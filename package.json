@@ -1,7 +1,8 @@
 {
-  "name": "@lobehub/lobehub",
+  "name": "@qingzhou/app",
   "version": "2.1.57",
-  "description": "LobeHub - an open-source,comprehensive AI Agent framework that supports speech synthesis, multimodal, and extensible Function Call plugin system. Supports one-click free deployment of your private ChatGPT/LLM web application.",
+  "private": true,
+  "description": "Qingzhou — a conversational creation platform with composable agent tools, a Cordis foundation, and a presentation studio.",
   "keywords": [
     "framework",
     "chatbot",
@@ -14,16 +15,16 @@
     "tts",
     "stt"
   ],
-  "homepage": "https://github.com/lobehub/lobehub",
+  "homepage": "https://github.com/shiro123444/Qingzhou",
   "bugs": {
-    "url": "https://github.com/lobehub/lobehub/issues/new/choose"
+    "url": "https://github.com/shiro123444/Qingzhou/issues/new/choose"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/lobehub/lobehub.git"
+    "url": "https://github.com/shiro123444/Qingzhou.git"
   },
-  "license": "MIT",
-  "author": "LobeHub <i@lobehub.com>",
+  "license": "SEE LICENSE IN LICENSE",
+  "author": "Qingzhou contributors",
   "sideEffects": [
     "./src/initialize.ts"
   ],
@@ -122,7 +123,6 @@
     "workflow:mdx": "tsx ./scripts/mdxWorkflow/index.ts",
     "workflow:mobile-spa": "tsx scripts/mobileSpaWorkflow/index.ts",
     "workflow:nexus-to-betterauth": "bun scripts/nexus-to-betterauth/index.mts",
-    "workflow:readme": "tsx ./scripts/readmeWorkflow/index.ts",
     "workflow:reset-onboarding": "tsx ./scripts/resetOnboarding/index.ts",
     "workflow:seed-user-info": "tsx ./scripts/seedUserInfo/index.ts",
     "workflow:set-desktop-version": "tsx ./scripts/electronWorkflow/setDesktopVersion.ts"
