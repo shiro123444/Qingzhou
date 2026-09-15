@@ -1,3 +1,4 @@
+import { canonicalToolName, invokeNativeTool } from '@lobechat/cordis-runtime';
 import { type ChatToolPayload } from '@lobechat/types';
 import { safeParseJSON } from '@lobechat/utils';
 import debug from 'debug';
@@ -23,8 +24,8 @@ import {
 const log = debug('lobe-server:tool-execution-service');
 
 interface ToolExecutionServiceDeps {
-  builtinToolsExecutor: BuiltinToolsExecutor;
-  mcpService: MCPService;
+  builtinToolsExecutor: Pick<BuiltinToolsExecutor, 'execute'>;
+  mcpService: Pick<MCPService, 'callTool'>;
 }
 
 const normalizeExecutionError = (error: unknown, fallbackMessage: string) => {
@@ -59,8 +60,8 @@ const normalizeExecutionError = (error: unknown, fallbackMessage: string) => {
 };
 
 export class ToolExecutionService {
-  private builtinToolsExecutor: BuiltinToolsExecutor;
-  private mcpService: MCPService;
+  private builtinToolsExecutor: Pick<BuiltinToolsExecutor, 'execute'>;
+  private mcpService: Pick<MCPService, 'callTool'>;
 
   constructor({ mcpService, builtinToolsExecutor }: ToolExecutionServiceDeps) {
     this.builtinToolsExecutor = builtinToolsExecutor;
@@ -77,20 +78,22 @@ export class ToolExecutionService {
 
     const startTime = Date.now();
     try {
-      const typeStr = type as string;
-      let data: ToolExecutionResult;
-      switch (typeStr) {
-        case 'mcp': {
-          data = await this.executeMCPTool(payload, context);
-          break;
-        }
-
-        case 'builtin':
-        default: {
-          data = await this.builtinToolsExecutor.execute(payload, context);
-          break;
-        }
-      }
+      const data = await invokeNativeTool<ToolExecutionResult>(
+        {
+          name: canonicalToolName(identifier, apiName),
+          execute: async (input) => {
+            const resolvedPayload = {
+              ...payload,
+              arguments: typeof input === 'string' ? input : JSON.stringify(input ?? {}),
+            };
+            // The authenticated server context stays in this closure. Cloud MCP,
+            // proxy/file handling and builtin authorization remain in their adapters.
+            if ((type as string) === 'mcp') return this.executeMCPTool(resolvedPayload, context);
+            return this.builtinToolsExecutor.execute(resolvedPayload, context);
+          },
+        },
+        payload.arguments,
+      );
 
       const executionTime = Date.now() - startTime;
 
@@ -296,9 +299,10 @@ export class ToolExecutionService {
       // Process content blocks (upload images, etc.)
       const { processContentBlocks } = await import('@/server/services/mcp/contentProcessor');
       const { FileService } = await import('@/server/services/file');
-      const fileService = context.userId && context.serverDB
-        ? new FileService(context.serverDB, context.userId)
-        : undefined;
+      const fileService =
+        context.userId && context.serverDB
+          ? new FileService(context.serverDB, context.userId)
+          : undefined;
 
       const newContent = result.isError
         ? result.content

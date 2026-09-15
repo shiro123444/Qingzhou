@@ -97,6 +97,7 @@ describe('AgentRuntimeService Agent Signal hook integration', () => {
 
       vi.spyOn(service as any, 'createAgentRuntime').mockReturnValue({
         runtime: {
+          dispose: vi.fn().mockResolvedValue(undefined),
           step: vi.fn().mockResolvedValue({
             events: [{ result: { content: 'done' }, type: 'llm_result' }],
             newState: {
@@ -199,6 +200,7 @@ describe('AgentRuntimeService Agent Signal hook integration', () => {
 
     vi.spyOn(service as any, 'createAgentRuntime').mockReturnValue({
       runtime: {
+        dispose: vi.fn().mockResolvedValue(undefined),
         step: vi.fn().mockResolvedValue({
           events: [{ result: { content: 'done' }, type: 'llm_result' }],
           newState: {
@@ -298,6 +300,7 @@ describe('AgentRuntimeService Agent Signal hook integration', () => {
 
     vi.spyOn(service as any, 'createAgentRuntime').mockReturnValue({
       runtime: {
+        dispose: vi.fn().mockResolvedValue(undefined),
         step: vi.fn().mockResolvedValue({
           events: [{ result: { content: 'done' }, type: 'llm_result' }],
           newState: {

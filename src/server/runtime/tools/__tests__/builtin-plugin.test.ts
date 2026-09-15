@@ -11,8 +11,8 @@ describe('createBuiltinToolsPlugin', () => {
     const toolRegistry = new ToolRegistry();
     context.provide('cordis.tools', toolRegistry);
 
-    const mockHandler = vi.fn(async (args: any) => ({
-      content: `Doc created: ${args.title}`,
+    const mockHandler = vi.fn(async (args: unknown) => ({
+      content: `Doc created: ${(args as { title: string }).title}`,
       success: true,
     }));
 
@@ -36,12 +36,13 @@ describe('createBuiltinToolsPlugin', () => {
     expect(tools.map((t) => t.name)).toContain('lobe-notebook:createDocument');
     expect(tools.map((t) => t.name)).toContain('createDocument');
 
-    // Execute through ToolRegistry
+    // Execute through ToolRegistry with valid service context contract
+    Object.assign(context, { toolManifestMap: {} });
     const result = (await toolRegistry.execute(
       'lobe-notebook:createDocument',
       { title: 'My Note' },
       context as any,
-    )) as any;
+    )) as { content: string };
     expect(result.content).toBe('Doc created: My Note');
     expect(mockHandler).toHaveBeenCalledWith({ title: 'My Note' }, context);
 

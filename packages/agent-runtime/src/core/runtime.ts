@@ -17,13 +17,15 @@ import type {
   ToolsCalling,
   Usage,
 } from '../types';
+import { CordisAgentHost } from './cordis-host';
 
 /**
  * Simplified Agent Runtime - The "Engine" that executes instructions from an "Agent" (Brain).
  * Now includes built-in call_llm support and allows full executor customization.
  */
 export class AgentRuntime {
-  private executors: Record<AgentInstruction['type'], InstructionExecutor>;
+  readonly cordis: CordisAgentHost;
+  private readonly executors: Record<AgentInstruction['type'], InstructionExecutor>;
   private operationId?: string;
   private getOperation?: RuntimeConfig['getOperation'];
 
@@ -38,6 +40,8 @@ export class AgentRuntime {
     this.executors = {
       call_llm: this.createCallLLMExecutor(),
       call_tool: this.createCallToolExecutor(),
+      call_tools_batch: (instruction, state, context) =>
+        this.executeToolsBatch(instruction as AgentInstructionCallToolsBatch, state, context),
       finish: this.createFinishExecutor(),
       request_human_approve: this.createHumanApproveExecutor(),
       request_human_prompt: this.createHumanPromptExecutor(),
@@ -47,6 +51,12 @@ export class AgentRuntime {
       // Agent provided executors have highest priority
       ...(agent.executors as any),
     };
+    this.cordis = new CordisAgentHost(agent, this.executors, config.composition);
+  }
+
+  /** Release the native plugins after the owning conversation loop or server step ends. */
+  dispose(): Promise<void> {
+    return this.cordis.dispose();
   }
 
   /**
@@ -123,7 +133,7 @@ export class AgentRuntime {
         };
       } else {
         // Standard flow: Plan -> Execute
-        rawInstructions = await this.agent.runner(runtimeContext, newState);
+        rawInstructions = await this.cordis.plan(runtimeContext, newState);
       }
 
       // Normalize to array
@@ -164,26 +174,7 @@ export class AgentRuntime {
       for (const instruction of normalizedInstructions) {
         if (instruction.type === 'finish') hasFinishInstruction = true;
 
-        let result;
-
-        // Special handling for batch tool execution
-        if (instruction.type === 'call_tools_batch') {
-          // Check if custom executor is provided (e.g., server-side with DB access)
-          const customExecutor = this.executors['call_tools_batch' as keyof typeof this.executors];
-          if (customExecutor) {
-            result = await customExecutor(instruction, currentState, runtimeContext);
-          } else {
-            // Fallback to built-in executeToolsBatch
-            result = await this.executeToolsBatch(instruction as any, currentState, runtimeContext);
-          }
-        } else {
-          const executor = this.executors[instruction.type as keyof typeof this.executors];
-          if (!executor) {
-            throw new Error(`No executor found for instruction type: ${instruction.type}`);
-          }
-          // Pass runtimeContext to executor so it can access stepContext
-          result = await executor(instruction, currentState, runtimeContext);
-        }
+        const result = await this.cordis.execute(instruction, currentState, runtimeContext);
 
         // Accumulate events
         allEvents.push(...result.events);
@@ -689,7 +680,7 @@ export class AgentRuntime {
 
     // Execute all tools concurrently based on the same state
     const results = await pMap(instruction.payload.toolsCalling, (toolCalling: ChatToolPayload) =>
-      this.executors.call_tool(
+      this.cordis.execute(
         {
           payload: { parentMessageId: payload.parentMessageId, toolCalling },
           type: 'call_tool',

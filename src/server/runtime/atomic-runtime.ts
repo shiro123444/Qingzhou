@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
+import { type PluginBundle, type PluginProfile, resolveProfile } from '@lobechat/cordis-runtime';
 import { z, type ZodTypeAny } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 
@@ -276,4 +277,26 @@ export class AtomicRuntime {
     })();
     return this.disposal;
   }
+}
+
+/** Resolve a trusted application profile before allocating any plugin resources. */
+export function createAtomicRuntimeFromProfile(definition: {
+  bundles: Readonly<Record<string, PluginBundle>>;
+  modules: Readonly<Record<string, AtomicPlugin>>;
+  profile: PluginProfile;
+}): AtomicRuntime {
+  const plugins = resolveProfile(definition.profile, definition.bundles).map((entry) => {
+    const plugin = Object.hasOwn(definition.modules, entry.use)
+      ? definition.modules[entry.use]
+      : undefined;
+    if (!plugin) throw fail('PLUGIN_NOT_FOUND', `Unknown atomic module ${entry.use}`);
+    if (entry.id !== plugin.id || Object.keys(entry.config ?? {}).length) {
+      throw fail(
+        'PLUGIN_INVALID',
+        'Atomic profiles preserve plugin IDs; configure modules in their trusted factories',
+      );
+    }
+    return plugin;
+  });
+  return new AtomicRuntime(plugins);
 }

@@ -1,3 +1,4 @@
+import { type PluginProfile } from '@lobechat/cordis-runtime';
 import { z } from 'zod';
 
 import type {
@@ -7,7 +8,13 @@ import type {
   RuntimeScope,
 } from '../../../../packages/runtime-contracts/src';
 import { createAssetPlugin } from '../assets/plugin';
-import { type AtomicInvocation, type AtomicOperation, AtomicRuntime } from '../atomic-runtime';
+import {
+  type AtomicInvocation,
+  type AtomicOperation,
+  type AtomicPlugin,
+  type AtomicRuntime,
+  createAtomicRuntimeFromProfile,
+} from '../atomic-runtime';
 import { createSkillsPlugin } from '../skills-plugin';
 import type { PresentationArtifactStore } from './artifact-store';
 import type { PresentationGenerationPort } from './generation-port';
@@ -72,6 +79,7 @@ export const createPresentationAtomicRuntime = (options: {
   artifactStore: PresentationArtifactStore;
   imageGenerationCapability?: ImageGenerationCapability;
   operations?: AtomicOperation[];
+  profile?: PluginProfile;
 }) => {
   const operations: AtomicOperation[] = [
     {
@@ -388,7 +396,7 @@ export const createPresentationAtomicRuntime = (options: {
       : []),
     ...(options.operations ?? []),
   ];
-  const runtime: AtomicRuntime = new AtomicRuntime([
+  const plugins: AtomicPlugin[] = [
     {
       id: 'presentation',
       version: '2.1.0',
@@ -405,7 +413,12 @@ export const createPresentationAtomicRuntime = (options: {
     },
     createAssetPlugin(options.artifactStore, options.imageGenerationCapability),
     createSkillsPlugin(() => runtime, options.chatPort),
-  ]);
+  ];
+  const runtime: AtomicRuntime = createAtomicRuntimeFromProfile({
+    bundles: { presentation: { entries: plugins.map(({ id }) => ({ id, use: id })) } },
+    modules: Object.fromEntries(plugins.map((plugin) => [plugin.id, plugin])),
+    profile: options.profile ?? { bundles: ['presentation'] },
+  });
   return runtime;
 };
 

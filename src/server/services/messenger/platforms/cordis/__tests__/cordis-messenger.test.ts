@@ -1,113 +1,126 @@
-import { describe, expect, it, vi } from 'vitest';
+// @vitest-environment node
+import { Context } from '@lobechat/cordis-foundation';
+import { afterEach, describe, expect, it } from 'vitest';
 
-import { Context } from '../../../../../../../packages/cordis-kernel/src/context';
-import { PluginManager } from '../../../../../../../packages/cordis-kernel/src/manager';
-import { CordisMessengerPlatformRegistry } from '../registry';
+import type { MessengerPlatformDefinition } from '../../types';
+import {
+  awaitPlatformGeneration,
+  createPlatformGeneration,
+  createSerialQueue,
+  disposePlatformGeneration,
+  MESSENGER_PLATFORM_DEFINITION_SERVICE,
+  readPlatformDefinition,
+  readPlatformGenerationMarker,
+} from '..';
 
-const buildDefinition = (overrides: Partial<any> = {}) => ({
-  connectionMode: 'webhook' as const,
-  createBinder: vi.fn(() => ({ id: 'binder-v1' }) as any),
-  id: 'slack' as const,
-  name: 'Slack',
-  oauth: { exchangeCode: vi.fn() },
-  webhookGate: { preprocess: vi.fn() },
-  ...overrides,
-});
+const buildDefinition = (
+  overrides: Partial<MessengerPlatformDefinition> = {},
+): MessengerPlatformDefinition =>
+  ({
+    connectionMode: 'webhook',
+    createBinder: () => ({ id: 'binder' }),
+    id: 'slack',
+    name: 'Slack',
+    ...overrides,
+  }) as MessengerPlatformDefinition;
 
-describe('CordisMessengerPlatformRegistry', () => {
-  it('registers and mounts a platform as a Cordis plugin', async () => {
-    const registry = new CordisMessengerPlatformRegistry();
-    const def = buildDefinition() as any;
+describe('cordis messenger platform generation', () => {
+  const generations: ReturnType<typeof createPlatformGeneration>[] = [];
 
-    registry.register(def);
-    // Wait for auto-mount tick
-    await Promise.resolve();
+  const track = <T extends ReturnType<typeof createPlatformGeneration>>(generation: T): T => {
+    generations.push(generation);
+    return generation;
+  };
 
-    expect(registry.getPlatform('slack')).toBe(def);
-    expect(registry.listPlatforms()).toEqual([def]);
-
-    const serialized = registry.listSerializedPlatforms();
-    expect(serialized).toEqual([{ connectionMode: 'webhook', id: 'slack', name: 'Slack' }]);
+  afterEach(async () => {
+    for (const generation of generations.splice(0)) {
+      try {
+        await disposePlatformGeneration(generation);
+      } catch {
+        // Teardown failures must not mask the test result.
+      }
+    }
   });
 
-  it('creates binder via active platform definition', async () => {
-    const registry = new CordisMessengerPlatformRegistry();
-    const binderFactory = vi.fn(() => ({ kind: 'slack-binder' }) as any);
-    registry.register(buildDefinition({ createBinder: binderFactory }) as any);
-    await Promise.resolve();
+  it('holds the definition on an independent native generation root, readable in the same tick', async () => {
+    const generation = track(createPlatformGeneration(buildDefinition()));
 
-    const creds = {
-      applicationId: 'app-1',
-      botToken: 'token-1',
-      installationKey: 'slack:team-1',
-      metadata: {},
-      platform: 'slack' as const,
-      tenantId: 'team-1',
-    };
+    expect(Context.is(generation.context)).toBe(true);
+    // Root-context provide is synchronous: readable (strict) before any await.
+    expect(readPlatformDefinition(generation)?.id).toBe('slack');
+    // The generation plugin activates asynchronously — never claim it is active here.
+    expect(readPlatformGenerationMarker(generation)).toBeUndefined();
 
-    const binder = registry.createBinder(creds);
-    expect(binderFactory).toHaveBeenCalledWith(creds);
-    expect(binder).toEqual({ kind: 'slack-binder' });
+    await awaitPlatformGeneration(generation);
+    expect(readPlatformGenerationMarker(generation)?.platformId).toBe('slack');
   });
 
-  it('supports dynamically unmounting and mounting platforms', async () => {
-    const registry = new CordisMessengerPlatformRegistry();
-    const def = buildDefinition() as any;
-    registry.register(def);
-    await Promise.resolve();
+  it('keeps each generation isolated in its own native context', async () => {
+    const first = track(createPlatformGeneration(buildDefinition({ name: 'v1' })));
+    const second = track(createPlatformGeneration(buildDefinition({ name: 'v2' })));
 
-    expect(registry.getPlatform('slack')).toBeDefined();
+    expect(first.context).not.toBe(second.context);
+    expect(readPlatformDefinition(first)?.name).toBe('v1');
+    expect(readPlatformDefinition(second)?.name).toBe('v2');
 
-    // Dynamically unmount
-    await registry.unmountPlatform('slack');
-    expect(registry.getPlatform('slack')).toBeUndefined();
-    expect(registry.listPlatforms()).toHaveLength(0);
-
-    // Dynamically remount
-    await registry.mountPlatform('slack');
-    expect(registry.getPlatform('slack')).toBeDefined();
-    expect(registry.listPlatforms()).toHaveLength(1);
+    await awaitPlatformGeneration(first);
+    await awaitPlatformGeneration(second);
+    expect(readPlatformGenerationMarker(first)?.generation).not.toBe(
+      readPlatformGenerationMarker(second)?.generation,
+    );
   });
 
-  it('supports hot-reloading platform with updated definition', async () => {
-    const registry = new CordisMessengerPlatformRegistry();
-    registry.register(buildDefinition({ name: 'Slack v1' }) as any);
-    await Promise.resolve();
-
-    expect(registry.getPlatform('slack')?.name).toBe('Slack v1');
-
-    const updated = buildDefinition({
-      createBinder: vi.fn(() => ({ id: 'binder-v2' }) as any),
-      name: 'Slack v2',
-    }) as any;
-
-    await registry.reloadPlatform('slack', updated);
-    expect(registry.getPlatform('slack')?.name).toBe('Slack v2');
-
-    const creds = {
-      applicationId: 'app-2',
-      botToken: 'token-2',
-      installationKey: 'slack:team-2',
-      metadata: {},
-      platform: 'slack' as const,
-      tenantId: 'team-2',
-    };
-
-    const binder = registry.createBinder(creds);
-    expect(binder).toEqual({ id: 'binder-v2' });
+  it('surfaces a synchronous definition failure without assembling a generation', () => {
+    const invalidDefinition = buildDefinition();
+    Reflect.set(invalidDefinition, 'id', '');
+    expect(() => createPlatformGeneration(invalidDefinition)).toThrow(/requires an id/);
+    expect(() =>
+      createPlatformGeneration(undefined as unknown as MessengerPlatformDefinition),
+    ).toThrow(/requires an id/);
   });
 
-  it('guarantees context consistency when initialized with pluginManager', () => {
-    const sharedContext = new Context();
-    const pluginManager = new PluginManager([], sharedContext);
+  it('reclaims the definition service through the native generation root on dispose', async () => {
+    const generation = createPlatformGeneration(buildDefinition({ id: 'telegram' }));
+    await awaitPlatformGeneration(generation);
+    expect(readPlatformDefinition(generation)).toBeDefined();
 
-    const registry = new CordisMessengerPlatformRegistry({ pluginManager });
-    expect(registry.context).toBe(sharedContext);
+    await disposePlatformGeneration(generation);
 
-    // Mismatched context throws error
-    const differentContext = new Context();
-    expect(
-      () => new CordisMessengerPlatformRegistry({ context: differentContext, pluginManager }),
-    ).toThrow('Incompatible context');
+    // Root unload clears the provide effect, so no manual map delete is needed.
+    expect(readPlatformDefinition(generation)).toBeUndefined();
+    expect(readPlatformGenerationMarker(generation)).toBeUndefined();
+    expect(generation.context.get(MESSENGER_PLATFORM_DEFINITION_SERVICE)).toBeUndefined();
+  });
+
+  it('serializes changes per key and settles every queued task', async () => {
+    const queue = createSerialQueue();
+    const order: string[] = [];
+
+    const first = queue.run('slack', async () => {
+      await Promise.resolve();
+      order.push('first');
+      return 1;
+    });
+    const second = queue.run('slack', async () => {
+      order.push('second');
+      return 2;
+    });
+    const other = queue.run('telegram', async () => {
+      order.push('telegram');
+      return 3;
+    });
+
+    await expect(Promise.all([first, second, other])).resolves.toEqual([1, 2, 3]);
+    // Serialization is per key: slack's tasks keep submission order, telegram is independent.
+    expect(order.filter((step) => step !== 'telegram')).toEqual(['first', 'second']);
+    expect(order).toContain('telegram');
+
+    // settle() must terminate (entries remove themselves once their own promise
+    // settles) and must not delete a newer chain queued for the same key.
+    await queue.settle();
+    expect(order.filter((step) => step !== 'telegram')).toEqual(['first', 'second']);
+
+    await expect(queue.run('slack', async () => 'after')).resolves.toBe('after');
+    await queue.settle();
   });
 });

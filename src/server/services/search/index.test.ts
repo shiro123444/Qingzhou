@@ -1,22 +1,22 @@
 import { Crawler } from '@lobechat/web-crawler';
+import { TRPCError } from '@trpc/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-
-import { toolsEnv } from '@/envs/tools';
 
 import { createSearchServiceImpl, SearchImplType } from './impls';
 import { SearchService } from './index';
 
+/** Mutable mock env: tests assign directly, so it must be hoisted and writable. */
+const mockToolsEnv = vi.hoisted(() => ({
+  CRAWL_CONCURRENCY: undefined as number | undefined,
+  CRAWLER_IMPLS: '',
+  CRAWLER_RETRY: undefined as number | undefined,
+  SEARCH_PROVIDERS: '',
+}));
+
 // Mock dependencies
 vi.mock('@lobechat/web-crawler');
 vi.mock('./impls');
-vi.mock('@/envs/tools', () => ({
-  toolsEnv: {
-    CRAWL_CONCURRENCY: undefined,
-    CRAWLER_IMPLS: '',
-    CRAWLER_RETRY: undefined,
-    SEARCH_PROVIDERS: '',
-  },
-}));
+vi.mock('@/envs/tools', () => ({ toolsEnv: mockToolsEnv }));
 
 describe('SearchService', () => {
   let searchService: SearchService;
@@ -30,6 +30,11 @@ describe('SearchService', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // Reset mutable mock env so provider/crawler config never leaks across tests.
+    mockToolsEnv.SEARCH_PROVIDERS = '';
+    mockToolsEnv.CRAWLER_IMPLS = '';
+    mockToolsEnv.CRAWLER_RETRY = undefined;
+    mockToolsEnv.CRAWL_CONCURRENCY = undefined;
     mockSearchImpl = createMockSearchImpl();
     vi.mocked(createSearchServiceImpl).mockReturnValue(mockSearchImpl as any);
     searchService = new SearchService();
@@ -41,21 +46,21 @@ describe('SearchService', () => {
     });
 
     it('should create instances for all providers from SEARCH_PROVIDERS', () => {
-      vi.mocked(toolsEnv).SEARCH_PROVIDERS = 'tavily,brave';
+      mockToolsEnv.SEARCH_PROVIDERS = 'tavily,brave';
       searchService = new SearchService();
       expect(createSearchServiceImpl).toHaveBeenCalledWith(SearchImplType.Tavily);
       expect(createSearchServiceImpl).toHaveBeenCalledWith(SearchImplType.Brave);
     });
 
     it('should handle full-width comma in SEARCH_PROVIDERS', () => {
-      vi.mocked(toolsEnv).SEARCH_PROVIDERS = 'tavily，brave';
+      mockToolsEnv.SEARCH_PROVIDERS = 'tavily，brave';
       searchService = new SearchService();
       expect(createSearchServiceImpl).toHaveBeenCalledWith(SearchImplType.Tavily);
       expect(createSearchServiceImpl).toHaveBeenCalledWith(SearchImplType.Brave);
     });
 
     it('should trim whitespace in SEARCH_PROVIDERS', () => {
-      vi.mocked(toolsEnv).SEARCH_PROVIDERS = '  tavily  ,  brave  ';
+      mockToolsEnv.SEARCH_PROVIDERS = '  tavily  ,  brave  ';
       searchService = new SearchService();
       expect(createSearchServiceImpl).toHaveBeenCalledWith(SearchImplType.Tavily);
       expect(createSearchServiceImpl).toHaveBeenCalledWith(SearchImplType.Brave);
@@ -114,6 +119,18 @@ describe('SearchService', () => {
   });
 
   describe('webSearch', () => {
+    // eslint-disable-next-line unicorn/error-message -- Regression: an upstream failure may have no message.
+    it.each([new Error(''), ''])(
+      'preserves a failed attempt with an empty error message (%s)',
+      async (failure) => {
+        mockSearchImpl.query.mockRejectedValue(failure);
+        await expect(searchService.webSearch({ query: 'test' })).rejects.toMatchObject({
+          code: 'SERVICE_UNAVAILABLE',
+          message: 'SEARCH_INCOMPLETE: 检索不完整，请重试',
+        });
+      },
+    );
+
     it('should return results on first attempt if results found', async () => {
       const mockResponse = {
         costTime: 100,
@@ -328,7 +345,7 @@ describe('SearchService', () => {
         .mockReturnValueOnce(mockImpl1 as any)
         .mockReturnValueOnce(mockImpl2 as any);
 
-      vi.mocked(toolsEnv).SEARCH_PROVIDERS = 'searxng,exa';
+      mockToolsEnv.SEARCH_PROVIDERS = 'searxng,exa';
       searchService = new SearchService();
 
       const result = await searchService.webSearch({ query: 'test' });
@@ -350,7 +367,7 @@ describe('SearchService', () => {
         .mockReturnValueOnce(mockImpl2 as any)
         .mockReturnValueOnce(mockImpl3 as any);
 
-      vi.mocked(toolsEnv).SEARCH_PROVIDERS = 'searxng,exa,brave';
+      mockToolsEnv.SEARCH_PROVIDERS = 'searxng,exa,brave';
       searchService = new SearchService();
 
       const result = await searchService.webSearch({ query: 'test' });
@@ -369,7 +386,7 @@ describe('SearchService', () => {
         .mockReturnValueOnce(mockImpl1 as any)
         .mockReturnValueOnce(mockImpl2 as any);
 
-      vi.mocked(toolsEnv).SEARCH_PROVIDERS = 'searxng,exa';
+      mockToolsEnv.SEARCH_PROVIDERS = 'searxng,exa';
       searchService = new SearchService();
 
       const result = await searchService.webSearch({ query: 'test' });
@@ -387,7 +404,7 @@ describe('SearchService', () => {
         .mockReturnValueOnce(mockImpl1 as any)
         .mockReturnValueOnce(mockImpl2 as any);
 
-      vi.mocked(toolsEnv).SEARCH_PROVIDERS = 'searxng,exa';
+      mockToolsEnv.SEARCH_PROVIDERS = 'searxng,exa';
       searchService = new SearchService();
 
       const result = await searchService.webSearch({
@@ -416,7 +433,7 @@ describe('SearchService', () => {
         .mockReturnValueOnce(mockImpl1 as any)
         .mockReturnValueOnce(mockImpl2 as any);
 
-      vi.mocked(toolsEnv).SEARCH_PROVIDERS = 'searxng,exa';
+      mockToolsEnv.SEARCH_PROVIDERS = 'searxng,exa';
       searchService = new SearchService();
 
       const result = await searchService.webSearch({ query: 'test' });
@@ -424,6 +441,98 @@ describe('SearchService', () => {
       // First provider error results in empty results → falls through retries → next provider
       expect(mockImpl2.query).toHaveBeenCalled();
       expect(result).toBe(successResponse);
+    });
+  });
+
+  describe('webSearch - incomplete vs legitimate empty', () => {
+    const emptyResponse = {
+      costTime: 100,
+      query: 'test',
+      resultNumbers: 0,
+      results: [],
+    };
+    const successResponse = {
+      costTime: 200,
+      query: 'test',
+      resultNumbers: 1,
+      results: [
+        {
+          category: 'general',
+          content: 'Real result',
+          engines: ['exa'],
+          parsedUrl: 'https://example.com',
+          score: 1,
+          title: 'Test',
+          url: 'https://example.com',
+        },
+      ],
+    };
+
+    it('throws the fixed controlled error when every provider fails', async () => {
+      const mockImpl1 = {
+        query: vi.fn().mockRejectedValue(new Error('searxng engine down')),
+      };
+      const mockImpl2 = { query: vi.fn().mockRejectedValue(new Error('<html>boom</html>')) };
+
+      vi.mocked(createSearchServiceImpl)
+        .mockReturnValueOnce(mockImpl1 as any)
+        .mockReturnValueOnce(mockImpl2 as any);
+
+      mockToolsEnv.SEARCH_PROVIDERS = 'searxng,exa';
+      searchService = new SearchService();
+
+      const caught = await searchService.webSearch({ query: 'test' }).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+      // Retries are preserved: each provider is attempted (full params + bare retry).
+      expect(mockImpl1.query).toHaveBeenCalledTimes(2);
+      expect(mockImpl2.query).toHaveBeenCalledTimes(2);
+
+      expect(caught).toBeInstanceOf(TRPCError);
+      const error = caught as TRPCError;
+      expect(error.code).toBe('SERVICE_UNAVAILABLE');
+      expect(error.message).toBe('SEARCH_INCOMPLETE: 检索不完整，请重试');
+      // Raw provider / engine output must never be echoed to the caller.
+      expect(error.message).not.toContain('engine down');
+      expect(error.message).not.toContain('<html>');
+    });
+
+    it('returns real results when an earlier provider failed but a later one succeeds', async () => {
+      const mockImpl1 = { query: vi.fn().mockRejectedValue(new Error('provider down')) };
+      const mockImpl2 = { query: vi.fn().mockResolvedValue(successResponse) };
+
+      vi.mocked(createSearchServiceImpl)
+        .mockReturnValueOnce(mockImpl1 as any)
+        .mockReturnValueOnce(mockImpl2 as any);
+
+      mockToolsEnv.SEARCH_PROVIDERS = 'searxng,exa';
+      searchService = new SearchService();
+
+      const result = await searchService.webSearch({ query: 'test' });
+
+      expect(result).toBe(successResponse);
+      expect(result.results).toHaveLength(1);
+    });
+
+    it('returns an empty result when every provider legitimately completes with zero results', async () => {
+      const mockImpl1 = { query: vi.fn().mockResolvedValue(emptyResponse) };
+      const mockImpl2 = { query: vi.fn().mockResolvedValue(emptyResponse) };
+
+      vi.mocked(createSearchServiceImpl)
+        .mockReturnValueOnce(mockImpl1 as any)
+        .mockReturnValueOnce(mockImpl2 as any);
+
+      mockToolsEnv.SEARCH_PROVIDERS = 'searxng,exa';
+      searchService = new SearchService();
+
+      await expect(searchService.webSearch({ query: 'test' })).resolves.toEqual({
+        costTime: 0,
+        query: 'test',
+        resultNumbers: 0,
+        results: [],
+      });
     });
   });
 
@@ -452,7 +561,7 @@ describe('SearchService', () => {
     });
 
     it('should use crawler implementations from env', async () => {
-      vi.mocked(toolsEnv).CRAWLER_IMPLS = 'jina,reader';
+      mockToolsEnv.CRAWLER_IMPLS = 'jina,reader';
 
       const mockSuccessResult = {
         crawler: 'jina',
@@ -496,7 +605,7 @@ describe('SearchService', () => {
     });
 
     it('should use CRAWL_CONCURRENCY from env', async () => {
-      vi.mocked(toolsEnv).CRAWL_CONCURRENCY = 1;
+      mockToolsEnv.CRAWL_CONCURRENCY = 1;
 
       const mockCrawler = {
         crawl: vi.fn().mockResolvedValue({
@@ -516,7 +625,7 @@ describe('SearchService', () => {
     });
 
     it('should retry on failed crawl results', async () => {
-      vi.mocked(toolsEnv).CRAWLER_RETRY = 1;
+      mockToolsEnv.CRAWLER_RETRY = 1;
 
       const failedResult = {
         crawler: 'naive',
@@ -542,7 +651,7 @@ describe('SearchService', () => {
     });
 
     it('should return last failed result after all retries exhausted', async () => {
-      vi.mocked(toolsEnv).CRAWLER_RETRY = 1;
+      mockToolsEnv.CRAWLER_RETRY = 1;
 
       const failedResult = {
         crawler: 'naive',
@@ -563,7 +672,7 @@ describe('SearchService', () => {
     });
 
     it('should not retry when CRAWLER_RETRY is 0', async () => {
-      vi.mocked(toolsEnv).CRAWLER_RETRY = 0;
+      mockToolsEnv.CRAWLER_RETRY = 0;
 
       const failedResult = {
         crawler: 'naive',
@@ -584,7 +693,7 @@ describe('SearchService', () => {
     });
 
     it('should handle crawl exceptions during retry', async () => {
-      vi.mocked(toolsEnv).CRAWLER_RETRY = 1;
+      mockToolsEnv.CRAWLER_RETRY = 1;
 
       const mockCrawler = {
         crawl: vi.fn().mockRejectedValue(new Error('Network error')),
@@ -602,7 +711,7 @@ describe('SearchService', () => {
     });
 
     it('should detect successful results by contentType presence', async () => {
-      vi.mocked(toolsEnv).CRAWLER_RETRY = 1;
+      mockToolsEnv.CRAWLER_RETRY = 1;
 
       const successResult = {
         crawler: 'naive',

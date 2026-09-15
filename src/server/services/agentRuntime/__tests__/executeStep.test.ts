@@ -652,7 +652,10 @@ describe('AgentRuntimeService.executeStep - error-path snapshot finalize (LOBE-8
     const persistFatal = new Error('parent message missing');
     (persistFatal as any).errorType = 'ConversationParentMissing';
     vi.spyOn(service as any, 'createAgentRuntime').mockResolvedValue({
-      runtime: { step: vi.fn().mockRejectedValue(persistFatal) },
+      runtime: {
+        dispose: vi.fn().mockResolvedValue(undefined),
+        step: vi.fn().mockRejectedValue(persistFatal),
+      },
     });
 
     const dispatchSpy = vi.spyOn(hookDispatcher, 'dispatch').mockResolvedValue(undefined);
@@ -721,7 +724,10 @@ describe('AgentRuntimeService.executeStep - error-path snapshot finalize (LOBE-8
     coordinator.saveAgentState = vi.fn().mockResolvedValue(undefined);
 
     vi.spyOn(service as any, 'createAgentRuntime').mockResolvedValue({
-      runtime: { step: vi.fn().mockRejectedValue(new Error('boom')) },
+      runtime: {
+        dispose: vi.fn().mockResolvedValue(undefined),
+        step: vi.fn().mockRejectedValue(new Error('boom')),
+      },
     });
     const dispatchSpy = vi.spyOn(hookDispatcher, 'dispatch').mockResolvedValue(undefined);
 
@@ -788,7 +794,10 @@ describe('AgentRuntimeService.executeStep - error-path snapshot finalize (LOBE-8
     coordinator.saveAgentState = vi.fn().mockResolvedValue(undefined);
 
     vi.spyOn(service as any, 'createAgentRuntime').mockResolvedValue({
-      runtime: { step: vi.fn().mockRejectedValue(new Error('boom')) },
+      runtime: {
+        dispose: vi.fn().mockResolvedValue(undefined),
+        step: vi.fn().mockRejectedValue(new Error('boom')),
+      },
     });
     const dispatchSpy = vi.spyOn(hookDispatcher, 'dispatch').mockResolvedValue(undefined);
 
@@ -869,7 +878,10 @@ describe('AgentRuntimeService.executeStep - error-path snapshot finalize (LOBE-8
     coordinator.saveAgentState = vi.fn().mockResolvedValue(undefined);
 
     vi.spyOn(service as any, 'createAgentRuntime').mockResolvedValue({
-      runtime: { step: vi.fn().mockRejectedValue(new Error('queue down')) },
+      runtime: {
+        dispose: vi.fn().mockResolvedValue(undefined),
+        step: vi.fn().mockRejectedValue(new Error('queue down')),
+      },
     });
     const dispatchSpy = vi.spyOn(hookDispatcher, 'dispatch').mockResolvedValue(undefined);
 

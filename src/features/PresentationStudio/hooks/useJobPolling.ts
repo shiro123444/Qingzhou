@@ -143,12 +143,10 @@ export const useJobPolling = (
                   store.getState().setStreamStatusForJob(jobId, 'live');
                 }
                 const currentJob = store.getState().jobs[jobId];
-                if (currentJob?.state === 'completed') {
-                  const ids = currentJob.artifactIds ?? [];
-                  const hasAll = ids.every((id) => store.getState().artifacts[id]);
-                  if (ids.length > 0 && !hasAll) {
-                    void store.getState().refreshArtifacts(jobId);
-                  }
+                // The store also recognizes partial ready snapshots. Hydrate
+                // pages as they arrive, without waiting for the whole deck.
+                if (currentJob?.artifactIds?.length) {
+                  void store.getState().refreshArtifacts(jobId);
                 }
               }
             } catch (err) {
@@ -252,8 +250,7 @@ export const useJobPolling = (
       for (const job of Object.values(refreshed.jobs)) {
         if (!job || !job.state || job.state !== 'completed') continue;
         const ids = job.artifactIds ?? [];
-        const hasAll = ids.every((id) => refreshed.artifacts[id]);
-        if (ids.length > 0 && !hasAll) {
+        if (ids.length > 0) {
           await refreshed.refreshArtifacts(job.jobId);
         }
       }

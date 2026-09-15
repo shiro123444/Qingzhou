@@ -119,7 +119,10 @@ describe('Hooks integration — afterStep event carries step presentation data',
     };
 
     vi.spyOn(service as any, 'createAgentRuntime').mockReturnValue({
-      runtime: { step: vi.fn().mockResolvedValue(stepResult) },
+      runtime: {
+        dispose: vi.fn().mockResolvedValue(undefined),
+        step: vi.fn().mockResolvedValue(stepResult),
+      },
     });
 
     // Capture the actual hook event
@@ -213,7 +216,10 @@ describe('Hooks integration — afterStep event carries step presentation data',
     };
 
     vi.spyOn(service as any, 'createAgentRuntime').mockReturnValue({
-      runtime: { step: vi.fn().mockResolvedValue(stepResult) },
+      runtime: {
+        dispose: vi.fn().mockResolvedValue(undefined),
+        step: vi.fn().mockResolvedValue(stepResult),
+      },
     });
 
     const capturedEvents: AgentHookEvent[] = [];
@@ -335,7 +341,10 @@ describe('Hooks integration — afterStep event is compatible with renderStepPro
     };
 
     vi.spyOn(service as any, 'createAgentRuntime').mockReturnValue({
-      runtime: { step: vi.fn().mockResolvedValue(stepResult) },
+      runtime: {
+        dispose: vi.fn().mockResolvedValue(undefined),
+        step: vi.fn().mockResolvedValue(stepResult),
+      },
     });
 
     const capturedEvents: AgentHookEvent[] = [];

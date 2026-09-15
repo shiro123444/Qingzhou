@@ -1,5 +1,6 @@
-import type { SearchParams, SearchQuery } from '@lobechat/types';
+import type { SearchParams, SearchQuery, UniformSearchResponse } from '@lobechat/types';
 import type { Crawler, CrawlImplType, CrawlUniformResult } from '@lobechat/web-crawler';
+import { TRPCError } from '@trpc/server';
 import debug from 'debug';
 import pMap from 'p-map';
 
@@ -10,12 +11,20 @@ import { createSearchServiceImpl } from './impls';
 
 const DEFAULT_CRAWL_CONCURRENCY = 3;
 const DEFAULT_CRAWLER_RETRY = 1;
+/**
+ * Fixed client-facing message for an incomplete search. Never echo provider or
+ * engine output here — those stay server-side in the recorded cause.
+ */
+const SEARCH_INCOMPLETE_MESSAGE = 'SEARCH_INCOMPLETE: 检索不完整，请重试';
 const log = debug('lobe-oom:web-browsing:search-service');
 
 const parseImplEnv = (envString: string = '') => {
   // Handle full-width commas and extra whitespace
   const envValue = envString.replaceAll('，', ',').trim();
-  return envValue.split(',').filter(Boolean);
+  return envValue
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
 };
 
 const getMemorySnapshot = () => {
@@ -138,14 +147,21 @@ export class SearchService {
   /**
    * Query for search results using the specified impl
    */
-  private async queryWithImpl(impl: SearchServiceImpl, query: string, params?: SearchParams) {
+  private async queryWithImpl(
+    impl: SearchServiceImpl,
+    query: string,
+    params?: SearchParams,
+  ): Promise<UniformSearchResponse> {
     try {
       return await impl.query(query, params);
     } catch (e) {
-      console.error('[SearchService] query failed:', (e as Error).message);
+      // A failure must stay detectable by the aggregator below, so always record
+      // a non-empty errorDetail (the existing contract) without echoing it out.
+      const message = (e instanceof Error ? e.message : String(e)) || '搜索服务暂不可用';
+      console.error('[SearchService] query failed:', message);
       return {
         costTime: 0,
-        errorDetail: (e as Error).message,
+        errorDetail: message,
         query,
         resultNumbers: 0,
         results: [],
@@ -174,6 +190,13 @@ export class SearchService {
       }
     } catch {}
 
+    // Records the first failed attempt (provider rejection or an impl-reported
+    // errorDetail) so an incomplete search is distinguishable from a real empty one.
+    let failureDetail: string | undefined;
+    const recordFailure = (data: UniformSearchResponse) => {
+      if (failureDetail === undefined && data.errorDetail) failureDetail = data.errorDetail;
+    };
+
     for (const impl of this.searchImpList) {
       try {
         if (log.enabled) {
@@ -190,6 +213,7 @@ export class SearchService {
         searchEngines,
         searchTimeRange,
       });
+      recordFailure(data);
 
       // First retry: remove search engine restrictions if no results found
       if (data.results.length === 0 && searchEngines && searchEngines?.length > 0) {
@@ -198,11 +222,13 @@ export class SearchService {
           searchEngines: undefined,
           searchTimeRange,
         });
+        recordFailure(data);
       }
 
       // Second retry: remove all restrictions if still no results found
       if (data.results.length === 0) {
         data = await this.queryWithImpl(impl, query);
+        recordFailure(data);
       }
 
       // If this provider returned results, use them
@@ -211,7 +237,19 @@ export class SearchService {
       }
     }
 
-    // All providers exhausted, return empty result
+    // No provider returned results. A fully legitimate empty result set stays
+    // empty; an incomplete search (any failed attempt) must surface as a
+    // controlled failure instead of a silent "success with no results".
+    if (failureDetail !== undefined) {
+      // Keep provider diagnostics out of this client-facing error.
+      log('webSearch:incomplete cause=%s', failureDetail);
+      throw new TRPCError({
+        code: 'SERVICE_UNAVAILABLE',
+        message: SEARCH_INCOMPLETE_MESSAGE,
+      });
+    }
+
+    // All providers completed with zero results and no failures.
     return { costTime: 0, query, resultNumbers: 0, results: [] };
   }
 }

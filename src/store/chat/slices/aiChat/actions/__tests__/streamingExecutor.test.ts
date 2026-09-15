@@ -136,6 +136,8 @@ afterEach(() => {
 describe('StreamingExecutor actions', () => {
   describe('executeClientAgent', () => {
     it('should handle the core AI message processing', async () => {
+      const nativeExecute = vi.spyOn(agentRuntime.CordisAgentHost.prototype, 'execute');
+      const dispose = vi.spyOn(agentRuntime.AgentRuntime.prototype, 'dispose');
       act(() => {
         useChatStore.setState({ executeClientAgent: realExecAgentRuntime });
       });
@@ -172,11 +174,17 @@ describe('StreamingExecutor actions', () => {
       const operations = Object.values(result.current.operations);
       const execOperation = operations.find((op) => op.type === 'execAgentRuntime');
       expect(execOperation?.status).toBe('completed');
+      expect(nativeExecute.mock.calls.map(([instruction]) => instruction.type)).toContain(
+        'call_llm',
+      );
+      expect(dispose).toHaveBeenCalledTimes(1);
 
       streamSpy.mockRestore();
     });
 
     it('should stop agent runtime loop when operation is cancelled before step execution', async () => {
+      const nativePlan = vi.spyOn(agentRuntime.CordisAgentHost.prototype, 'plan');
+      const dispose = vi.spyOn(agentRuntime.AgentRuntime.prototype, 'dispose');
       act(() => {
         useChatStore.setState({ executeClientAgent: realExecAgentRuntime });
       });
@@ -229,8 +237,27 @@ describe('StreamingExecutor actions', () => {
       expect(cancelDuringFirstCall).toBe(true);
       // The loop should stop after first call, not continue to second LLM call after tool execution
       expect(streamCallCount).toBe(1);
+      expect(nativePlan.mock.calls.some(([, state]) => state.status === 'interrupted')).toBe(true);
+      expect(dispose).toHaveBeenCalledTimes(1);
 
       streamSpy.mockRestore();
+    });
+
+    it('should dispose the native host when the conversation loop throws', async () => {
+      useChatStore.setState({ executeClientAgent: realExecAgentRuntime });
+      const failure = new Error('step transport failed');
+      vi.spyOn(agentRuntime.AgentRuntime.prototype, 'step').mockRejectedValueOnce(failure);
+      const dispose = vi.spyOn(agentRuntime.AgentRuntime.prototype, 'dispose');
+
+      await expect(
+        realExecAgentRuntime({
+          context: { agentId: TEST_IDS.SESSION_ID, topicId: TEST_IDS.TOPIC_ID },
+          messages: [createMockMessage({ role: 'user', content: TEST_CONTENT.USER_MESSAGE })],
+          parentMessageId: TEST_IDS.USER_MESSAGE_ID,
+          parentMessageType: 'user',
+        }),
+      ).rejects.toBe(failure);
+      expect(dispose).toHaveBeenCalledTimes(1);
     });
 
     it('should stop agent runtime loop when operation is cancelled after step completion', async () => {

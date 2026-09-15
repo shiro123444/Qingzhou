@@ -1,3 +1,4 @@
+import { canonicalToolName, invokeNativeTool } from '@lobechat/cordis-runtime';
 import { type ChatToolPayload, type RuntimeStepContext } from '@lobechat/types';
 
 import { type ChatStore } from '@/store/chat/store';
@@ -46,18 +47,24 @@ export class PluginPublicApiActionImpl {
     payload: ChatToolPayload,
     stepContext?: RuntimeStepContext,
   ): Promise<any> => {
-    switch (payload.type) {
-      // @ts-ignore
-      case 'mcp': {
-        return await this.#get().invokeMCPTypePlugin(id, payload);
-      }
-
-      case 'builtin':
-      default: {
-        // Pass stepContext to builtin tools for dynamic state access
-        return await this.#get().invokeBuiltinTool(id, payload, stepContext);
-      }
-    }
+    // One request owns one native tool generation. The existing adapters retain
+    // operation cancellation, message updates, attachments and tool source routing.
+    return invokeNativeTool(
+      {
+        name: canonicalToolName(payload.identifier, payload.apiName),
+        execute: async (input) => {
+          const resolvedPayload = {
+            ...payload,
+            arguments: typeof input === 'string' ? input : JSON.stringify(input ?? {}),
+          };
+          if ((payload.type as string) === 'mcp') {
+            return this.#get().invokeMCPTypePlugin(id, resolvedPayload);
+          }
+          return this.#get().invokeBuiltinTool(id, resolvedPayload, stepContext);
+        },
+      },
+      payload.arguments,
+    );
   };
 }
 

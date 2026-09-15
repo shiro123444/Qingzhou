@@ -1,120 +1,165 @@
-import { Context } from '../../../../../../packages/cordis-kernel/src/context';
-import { PluginManager } from '../../../../../../packages/cordis-kernel/src/manager';
-import type { InstallationCredentials } from '../../installations/types';
-import type { MessengerPlatformBinder } from '../../types';
-import type { MessengerPlatformDefinition, SerializedMessengerPlatformDefinition } from '../types';
-import { createMessengerPlatformPlugin } from './plugin';
+import { Context } from '@lobechat/cordis-foundation';
 
-export interface CordisMessengerPlatformRegistryOptions {
-  context?: Context;
-  pluginManager?: PluginManager;
+import type { MessengerPlatformDefinition } from '../types';
+import {
+  createMessengerPlatformPlugin,
+  MESSENGER_PLATFORM_DEFINITION_SERVICE,
+  MESSENGER_PLATFORM_GENERATION_SERVICE,
+  validateMessengerPlatformDefinition,
+} from './plugin';
+
+/**
+ * One platform generation.
+ *
+ * The generation owns its own native Cordis root context. The definition is held
+ * by that root's `provide` (published synchronously), so it is readable in the
+ * same tick; the optional plugin fiber is only the activation/ownership gate.
+ * Selection state (ctx + readiness + cleanup) lives here — never the definition.
+ */
+export interface MessengerPlatformGeneration {
+  /** Generation root context owning the definition service. */
+  context: Context;
+  /** Captured startup failure (may be any falsy thrown value, so a flag guards it). */
+  error?: unknown;
+  /** Explicit failure flag: `error` may legitimately be `undefined`/`null`. */
+  failed: boolean;
+  generation: symbol;
+  platformId: string;
+  /** Resolves once the generation plugin fiber has settled. */
+  ready: Promise<void>;
+  /** Native disposer for the definition service (also owned by the plugin fiber). */
+  removeDefinition: () => void;
 }
 
 /**
- * Cordis-backed Messenger Platform Registry.
+ * Assemble one generation synchronously.
  *
- * Models every messenger platform (Slack, Telegram, Discord, etc.) as a
- * native Cordis plugin with lifecycle states (installed, active, disabled),
- * enabling dynamic hot-plugging, live credential updates, and clean unmounting.
+ * `new Context()` gives the generation its own native root; the root fiber is
+ * already ACTIVE, so `root.provide(definitionService, definition)` is readable
+ * immediately. A synchronous publication failure propagates as-is, so a caller
+ * can never register a ghost entry.
  */
-export class CordisMessengerPlatformRegistry {
-  public readonly context: Context;
-  public readonly pluginManager: PluginManager;
-  private readonly platformDefinitions = new Map<string, MessengerPlatformDefinition>();
+export const createPlatformGeneration = (
+  definition: MessengerPlatformDefinition,
+  validate: (definition: MessengerPlatformDefinition) => void = validateMessengerPlatformDefinition,
+): MessengerPlatformGeneration => {
+  validate(definition);
 
-  constructor(options: CordisMessengerPlatformRegistryOptions = {}) {
-    if (
-      options.context &&
-      options.pluginManager &&
-      options.context !== options.pluginManager.context
-    ) {
-      throw new Error(
-        'Incompatible context: options.context does not match options.pluginManager.context',
-      );
-    }
-    this.context = options.context ?? options.pluginManager?.context ?? new Context();
-    this.pluginManager = options.pluginManager ?? new PluginManager([], this.context);
+  const context = new Context();
+  let removeDefinition: (() => void) | undefined;
+  try {
+    removeDefinition = context.provide(MESSENGER_PLATFORM_DEFINITION_SERVICE, definition);
+  } catch (error) {
+    void context.fiber.dispose().catch(() => undefined);
+    throw error;
   }
 
-  /**
-   * Register a platform definition and install it into Cordis PluginManager.
-   */
-  register(definition: MessengerPlatformDefinition, autoMount = true): this {
-    if (this.platformDefinitions.has(definition.id)) {
-      throw new Error(`Messenger platform "${definition.id}" is already registered`);
-    }
+  const generation = Symbol(`messenger.platform.${definition.id}`);
+  const platformId = definition.id;
 
-    this.platformDefinitions.set(definition.id, definition);
-    const plugin = createMessengerPlatformPlugin(definition);
-    this.pluginManager.install(plugin);
-
-    if (autoMount) {
-      void this.pluginManager.mount(plugin.id);
-    }
-
-    return this;
+  try {
+    const fiber = context.plugin(
+      createMessengerPlatformPlugin(platformId, generation, removeDefinition),
+    );
+    const record: MessengerPlatformGeneration = {
+      context,
+      failed: false,
+      generation,
+      platformId,
+      removeDefinition,
+      ready: Promise.resolve(fiber).then(
+        () => undefined,
+        (error: unknown) => {
+          record.failed = true;
+          record.error = error;
+        },
+      ),
+    };
+    return record;
+  } catch (error) {
+    removeDefinition();
+    void context.fiber.dispose().catch(() => undefined);
+    throw error;
   }
+};
 
-  /**
-   * Dynamically mount an installed platform plugin.
-   */
-  async mountPlatform(platformId: string): Promise<void> {
-    await this.pluginManager.mount(`messenger.${platformId}`);
-  }
+/** Read the generation's definition from its root native service (strict read is correct). */
+export const readPlatformDefinition = (
+  generation: MessengerPlatformGeneration,
+): MessengerPlatformDefinition | undefined =>
+  generation.context.get(MESSENGER_PLATFORM_DEFINITION_SERVICE);
 
-  /**
-   * Dynamically unmount an active platform plugin.
-   */
-  async unmountPlatform(platformId: string): Promise<void> {
-    await this.pluginManager.unmount(`messenger.${platformId}`);
-  }
+/** Read the marker published by the generation plugin, once it activated. */
+export const readPlatformGenerationMarker = (generation: MessengerPlatformGeneration) =>
+  generation.context.get(MESSENGER_PLATFORM_GENERATION_SERVICE);
 
-  /**
-   * Dynamically hot-reload a platform plugin with an optional updated definition.
-   */
-  async reloadPlatform(
-    platformId: string,
-    updatedDefinition?: MessengerPlatformDefinition,
-  ): Promise<void> {
-    if (updatedDefinition) {
-      this.platformDefinitions.set(platformId, updatedDefinition);
-      const plugin = createMessengerPlatformPlugin(updatedDefinition, `reload-${Date.now()}`);
-      this.pluginManager.install(plugin);
-    }
-    await this.pluginManager.reload(`messenger.${platformId}`);
-  }
+/** Wait until the generation plugin fiber settled, surfacing any startup failure. */
+export const awaitPlatformGeneration = async (
+  generation: MessengerPlatformGeneration,
+): Promise<void> => {
+  await generation.ready;
+  // Throw the original value even when it is falsy (undefined/null/0/'').
+  if (generation.failed) throw generation.error;
+};
 
-  /**
-   * Get an active platform definition from Cordis Context.
-   */
-  getPlatform(platform: string): MessengerPlatformDefinition | undefined {
-    return this.context.get<MessengerPlatformDefinition>(`messenger.platform.${platform}`);
+/**
+ * Reclaim one generation by unloading its native root context. The child plugin
+ * fiber unloads first (its effect removes the definition service) and the root's
+ * own provide effect is cleared with the root, so ownership is native-owned.
+ * The explicit disposer stays as an idempotent safety net.
+ */
+export const disposePlatformGeneration = async (
+  generation: MessengerPlatformGeneration,
+): Promise<void> => {
+  try {
+    await generation.context.fiber.dispose();
+  } finally {
+    if (readPlatformDefinition(generation)) generation.removeDefinition();
   }
+};
 
-  /**
-   * List all currently active platforms in Cordis.
-   */
-  listPlatforms(): MessengerPlatformDefinition[] {
-    const active: MessengerPlatformDefinition[] = [];
-    for (const [id] of this.platformDefinitions) {
-      const platform = this.getPlatform(id);
-      if (platform) active.push(platform);
-    }
-    return active;
-  }
-
-  /**
-   * List serialized platform definitions for frontend consumption.
-   */
-  listSerializedPlatforms(): SerializedMessengerPlatformDefinition[] {
-    return this.listPlatforms().map(({ createBinder, oauth, webhookGate, ...rest }) => rest);
-  }
-
-  /**
-   * Create a platform binder from the resolved active definition.
-   */
-  createBinder(creds: InstallationCredentials): MessengerPlatformBinder | null {
-    const definition = this.getPlatform(creds.platform);
-    return definition ? definition.createBinder(creds) : null;
-  }
+export interface SerialQueue {
+  run: <T>(key: string, task: () => Promise<T>) => Promise<T>;
+  /** Resolves once every queued task for every key has settled. */
+  settle: () => Promise<void>;
 }
+
+/**
+ * Serialize lifecycle changes per key so two changes to the same platform never
+ * interleave, while unrelated platforms stay independent.
+ *
+ * Each entry removes itself once its own promise settles, and only when the key
+ * still points at that same promise — a newer chain queued for the same key is
+ * never deleted by an older one.
+ */
+export const createSerialQueue = (): SerialQueue => {
+  const chains = new Map<string, Promise<void>>();
+  const settle = async (): Promise<void> => {
+    while (chains.size > 0) {
+      await Promise.allSettled(chains.values());
+    }
+  };
+  return {
+    run: <T>(key: string, task: () => Promise<T>): Promise<T> => {
+      const previous = chains.get(key) ?? Promise.resolve();
+      // Run regardless of the previous outcome.
+      const next = previous.then(task, task);
+      // Observe both outcomes so a rejection is never unhandled; `tracked` always resolves.
+      const tracked = next.then(
+        () => undefined,
+        () => undefined,
+      );
+      chains.set(key, tracked);
+      void tracked.then(() => {
+        if (chains.get(key) === tracked) chains.delete(key);
+      });
+      return next;
+    },
+    settle,
+  };
+};
+
+export const createRegistryClosedError = (): Error & { code: string } =>
+  Object.assign(new Error('Messenger platform registry is disposed'), {
+    code: 'CORDIS_REGISTRY_CLOSED',
+  });

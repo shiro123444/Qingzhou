@@ -92,6 +92,7 @@ vi.mock('@/server/modules/AgentRuntime', async (importOriginal) => {
 
 vi.mock('@lobechat/agent-runtime', () => ({
   AgentRuntime: vi.fn().mockImplementation((_agent, _options) => ({
+    dispose: vi.fn().mockResolvedValue(undefined),
     step: vi.fn(),
   })),
 }));
@@ -473,10 +474,15 @@ describe('AgentRuntimeService', () => {
       };
 
       // Mock runtime.step
-      const mockRuntime = { step: vi.fn().mockResolvedValue(mockStepResult) };
+      const mockRuntime = {
+        dispose: vi.fn().mockResolvedValue(undefined),
+        step: vi.fn().mockResolvedValue(mockStepResult),
+      };
       vi.spyOn(service as any, 'createAgentRuntime').mockReturnValue({ runtime: mockRuntime });
 
       const result = await service.executeStep(mockParams);
+
+      expect(mockRuntime.dispose).toHaveBeenCalledTimes(1);
 
       expect(result).toEqual({
         success: true,
@@ -505,6 +511,24 @@ describe('AgentRuntimeService', () => {
       expect(mockQueueService.scheduleMessage).toHaveBeenCalled();
     });
 
+    it('should release the step lock even when native teardown fails', async () => {
+      const failure = new Error('native teardown failed');
+      const runtime = {
+        dispose: vi.fn().mockRejectedValue(failure),
+        step: vi.fn().mockResolvedValue({
+          events: [],
+          newState: { ...mockState, status: 'done', stepCount: 2 },
+        }),
+      };
+      vi.spyOn(service as any, 'createAgentRuntime').mockResolvedValue({ runtime });
+      await expect(service.executeStep(mockParams)).rejects.toBe(failure);
+      expect(runtime.dispose).toHaveBeenCalledTimes(1);
+      expect(mockCoordinator.releaseStepLock).toHaveBeenCalledWith(
+        mockParams.operationId,
+        mockParams.stepIndex,
+      );
+    });
+
     it('should handle missing agent state', async () => {
       mockCoordinator.loadAgentState.mockResolvedValue(null);
 
@@ -515,10 +539,14 @@ describe('AgentRuntimeService', () => {
 
     it('should handle execution errors', async () => {
       const error = new Error('Runtime error');
-      const mockRuntime = { step: vi.fn().mockRejectedValue(error) };
+      const mockRuntime = {
+        dispose: vi.fn().mockResolvedValue(undefined),
+        step: vi.fn().mockRejectedValue(error),
+      };
       vi.spyOn(service as any, 'createAgentRuntime').mockReturnValue({ runtime: mockRuntime });
 
       await expect(service.executeStep(mockParams)).rejects.toThrow('Runtime error');
+      expect(mockRuntime.dispose).toHaveBeenCalledTimes(1);
 
       expect(mockStreamManager.publishStreamEvent).toHaveBeenCalledWith('test-operation-1', {
         type: 'error',
@@ -534,7 +562,10 @@ describe('AgentRuntimeService', () => {
 
     it('should dispatch onComplete hook with error in finalState when execution fails', async () => {
       const error = new Error('Runtime error');
-      const mockRuntime = { step: vi.fn().mockRejectedValue(error) };
+      const mockRuntime = {
+        dispose: vi.fn().mockResolvedValue(undefined),
+        step: vi.fn().mockRejectedValue(error),
+      };
       vi.spyOn(service as any, 'createAgentRuntime').mockReturnValue({ runtime: mockRuntime });
 
       const dispatchSpy = vi.spyOn(hookDispatcher, 'dispatch').mockResolvedValue(undefined);
@@ -569,7 +600,10 @@ describe('AgentRuntimeService', () => {
         error: { status: 401 },
         provider: 'openai',
       };
-      const mockRuntime = { step: vi.fn().mockRejectedValue(llmError) };
+      const mockRuntime = {
+        dispose: vi.fn().mockResolvedValue(undefined),
+        step: vi.fn().mockRejectedValue(llmError),
+      };
       vi.spyOn(service as any, 'createAgentRuntime').mockReturnValue({ runtime: mockRuntime });
 
       const dispatchSpy = vi.spyOn(hookDispatcher, 'dispatch').mockResolvedValue(undefined);
@@ -599,7 +633,10 @@ describe('AgentRuntimeService', () => {
 
     it('should save error state to coordinator for later retrieval (inMemory mode fix)', async () => {
       const error = new Error('Test error for inMemory mode');
-      const mockRuntime = { step: vi.fn().mockRejectedValue(error) };
+      const mockRuntime = {
+        dispose: vi.fn().mockResolvedValue(undefined),
+        step: vi.fn().mockRejectedValue(error),
+      };
       vi.spyOn(service as any, 'createAgentRuntime').mockReturnValue({ runtime: mockRuntime });
 
       // Spy on coordinator.saveAgentState to verify it's called with error state
@@ -634,7 +671,10 @@ describe('AgentRuntimeService', () => {
         events: [],
       };
 
-      const mockRuntime = { step: vi.fn().mockResolvedValue(mockStepResult) };
+      const mockRuntime = {
+        dispose: vi.fn().mockResolvedValue(undefined),
+        step: vi.fn().mockResolvedValue(mockStepResult),
+      };
       vi.spyOn(service as any, 'createAgentRuntime').mockReturnValue({ runtime: mockRuntime });
       const processSpy = vi.spyOn((service as any).humanIntervention, 'process').mockResolvedValue({
         newState: mockState,
@@ -662,7 +702,10 @@ describe('AgentRuntimeService', () => {
         events: [],
       };
 
-      const mockRuntime = { step: vi.fn().mockResolvedValue(mockStepResult) };
+      const mockRuntime = {
+        dispose: vi.fn().mockResolvedValue(undefined),
+        step: vi.fn().mockResolvedValue(mockStepResult),
+      };
       vi.spyOn(service as any, 'createAgentRuntime').mockReturnValue({ runtime: mockRuntime });
 
       // First call returns running state (for executeStep's initial load),
@@ -755,7 +798,10 @@ describe('AgentRuntimeService', () => {
         events: [],
       };
 
-      const mockRuntime = { step: vi.fn().mockResolvedValue(mockStepResult) };
+      const mockRuntime = {
+        dispose: vi.fn().mockResolvedValue(undefined),
+        step: vi.fn().mockResolvedValue(mockStepResult),
+      };
       vi.spyOn(service as any, 'createAgentRuntime').mockReturnValue({ runtime: mockRuntime });
 
       await service.executeStep(mockParams);
@@ -815,7 +861,10 @@ describe('AgentRuntimeService', () => {
         events: [],
       };
 
-      const mockRuntime = { step: vi.fn().mockResolvedValue(mockStepResult) };
+      const mockRuntime = {
+        dispose: vi.fn().mockResolvedValue(undefined),
+        step: vi.fn().mockResolvedValue(mockStepResult),
+      };
       vi.spyOn(service as any, 'createAgentRuntime').mockReturnValue({ runtime: mockRuntime });
 
       await service.executeStep(mockParams);
@@ -865,7 +914,10 @@ describe('AgentRuntimeService', () => {
         events: [],
       };
 
-      const mockRuntime = { step: vi.fn().mockResolvedValue(mockStepResult) };
+      const mockRuntime = {
+        dispose: vi.fn().mockResolvedValue(undefined),
+        step: vi.fn().mockResolvedValue(mockStepResult),
+      };
       vi.spyOn(service as any, 'createAgentRuntime').mockReturnValue({ runtime: mockRuntime });
 
       await service.executeStep(mockParams);

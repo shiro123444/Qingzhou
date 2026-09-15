@@ -251,6 +251,8 @@
     "@lobechat/const": "workspace:*",
     "@lobechat/context-engine": "workspace:*",
     "@lobechat/conversation-flow": "workspace:*",
+    "@lobechat/cordis-foundation": "workspace:*",
+    "@lobechat/cordis-runtime": "workspace:*",
     "@lobechat/database": "workspace:*",
     "@lobechat/desktop-bridge": "workspace:*",
     "@lobechat/device-gateway-client": "workspace:*",

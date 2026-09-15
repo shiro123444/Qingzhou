@@ -481,6 +481,33 @@ export const projectArtifactSnapshot = (data: unknown): ArtifactSnapshot | null 
   return artifact;
 };
 
+const needsArtifactHydration = (artifact?: ArtifactSnapshot): boolean =>
+  !artifact ||
+  (artifact.status === 'ready' &&
+    !artifact.uri &&
+    (artifact.type === 'svg' ||
+      artifact.type === 'image' ||
+      Boolean(artifact.mimeType?.startsWith('image/'))));
+
+/** Events carry partial snapshots. Keep fetched preview data and newer state. */
+const mergeArtifactSnapshot = (
+  current: ArtifactSnapshot | undefined,
+  incoming: ArtifactSnapshot,
+  changedDuringFetch = false,
+): ArtifactSnapshot => {
+  if (!current) return incoming;
+  const stale =
+    changedDuringFetch ||
+    Date.parse(incoming.updatedAt ?? '') < Date.parse(current.updatedAt ?? '');
+  const [base, latest] = stale ? [incoming, current] : [current, incoming];
+  return {
+    ...base,
+    ...Object.fromEntries(Object.entries(latest).filter(([, value]) => value !== undefined)),
+    metadata: { ...base.metadata, ...latest.metadata },
+    uri: latest.uri || base.uri,
+  };
+};
+
 /**
  * Projects real-time generation progress fields (R1-B).
  * Only whitelisted fields (stage, activity, currentSlide, totalSlides, progress, updatedAt)
@@ -611,11 +638,12 @@ export type PresentationEventProjection =
 export const projectPresentationEventData = (data: unknown): PresentationEventProjection => {
   if (!data || typeof data !== 'object') return { kind: 'invalid' };
   const record = data as Record<string, unknown>;
+  const topLevelJob = projectJobSnapshot(data);
 
   if (
     record.job !== undefined ||
     record.artifact !== undefined ||
-    record.artifactIds !== undefined
+    (record.artifactIds !== undefined && !topLevelJob)
   ) {
     const job = projectJobSnapshot(record.job);
     const artifact = projectArtifactSnapshot(record.artifact);
@@ -637,7 +665,7 @@ export const projectPresentationEventData = (data: unknown): PresentationEventPr
     };
   }
 
-  const job = projectJobSnapshot(data);
+  const job = topLevelJob;
   if (job) {
     const progress = projectGenerationProgress(data);
     return { kind: 'job', job, progress: progress ?? undefined };
@@ -675,6 +703,23 @@ export const createPresentationStudioStore = (
   }
 
   const initialLoading = options.initialLoading ?? Boolean(options.initialJobIds?.length);
+
+  const artifactFetches = new Map<string, Promise<ArtifactSnapshot | null>>();
+  const fetchArtifact = (id: string) => {
+    const existing = artifactFetches.get(id);
+    if (existing) return existing;
+    const task = Promise.resolve().then(async () => {
+      const snapshot = await client.getArtifact(id);
+      if (snapshot && snapshot.artifactId !== id) throw new Error('Artifact response ID mismatch');
+      return snapshot;
+    });
+    artifactFetches.set(id, task);
+    const release = () => {
+      if (artifactFetches.get(id) === task) artifactFetches.delete(id);
+    };
+    void task.then(release, release);
+    return task;
+  };
 
   return create<PresentationStudioStore>()((set, get) => ({
     ...presentationInitialState,
@@ -757,7 +802,10 @@ export const createPresentationStudioStore = (
         if (projection.kind === 'bundle') {
           if (projection.job) upsertOwnedJob(projection.job);
           if (projection.artifact) {
-            artifacts[projection.artifact.artifactId] = projection.artifact;
+            artifacts[projection.artifact.artifactId] = mergeArtifactSnapshot(
+              artifacts[projection.artifact.artifactId],
+              projection.artifact,
+            );
             linkArtifactIds(event.job_id, [projection.artifact.artifactId]);
           }
           if (projection.artifactIds && projection.artifactIds.length > 0) {
@@ -770,7 +818,10 @@ export const createPresentationStudioStore = (
         } else if (projection.kind === 'progress') {
           applyProgress(projection.progress);
         } else {
-          artifacts[projection.artifact.artifactId] = projection.artifact;
+          artifacts[projection.artifact.artifactId] = mergeArtifactSnapshot(
+            artifacts[projection.artifact.artifactId],
+            projection.artifact,
+          );
           linkArtifactIds(event.job_id, [projection.artifact.artifactId]);
         }
 
@@ -888,9 +939,10 @@ export const createPresentationStudioStore = (
       const ids = job?.artifactIds ?? [];
       if (ids.length === 0) return;
 
-      const missingIds = ids.filter((id) => !get().artifacts[id]);
+      const beforeFetch = get().artifacts;
+      const missingIds = ids.filter((id) => needsArtifactHydration(beforeFetch[id]));
       if (missingIds.length === 0) {
-        if (!get().selectedArtifactId && ids.length > 0) {
+        if (!get().selectedArtifactId && (!get().selectedJobId || get().selectedJobId === jobId)) {
           set({ selectedArtifactId: ids[0] });
         }
         return;
@@ -899,7 +951,7 @@ export const createPresentationStudioStore = (
       const snapshots = await Promise.all(
         missingIds.map(async (artifactId) => {
           try {
-            return await client.getArtifact(artifactId);
+            return await fetchArtifact(artifactId);
           } catch (err) {
             if (!get().clientError) {
               set({ clientError: toPresentationError(err) });
@@ -915,10 +967,22 @@ export const createPresentationStudioStore = (
       }
 
       if (Object.keys(newArtifacts).length > 0) {
-        set((s) => ({
-          artifacts: { ...s.artifacts, ...newArtifacts },
-          selectedArtifactId: s.selectedArtifactId ?? ids[0],
-        }));
+        set((s) => {
+          const artifacts = { ...s.artifacts };
+          for (const [id, snapshot] of Object.entries(newArtifacts)) {
+            artifacts[id] = mergeArtifactSnapshot(
+              artifacts[id],
+              snapshot,
+              artifacts[id] !== beforeFetch[id],
+            );
+          }
+          return {
+            artifacts,
+            selectedArtifactId:
+              s.selectedArtifactId ??
+              (!s.selectedJobId || s.selectedJobId === jobId ? ids[0] : null),
+          };
+        });
       }
     },
 
@@ -996,18 +1060,22 @@ export const createPresentationStudioStore = (
     refreshJob: async (jobId) => {
       if (get().pendingActions[jobId] === 'refresh') return;
 
+      const beforeJob = get().jobs[jobId];
       set((s) => ({ pendingActions: { ...s.pendingActions, [jobId]: 'refresh' } }));
       try {
         const job = await client.getPresentationJob(jobId);
         if (job) {
+          const beforeFetch = get().artifacts;
           const newArtifacts: Record<string, ArtifactSnapshot> = {};
           if (job.artifactIds && job.artifactIds.length > 0) {
-            const missingIds = job.artifactIds.filter((id) => !get().artifacts[id]);
+            const missingIds = job.artifactIds.filter((id) =>
+              needsArtifactHydration(beforeFetch[id]),
+            );
             if (missingIds.length > 0) {
               const snapshots = await Promise.all(
                 missingIds.map(async (id) => {
                   try {
-                    return await client.getArtifact(id);
+                    return await fetchArtifact(id);
                   } catch (err) {
                     if (!get().clientError) {
                       set({ clientError: toPresentationError(err) });
@@ -1021,11 +1089,22 @@ export const createPresentationStudioStore = (
               }
             }
           }
-          const progress = projectGenerationProgress(job);
           set((s) => {
-            const allArtifacts = { ...s.artifacts, ...newArtifacts };
-            const firstId = job.artifactIds?.[0] ?? null;
-            const selectedArtifactId = s.selectedArtifactId ?? firstId;
+            const allArtifacts = { ...s.artifacts };
+            for (const [id, snapshot] of Object.entries(newArtifacts)) {
+              allArtifacts[id] = mergeArtifactSnapshot(
+                allArtifacts[id],
+                snapshot,
+                allArtifacts[id] !== beforeFetch[id],
+              );
+            }
+            const latestJob =
+              s.jobs[jobId] !== beforeJob && s.jobs[jobId] ? { ...job, ...s.jobs[jobId] } : job;
+            const progress = projectGenerationProgress(latestJob);
+            const firstId = latestJob.artifactIds?.[0] ?? null;
+            const selectedArtifactId =
+              s.selectedArtifactId ??
+              (!s.selectedJobId || s.selectedJobId === jobId ? firstId : null);
             const currentProgress = s.generationProgressByJob[jobId] ?? {};
             return {
               artifacts: allArtifacts,
@@ -1049,8 +1128,10 @@ export const createPresentationStudioStore = (
                   }
                 : s.generationProgressByJob,
               jobOrder: s.jobOrder.includes(jobId) ? s.jobOrder : [jobId, ...s.jobOrder],
-              jobTitles: job.title ? { ...s.jobTitles, [jobId]: job.title } : s.jobTitles,
-              jobs: { ...s.jobs, [jobId]: job },
+              jobTitles: latestJob.title
+                ? { ...s.jobTitles, [jobId]: latestJob.title }
+                : s.jobTitles,
+              jobs: { ...s.jobs, [jobId]: latestJob },
               pendingActions: { ...s.pendingActions, [jobId]: undefined },
               selectedArtifactId,
             };

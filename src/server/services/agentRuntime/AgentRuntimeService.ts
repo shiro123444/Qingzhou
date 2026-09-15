@@ -496,6 +496,7 @@ export class AgentRuntimeService {
     // runtime.step() call site stays as the authoritative start for the
     // success path.
     const stepStartAt = Date.now();
+    let stepRuntime: AgentRuntime | undefined;
 
     try {
       log('[%s][%d] Start step executing...', operationId, stepIndex);
@@ -615,6 +616,7 @@ export class AgentRuntimeService {
         operationId,
         stepIndex,
       });
+      stepRuntime = runtime;
 
       // Handle human intervention
       let currentContext = context;
@@ -975,7 +977,11 @@ export class AgentRuntimeService {
       // Release lock so legitimate retries or next operations can proceed.
       // If Vercel force-kills the process, this won't execute — the lock
       // auto-expires after TTL (35s), allowing QStash retries to self-heal.
-      await this.coordinator.releaseStepLock(operationId, stepIndex);
+      try {
+        await stepRuntime?.dispose();
+      } finally {
+        await this.coordinator.releaseStepLock(operationId, stepIndex);
+      }
     }
   }
 
