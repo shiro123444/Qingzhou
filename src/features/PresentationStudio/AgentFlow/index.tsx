@@ -5,12 +5,24 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { type ChatInputEditor } from '@/features/ChatInput';
 import { ChatList, ConversationProvider, MessageItem } from '@/features/Conversation';
+import { QingzhouPresentationScene } from '@/features/QingzhouBrand';
 import { ServerConfigStoreProvider } from '@/store/serverConfig/Provider';
 
 import OutlineWorkspace, { type OutlineSlide } from './OutlineWorkspace';
-import type { PresentationAgentBrief, PresentationAgentClient } from './presentationAgentClient';
+import {
+  AgentQuestionCard,
+  BriefConfirmationCard,
+  type ConfirmedAgentAnswer,
+  CreativePlanCard,
+  PlanningCardsFooter,
+} from './PlanningCards';
+import type {
+  PresentationAgentBrief,
+  PresentationAgentClient,
+  PresentationAgentQuestion,
+} from './presentationAgentClient';
 import PresentationChatInput, { type PresentationSendPayload } from './PresentationChatInput';
-import type { PresentationToolSelection } from './PresentationTools';
+import { PresentationTools, type PresentationToolSelection } from './PresentationTools';
 import PresentationTypewriterTitle from './PresentationTypewriterTitle';
 import { styles } from './style';
 import { type PresentationReferenceInput, toPresentationReference } from './types';
@@ -42,7 +54,7 @@ export interface PresentationAgentFlowProps {
     audience: string;
     style: string;
   }) => Promise<Partial<OutlineSlide> | OutlineSlide[] | void>;
-  selectedTemplate?: { templateId: string; versionId?: string };
+  selectedTemplate?: { name?: string; templateId: string; versionId?: string };
 }
 
 type FlowStep = 'topic' | 'intake' | 'outline' | 'summary';
@@ -50,7 +62,11 @@ type FlowStep = 'topic' | 'intake' | 'outline' | 'summary';
 interface ChatMessage {
   content: string;
   createdAt?: number;
+  /** Internal UI events remain in Agent context without impersonating a visible user message. */
+  hidden?: boolean;
   id: string;
+  /** UI acknowledgements do not become model instructions on later turns. */
+  includeInContext?: boolean;
   references?: PresentationReferenceInput[];
   sender: 'agent' | 'user';
   stepKey?: FlowStep;
@@ -61,6 +77,46 @@ interface InspirationTemplate {
   label: string;
   prompt: string;
 }
+
+const ACTIVITY_TYPEWRITER_INTERVAL = 26;
+
+const AgentActivityStatus = memo<{ text: string }>(({ text }) => {
+  const [visibleText, setVisibleText] = useState('');
+
+  useEffect(() => {
+    const characters = Array.from(text);
+    setVisibleText(characters[0] ?? '');
+    if (characters.length <= 1) return;
+
+    let visibleCharacters = 1;
+    const timer = window.setInterval(() => {
+      visibleCharacters += 1;
+      setVisibleText(characters.slice(0, visibleCharacters).join(''));
+      if (visibleCharacters >= characters.length) window.clearInterval(timer);
+    }, ACTIVITY_TYPEWRITER_INTERVAL);
+
+    return () => window.clearInterval(timer);
+  }, [text]);
+
+  return (
+    <div aria-label={text} className={styles.thinkingBubble} role="status">
+      <span
+        aria-hidden
+        className={styles.thinkingWave}
+        data-testid="presentation-agent-activity-wave"
+      >
+        <i className={styles.thinkingDot} />
+        <i className={styles.thinkingDot} />
+        <i className={styles.thinkingDot} />
+      </span>
+      <span aria-hidden className={styles.thinkingText} key={text}>
+        {visibleText}
+      </span>
+    </div>
+  );
+});
+
+AgentActivityStatus.displayName = 'AgentActivityStatus';
 
 const INSPIRATION_TEMPLATES: InspirationTemplate[] = [
   {
@@ -138,6 +194,7 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
     selectedTemplate,
   }) => {
     const editorRef = useRef<ChatInputEditor | null>(null);
+    const flowScrollerRef = useRef<HTMLDivElement | null>(null);
     const [step, setStep] = useState<FlowStep>('topic');
     const [selectedTopic, setSelectedTopic] = useState('');
     const [selectedReferences, setSelectedReferences] = useState<PresentationReferenceInput[]>([]);
@@ -149,16 +206,27 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
     const [confirmedSlides, setConfirmedSlides] = useState<OutlineSlide[]>([]);
     const [outlineVersionId, setOutlineVersionId] = useState('v1');
     const [tools, setTools] = useState<PresentationToolSelection>({
-      search: false,
+      search: true,
       skillIds: ['ppt:story', 'ppt:visual'],
     });
     const [agentBrief, setAgentBrief] = useState<PresentationAgentBrief>({});
     const [agentBusy, setAgentBusy] = useState<'conversation' | 'outline' | null>(null);
     const [activity, setActivity] = useState('正在理解你的要求');
     const turnController = useRef<AbortController | null>(null);
+    const turnInFlight = useRef(false);
+    const recoveredLimitErrorRef = useRef<string | null>(null);
+    const learnedTemplateKey = useRef<string | null>(null);
     useEffect(() => () => turnController.current?.abort(), []);
     const [agentError, setAgentError] = useState<string | null>(null);
     const [agentOutline, setAgentOutline] = useState<OutlineSlide[] | undefined>();
+    const [pendingQuestion, setPendingQuestion] = useState<{
+      id: string;
+      question: PresentationAgentQuestion | string;
+      text: string;
+    } | null>(null);
+    const [questionDraft, setQuestionDraft] = useState('');
+    const [confirmedAnswers, setConfirmedAnswers] = useState<ConfirmedAgentAnswer[]>([]);
+    const needsBriefConfirmation = useRef(false);
     const threadIdRef = useRef(`presentation-thread-${Date.now()}`);
     const initialSubmittedRef = useRef(false);
 
@@ -187,20 +255,70 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
     }, []);
 
     const handleAgentTurn = useCallback(
-      async (payload: PresentationSendPayload) => {
-        if (agentBusy) return;
+      async (
+        payload: PresentationSendPayload,
+        options?: {
+          announcement?: string;
+          hiddenUserMessage?: boolean;
+          initialActivity?: string;
+          modelContent?: string;
+          visibleUserMessage?: string;
+        },
+      ) => {
+        if (agentBusy || turnInFlight.current) return;
         const text = payload.text.trim();
         if (!text && payload.references.length === 0) return;
+        if (!options?.hiddenUserMessage) recoveredLimitErrorRef.current = null;
 
         const content = text || '请根据我提供的参考材料规划演示文稿。';
         const userMessage: ChatMessage = {
           content,
           createdAt: Date.now(),
+          hidden: options?.hiddenUserMessage,
           id: nextMessageId('user'),
           references: payload.references,
           sender: 'user',
         };
-        const conversation = [...messages, userMessage];
+        const modelUserMessage: ChatMessage = {
+          ...userMessage,
+          content: options?.modelContent?.trim() || content,
+        };
+        const announcement: ChatMessage | undefined = options?.announcement
+          ? {
+              content: options.announcement,
+              createdAt: Date.now(),
+              id: nextMessageId('agent-template'),
+              includeInContext: false,
+              sender: 'agent',
+            }
+          : undefined;
+        const visibleUserContent = options?.visibleUserMessage?.trim();
+        const visibleUserMessage: ChatMessage | undefined =
+          visibleUserContent &&
+          !messages.some(
+            (message) =>
+              !message.hidden &&
+              message.sender === 'user' &&
+              message.content === visibleUserContent,
+          )
+            ? {
+                content: visibleUserContent,
+                createdAt: Date.now(),
+                id: nextMessageId('user-visible'),
+                includeInContext: false,
+                sender: 'user',
+              }
+            : undefined;
+        const conversation = [
+          ...messages,
+          ...(visibleUserMessage ? [visibleUserMessage] : []),
+          ...(announcement ? [announcement] : []),
+          userMessage,
+        ];
+        const agentConversation = [
+          ...messages.filter((message) => message.includeInContext !== false),
+          modelUserMessage,
+        ];
         setMessages(conversation);
         const allReferences = [
           ...new Map(
@@ -211,15 +329,22 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
         setStep('intake');
         setAgentError(null);
         setAgentBusy('conversation');
-        setActivity('正在理解你的要求');
+        setActivity(options?.initialActivity ?? '正在理解你的要求');
+        turnInFlight.current = true;
         turnController.current = new AbortController();
+        let streamingMessageId: string | undefined;
 
         try {
           const result = await agentClient.turn(
             {
               brief: agentBrief,
-              template: selectedTemplate,
-              messages: conversation.map((message) => ({
+              template: selectedTemplate
+                ? {
+                    templateId: selectedTemplate.templateId,
+                    versionId: selectedTemplate.versionId,
+                  }
+                : undefined,
+              messages: agentConversation.map((message) => ({
                 content: message.content,
                 role: message.sender === 'agent' ? 'assistant' : 'user',
               })),
@@ -229,29 +354,71 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
             },
             {
               onActivity: (event) => setActivity(event.text),
+              onCheckpoint: (checkpoint) => {
+                applyAgentBrief(checkpoint.brief);
+                if (checkpoint.slides) setAgentOutline(checkpoint.slides);
+              },
+              onMessageDelta: (_delta, streamedContent) => {
+                if (!streamingMessageId) streamingMessageId = nextMessageId('agent-stream');
+                const id = streamingMessageId;
+                setMessages((current) => {
+                  const existing = current.findIndex((message) => message.id === id);
+                  const streamed: ChatMessage = {
+                    content: streamedContent,
+                    createdAt: Date.now(),
+                    id,
+                    sender: 'agent',
+                  };
+                  if (existing < 0) return [...current, streamed];
+                  return current.map((message, index) => (index === existing ? streamed : message));
+                });
+              },
               signal: turnController.current.signal,
             },
           );
+          const asksQuestion =
+            result.phase === 'intake' &&
+            Boolean(
+              result.question ||
+              result.questionId ||
+              /[?？][”’」』】）)]*\s*$/u.test(result.message.trim()) ||
+              /(?:请|需要).{0,24}(?:确认|选择|告诉|决定)/u.test(result.message),
+            );
+          recoveredLimitErrorRef.current = null;
           applyAgentBrief(result.brief);
-          setMessages((current) => [
-            ...current,
-            {
-              content: result.message,
-              createdAt: Date.now(),
-              id: nextMessageId(result.questionId ? `agent-${result.questionId}` : 'agent'),
-              sender: 'agent',
-            },
-          ]);
+          if (!streamingMessageId) {
+            setMessages((current) => [
+              ...current,
+              {
+                content: result.message,
+                createdAt: Date.now(),
+                id: nextMessageId('agent'),
+                sender: 'agent',
+              },
+            ]);
+          }
+          if (asksQuestion) {
+            needsBriefConfirmation.current = true;
+            setPendingQuestion({
+              id: result.questionId || `question-${Date.now()}`,
+              question: result.question ?? result.message.trim(),
+              text: result.question?.prompt ?? result.message.trim(),
+            });
+            setQuestionDraft('');
+            return;
+          }
 
           if (result.phase !== 'outline') return;
           if (!result.slides?.length) throw new Error('Agent 尚未返回有效大纲，请继续对话');
           setAgentOutline(result.slides);
           setConfirmedSlides([]);
           setOutlineVersionId('v1');
-          setStep('outline');
+          setStep(needsBriefConfirmation.current ? 'summary' : 'outline');
         } catch (error) {
+          if (turnController.current?.signal.aborted) return;
           setAgentError(error instanceof Error ? error.message : 'PPT Agent 暂时不可用');
         } finally {
+          turnInFlight.current = false;
           setAgentBusy(null);
         }
       },
@@ -268,6 +435,56 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
       ],
     );
 
+    useEffect(() => {
+      if (
+        !agentError ||
+        agentBusy ||
+        turnInFlight.current ||
+        !/工具调用次数已达本轮上限|本轮规划已达到调用上限|Conversation response message is required|Failed to parse multimodal chat response JSON/u.test(
+          agentError,
+        )
+      )
+        return;
+      const recoveryKey = agentError;
+      if (recoveredLimitErrorRef.current) return;
+      recoveredLimitErrorRef.current = recoveryKey;
+      setAgentError(null);
+      void handleAgentTurn(
+        {
+          references: [],
+          text: '[恢复执行] 请从本会话已经完成的模板分析、资料、资产与创作方案继续；不要重新开始。',
+        },
+        {
+          hiddenUserMessage: true,
+          initialActivity: '正在从已完成的进度继续',
+        },
+      );
+    }, [agentBusy, agentError, handleAgentTurn]);
+
+    useEffect(() => {
+      if (!selectedTemplate) {
+        learnedTemplateKey.current = null;
+        return;
+      }
+      const key = `${selectedTemplate.templateId}:${selectedTemplate.versionId ?? ''}`;
+      if (agentBusy || turnInFlight.current || learnedTemplateKey.current === key) return;
+      learnedTemplateKey.current = key;
+      if (initialTopic) initialSubmittedRef.current = true;
+      const templateName = selectedTemplate.name?.trim() || '所选模板';
+      void handleAgentTurn(
+        {
+          references: [],
+          text: `[界面事件：模板已由当前用户选择] 请先观察模板「${templateName}」的真实页面、嵌入媒体和可复用组件，形成视觉设计程序。${initialTopic ? `同时结合用户的创作主题：${initialTopic}` : '尚未提供创作主题；完成模板学习后再询问主题。'}遇到会实质改变保留、替换或重绘策略的歧义时，只提出当前最关键的问题并等待回答。`,
+        },
+        {
+          announcement: `模板「${templateName}」已保存。我正在查看真实页面、媒体和组件；需要你决定的地方会直接在这里询问。`,
+          hiddenUserMessage: true,
+          initialActivity: '正在打开模板真实页面',
+          visibleUserMessage: initialTopic,
+        },
+      );
+    }, [agentBusy, handleAgentTurn, initialTopic, selectedTemplate]);
+
     const handleTemplateSelect = useCallback((prompt: string) => {
       const editor = editorRef.current;
       if (editor) {
@@ -281,7 +498,12 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
     }, []);
 
     useEffect(() => {
-      if (initialTopic && !initialSubmittedRef.current && step === 'topic') {
+      if (
+        initialTopic &&
+        !initialSubmittedRef.current &&
+        step === 'topic' &&
+        !turnInFlight.current
+      ) {
         initialSubmittedRef.current = true;
         void handleAgentTurn({ references: [], text: initialTopic });
       }
@@ -296,6 +518,57 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
       },
       [handleAgentTurn],
     );
+
+    const handleQuestionAnswer = useCallback(() => {
+      const answer = questionDraft.trim();
+      if (!pendingQuestion || !answer || agentBusy) return;
+      const question = pendingQuestion;
+      setConfirmedAnswers((current) => [
+        ...current.filter((item) => item.id !== question.id),
+        { answer, id: question.id, question: question.text },
+      ]);
+      setPendingQuestion(null);
+      setQuestionDraft('');
+      void handleAgentTurn(
+        { references: [], text: answer },
+        {
+          initialActivity: '正在结合你的决定继续规划',
+          modelContent: `[回答问题 ${question.id}]\n问题：${typeof question.question === 'string' ? question.question : question.question.prompt}\n用户决定：${answer}`,
+        },
+      );
+    }, [agentBusy, handleAgentTurn, pendingQuestion, questionDraft]);
+
+    const handleBriefConfirmation = useCallback(() => {
+      const answerSummary = confirmedAnswers.map((item) => `- ${item.question}：${item.answer}`);
+      const overview = [
+        '信息概述已确认',
+        selectedTopic ? `主题：${selectedTopic}` : '',
+        selectedAudience ? `受众与场景：${selectedAudience}` : '',
+        selectedSlideCount ? `页数：${selectedSlideCount} 页` : '',
+        selectedStyle ? `视觉方向：${selectedStyle}` : '',
+        ...answerSummary,
+      ]
+        .filter(Boolean)
+        .join('\n');
+      setMessages((current) => [
+        ...current,
+        {
+          content: overview,
+          createdAt: Date.now(),
+          id: nextMessageId('agent-summary'),
+          includeInContext: false,
+          sender: 'agent',
+        },
+      ]);
+      setStep('outline');
+    }, [
+      confirmedAnswers,
+      nextMessageId,
+      selectedAudience,
+      selectedSlideCount,
+      selectedStyle,
+      selectedTopic,
+    ]);
 
     // Reuse LobeHub's native Conversation ChatInput/ChatList shell. The
     // lifecycle hook short-circuits the normal agent send and feeds the
@@ -334,7 +607,7 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
           [
             `演示文稿主题：${selectedTopic}`,
             `用户原始创作要求：${messages
-              .filter((message) => message.sender === 'user')
+              .filter((message) => message.sender === 'user' && !message.hidden)
               .map((message) => message.content)
               .join('\n')}`,
             `目标受众与场景：${selectedAudience}`,
@@ -374,12 +647,12 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
         });
       },
       [
+        agentBrief.assets,
         agentBrief.research,
         agentBrief.plan,
         confirmedSlides,
         selectedTopic,
         selectedAudience,
-        selectedSlideCount,
         selectedStyle,
         selectedReferences,
         outlineVersionId,
@@ -418,6 +691,11 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
       setAgentBusy(null);
       setAgentError(null);
       setAgentOutline(undefined);
+      setPendingQuestion(null);
+      setQuestionDraft('');
+      setConfirmedAnswers([]);
+      needsBriefConfirmation.current = false;
+      recoveredLimitErrorRef.current = null;
       threadIdRef.current = `presentation-thread-${Date.now()}`;
       setMessages([]);
     }, [defaultLanguage]);
@@ -427,19 +705,24 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
       [],
     );
 
-    const conversationMessages = useMemo<UIChatMessage[]>(
-      () =>
-        messages.map((m, index) => ({
-          agentId: 'ppt-agent',
-          content: m.content,
-          createdAt: m.createdAt || Date.now(),
-          id: m.id,
-          ...(index > 0 ? { parentId: messages[index - 1].id } : {}),
-          role: m.sender === 'agent' ? 'assistant' : 'user',
-          updatedAt: m.createdAt || Date.now(),
-        })),
-      [messages],
-    );
+    const conversationMessages = useMemo<UIChatMessage[]>(() => {
+      const visibleMessages = messages.filter((message) => !message.hidden);
+      return visibleMessages.map((m, index) => ({
+        agentId: 'ppt-agent',
+        content: m.content,
+        createdAt: m.createdAt || Date.now(),
+        id: m.id,
+        ...(index > 0 ? { parentId: visibleMessages[index - 1].id } : {}),
+        role: m.sender === 'agent' ? 'assistant' : 'user',
+        updatedAt: m.createdAt || Date.now(),
+      }));
+    }, [messages]);
+
+    useEffect(() => {
+      const scroller = flowScrollerRef.current;
+      if (!scroller) return;
+      scroller.scrollTop = scroller.scrollHeight;
+    }, [agentBusy, conversationMessages, pendingQuestion]);
 
     const renderStepFooter = useCallback(
       (stepKey: FlowStep) => {
@@ -563,13 +846,19 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
       return '继续补充要求，PPT Agent 会结合完整上下文决定下一步...';
     }, [step]);
 
+    const thinkingStatus = agentBusy ? (
+      <div className={styles.realtimeTranscript} data-testid="presentation-agent-thinking">
+        <AgentActivityStatus text={activity} />
+      </div>
+    ) : null;
+
     return (
       <Flexbox
+        className={styles.flowRoot}
         data-stage={step}
         data-testid="presentation-agent-flow"
         flex={1}
         height={'100%'}
-        justify={'space-between'}
         width={'100%'}
       >
         <ConversationProvider
@@ -584,146 +873,146 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
               : 'presentation-conversation-empty'
           }
         >
-          <Flexbox
-            flex={1}
-            style={{ minHeight: 0, overflowX: 'hidden', overflowY: 'auto' }}
-            width="100%"
-          >
-            {step !== 'outline' && (
-              <ServerConfigStoreProvider>
-                <ChatList
-                  itemContent={(index, id) => {
-                    return (
-                      <MessageItem
-                        disableEditing
-                        id={id}
-                        index={index}
-                        isLatestItem={index === messages.length - 1}
-                      />
-                    );
-                  }}
-                  welcome={
-                    <>
-                      <Flexbox flex={1} />
-                      <Flexbox gap={32} style={{ paddingBottom: 'max(4vh, 16px)' }} width="100%">
-                        <PresentationTypewriterTitle />
-                        <Flexbox width="min(100%, 760px)">
-                          <p
-                            style={{
-                              color: 'var(--ant-color-text-description)',
-                              fontSize: 14,
-                              lineHeight: 1.6,
-                              margin: 0,
-                            }}
+          <div className={styles.flowShell}>
+            <QingzhouPresentationScene active={creating || Boolean(agentBusy)} stage={step} />
+            <div className={styles.flowThread}>
+              {step !== 'outline' && (
+                <div className={styles.flowScroller} ref={flowScrollerRef}>
+                  <div className={styles.capabilityBar}>
+                    <PresentationTools value={tools} onChange={setTools} />
+                  </div>
+                  <ServerConfigStoreProvider>
+                    <ChatList
+                      itemContent={(index, id) => {
+                        const message = conversationMessages[index];
+                        return (
+                          <div
+                            className={styles.flowMessageRow}
+                            data-message-role={message?.role}
+                            data-testid={
+                              message?.role === 'user' ? 'presentation-user-message' : undefined
+                            }
                           >
+                            <MessageItem
+                              disableEditing
+                              id={id}
+                              index={index}
+                              isLatestItem={index === conversationMessages.length - 1}
+                            />
+                          </div>
+                        );
+                      }}
+                      welcome={
+                        <div className={styles.flowWelcome}>
+                          <PresentationTypewriterTitle />
+                          <p className={styles.flowWelcomeCopy}>
                             说说你想讲什么，我们一起决定怎么呈现。
                           </p>
-                        </Flexbox>
-                        <div
-                          data-testid="agent-inspiration-chips"
-                          style={{ width: 'min(100%, 920px)' }}
-                        >
-                          <p
-                            style={{
-                              color: 'var(--ant-color-text-description)',
-                              fontSize: 13,
-                              marginBottom: 8,
-                            }}
-                          >
-                            从这些想法开始
-                          </p>
-                          <Flexbox horizontal gap={8} wrap="wrap">
-                            {INSPIRATION_TEMPLATES.map((item) => (
-                              <Block
-                                clickable
-                                key={item.label}
-                                paddingBlock={8}
-                                paddingInline={14}
-                                style={{ borderRadius: 48, fontSize: 13 }}
-                                variant="filled"
-                                onClick={() => {
-                                  handleTemplateSelect(item.prompt);
-                                }}
-                              >
-                                {item.label} · {item.desc}
-                              </Block>
-                            ))}
-                          </Flexbox>
+                          <div data-testid="agent-inspiration-chips">
+                            <p className={styles.flowWelcomeHint}>从这些想法开始</p>
+                            <Flexbox horizontal gap={8} wrap="wrap">
+                              {INSPIRATION_TEMPLATES.map((item) => (
+                                <Block
+                                  clickable
+                                  key={item.label}
+                                  paddingBlock={8}
+                                  paddingInline={14}
+                                  style={{ borderRadius: 48, fontSize: 13 }}
+                                  variant="filled"
+                                  onClick={() => {
+                                    handleTemplateSelect(item.prompt);
+                                  }}
+                                >
+                                  {item.label} · {item.desc}
+                                </Block>
+                              ))}
+                            </Flexbox>
+                          </div>
                         </div>
-                      </Flexbox>
-                    </>
-                  }
-                />
-              </ServerConfigStoreProvider>
-            )}
-            <div
-              aria-live="polite"
-              data-testid="presentation-agent-transcript"
-              style={{
-                height: 0,
-                overflow: 'hidden',
-                position: 'absolute',
-                width: 0,
-              }}
-            >
-              {messages.map((message) => (
-                <span key={message.id}>{message.content}</span>
-              ))}
-            </div>
-            {step !== 'outline' && agentBrief.plan && (
-              <details className={styles.realtimeTranscript}>
-                <summary style={{ cursor: 'pointer', fontSize: 13 }}>创作方案</summary>
-                <div className={styles.realtimeMessage}>
-                  <p>{agentBrief.plan.goal}</p>
-                  <p>{agentBrief.plan.narrative}</p>
-                  <p>{agentBrief.plan.rationale}</p>
-                  <ol>
-                    {agentBrief.plan.steps.map((item, index) => (
-                      <li key={index}>
-                        {item.action} · {item.reason}
-                      </li>
-                    ))}
-                  </ol>
-                </div>
-              </details>
-            )}
-            {agentBusy && (
-              <div className={styles.realtimeTranscript} data-testid="presentation-agent-thinking">
-                <div className={styles.thinkingBubble} role="status">
-                  <Icon icon={Sparkles} size={18} />
-                  <span key={activity}>{activity}</span>
-                </div>
-              </div>
-            )}
-            {agentError && (
-              <div
-                aria-live="assertive"
-                className={styles.realtimeTranscript}
-                data-testid="presentation-agent-error"
-              >
-                <div className={`${styles.realtimeMessage} ${styles.realtimeMessageAgent}`}>
-                  {agentError}
-                </div>
-              </div>
-            )}
-            <div data-testid="presentation-agent-step-footer">{renderStepFooter(step)}</div>
-          </Flexbox>
+                      }
+                    />
+                  </ServerConfigStoreProvider>
 
-          {/* LobeHub Native ChatInput anchored directly at bottom for conversation steps */}
-          {(step === 'topic' || step === 'intake') && (
-            <PresentationChatInput
-              conversation
-              creating={creating || Boolean(agentBusy)}
-              disabled={Boolean(agentBusy)}
-              placeholder={chatInputPlaceholder}
-              tools={tools}
-              onSend={handleChatSend}
-              onToolsChange={setTools}
-              onEditorReady={(inst) => {
-                editorRef.current = inst;
-              }}
-            />
-          )}
+                  {(agentBrief.plan || step === 'summary') && (
+                    <div className={styles.planningShelf}>
+                      <PlanningCardsFooter>
+                        {agentBrief.plan && <CreativePlanCard plan={agentBrief.plan} />}
+                        {step === 'summary' && (
+                          <BriefConfirmationCard
+                            answers={confirmedAnswers}
+                            brief={agentBrief}
+                            onConfirm={handleBriefConfirmation}
+                          />
+                        )}
+                      </PlanningCardsFooter>
+                    </div>
+                  )}
+
+                  {thinkingStatus}
+                  {agentError && (
+                    <div
+                      aria-live="assertive"
+                      className={styles.realtimeTranscript}
+                      data-testid="presentation-agent-error"
+                    >
+                      <div className={`${styles.realtimeMessage} ${styles.realtimeMessageAgent}`}>
+                        {agentError}
+                      </div>
+                    </div>
+                  )}
+
+                  {!agentBusy && pendingQuestion && (
+                    <AgentQuestionCard
+                      answerCount={confirmedAnswers.length}
+                      question={pendingQuestion.question}
+                      value={questionDraft}
+                      onAnswerChange={setQuestionDraft}
+                      onSubmit={handleQuestionAnswer}
+                    />
+                  )}
+
+                  {(step === 'topic' || step === 'intake') && !agentBusy && !pendingQuestion && (
+                    <div className={styles.flowComposer}>
+                      <PresentationChatInput
+                        conversation
+                        creating={creating}
+                        placeholder={chatInputPlaceholder}
+                        onSend={handleChatSend}
+                        onStop={() => turnController.current?.abort()}
+                        onEditorReady={(inst) => {
+                          editorRef.current = inst;
+                        }}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+              {step === 'outline' ? (
+                <div className={styles.flowScroller} data-testid="presentation-agent-step-footer">
+                  {renderStepFooter(step)}
+                </div>
+              ) : (
+                <>
+                  <div
+                    aria-live="polite"
+                    data-testid="presentation-agent-transcript"
+                    style={{
+                      height: 0,
+                      overflow: 'hidden',
+                      position: 'absolute',
+                      width: 0,
+                    }}
+                  >
+                    {messages
+                      .filter((message) => !message.hidden)
+                      .map((message) => (
+                        <span key={message.id}>{message.content}</span>
+                      ))}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
         </ConversationProvider>
       </Flexbox>
     );

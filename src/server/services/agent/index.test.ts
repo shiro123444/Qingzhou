@@ -192,7 +192,7 @@ describe('AgentService', () => {
       const result = await newService.getBuiltinAgent('inbox');
 
       // Avatar should be merged from BUILTIN_AGENTS definition
-      expect((result as any)?.avatar).toBe('/brand/qingzhou-mark.svg');
+      expect((result as any)?.avatar).toBe('/brand/jumi/jumi-white-puppy.png');
     });
 
     it('should not include avatar for non-builtin agents', async () => {

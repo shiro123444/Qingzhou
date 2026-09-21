@@ -57,12 +57,14 @@ export const PresentationTypewriterTitle = memo(() => {
     <Flexbox
       data-testid="presentation-typewriter-title"
       style={{
+        alignItems: 'flex-start',
         color: cssVar.colorText,
         fontSize: 32,
         fontWeight: 700,
         height: '1.4em',
         lineHeight: 1.4,
         overflow: 'hidden',
+        width: '100%',
       }}
     >
       <span>

@@ -33,13 +33,14 @@ const slide = (artifactId: string, n: number): ArtifactSnapshot => ({
 describe('PresentationStudio Full-Width Centered Agent Flow (A-1 / A-2 / A-3 / C-109 / C-111)', () => {
   it('renders single centered empty shell with typewriter title and walks through the creation flow', async () => {
     const createPresentationJob = vi.fn(async () => completedJob([]));
+    const outlineSlides = Array.from({ length: 12 }, (_, index) => ({
+      id: `slide-${index + 1}`,
+      keyPoints: [`要点 ${index + 1}`],
+      title: index === 0 ? '2026年企业数字化转型战略规划' : `战略章节 ${index + 1}`,
+    }));
     const agentClient = {
       outline: vi.fn(async () => ({
-        slides: Array.from({ length: 12 }, (_, index) => ({
-          id: `slide-${index + 1}`,
-          keyPoints: [`要点 ${index + 1}`],
-          title: index === 0 ? '2026年企业数字化转型战略规划' : `战略章节 ${index + 1}`,
-        })),
+        slides: outlineSlides,
       })),
       turn: vi.fn(async () => ({
         brief: {
@@ -52,6 +53,7 @@ describe('PresentationStudio Full-Width Centered Agent Flow (A-1 / A-2 / A-3 / C
         },
         message: '信息完整，开始生成大纲。',
         phase: 'outline' as const,
+        slides: outlineSlides,
       })),
     };
     const client = {
@@ -77,7 +79,7 @@ describe('PresentationStudio Full-Width Centered Agent Flow (A-1 / A-2 / A-3 / C
     const emptyShell = screen.getByTestId('presentation-empty-shell');
     expect(emptyShell).toBeInTheDocument();
 
-    const agentFlow = screen.getByTestId('presentation-agent-flow');
+    const agentFlow = await screen.findByTestId('presentation-agent-flow');
     expect(agentFlow).toBeInTheDocument();
     expect(emptyShell).toContainElement(agentFlow);
 
@@ -90,12 +92,6 @@ describe('PresentationStudio Full-Width Centered Agent Flow (A-1 / A-2 / A-3 / C
     });
     expect(screen.queryByTestId('audience-options-group')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /确认大纲，继续生成/ }));
-
-    // User confirmation is the transition into generation.
-    await waitFor(() => {
-      expect(screen.getByTestId('presentation-agent-summary')).toBeInTheDocument();
-    });
-    fireEvent.click(screen.getByRole('button', { name: /Start presentation generation/i }));
 
     // Verify createJob dispatch
     await waitFor(() => {

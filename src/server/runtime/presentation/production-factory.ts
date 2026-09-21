@@ -70,7 +70,10 @@ import { loadProductionPresentationProviderOptions } from './production-config';
 import { createRevisionAssetPlanner } from './revision-assets';
 import { createProcessPresentationRunner, type ProcessPresentationRunnerOptions } from './runner';
 import type { FilePresentationTemplateLibrary } from './templates';
+import type { PresentationAudioTranscriber } from './templates/audio-transcription';
 import { TemplateVisualLearning } from './templates/visual-learning';
+import { createPresentationVisualCritic } from './visual-critic';
+import { createPresentationVisualStoryboardPlanner } from './visual-storyboard';
 import { InMemoryPresentationPlanWorker, type PresentationWorkerWorkspace } from './worker';
 
 /** The authenticated scope every port resolution must carry. */
@@ -393,6 +396,7 @@ export const createPptMasterProductionComposition =
 
 export interface ProductionPresentationGenerationCompositionOptions {
   readonly artifactStore?: PresentationArtifactStore;
+  readonly audioTranscriber?: PresentationAudioTranscriber;
   readonly contextFactory?: PresentationGenerationContextFactory;
   readonly defaultSlideCount?: number;
   readonly env?: ProductionPresentationEnv;
@@ -463,11 +467,18 @@ export const createProductionPresentationGenerationComposition = (
   const templateVisualLearning =
     options.templateLibrary && options.multimodalChatPort
       ? new TemplateVisualLearning({
+          audioTranscriber: options.audioTranscriber,
           library: options.templateLibrary,
           store: artifactStore,
           chat: options.multimodalChatPort,
         })
       : undefined;
+  const visualStoryboardPlanner = options.multimodalChatPort
+    ? createPresentationVisualStoryboardPlanner({ chat: options.multimodalChatPort })
+    : undefined;
+  const visualCritic = options.multimodalChatPort
+    ? createPresentationVisualCritic({ chat: options.multimodalChatPort, store: artifactStore })
+    : undefined;
   const revisionAssetPlanner = options.multimodalChatPort
     ? createRevisionAssetPlanner({
         chatPort: options.multimodalChatPort,
@@ -483,6 +494,26 @@ export const createProductionPresentationGenerationComposition = (
           );
           return assets.filter((asset): asset is NonNullable<typeof asset> => !!asset);
         },
+        readVisualReferences: async (refs, input) => {
+          const images = await Promise.all(
+            refs.map(async (ref) => {
+              const artifact = await artifactStore.get(input.scope, ref);
+              if (
+                !artifact?.bytes ||
+                artifact.bytes.length > 8 * 1024 * 1024 ||
+                !['image/png', 'image/jpeg', 'image/webp'].includes(artifact.mimeType ?? '')
+              ) {
+                return null;
+              }
+              return {
+                base64: Buffer.from(artifact.bytes).toString('base64'),
+                mimeType: artifact.mimeType as 'image/jpeg' | 'image/png' | 'image/webp',
+                ref,
+              };
+            }),
+          );
+          return images.filter((image): image is NonNullable<typeof image> => Boolean(image));
+        },
         extractTemplateComponent: templateVisualLearning
           ? async (componentId, input) => {
               if (!input.jobInput.template || !atomicRuntime)
@@ -494,7 +525,12 @@ export const createProductionPresentationGenerationComposition = (
                   versionId: input.jobInput.options?.templateVersionId,
                   componentId,
                 },
-                { scope: input.scope, jobId: input.jobId, signal: input.signal },
+                {
+                  scope: input.scope,
+                  jobId: input.jobId,
+                  signal: input.signal,
+                  onEvent: input.onEvent,
+                },
               );
             }
           : undefined,
@@ -504,7 +540,12 @@ export const createProductionPresentationGenerationComposition = (
           const output = await runSkillSteps(
             atomicRuntime,
             steps,
-            { scope: input.scope, jobId: input.jobId, signal: input.signal },
+            {
+              scope: input.scope,
+              jobId: input.jobId,
+              signal: input.signal,
+              onEvent: input.onEvent,
+            },
             (name) =>
               [
                 'assets.removeBackground',
@@ -529,6 +570,8 @@ export const createProductionPresentationGenerationComposition = (
         artifactStore,
         templateLibrary: options.templateLibrary,
         revisionAssetPlanner,
+        visualStoryboardPlanner,
+        visualCritic,
         imageGenerationCapability: options.imageGenerationCapability,
       })
     : undefined;
@@ -574,6 +617,8 @@ export const createProductionPresentationGenerationComposition = (
     atomicRuntime,
     templateLibrary: options.templateLibrary,
     revisionAssetPlanner,
+    visualStoryboardPlanner,
+    visualCritic,
     ...(capability ? { capability } : {}),
     contextFactory,
     generationArtifactStore: artifactStore,

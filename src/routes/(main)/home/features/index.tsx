@@ -4,6 +4,7 @@ import { Flexbox } from '@lobehub/ui';
 import { memo } from 'react';
 
 import DailyBrief from '@/features/DailyBrief';
+import { QingzhouHomeFrame } from '@/features/QingzhouBrand';
 import { useUserStore } from '@/store/user';
 import { authSelectors } from '@/store/user/slices/auth/selectors';
 
@@ -15,21 +16,23 @@ const Home = memo(() => {
   const isLogin = useUserStore(authSelectors.isLogin);
 
   return (
-    <Flexbox gap={40}>
-      <Flexbox gap={24}>
-        <Flexbox gap={8}>
-          <AgentSelect />
-          <WelcomeText />
+    <QingzhouHomeFrame>
+      <Flexbox gap={40}>
+        <Flexbox gap={24}>
+          <Flexbox gap={8}>
+            <AgentSelect />
+            <WelcomeText />
+          </Flexbox>
+          <InputArea />
         </Flexbox>
-        <InputArea />
-      </Flexbox>
 
-      {isLogin && (
-        <Flexbox gap={40}>
-          <DailyBrief />
-        </Flexbox>
-      )}
-    </Flexbox>
+        {isLogin && (
+          <Flexbox gap={40}>
+            <DailyBrief />
+          </Flexbox>
+        )}
+      </Flexbox>
+    </QingzhouHomeFrame>
   );
 });
 

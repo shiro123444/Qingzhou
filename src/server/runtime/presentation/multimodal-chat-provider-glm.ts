@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 /**
  * Server-only OpenAI-compatible multimodal chat adapter.
  *
@@ -8,7 +10,6 @@
  * No process.env, filesystem, database or real network is touched directly.
  * All external boundaries (fetcher, clock, apiKey, endpoint) are explicitly injected.
  */
-
 import type { RuntimeScope } from '../../../../packages/runtime-contracts/src';
 
 export const DEFAULT_MULTIMODAL_CHAT_MODEL = 'gemini-3.8-flash-high';
@@ -59,6 +60,7 @@ export interface GLMChatChoice {
   readonly index: number;
   readonly message: {
     readonly content: string;
+    readonly reasoning_content?: string;
     readonly role: 'assistant';
   };
 }
@@ -79,6 +81,7 @@ export interface GLMChatResult {
 
 export interface GLMChatContext {
   readonly idempotencyKey?: string;
+  readonly onRetry?: (event: { attempt: number; maxAttempts: number }) => void;
   readonly scope: RuntimeScope;
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
@@ -102,6 +105,10 @@ const trustedImagePermissions = new WeakMap<
   object,
   { scopeKey: string; urls: ReadonlySet<string> }
 >();
+const MAX_TRUSTED_IMAGE_COUNT = 6;
+const MAX_TRUSTED_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_TRUSTED_IMAGE_TOTAL_BYTES = 32 * 1024 * 1024;
+const DEFAULT_CHAT_TIMEOUT_MS = 120_000;
 
 /** Only server code with authenticated asset bytes may create this non-serializable permission. */
 export const createTrustedChatImages = (
@@ -109,21 +116,26 @@ export const createTrustedChatImages = (
   scope: RuntimeScope,
 ): GLMTrustedChatImages => {
   const owner = cloneScope(scope);
-  if (!Array.isArray(images) || images.length > 4)
-    throw invalid('Trusted image input is limited to four images', 'trustedImages');
-  const maxBytes = 8 * 1024 * 1024;
+  if (!Array.isArray(images) || images.length > MAX_TRUSTED_IMAGE_COUNT)
+    throw invalid('Trusted image input is limited to six images', 'trustedImages');
+  let totalBytes = 0;
   const urls = images.map((image) => {
     if (
       !image ||
       !['image/png', 'image/jpeg', 'image/webp'].includes(image.mimeType) ||
       typeof image.base64 !== 'string' ||
       !image.base64 ||
-      image.base64.length > Math.ceil(maxBytes / 3) * 4 ||
+      image.base64.length > Math.ceil(MAX_TRUSTED_IMAGE_BYTES / 3) * 4 ||
       !/^[\d+/A-Za-z]+={0,2}$/u.test(image.base64)
     )
       throw invalid('Trusted images must be bounded PNG, JPEG or WebP data', 'trustedImages');
     const bytes = Buffer.from(image.base64, 'base64');
-    if (bytes.length > maxBytes || bytes.toString('base64') !== image.base64)
+    totalBytes += bytes.length;
+    if (
+      bytes.length > MAX_TRUSTED_IMAGE_BYTES ||
+      totalBytes > MAX_TRUSTED_IMAGE_TOTAL_BYTES ||
+      bytes.toString('base64') !== image.base64
+    )
       throw invalid('Trusted image base64 is invalid or exceeds the size limit', 'trustedImages');
     const matchesType =
       image.mimeType === 'image/png'
@@ -201,6 +213,29 @@ const invalid = (message: string, path?: string): GLMChatProviderError =>
 
 const payloadInvalid = (message: string, path?: string): GLMChatProviderError =>
   providerError('CHAT_PAYLOAD_INVALID', message, path);
+
+const parseProviderJsonText = (raw: string): unknown => {
+  const text = raw.replace(/^\uFEFF/u, '').trim();
+  if (!text) throw new SyntaxError('empty response');
+  try {
+    return JSON.parse(text);
+  } catch {
+    const dataLines = text
+      .split(/\r?\n/u)
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trim())
+      .filter((line) => line && line !== '[DONE]');
+    for (let index = dataLines.length - 1; index >= 0; index -= 1) {
+      try {
+        return JSON.parse(dataLines[index]);
+      } catch {
+        // Some gateways accidentally return an SSE envelope for a non-stream request.
+      }
+    }
+    throw new SyntaxError('invalid response');
+  }
+};
 
 const unavailable = (message = 'Multimodal chat provider is unavailable'): GLMChatProviderError =>
   providerError('CHAT_UNAVAILABLE', message);
@@ -306,9 +341,9 @@ const validateMessages = (
             if (
               typeof candidate === 'string' &&
               trustedImages?.has(candidate) &&
-              ++trustedImageCount > 4
+              ++trustedImageCount > MAX_TRUSTED_IMAGE_COUNT
             )
-              throw invalid('At most four trusted images can be sent per request', 'trustedImages');
+              throw invalid('At most six trusted images can be sent per request', 'trustedImages');
             const safeUrl =
               typeof candidate === 'string' && trustedImages?.has(candidate)
                 ? candidate
@@ -397,6 +432,15 @@ export class GLMMultimodalChatAdapter implements GLMMultimodalChatPort {
     const scope = cloneScope(context.scope);
 
     if (context.signal?.aborted) throw cancelled();
+    const timeoutMs = context.timeoutMs ?? DEFAULT_CHAT_TIMEOUT_MS;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 600_000) {
+      throw invalid('timeoutMs must be between 1 and 600000 milliseconds', 'timeoutMs');
+    }
+    const timeoutSignal = AbortSignal.timeout(Math.trunc(timeoutMs));
+    const requestSignal =
+      context.signal && timeoutSignal
+        ? AbortSignal.any([context.signal, timeoutSignal])
+        : (context.signal ?? timeoutSignal);
 
     const trustedImages = context.trustedImages
       ? trustedImagePermissions.get(context.trustedImages)
@@ -415,7 +459,19 @@ export class GLMMultimodalChatAdapter implements GLMMultimodalChatPort {
         ? request.idempotencyKey.trim()
         : undefined;
 
-    const cacheKey = idempotencyKey ? `${scopeKey(scope)}:${idempotencyKey}` : undefined;
+    // A key belongs to an exact inference payload, not every planner call in a session.
+    const requestFingerprint = createHash('sha256')
+      .update(
+        JSON.stringify({
+          ...request,
+          model: resolvedModel,
+          messages: validatedMessages,
+        }),
+      )
+      .digest('hex');
+    const cacheKey = idempotencyKey
+      ? `${scopeKey(scope)}:${idempotencyKey}:${requestFingerprint}`
+      : undefined;
     if (cacheKey && this.responseCache.has(cacheKey)) {
       return this.responseCache.get(cacheKey)!;
     }
@@ -423,6 +479,9 @@ export class GLMMultimodalChatAdapter implements GLMMultimodalChatPort {
     const payload: Record<string, unknown> = {
       messages: validatedMessages,
       model: resolvedModel,
+      // DeepSeek V4 thinking is on by default and can spend max_tokens on
+      // reasoning_content, leaving message.content empty.
+      thinking: { type: 'enabled' },
       ...(typeof request.temperature === 'number' ? { temperature: request.temperature } : {}),
       ...(typeof request.max_tokens === 'number' ? { max_tokens: request.max_tokens } : {}),
       ...(request.response_format ? { response_format: request.response_format } : {}),
@@ -437,13 +496,30 @@ export class GLMMultimodalChatAdapter implements GLMMultimodalChatPort {
           'Content-Type': 'application/json',
         },
         method: 'POST',
-        signal: context.signal,
+        signal: requestSignal,
       });
-    } catch (error: any) {
-      if (context.signal?.aborted || error?.name === 'AbortError') {
+    } catch (error: unknown) {
+      if (context.signal?.aborted) {
         throw cancelled();
       }
-      throw unavailable(`Multimodal chat request failed: ${error?.message || 'network error'}`);
+      if (timeoutSignal?.aborted) throw unavailable('Multimodal chat request timed out');
+      // Keep network diagnostics server-side; never log credentials, prompts or raw errors.
+      const cause = error instanceof Error && isRecord(error.cause) ? error.cause : undefined;
+      console.warn('[presentation.chat] transport interrupted', {
+        code:
+          typeof cause?.code === 'string' && /^[A-Z0-9_]+$/u.test(cause.code)
+            ? cause.code
+            : 'UNKNOWN',
+        origin: URL.canParse(this.endpoint) ? new URL(this.endpoint).origin : 'invalid',
+        provider: this.providerId,
+        requestBytes: Buffer.byteLength(JSON.stringify(payload)),
+      });
+      throw new GLMChatProviderError(
+        'CHAT_UNAVAILABLE',
+        '模型连接暂时中断，已完成的步骤已保留，请继续重试。',
+        undefined,
+        { cause: error },
+      );
     }
 
     if (context.signal?.aborted) throw cancelled();
@@ -474,13 +550,18 @@ export class GLMMultimodalChatAdapter implements GLMMultimodalChatPort {
 
     let parsedBody: unknown;
     try {
-      if (typeof response.json === 'function') {
-        parsedBody = await response.json();
-      } else if (typeof response.text === 'function') {
-        parsedBody = JSON.parse(await response.text());
-      }
-    } catch {
-      throw payloadInvalid('Failed to parse multimodal chat response JSON');
+      if (typeof response.text === 'function')
+        parsedBody = parseProviderJsonText(await response.text());
+      else if (typeof response.json === 'function') parsedBody = await response.json();
+    } catch (error) {
+      if (context.signal?.aborted) throw cancelled();
+      if (timeoutSignal.aborted) throw unavailable('模型响应超时，已完成的步骤已保留。');
+      throw new GLMChatProviderError(
+        'CHAT_PAYLOAD_INVALID',
+        '模型回复传输不完整，请从当前进度继续。',
+        undefined,
+        { cause: error },
+      );
     }
 
     if (!isRecord(parsedBody)) {
@@ -492,15 +573,24 @@ export class GLMMultimodalChatAdapter implements GLMMultimodalChatPort {
     }
 
     const choices: GLMChatChoice[] = parsedBody.choices.map((c, idx) => {
-      if (!isRecord(c) || !isRecord(c.message) || typeof c.message.content !== 'string') {
+      if (!isRecord(c) || !isRecord(c.message)) {
+        throw payloadInvalid(`Multimodal chat response choices[${idx}] has invalid message`);
+      }
+      const rawContent = c.message.content;
+      const reasoning =
+        typeof c.message.reasoning_content === 'string' ? c.message.reasoning_content : undefined;
+      const content =
+        typeof rawContent === 'string' ? rawContent : rawContent == null ? '' : undefined;
+      if (content === undefined) {
         throw payloadInvalid(`Multimodal chat response choices[${idx}] has invalid message`);
       }
       return {
         finish_reason: typeof c.finish_reason === 'string' ? c.finish_reason : undefined,
         index: typeof c.index === 'number' ? c.index : idx,
         message: {
-          content: c.message.content,
+          content,
           role: 'assistant' as const,
+          ...(reasoning ? { reasoning_content: reasoning } : {}),
         },
       };
     });
@@ -529,7 +619,7 @@ export class GLMMultimodalChatAdapter implements GLMMultimodalChatPort {
         : undefined,
     });
 
-    if (cacheKey) {
+    if (cacheKey && choices.some((choice) => choice.message.content.trim())) {
       this.responseCache.set(cacheKey, result);
     }
 

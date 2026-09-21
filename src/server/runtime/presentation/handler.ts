@@ -9,6 +9,10 @@ import type {
   PresentationJob,
   PresentationMessageInput,
 } from '../../../../packages/runtime-contracts/src';
+import {
+  PRESENTATION_PPTX_MAX_UPLOAD_BYTES,
+  PRESENTATION_PPTX_MAX_UPLOAD_MIB,
+} from '../../../../packages/runtime-contracts/src';
 import type {
   PresentationFactoryScope,
   PresentationPortBinding,
@@ -35,6 +39,7 @@ export type {
 export type PresentationRouteOperation =
   | 'message'
   | 'templates'
+  | 'deleteTemplate'
   | 'learnTemplate'
   | 'importTemplate'
   | 'applyTemplate'
@@ -42,6 +47,7 @@ export type PresentationRouteOperation =
   | 'tool'
   | 'create'
   | 'get'
+  | 'deleteJob'
   | 'cancel'
   | 'retry'
   | 'getArtifact'
@@ -122,7 +128,12 @@ const errorDetails = (error: unknown): Record<string, string> | undefined => {
 
 const statusForCode = (code: string): number => {
   if (code === 'PRESENTATION_INVALID' || code === 'TEMPLATE_INVALID') return 400;
-  if (code === 'PRESENTATION_CONFLICT' || code === 'PLUGIN_BUSY') return 409;
+  if (
+    code === 'PRESENTATION_CONFLICT' ||
+    code === 'PRESENTATION_TEMPLATE_INPUT_REQUIRED' ||
+    code === 'PLUGIN_BUSY'
+  )
+    return 409;
   if (code === 'PRESENTATION_NOT_FOUND' || code === 'PRESENTATION_ROUTE_NOT_FOUND') return 404;
   if (code === 'PRESENTATION_CANCEL_FAILED') return 502;
   if (code === 'PRESENTATION_TIMEOUT') return 504;
@@ -179,6 +190,8 @@ export const matchPresentationRoute = (request: Request): PresentationRouteMatch
     if (method === 'GET') return { operation: 'templates' };
     if (method === 'POST') return { operation: 'learnTemplate' };
   }
+  if (segments.length === 2 && segments[0] === 'templates' && method === 'DELETE')
+    return { operation: 'deleteTemplate', id: segments[1] };
   if (
     segments.length === 2 &&
     segments[0] === 'templates' &&
@@ -195,6 +208,9 @@ export const matchPresentationRoute = (request: Request): PresentationRouteMatch
   }
   if (segments.length === 2 && segments[0] === 'jobs' && method === 'GET') {
     return { operation: 'get', id: segments[1] };
+  }
+  if (segments.length === 2 && segments[0] === 'jobs' && method === 'DELETE') {
+    return { operation: 'deleteJob', id: segments[1] };
   }
   if (segments.length === 3 && segments[0] === 'jobs' && method === 'POST') {
     if (segments[2] === 'cancel') return { operation: 'cancel', id: segments[1] };
@@ -316,9 +332,15 @@ export const handlePresentationRequest = async (
     const result = await factory({ ...scope, request });
     const port = resolvePort(result);
     if (
-      ['templates', 'learnTemplate', 'importTemplate', 'applyTemplate', 'tools', 'tool'].includes(
-        match.operation,
-      )
+      [
+        'templates',
+        'deleteTemplate',
+        'learnTemplate',
+        'importTemplate',
+        'applyTemplate',
+        'tools',
+        'tool',
+      ].includes(match.operation)
     ) {
       const extended = port as unknown as PresentationGenerationPort;
       if (typeof extended.listTemplates !== 'function')
@@ -328,6 +350,16 @@ export const handlePresentationRequest = async (
         );
       if (match.operation === 'templates')
         return successResponse({ templates: await extended.listTemplates() });
+      if (match.operation === 'deleteTemplate') {
+        if (typeof extended.deleteTemplate !== 'function')
+          throw new PresentationRequestError(
+            'PROVIDER_UNAVAILABLE',
+            'Template deletion is unavailable',
+          );
+        const templateId = requiredId(match.id, 'templateId');
+        await extended.deleteTemplate(templateId);
+        return successResponse({ deleted: true, templateId });
+      }
       if (match.operation === 'tools') return successResponse(await extended.listOperations());
       if (match.operation === 'importTemplate') {
         const form = await readPresentationUploadForm(request);
@@ -336,11 +368,12 @@ export const handlePresentationRequest = async (
           !file ||
           typeof file === 'string' ||
           !file.name.toLowerCase().endsWith('.pptx') ||
-          file.size > 32 * 1024 * 1024
+          file.size === 0 ||
+          file.size > PRESENTATION_PPTX_MAX_UPLOAD_BYTES
         )
           throw new PresentationRequestError(
             'PRESENTATION_INVALID',
-            'Upload a PPTX smaller than 32 MiB',
+            `Upload a PPTX no larger than ${PRESENTATION_PPTX_MAX_UPLOAD_MIB} MiB`,
           );
         return successResponse(
           await extended.importTemplate(
@@ -394,6 +427,16 @@ export const handlePresentationRequest = async (
       const job = await port.getJob(id);
       if (!job) throw notFound('job', id);
       return successResponse(job);
+    }
+    if (match.operation === 'deleteJob') {
+      const deleting = port as typeof port & { deleteJob?: (jobId: string) => Promise<void> };
+      if (!deleting.deleteJob)
+        throw new PresentationRequestError(
+          'PROVIDER_UNAVAILABLE',
+          'Presentation deletion is unavailable',
+        );
+      await deleting.deleteJob(id);
+      return successResponse({ deleted: true, jobId: id });
     }
     if (match.operation === 'cancel') return successResponse(await port.cancelJob(id));
     if (match.operation === 'retry') return successResponse(await port.retryJob(id));

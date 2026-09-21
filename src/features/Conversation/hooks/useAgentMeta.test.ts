@@ -87,7 +87,7 @@ describe('useAgentMeta', () => {
     expect(result.current.description).toBe('Inbox description');
   });
 
-  it('should fallback to jumi AI title for builtin agent without custom title', () => {
+  it('should fallback to Jumi for a builtin agent without a custom title', () => {
     const mockInboxAgentId = 'inbox-agent-id';
     const mockMeta = {
       avatar: '/icons/icon-lobe.png',
@@ -112,8 +112,24 @@ describe('useAgentMeta', () => {
 
     const { result } = renderHook(() => useAgentMeta());
 
-    expect(result.current.avatar).toBe('/icons/icon-lobe.png');
-    expect(result.current.title).toBe('jumi AI');
+    expect(result.current.avatar).toBe('/brand/jumi/jumi-white-puppy.png');
+    expect(result.current.title).toBe('Jumi');
+  });
+
+  it('uses the Jumi identity for the presentation agent', () => {
+    vi.mocked(useConversationStore).mockImplementation((selector: any) =>
+      selector({ context: { agentId: 'ppt-agent' } }),
+    );
+    act(() => {
+      useAgentStore.setState({ agentMap: {}, builtinAgentIdMap: {} });
+    });
+
+    const { result } = renderHook(() => useAgentMeta());
+
+    expect(result.current).toMatchObject({
+      avatar: '/brand/jumi/jumi-white-puppy.png',
+      title: 'Jumi',
+    });
   });
 
   it('should preserve custom title for page agent (builtin)', () => {

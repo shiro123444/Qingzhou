@@ -77,6 +77,7 @@ export const COMPOSABLE_OPERATIONS = new Set([
   'assets.list',
   'assets.applyMask',
   'presentation.template.extractAssets',
+  'presentation.template.extractMedia',
   'assets.transform',
   'assets.removeBackground',
   'assets.keyColor',

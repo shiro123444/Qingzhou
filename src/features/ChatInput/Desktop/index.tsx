@@ -10,6 +10,7 @@ import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 
 import { useChatInputStore } from '@/features/ChatInput/store';
+import { QingzhouComposerOrnaments, qingzhouStyles } from '@/features/QingzhouBrand';
 import { LayoutContainerContext } from '@/routes/(main)/_layout/DesktopLayoutContainer/LayoutContainerContext';
 import { useChatStore } from '@/store/chat';
 import { chatSelectors } from '@/store/chat/selectors';
@@ -40,6 +41,14 @@ const styles = createStaticStyles(({ css, cssVar }) => ({
   `,
   footnote: css`
     font-size: 10px;
+  `,
+  expandedFrame: css`
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+
+    width: 100%;
+    min-height: 0;
   `,
   fullscreen: css`
     position: absolute;
@@ -150,56 +159,59 @@ const DesktopChatInput = memo<DesktopChatInputProps>(
         gap={8}
         paddingBlock={expand ? 0 : showFootnote ? '0 12px' : '0 8px'}
       >
-        <ChatInput
-          data-testid="chat-input"
-          defaultHeight={chatInputHeight || 32}
-          fullscreen={expand}
-          maxHeight={320}
-          minHeight={36}
-          resize={true}
-          slashMenuRef={slashMenuRef}
-          footer={
-            <ChatInputActionBar
-              style={actionBarStyle ?? { paddingRight: 8 }}
-              left={
-                loadingLeftSlot ??
-                leftContent ?? (
-                  <ActionBar
-                    borderRadius={borderRadius}
-                    dropdownPlacement={dropdownPlacement}
-                    extraActionItems={extraActionItems}
-                  />
-                )
-              }
-              right={
-                loadingRightSlot ??
-                rightContent ??
-                (sendAreaPrefix ? (
-                  <Flexbox horizontal align={'center'} gap={6}>
-                    {sendAreaPrefix}
+        <div className={cx(qingzhouStyles.composer, expand && styles.expandedFrame)}>
+          {!expand && <QingzhouComposerOrnaments />}
+          <ChatInput
+            data-testid="chat-input"
+            defaultHeight={chatInputHeight || 32}
+            fullscreen={expand}
+            maxHeight={320}
+            minHeight={36}
+            resize={true}
+            slashMenuRef={slashMenuRef}
+            footer={
+              <ChatInputActionBar
+                style={actionBarStyle ?? { paddingRight: 8 }}
+                left={
+                  loadingLeftSlot ??
+                  leftContent ?? (
+                    <ActionBar
+                      borderRadius={borderRadius}
+                      dropdownPlacement={dropdownPlacement}
+                      extraActionItems={extraActionItems}
+                    />
+                  )
+                }
+                right={
+                  loadingRightSlot ??
+                  rightContent ??
+                  (sendAreaPrefix ? (
+                    <Flexbox horizontal align={'center'} gap={6}>
+                      {sendAreaPrefix}
+                      <SendArea />
+                    </Flexbox>
+                  ) : (
                     <SendArea />
-                  </Flexbox>
-                ) : (
-                  <SendArea />
-                ))
-              }
-            />
-          }
-          header={
-            <Flexbox gap={0}>
-              {extentHeaderContent}
-              {showTypoBar && <TypoBar />}
-              {contextContainerNode}
-            </Flexbox>
-          }
-          onSizeChange={(height) => {
-            updateSystemStatus({ chatInputHeight: height });
-          }}
-          {...inputContainerProps}
-          className={cx(expand && styles.inputFullscreen, inputContainerProps?.className)}
-        >
-          <InputEditor placeholder={placeholder} placeholderVariant={placeholderVariant} />
-        </ChatInput>
+                  ))
+                }
+              />
+            }
+            header={
+              <Flexbox gap={0}>
+                {extentHeaderContent}
+                {showTypoBar && <TypoBar />}
+                {contextContainerNode}
+              </Flexbox>
+            }
+            onSizeChange={(height) => {
+              updateSystemStatus({ chatInputHeight: height });
+            }}
+            {...inputContainerProps}
+            className={cx(expand && styles.inputFullscreen, inputContainerProps?.className)}
+          >
+            <InputEditor placeholder={placeholder} placeholderVariant={placeholderVariant} />
+          </ChatInput>
+        </div>
         {runtimeConfigSlot ?? (showRuntimeConfig && <RuntimeConfig />)}
         {showFootnote && !expand && (
           <Center style={{ pointerEvents: 'none', zIndex: 100 }}>

@@ -118,4 +118,24 @@ describe('slide annotations', () => {
       }),
     ).rejects.toThrow('unowned');
   });
+  it('allows a patch-local clip path while rejecting non-local URL references', () => {
+    const imageIndex = 2;
+    const clipped =
+      '<g><defs><clipPath id="annotation-clip"><path d="M300 100h180q20 0 20 20v160q0 20-20 20H300z"/></clipPath></defs><image href="/api/runtime/presentation/artifacts/image-owned?raw=true" x="300" y="100" width="200" height="200" clip-path="url(#annotation-clip)"/></g>';
+    expect(
+      mergeAnnotationElements(svg, [imageIndex], [{ index: imageIndex, svg: clipped }]),
+    ).toContain('clip-path="url(#annotation-clip)"');
+    expect(() =>
+      mergeAnnotationElements(
+        svg,
+        [imageIndex],
+        [
+          {
+            index: imageIndex,
+            svg: '<image href="/api/runtime/presentation/artifacts/image-owned?raw=true" clip-path="url(#missing)"/>',
+          },
+        ],
+      ),
+    ).toThrow('Unsafe annotation patch');
+  });
 });

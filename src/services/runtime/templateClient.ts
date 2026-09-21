@@ -4,11 +4,41 @@ import type { PresentationJob } from '../../../packages/runtime-contracts/src';
 export interface PresentationTemplateSummary {
   constraints?: { palette: string[] };
   layoutCount?: number;
+  mediaCount?: number;
   name: string;
   source?: { kind: string };
   templateId: string;
   versionId: string;
+  videoCount?: number;
   warnings?: string[];
+}
+
+export interface PresentationTemplateLearningChoice {
+  consequence: string;
+  id: string;
+  label: string;
+}
+
+export interface PresentationTemplateLearningQuestion {
+  choices: PresentationTemplateLearningChoice[];
+  id: string;
+  mediaId?: string;
+  page?: number;
+  question: string;
+  reason: string;
+  recommendedChoiceId?: string;
+}
+
+export interface PresentationTemplateLearningResult {
+  learning: {
+    guidanceHistory: string[];
+    iteration: number;
+    questions: PresentationTemplateLearningQuestion[];
+    status: 'needs_input' | 'ready';
+  };
+  media?: { kind: 'audio' | 'video'; status: string }[];
+  templateId: string;
+  versionId: string;
 }
 
 interface TemplateResponse extends PresentationTemplateSummary {
@@ -32,6 +62,25 @@ const summary = ({ layouts, ...profile }: TemplateResponse): PresentationTemplat
 });
 
 export const presentationTemplateClient = {
+  analyze: (
+    template: PresentationTemplateSummary,
+    guidance?: string,
+    questionId?: string,
+    choiceId?: string,
+    signal?: AbortSignal,
+  ): Promise<PresentationTemplateLearningResult> =>
+    request('/api/runtime/presentation/tools/presentation.template.analyzeVisual', {
+      body: JSON.stringify({
+        ...(guidance?.trim() ? { guidance: guidance.trim() } : {}),
+        ...(questionId?.trim() ? { questionId: questionId.trim() } : {}),
+        ...(choiceId?.trim() ? { choiceId: choiceId.trim() } : {}),
+        templateId: template.templateId,
+        versionId: template.versionId,
+      }),
+      headers: { 'content-type': 'application/json' },
+      method: 'POST',
+      signal,
+    }),
   listNativeOutputs: (template: PresentationTemplateSummary, signal?: AbortSignal) =>
     request<{ outputs: { artifactId: string; uri?: string; updatedAt?: string }[] }>(
       '/api/runtime/presentation/tools/presentation.template.listNativeOutputs',
@@ -81,5 +130,8 @@ export const presentationTemplateClient = {
   list: async (signal?: AbortSignal): Promise<PresentationTemplateSummary[]> => {
     const result = await request<{ templates: TemplateResponse[] }>(endpoint, { signal });
     return result.templates.map(summary);
+  },
+  remove: async (templateId: string): Promise<void> => {
+    await request(`${endpoint}/${encodeURIComponent(templateId)}`, { method: 'DELETE' });
   },
 };

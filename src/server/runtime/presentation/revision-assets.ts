@@ -6,12 +6,21 @@ import type {
   PresentationPlan,
   RuntimeScope,
 } from '../../../../packages/runtime-contracts/src';
+import type { AtomicOperationEvent } from '../atomic-runtime';
 import { type SkillStep, skillStepsSchema } from '../skill-composition';
 import type { ImageGenerationCapability } from './image-generation-capability';
 import type { ImageGenerationSlotOutput } from './image-generation-planner';
-import type { GLMMultimodalChatPort } from './multimodal-chat-provider-glm';
+import {
+  createTrustedChatImages,
+  type GLMChatContentPart,
+  type GLMMultimodalChatPort,
+  type GLMServerImageInput,
+} from './multimodal-chat-provider-glm';
 import { validatePresentationPlan } from './planner';
+import { completeStructuredJson, extractModelJson } from './structured-json-chat';
 import type { TemplateVisualProfile } from './templates/visual-types';
+
+export { extractModelJson } from './structured-json-chat';
 
 /** Coordinates relative to the slide's viewBox, independent of pixel dimensions. */
 export interface PresentationAssetPlacement {
@@ -39,6 +48,7 @@ export interface PresentationRevisionAssetInput {
   readonly basePlan: PresentationPlan;
   readonly jobId: string;
   readonly jobInput: PresentationJobInput;
+  readonly onEvent?: (event: AtomicOperationEvent) => void;
   readonly revision: PresentationMessageInput;
   readonly scope: RuntimeScope;
   readonly signal?: AbortSignal;
@@ -74,6 +84,10 @@ export interface RevisionAssetPlannerOptions {
     refs: string[],
     input: PresentationRevisionAssetInput,
   ) => Promise<{ ref: string; name?: string }[]>;
+  readonly readVisualReferences?: (
+    refs: string[],
+    input: PresentationRevisionAssetInput,
+  ) => Promise<Array<GLMServerImageInput & { ref: string }>>;
 }
 
 export class PresentationRevisionAssetError extends Error {
@@ -101,6 +115,16 @@ const hash = (value: unknown): string =>
   createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value);
+
+/** Extract `{intents}` from fences, think-tags, or mixed model prose. */
+export const parseAssetIntentPayload = (content: string): unknown => {
+  try {
+    const value = extractModelJson(content);
+    return Array.isArray(value) ? { intents: value } : value;
+  } catch {
+    throw new SyntaxError('Asset intent analysis returned invalid JSON');
+  }
+};
 
 /** Text-only prompt boundary. Actual image bytes belong exclusively in trusted image_url parts. */
 export const boundPresentationPromptText = (text: string): string => {
@@ -170,6 +194,9 @@ const validateProcessingSteps = (raw: unknown): SkillStep[] => {
 };
 
 const INITIAL_DESIGN_PROMPT = `This is INITIAL ART DIRECTION before composition, not a conservative edit. Design the visual asset strategy from the supplied outline and vision-derived template profile. A blank SVG is only a planning envelope, not an existing finished design. When the reference uses expressive illustration, watercolor, texture, ribbons or decoration, preserve that visual language with suitable reusable components or generated raster artwork; generic SVG boxes are not an acceptable substitute. Choose assets where they serve the slide, do not force a picture on every data/text page. Choose the appropriate visual family per page, reserve space for editable text, and provide detailed style-specific prompts without burned-in slide text or logos. Describe texture, brushwork, negative space and subject composition using the actual learned profile. Reuse a safe template component with {action:"reuse",componentId:"exact component id",slideId,slotId,layout:{x,y,width,height,fit}}; when its treatment is removeBackground, include processing steps with ref "$source". Never reuse components containing old text or marked redraw/native. Generate a clean version for those. Return {intents:[...]} with explicit normalized placements; zero intents is appropriate only when the actual desired visual language does not require raster assets. The provided per-page outline and original user goal take priority. Assets in reusableAssets have already been created or found during the conversation and verified by the server: prefer reusing them instead of generating them again. Place one with {action:"reuse",ref:"exact available ref",slideId,slotId,layout}; include processing when further cutout is needed. `;
+
+const needsVisualArtDirection = (revision: PresentationMessageInput): boolean =>
+  revision.requestId === 'initial-assets' || Boolean(revision.template);
 
 const SYSTEM_PROMPT = `You decide visual asset operations for a presentation edit. Return JSON only:
 {"intents":[{"action":"reuse|generate|replace|remove","slideId":"existing slide id","slotId":"stable short id","ref":"existing image href for reuse/replace/remove","prompt":"detailed image generation prompt, required only for generate/replace","size":"1024x1024|1024x1536|1536x1024","layout":{"x":0.52,"y":0.2,"width":0.42,"height":0.65,"fit":"contain|cover"}}]}.
@@ -295,148 +322,251 @@ class RevisionAssetPlanner implements PresentationRevisionAssetPlanner {
           )
         : [];
     const reusableRefs = new Set(reusable.map((asset) => asset.ref));
-    const response = await this.options.chatPort.chat(
-      {
-        max_tokens: 3000,
-        messages: [
-          {
-            content: boundPresentationPromptText(
-              SYSTEM_PROMPT +
-                (input.revision.requestId === 'initial-assets' ? INITIAL_DESIGN_PROMPT : ''),
-            ),
-            role: 'system',
-          },
-          {
-            content: boundPresentationPromptText(
-              JSON.stringify({
-                instruction: input.revision.content,
-                maxGeneratedSlots: this.maxGeneratedSlots,
-                initialCreation: input.revision.requestId === 'initial-assets',
-                reusableAssets: reusable,
-                visualTemplate: input.jobInput.options?.templateVisual,
-                outline: input.jobInput.options?.outline,
-                userGoal: input.jobInput.prompt,
-
-                slides,
-              }),
-            ),
-            role: 'user',
-          },
-        ],
-        model: this.options.chatPort.manifest.model,
-        response_format: { type: 'json_object' },
-        temperature: 0,
-      },
-      { idempotencyKey: `${operationKey}:intent`, scope: input.scope, signal: input.signal },
+    const visual = input.jobInput.options?.templateVisual as TemplateVisualProfile | undefined;
+    const storyboard = input.jobInput.options?.visualStoryboard as
+      | { slides?: Array<{ archetypeId?: string }> }
+      | undefined;
+    const evidencePages = new Set(
+      (storyboard?.slides ?? []).flatMap((slide) => {
+        const archetype = visual?.designProgram?.archetypes.find(
+          (item) => item.id === slide.archetypeId,
+        );
+        return archetype?.evidencePages ?? [];
+      }),
     );
-    checkAbort(input.signal);
-    let parsed: unknown;
+    const pageVisualRefs = (visual?.pages ?? [])
+      .filter((page) => !evidencePages.size || evidencePages.has(page.page))
+      .map((page) => page.ref)
+      .slice(0, 4);
+    const mediaFrameRefs = (visual?.media ?? [])
+      .flatMap((media) => media.frameRefs)
+      .filter((ref, index, all) => all.indexOf(ref) === index)
+      .slice(0, 2);
+    const visualRefs = [...pageVisualRefs, ...mediaFrameRefs];
+    const visualReferences = this.options.readVisualReferences
+      ? await this.options.readVisualReferences(visualRefs, input)
+      : [];
+    const trustedVisuals = visualReferences.length
+      ? createTrustedChatImages(visualReferences, input.scope)
+      : undefined;
+    const payload = boundPresentationPromptText(
+      JSON.stringify({
+        instruction: input.revision.content,
+        maxGeneratedSlots: this.maxGeneratedSlots,
+        initialCreation: input.revision.requestId === 'initial-assets',
+        reusableAssets: reusable,
+        visualTemplate: visual,
+        visualStoryboard: input.jobInput.options?.visualStoryboard,
+        outline: input.jobInput.options?.outline,
+        userGoal: input.jobInput.prompt,
+        slides,
+      }),
+    );
+    const userContent: string | GLMChatContentPart[] = trustedVisuals
+      ? [
+          { text: payload, type: 'text' },
+          ...visualReferences.flatMap((reference, index): GLMChatContentPart[] => [
+            {
+              text: `模板视觉证据 ${index + 1}（资产 ${reference.ref}）。观察画风、构图锚点、装饰与留白；不要复制其中烧录的文字。`,
+              type: 'text',
+            },
+            {
+              image_url: { detail: 'high', url: trustedVisuals.urls[index] },
+              type: 'image_url',
+            },
+          ]),
+        ]
+      : payload;
+    const intentMessages = [
+      {
+        content: boundPresentationPromptText(
+          SYSTEM_PROMPT + (needsVisualArtDirection(input.revision) ? INITIAL_DESIGN_PROMPT : ''),
+        ),
+        role: 'system' as const,
+      },
+      {
+        content: userContent,
+        role: 'user' as const,
+      },
+    ];
+    let intents: RevisionAssetIntent[];
     try {
-      const content = response.choices[0]?.message.content ?? '';
-      parsed = JSON.parse(content.replace(/^```(?:json)?\s*/u, '').replace(/\s*```$/u, ''));
-    } catch {
-      invalid('Asset intent analysis returned invalid JSON');
+      intents = (
+        await completeStructuredJson({
+          chat: this.options.chatPort,
+          context: {
+            idempotencyKey: `${operationKey}:intent`,
+            scope: input.scope,
+            signal: input.signal,
+            ...(trustedVisuals ? { trustedImages: trustedVisuals } : {}),
+          },
+          emptyError: 'Asset intent analysis returned invalid JSON',
+          parse: (value) => {
+            const payload = Array.isArray(value) ? { intents: value } : value;
+            if (
+              !isRecord(payload) ||
+              !Array.isArray(payload.intents) ||
+              payload.intents.length > 32
+            ) {
+              throw new SyntaxError('Asset analysis must return a bounded intents array');
+            }
+            const parsed = payload as { intents: unknown[] };
+            const slotKeys = new Set<string>();
+            const touchedRefs = new Set<string>();
+            const intents = parsed.intents.map((raw): RevisionAssetIntent => {
+              if (
+                !isRecord(raw) ||
+                typeof raw.slideId !== 'string' ||
+                !refsBySlide.has(raw.slideId)
+              )
+                return invalid('Asset analysis attempted to modify an unselected slide');
+              if (typeof raw.slotId !== 'string' || !/^[\w-]{1,80}$/u.test(raw.slotId))
+                return invalid('Asset slot ids must be short stable identifiers');
+              const key = `${raw.slideId}:${raw.slotId}`;
+              if (slotKeys.has(key)) return invalid('Asset slot ids must be unique per slide');
+              slotKeys.add(key);
+              const action = raw.action;
+              if (
+                action !== 'reuse' &&
+                action !== 'replace' &&
+                action !== 'remove' &&
+                action !== 'generate' &&
+                action !== 'process'
+              )
+                return invalid('Unknown asset operation');
+              if (action === 'reuse' && typeof raw.ref === 'string' && reusableRefs.has(raw.ref)) {
+                return {
+                  action: 'reuse',
+                  ref: raw.ref,
+                  slideId: raw.slideId,
+                  slotId: raw.slotId,
+                  layout: validateAssetPlacement(raw.layout),
+                  ...(raw.processing
+                    ? { processing: validateProcessingSteps(raw.processing) }
+                    : {}),
+                };
+              }
+              if (action === 'reuse' && typeof raw.componentId === 'string') {
+                const visual = input.jobInput.options?.templateVisual as
+                  | TemplateVisualProfile
+                  | undefined;
+                const component = visual?.components.find((item) => item.id === raw.componentId);
+                if (
+                  !component ||
+                  component.containsText ||
+                  ['redraw', 'native'].includes(component.treatment)
+                )
+                  return invalid('Template component needs redraw or was not visually verified');
+                if (component.treatment === 'removeBackground' && !raw.processing)
+                  return invalid('This component requires transparency processing');
+                const layout =
+                  raw.layout === undefined
+                    ? validateAssetPlacement({ ...component.box, fit: 'contain' })
+                    : validateAssetPlacement(raw.layout);
+                return {
+                  action: 'reuse',
+                  componentId: component.id,
+                  slideId: raw.slideId,
+                  slotId: raw.slotId,
+                  layout,
+                  ...(raw.processing
+                    ? { processing: validateProcessingSteps(raw.processing) }
+                    : {}),
+                };
+              }
+              const ref =
+                typeof raw.ref === 'string' ? (aliases.get(raw.ref) ?? raw.ref) : undefined;
+              if (action !== 'generate' && (!ref || !refsBySlide.get(raw.slideId)?.includes(ref)))
+                return invalid(
+                  'Asset operations must reference an image belonging to the selected slide',
+                );
+              if (ref && action !== 'reuse') {
+                const refKey = `${raw.slideId}:${ref}`;
+                if (touchedRefs.has(refKey))
+                  return invalid('An existing image can only be modified once per edit');
+                touchedRefs.add(refKey);
+              }
+              const common: RevisionAssetIntent = {
+                action: action === 'process' ? 'replace' : action,
+                ...(ref ? { ref } : {}),
+                slideId: raw.slideId,
+                slotId: raw.slotId,
+              };
+              if (action === 'reuse' || action === 'remove') return common;
+              if (action === 'process') {
+                const processing = validateProcessingSteps(raw.processing);
+                return { ...common, processing, layout: validateAssetPlacement(raw.layout) };
+              }
+              if (
+                typeof raw.prompt !== 'string' ||
+                !raw.prompt.trim() ||
+                raw.prompt.length > 4000 ||
+                /<(?:svg|script)\b|data:image\//iu.test(raw.prompt)
+              )
+                return invalid('Image generation requires a descriptive prompt');
+              if (raw.size !== '1024x1024' && raw.size !== '1024x1536' && raw.size !== '1536x1024')
+                return invalid('Image generation requires a supported aspect ratio');
+              return {
+                ...common,
+                ...(raw.processing ? { processing: validateProcessingSteps(raw.processing) } : {}),
+                layout: validateAssetPlacement(raw.layout),
+                prompt: raw.prompt.trim(),
+                size: raw.size,
+              };
+            });
+            if (
+              (intents as RevisionAssetIntent[]).filter(
+                (intent) => intent.action === 'generate' || intent.action === 'replace',
+              ).length > this.maxGeneratedSlots
+            )
+              throw new PresentationRevisionAssetError(
+                'IMAGE_BUDGET_EXCEEDED',
+                'This edit exceeds the image generation budget',
+              );
+
+            return intents;
+          },
+          request: {
+            max_tokens: 16_000,
+            messages: intentMessages,
+            model: this.options.chatPort.manifest.model,
+            response_format: { type: 'json_object' },
+            temperature: 0,
+          },
+        })
+      ).value;
+    } catch (error) {
+      checkAbort(input.signal);
+      throw error;
     }
-    if (!isRecord(parsed) || !Array.isArray(parsed.intents) || parsed.intents.length > 32)
-      return invalid('Asset analysis must return a bounded intents array');
-    const slotKeys = new Set<string>();
-    const touchedRefs = new Set<string>();
-    const intents = parsed.intents.map((raw): RevisionAssetIntent => {
-      if (!isRecord(raw) || typeof raw.slideId !== 'string' || !refsBySlide.has(raw.slideId))
-        return invalid('Asset analysis attempted to modify an unselected slide');
-      if (typeof raw.slotId !== 'string' || !/^[\w-]{1,80}$/u.test(raw.slotId))
-        return invalid('Asset slot ids must be short stable identifiers');
-      const key = `${raw.slideId}:${raw.slotId}`;
-      if (slotKeys.has(key)) return invalid('Asset slot ids must be unique per slide');
-      slotKeys.add(key);
-      const action = raw.action;
-      if (
-        action !== 'reuse' &&
-        action !== 'replace' &&
-        action !== 'remove' &&
-        action !== 'generate' &&
-        action !== 'process'
-      )
-        return invalid('Unknown asset operation');
-      if (action === 'reuse' && typeof raw.ref === 'string' && reusableRefs.has(raw.ref)) {
-        return {
-          action: 'reuse',
-          ref: raw.ref,
-          slideId: raw.slideId,
-          slotId: raw.slotId,
-          layout: validateAssetPlacement(raw.layout),
-          ...(raw.processing ? { processing: validateProcessingSteps(raw.processing) } : {}),
-        };
-      }
-      if (action === 'reuse' && typeof raw.componentId === 'string') {
-        const visual = input.jobInput.options?.templateVisual as TemplateVisualProfile | undefined;
-        const component = visual?.components.find((item) => item.id === raw.componentId);
-        if (
-          !component ||
-          component.containsText ||
-          ['redraw', 'native'].includes(component.treatment)
-        )
-          return invalid('Template component needs redraw or was not visually verified');
-        if (component.treatment === 'removeBackground' && !raw.processing)
-          return invalid('This component requires transparency processing');
-        return {
-          action: 'reuse',
-          componentId: component.id,
-          slideId: raw.slideId,
-          slotId: raw.slotId,
-          layout: validateAssetPlacement(raw.layout),
-          ...(raw.processing ? { processing: validateProcessingSteps(raw.processing) } : {}),
-        };
-      }
-      const ref = typeof raw.ref === 'string' ? (aliases.get(raw.ref) ?? raw.ref) : undefined;
-      if (action !== 'generate' && (!ref || !refsBySlide.get(raw.slideId)?.includes(ref)))
-        return invalid('Asset operations must reference an image belonging to the selected slide');
-      if (ref && action !== 'reuse') {
-        const refKey = `${raw.slideId}:${ref}`;
-        if (touchedRefs.has(refKey))
-          return invalid('An existing image can only be modified once per edit');
-        touchedRefs.add(refKey);
-      }
-      const common: RevisionAssetIntent = {
-        action: action === 'process' ? 'replace' : action,
-        ...(ref ? { ref } : {}),
-        slideId: raw.slideId,
-        slotId: raw.slotId,
-      };
-      if (action === 'reuse' || action === 'remove') return common;
-      if (action === 'process') {
-        const processing = validateProcessingSteps(raw.processing);
-        return { ...common, processing, layout: validateAssetPlacement(raw.layout) };
-      }
-      if (
-        typeof raw.prompt !== 'string' ||
-        !raw.prompt.trim() ||
-        raw.prompt.length > 4000 ||
-        /<(?:svg|script)\b|data:image\//iu.test(raw.prompt)
-      )
-        return invalid('Image generation requires a descriptive prompt');
-      if (raw.size !== '1024x1024' && raw.size !== '1024x1536' && raw.size !== '1536x1024')
-        return invalid('Image generation requires a supported aspect ratio');
-      return {
-        ...common,
-        ...(raw.processing ? { processing: validateProcessingSteps(raw.processing) } : {}),
-        layout: validateAssetPlacement(raw.layout),
-        prompt: raw.prompt.trim(),
-        size: raw.size,
-      };
-    });
-    const generated = intents.filter(
+    checkAbort(input.signal);
+    const generated = (intents as RevisionAssetIntent[]).filter(
       (intent) =>
         Boolean(intent.prompt) && (intent.action === 'generate' || intent.action === 'replace'),
     );
-    if (
-      intents.filter((intent) => intent.action === 'generate' || intent.action === 'replace')
-        .length > this.maxGeneratedSlots
-    )
-      throw new PresentationRevisionAssetError(
-        'IMAGE_BUDGET_EXCEEDED',
-        'This edit exceeds the image generation budget',
-      );
+    const assetContext = (intent: RevisionAssetIntent): PresentationRevisionAssetInput => {
+      if (!input.onEvent) return input;
+      const page = input.basePlan.slides.find((slide) => slide.slideId === intent.slideId)?.order;
+      const number = intents.filter((item) => item.slideId === intent.slideId).indexOf(intent) + 1;
+      return {
+        ...input,
+        onEvent: (event) =>
+          input.onEvent?.({ ...event, detail: `第 ${page} 页 · 第 ${number} 张素材` }),
+      };
+    };
+    const emitAsset = (
+      intent: RevisionAssetIntent,
+      name: string,
+      state: AtomicOperationEvent['state'],
+    ) =>
+      assetContext(intent).onEvent?.({
+        name,
+        state,
+        jobId: input.jobId,
+        operationId: `${operationKey}:${intent.slideId}:${intent.slotId}:${name}`,
+        pluginVersion: '1.0.0',
+        timestamp: new Date().toISOString(),
+      });
     const assets: Array<
       ImageGenerationSlotOutput & { layout?: PresentationAssetPlacement; size?: string }
     > = [];
@@ -501,7 +631,7 @@ class RevisionAssetPlanner implements PresentationRevisionAssetPlanner {
                   : value;
           const result = await this.options.processAssets(
             bind(intent.processing) as SkillStep[],
-            input,
+            assetContext(intent),
           );
           resolvedSlot = { ...slot, assetRefs: [{ ref: result.ref }] };
         }
@@ -511,6 +641,7 @@ class RevisionAssetPlanner implements PresentationRevisionAssetPlanner {
     for (const intent of intents.filter(
       (intent) => intent.action === 'reuse' && intent.ref && intent.layout && !intent.processing,
     )) {
+      emitAsset(intent, 'presentation.assets.reuse', 'completed');
       assets.push({
         slideId: intent.slideId,
         slotId: `${input.revision.requestId}:${intent.slotId}`,
@@ -522,14 +653,17 @@ class RevisionAssetPlanner implements PresentationRevisionAssetPlanner {
     for (const intent of intents.filter((intent) => intent.componentId)) {
       if (!this.options.extractTemplateComponent)
         return invalid('Template component extraction is unavailable');
-      const extracted = await this.options.extractTemplateComponent(intent.componentId!, input);
+      const extracted = await this.options.extractTemplateComponent(
+        intent.componentId!,
+        assetContext(intent),
+      );
       let ref = extracted.ref;
       if (intent.processing) {
         if (!this.options.processAssets) return invalid('Asset processing is unavailable');
         const steps = JSON.parse(
           JSON.stringify(intent.processing).replaceAll('"$source"', JSON.stringify(ref)),
         ) as SkillStep[];
-        ref = (await this.options.processAssets(steps, input)).ref;
+        ref = (await this.options.processAssets(steps, assetContext(intent))).ref;
       } else if (extracted.needsTransparency)
         return invalid('Template component still needs transparency processing');
       assets.push({
@@ -548,7 +682,7 @@ class RevisionAssetPlanner implements PresentationRevisionAssetPlanner {
           'IMAGE_UNAVAILABLE',
           'Asset processing is not configured',
         );
-      const result = await this.options.processAssets(intent.processing!, input);
+      const result = await this.options.processAssets(intent.processing!, assetContext(intent));
       assets.push({
         slideId: intent.slideId,
         slotId: `${input.revision.requestId}:${intent.slotId}`,

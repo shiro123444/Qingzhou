@@ -24,19 +24,20 @@ export const usePresentationStudio = (
   store: PresentationStudioStoreHook,
   { initialJobIds, pollIntervalMs = 2500, ...streamOptions }: UsePresentationStudioOptions = {},
 ) => {
-  // C-112-04: Resolve jobIds from props, URL search param, or sessionStorage (for leave-and-return recovery)
+  const initialJobIdsKey = initialJobIds === undefined ? undefined : JSON.stringify(initialJobIds);
+  // Explicit deep links resume one work. A bare /presentation restores the
+  // history list without selecting the previous work, so creation always opens
+  // on a clean canvas.
   const effectiveJobIds = useMemo(() => {
-    if (initialJobIds !== undefined) return initialJobIds;
+    if (initialJobIdsKey !== undefined) return JSON.parse(initialJobIdsKey) as string[];
     if (typeof window !== 'undefined') {
       try {
         const paramId = new URLSearchParams(window.location.search).get('jobId');
         if (paramId) return [paramId];
-        const storedId = window.sessionStorage?.getItem('presentation_studio_active_job_id');
-        if (storedId) return [storedId];
       } catch {}
     }
-    return undefined;
-  }, [initialJobIds]);
+    return [];
+  }, [initialJobIdsKey]);
 
   const initialLoading = store((s) => s.initialLoading);
 
@@ -44,8 +45,8 @@ export const usePresentationStudio = (
     let disposed = false;
     store.getState().setInitialLoading(true);
     const restore = async () => {
-      const recovered = await store.getState().restoreJobList();
-      const targets = effectiveJobIds?.length ? effectiveJobIds : recovered.slice(0, 1);
+      await store.getState().restoreJobList();
+      const targets = effectiveJobIds;
       for (const jobId of targets) {
         if (disposed) return;
 

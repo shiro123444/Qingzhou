@@ -68,6 +68,15 @@ describe('Production GLM Chat Configuration Seam (C-106)', () => {
       );
     });
 
+    it('rewrites an /anthropic gateway alias to /v1/chat/completions', () => {
+      expect(normalizeGLMChatEndpoint('https://api.deepseek.com/anthropic')).toBe(
+        'https://api.deepseek.com/v1/chat/completions',
+      );
+      expect(normalizeGLMChatEndpoint('https://api.deepseek.com/anthropic/')).toBe(
+        'https://api.deepseek.com/v1/chat/completions',
+      );
+    });
+
     it('rejects non-HTTPS URLs', () => {
       expect(() => normalizeGLMChatEndpoint('http://api.b.ai')).toThrowError(PresentationError);
     });
@@ -92,15 +101,25 @@ describe('Production GLM Chat Configuration Seam (C-106)', () => {
   });
 
   describe('loadProductionGLMChatProviderConfig', () => {
-    it('locks the provider-neutral default to the supported Gemini model', () => {
+    it('defaults the provider-neutral model to Gemini when ANTHROPIC_MODEL is omitted', () => {
       const config = loadProductionGLMChatProviderConfig({
         [PRODUCTION_CHAT_ENV_KEYS.apiKey]: 'test-gemini-key',
-        [PRODUCTION_CHAT_ENV_KEYS.model]: 'attempted-env-override',
       });
 
       expect(config.endpoint).toBe(`${DEFAULT_PRODUCTION_CHAT_BASE_URL}/v1/chat/completions`);
       expect(config.model).toBe(DEFAULT_PRODUCTION_CHAT_MODEL);
       expect(config.model).toBe('gemini-3.8-flash-high');
+    });
+
+    it('honors ANTHROPIC_MODEL for the active provider', () => {
+      const config = loadProductionGLMChatProviderConfig({
+        [PRODUCTION_CHAT_ENV_KEYS.apiKey]: 'test-deepseek-key',
+        [PRODUCTION_CHAT_ENV_KEYS.baseUrl]: 'https://api.deepseek.com/anthropic',
+        [PRODUCTION_CHAT_ENV_KEYS.model]: 'deepseek-v4.1-flash-expires-on-0910',
+      });
+
+      expect(config.endpoint).toBe('https://api.deepseek.com/v1/chat/completions');
+      expect(config.model).toBe('deepseek-v4.1-flash-expires-on-0910');
     });
 
     it('ignores dependency and request model overrides for the active provider', async () => {
@@ -114,8 +133,8 @@ describe('Production GLM Chat Configuration Seam (C-106)', () => {
       });
       const port = createProductionGLMMultimodalChatPort({
         env: {
-          [PRODUCTION_CHAT_ENV_KEYS.apiKey]: 'test-gemini-key',
-          [PRODUCTION_CHAT_ENV_KEYS.model]: 'attempted-env-override',
+          [PRODUCTION_CHAT_ENV_KEYS.apiKey]: 'test-deepseek-key',
+          [PRODUCTION_CHAT_ENV_KEYS.model]: 'deepseek-v4.1-flash-expires-on-0910',
         },
         fetcher,
         model: 'attempted-dependency-override',
@@ -129,8 +148,10 @@ describe('Production GLM Chat Configuration Seam (C-106)', () => {
         { scope: { sessionId: 's1', userId: 'u1' } },
       );
 
-      expect(port.manifest.model).toBe('gemini-3.8-flash-high');
-      expect(JSON.parse(String(fetcher.mock.calls[0][1].body)).model).toBe('gemini-3.8-flash-high');
+      expect(port.manifest.model).toBe('deepseek-v4.1-flash-expires-on-0910');
+      expect(JSON.parse(String(fetcher.mock.calls[0][1].body)).model).toBe(
+        'deepseek-v4.1-flash-expires-on-0910',
+      );
     });
 
     it('loads valid configuration with defaults', () => {

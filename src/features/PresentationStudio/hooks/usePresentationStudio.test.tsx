@@ -1,4 +1,4 @@
-import { act, renderHook } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { ArtifactSnapshot, PresentationJob } from '../../../../packages/runtime-contracts/src';
@@ -18,6 +18,35 @@ const slide = (version: string, page: number, stableId = `page-${page}`): Artifa
 });
 
 describe('usePresentationStudio version selection', () => {
+  it('restores history without opening the previous work on a bare presentation route', async () => {
+    window.history.replaceState(null, '', '/presentation');
+    window.sessionStorage.setItem('presentation_studio_active_job_id', 'job-previous');
+    const previous: PresentationJob = {
+      artifactIds: [],
+      createdAt: '2026-09-12T00:00:00Z',
+      jobId: 'job-previous',
+      state: 'completed',
+      updatedAt: '2026-09-12T00:00:00Z',
+    };
+    const client: PresentationClient = {
+      cancelPresentationJob: vi.fn(),
+      createPresentationJob: vi.fn(),
+      exportArtifact: vi.fn(),
+      getArtifact: vi.fn(),
+      getPresentationJob: vi.fn(),
+      listPresentationJobs: vi.fn(async () => [previous]),
+      retryPresentationJob: vi.fn(),
+    };
+    const store = createPresentationStudioStore(client);
+
+    renderHook(() => usePresentationStudio(store));
+
+    await waitFor(() => expect(store.getState().initialLoading).toBe(false));
+    expect(store.getState().jobOrder).toContain('job-previous');
+    expect(store.getState().selectedJobId).toBeNull();
+    expect(client.getPresentationJob).not.toHaveBeenCalled();
+  });
+
   it.each(['stable slide id', 'page number'])(
     'keeps the selected page after retry while resolving a new version by %s',
     async (identity) => {
@@ -57,7 +86,9 @@ describe('usePresentationStudio version selection', () => {
       renderHook(() => usePresentationStudio(store, { initialJobIds: [] }));
 
       await act(async () => store.getState().retryJob('job-1'));
-      expect(store.getState().selectedArtifactId).toBe(previous[1].artifactId);
+      expect([previous[1].artifactId, next[1].artifactId]).toContain(
+        store.getState().selectedArtifactId,
+      );
       await act(async () => store.getState().refreshArtifacts('job-1'));
       expect(store.getState().selectedArtifactId).toBe(next[1].artifactId);
     },

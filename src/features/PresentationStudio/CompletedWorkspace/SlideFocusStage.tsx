@@ -6,24 +6,32 @@ import {
   FileQuestion,
   ImageIcon,
   Layers,
+  MessageCircle,
   MessageSquarePlus,
 } from 'lucide-react';
-import { memo, useEffect, useState } from 'react';
+import { type CSSProperties, memo, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type {
   ArtifactSnapshot,
   PresentationMessageInput,
 } from '../../../../packages/runtime-contracts/src/index';
 import { SlideAnnotation } from '../annotation/SlideAnnotation';
+import SlidePaintOverlay from './SlidePaintOverlay';
 import { styles } from './style';
 
 export interface SlideFocusStageProps {
+  conversationOpen?: boolean;
   currentIndex: number;
   jobId?: string;
   onNext: () => void;
   onOpenDrawer: () => void;
   onPrev: () => void;
   onSendMessage?: (jobId: string, input: PresentationMessageInput) => Promise<boolean>;
+  onToggleConversation?: () => void;
+  painting?: boolean;
+  paintInterrupted?: boolean;
+  revealSrcs?: string[];
   selectedSlide: ArtifactSnapshot | null;
   totalSlides: number;
   versionId?: string;
@@ -52,19 +60,26 @@ const getSlideStatusZh = (status?: string): string => {
 
 export const SlideFocusStage = memo<SlideFocusStageProps>(
   ({
+    conversationOpen = false,
     currentIndex,
     jobId,
-    versionId,
-    onSendMessage,
     onNext,
     onOpenDrawer,
     onPrev,
+    onSendMessage,
+    onToggleConversation,
+    paintInterrupted = false,
+    painting = false,
+    revealSrcs,
     selectedSlide,
     totalSlides,
+    versionId,
   }) => {
+    const { t } = useTranslation('common');
     const [annotating, setAnnotating] = useState(false);
     useEffect(() => setAnnotating(false), [currentIndex]);
     const aspectRatio = selectedSlide?.metadata?.aspectRatio === '4:3' ? '4:3' : '16:9';
+    const [slideAw, slideAh] = aspectRatio === '4:3' ? [4, 3] : [16, 9];
     const ready = selectedSlide?.status === 'ready' && Boolean(selectedSlide?.uri);
 
     const pagePillText =
@@ -102,9 +117,15 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
           <div
             aria-label={`第 ${currentIndex + 1} 页 ${aspectRatio} 大预览`}
             className={styles.focusFrame169}
+            data-painting={painting ? 'true' : 'false'}
             role="button"
-            style={{ aspectRatio: aspectRatio.replace(':', ' / ') }}
             tabIndex={0}
+            style={
+              {
+                '--slide-ah': slideAh,
+                '--slide-aw': slideAw,
+              } as CSSProperties
+            }
             onClick={() => {
               if (!annotating) onOpenDrawer();
             }}
@@ -134,6 +155,12 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
               </div>
             )}
 
+            <SlidePaintOverlay
+              active={painting}
+              interrupted={paintInterrupted}
+              revealSrcs={revealSrcs}
+            />
+
             {annotating && ready && jobId && versionId && onSendMessage && (
               <SlideAnnotation
                 jobId={jobId}
@@ -152,7 +179,11 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
           </div>
         </div>
 
-        <nav aria-label="幻灯片分页导航" className={styles.bottomPaginator}>
+        <nav
+          aria-label="幻灯片舞台指挥条"
+          className={styles.commandBar}
+          data-testid="slide-command-bar"
+        >
           {onSendMessage && (
             <Tooltip title={annotating ? '退出标注' : '标注修改'}>
               <Button
@@ -166,31 +197,46 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
               />
             </Tooltip>
           )}
-          <Tooltip title="上一页">
-            <Button
-              aria-label="上一页"
-              className={styles.iconButton}
-              disabled={currentIndex <= 0}
-              icon={<Icon aria-hidden icon={ChevronLeft} size={22} />}
-              type="text"
-              onClick={onPrev}
-            />
-          </Tooltip>
+          {onToggleConversation && (
+            <button
+              aria-expanded={conversationOpen}
+              aria-pressed={conversationOpen}
+              className={styles.conversationTrigger}
+              data-testid="presentation-conversation-trigger"
+              type="button"
+              onClick={onToggleConversation}
+            >
+              <MessageCircle aria-hidden size={18} strokeWidth={1.6} />
+              {t('presentationConversation.open')}
+            </button>
+          )}
+          <div aria-label="幻灯片分页导航" className={styles.paginatorGroup}>
+            <Tooltip title="上一页">
+              <Button
+                aria-label="上一页"
+                className={styles.iconButton}
+                disabled={currentIndex <= 0}
+                icon={<Icon aria-hidden icon={ChevronLeft} size={22} />}
+                type="text"
+                onClick={onPrev}
+              />
+            </Tooltip>
 
-          <span className={styles.pageCounter} data-testid="slide-page-counter">
-            {pagePillText}
-          </span>
+            <span className={styles.pageCounter} data-testid="slide-page-counter">
+              {pagePillText}
+            </span>
 
-          <Tooltip title="下一页">
-            <Button
-              aria-label="下一页"
-              className={styles.iconButton}
-              disabled={currentIndex >= totalSlides - 1}
-              icon={<Icon aria-hidden icon={ChevronRight} size={22} />}
-              type="text"
-              onClick={onNext}
-            />
-          </Tooltip>
+            <Tooltip title="下一页">
+              <Button
+                aria-label="下一页"
+                className={styles.iconButton}
+                disabled={currentIndex >= totalSlides - 1}
+                icon={<Icon aria-hidden icon={ChevronRight} size={22} />}
+                type="text"
+                onClick={onNext}
+              />
+            </Tooltip>
+          </div>
         </nav>
       </section>
     );

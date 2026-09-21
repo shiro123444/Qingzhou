@@ -38,6 +38,8 @@ import {
 import type { PresentationPipelineContext } from './pipeline';
 import type { PresentationRevisionAssetPlanner } from './revision-assets';
 import type { FilePresentationTemplateLibrary } from './templates';
+import type { PresentationVisualCritic } from './visual-critic';
+import type { PresentationVisualStoryboardPlanner } from './visual-storyboard';
 
 export type PresentationGenerationContextFactory = (jobId: string) => PresentationPipelineContext;
 
@@ -66,6 +68,8 @@ export interface PresentationRuntimeCompositionOptions {
   readonly portFactory?: PresentationPortFactory;
   readonly revisionAssetPlanner?: PresentationRevisionAssetPlanner;
   readonly templateLibrary?: FilePresentationTemplateLibrary;
+  readonly visualCritic?: PresentationVisualCritic;
+  readonly visualStoryboardPlanner?: PresentationVisualStoryboardPlanner;
 }
 
 export type PresentationRuntimeCompositionErrorCode =
@@ -300,6 +304,8 @@ export const createPresentationRuntimeComposition = (
               atomicRuntime: compositionOptions.atomicRuntime,
               templateLibrary: compositionOptions.templateLibrary,
               revisionAssetPlanner: compositionOptions.revisionAssetPlanner,
+              visualStoryboardPlanner: compositionOptions.visualStoryboardPlanner,
+              visualCritic: compositionOptions.visualCritic,
               artifactStore: compositionOptions.generationArtifactStore!,
               repository: compositionOptions.jobRepository,
               capability,

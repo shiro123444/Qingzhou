@@ -48,7 +48,14 @@ describe('C-53 ppt-master toolchain', () => {
     ]);
     expect(spawn).toHaveBeenCalledWith(
       expect.objectContaining({
-        args: ['/opt/ppt-master/svg_to_pptx.py', '/tmp/workspaces/job-1', '--animation', 'fade'],
+        args: [
+          '/opt/ppt-master/svg_to_pptx.py',
+          '/tmp/workspaces/job-1',
+          '--output',
+          'exports/presentation.pptx',
+          '--animation',
+          'fade',
+        ],
         shell: false,
       }),
     );

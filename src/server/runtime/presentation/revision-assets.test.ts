@@ -11,6 +11,7 @@ import type { GLMChatResult, GLMMultimodalChatPort } from './multimodal-chat-pro
 import {
   boundPresentationPromptText,
   createRevisionAssetPlanner,
+  parseAssetIntentPayload,
   type PresentationRevisionAssetInput,
   type RevisionAssetIntent,
 } from './revision-assets';
@@ -105,6 +106,35 @@ const imageCapability = () => {
 };
 
 describe('presentation revision assets', () => {
+  it('extracts intent JSON from think tags, fences, arrays, and mixed prose', () => {
+    expect(parseAssetIntentPayload('<think>draft</think>{"intents":[]}')).toEqual({ intents: [] });
+    expect(parseAssetIntentPayload('```json\n{"intents":[]}\n```')).toEqual({ intents: [] });
+    expect(parseAssetIntentPayload('Here is the plan:\n{"intents":[]}\nDone.')).toEqual({
+      intents: [],
+    });
+    expect(parseAssetIntentPayload('[]')).toEqual({ intents: [] });
+    expect(() => parseAssetIntentPayload('not json')).toThrow(/invalid JSON/u);
+  });
+
+  it('retries once when the first intent analysis reply is not JSON', async () => {
+    const chat = chatPort([]);
+    vi.mocked(chat.chat)
+      .mockResolvedValueOnce({
+        choices: [{ index: 0, message: { content: 'thinking about assets', role: 'assistant' } }],
+        created: 1,
+        id: 'bad',
+        model: 'test',
+      })
+      .mockResolvedValueOnce(response([]));
+    await expect(
+      createRevisionAssetPlanner({ chatPort: chat }).prepare(input),
+    ).resolves.toMatchObject({ intents: [] });
+    expect(chat.chat).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(chat.chat).mock.calls[1][1]).toMatchObject({
+      idempotencyKey: expect.stringMatching(/intent:harvest$/u),
+    });
+  });
+
   it('keeps large inline image payloads out of the semantic-analysis text request, including wrapped base64', async () => {
     const payload = `${'A'.repeat(800_000)}\n${'B'.repeat(800_000)}`;
     const embedded = `data:image/png;base64,${payload}`;
@@ -399,4 +429,247 @@ it('places an owned asset made during intake without generating it again, and re
       request,
     ),
   ).rejects.toThrow('belonging to the selected slide');
+});
+
+const componentBox = { height: 0.4, width: 0.3, x: 0.1, y: 0.2 };
+const templateVisual = {
+  analyzedAt: '2026-01-01T00:00:00.000Z',
+  components: [
+    {
+      box: componentBox,
+      containsText: false,
+      familyId: 'f1',
+      id: 'ribbon',
+      name: 'Ribbon',
+      page: 1,
+      rationale: 'safe decoration',
+      role: 'decoration' as const,
+      treatment: 'reuse' as const,
+    },
+    {
+      box: { height: 0.2, width: 1, x: 0, y: 0 },
+      containsText: true,
+      familyId: 'f1',
+      id: 'old-title',
+      name: 'Title',
+      page: 1,
+      rationale: 'baked text',
+      role: 'heading' as const,
+      treatment: 'reuse' as const,
+    },
+    {
+      box: { height: 0.3, width: 0.3, x: 0.6, y: 0.1 },
+      containsText: false,
+      familyId: 'f1',
+      id: 'hero-photo',
+      name: 'Photo',
+      page: 1,
+      rationale: 'redraw artwork',
+      role: 'artwork' as const,
+      treatment: 'redraw' as const,
+    },
+    {
+      box: { height: 0.15, width: 0.15, x: 0.8, y: 0.8 },
+      containsText: false,
+      familyId: 'f1',
+      id: 'chart',
+      name: 'Chart',
+      page: 1,
+      rationale: 'native chart',
+      role: 'artwork' as const,
+      treatment: 'native' as const,
+    },
+    {
+      box: { height: 0.5, width: 0.4, x: 0.05, y: 0.3 },
+      containsText: false,
+      familyId: 'f1',
+      id: 'cutout-leaf',
+      name: 'Leaf',
+      page: 1,
+      rationale: 'needs transparency',
+      role: 'decoration' as const,
+      treatment: 'removeBackground' as const,
+    },
+  ],
+  families: [
+    {
+      artwork: 'wash',
+      composition: 'open',
+      id: 'f1',
+      name: 'cover',
+      pages: [1],
+      palette: ['#123456'],
+      preserve: [],
+      typography: 'serif',
+    },
+  ],
+  guidance: 'keep wash',
+  media: [
+    {
+      confidence: 0.9,
+      frameRefs: ['video-frame-1', 'video-frame-2'],
+      kind: 'video' as const,
+      mediaId: 'slide-1:video:1',
+      page: 1,
+      preserveRecommendation: 'poster' as const,
+      questions: [],
+      role: 'decorative' as const,
+      status: 'analyzed' as const,
+      summary: 'Soft watercolor motion behind the title',
+      visualStyle: 'paper grain and a pale wash',
+    },
+  ],
+  model: 'vision',
+  pages: [{ height: 788, nativeTextCount: 0, page: 1, ref: 'template-page-1', width: 1400 }],
+  schemaVersion: 1 as const,
+  summary: 'watercolor',
+  templateId: 'tmpl',
+  versionId: 'ver',
+};
+const visualJobInput = {
+  ...input,
+  jobInput: { ...input.jobInput, options: { templateVisual } },
+  revision: {
+    content: '应用模板「水彩」的视觉风格与适合各页内容的版式，保留本稿的主题、事实和文字含义。',
+    requestId: 'apply-template',
+    target: { type: 'deck' as const },
+    template: { templateId: 'tmpl', versionId: 'ver' },
+  },
+};
+
+it('uses initial art-direction rules when applying a template, not conservative empty edits', async () => {
+  const templateChat = chatPort([]);
+  const wordingChat = chatPort([]);
+  await createRevisionAssetPlanner({ chatPort: templateChat }).prepare(visualJobInput);
+  await createRevisionAssetPlanner({ chatPort: wordingChat }).prepare({
+    ...input,
+    revision: { ...input.revision, content: '把标题改成新产品名' },
+  });
+  const templateSystem = vi.mocked(templateChat.chat).mock.calls[0][0].messages[0]
+    .content as string;
+  const wordingSystem = vi.mocked(wordingChat.chat).mock.calls[0][0].messages[0].content as string;
+  expect(templateSystem).toContain('INITIAL ART DIRECTION');
+  expect(wordingSystem).not.toContain('INITIAL ART DIRECTION');
+});
+
+it('shows owned template page pixels to asset direction instead of relying on profile JSON alone', async () => {
+  const chat = chatPort([]);
+  const png =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+  const readVisualReferences = vi.fn(async (refs: string[]) =>
+    refs.map((ref) => ({ base64: png, mimeType: 'image/png' as const, ref })),
+  );
+  await createRevisionAssetPlanner({ chatPort: chat, readVisualReferences }).prepare(
+    visualJobInput,
+  );
+  expect(readVisualReferences).toHaveBeenCalledWith(
+    ['template-page-1', 'video-frame-1', 'video-frame-2'],
+    visualJobInput,
+  );
+  const [request, context] = vi.mocked(chat.chat).mock.calls[0];
+  expect(context.trustedImages?.urls).toHaveLength(3);
+  expect(Array.isArray(request.messages[1].content)).toBe(true);
+  expect(JSON.stringify(request.messages[1].content)).toContain('模板视觉证据');
+});
+
+it('defaults template component reuse to the learned box and rejects text, redraw, native, or unprocessed cutouts', async () => {
+  const extractTemplateComponent = vi.fn(async () => ({
+    needsTransparency: false,
+    ref: 'extracted-ribbon',
+  }));
+  const processAssets = vi.fn(async () => ({ ref: 'cutout-owned' }));
+  const reuse = await createRevisionAssetPlanner({
+    chatPort: chatPort([
+      { action: 'reuse', componentId: 'ribbon', slideId: 'cover', slotId: 'ribbon-slot' },
+    ]),
+    extractTemplateComponent,
+  }).prepare(visualJobInput);
+  expect(reuse.intents[0]).toMatchObject({
+    action: 'reuse',
+    componentId: 'ribbon',
+    layout: { ...componentBox, fit: 'contain' },
+  });
+  expect(extractTemplateComponent).toHaveBeenCalledWith('ribbon', visualJobInput);
+
+  const customLayout = { fit: 'cover' as const, height: 0.5, width: 0.4, x: 0.55, y: 0.2 };
+  const placed = await createRevisionAssetPlanner({
+    chatPort: chatPort([
+      {
+        action: 'reuse',
+        componentId: 'ribbon',
+        layout: customLayout,
+        slideId: 'cover',
+        slotId: 'ribbon-slot',
+      },
+    ]),
+    extractTemplateComponent,
+  }).prepare({ ...visualJobInput, revision: { ...visualJobInput.revision, requestId: 'apply-2' } });
+  expect(placed.intents[0].layout).toEqual(customLayout);
+
+  await expect(
+    createRevisionAssetPlanner({
+      chatPort: chatPort([
+        { action: 'reuse', componentId: 'old-title', slideId: 'cover', slotId: 'title' },
+      ]),
+      extractTemplateComponent,
+    }).prepare({
+      ...visualJobInput,
+      revision: { ...visualJobInput.revision, requestId: 'apply-3' },
+    }),
+  ).rejects.toMatchObject({ code: 'IMAGE_PLAN_INVALID' });
+  await expect(
+    createRevisionAssetPlanner({
+      chatPort: chatPort([
+        { action: 'reuse', componentId: 'hero-photo', slideId: 'cover', slotId: 'hero' },
+      ]),
+      extractTemplateComponent,
+    }).prepare({
+      ...visualJobInput,
+      revision: { ...visualJobInput.revision, requestId: 'apply-4' },
+    }),
+  ).rejects.toMatchObject({ code: 'IMAGE_PLAN_INVALID' });
+  await expect(
+    createRevisionAssetPlanner({
+      chatPort: chatPort([
+        { action: 'reuse', componentId: 'chart', slideId: 'cover', slotId: 'chart' },
+      ]),
+      extractTemplateComponent,
+    }).prepare({
+      ...visualJobInput,
+      revision: { ...visualJobInput.revision, requestId: 'apply-5' },
+    }),
+  ).rejects.toMatchObject({ code: 'IMAGE_PLAN_INVALID' });
+  await expect(
+    createRevisionAssetPlanner({
+      chatPort: chatPort([
+        { action: 'reuse', componentId: 'cutout-leaf', slideId: 'cover', slotId: 'leaf' },
+      ]),
+      extractTemplateComponent,
+    }).prepare({
+      ...visualJobInput,
+      revision: { ...visualJobInput.revision, requestId: 'apply-6' },
+    }),
+  ).rejects.toMatchObject({ code: 'IMAGE_PLAN_INVALID' });
+
+  const processed = await createRevisionAssetPlanner({
+    chatPort: chatPort([
+      {
+        action: 'reuse',
+        componentId: 'cutout-leaf',
+        processing: [
+          { id: 'cutout', input: { ref: '$source' }, operation: 'assets.removeBackground' },
+        ],
+        slideId: 'cover',
+        slotId: 'leaf',
+      },
+    ]),
+    extractTemplateComponent: async () => ({ needsTransparency: true, ref: 'leaf-source' }),
+    processAssets,
+  }).prepare({ ...visualJobInput, revision: { ...visualJobInput.revision, requestId: 'apply-7' } });
+  expect(processAssets).toHaveBeenCalled();
+  expect(processed.assetArtifactIds).toEqual(['cutout-owned']);
+  expect(processed.intents[0].layout).toEqual({
+    ...templateVisual.components[4].box,
+    fit: 'contain',
+  });
 });

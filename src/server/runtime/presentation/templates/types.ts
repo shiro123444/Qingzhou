@@ -27,6 +27,19 @@ export interface TemplateAssetSlot {
   slotId: string;
 }
 
+/** Embedded media is recorded as evidence; source bytes remain inside the owned PPTX. */
+export interface TemplateMediaReference {
+  box?: TemplateBox;
+  kind: 'audio' | 'video';
+  mediaId: string;
+  mimeType?: string;
+  page: number;
+  path: string;
+  posterReference?: string;
+  relationshipId: string;
+  sizeBytes: number;
+}
+
 export interface TemplateLayout {
   assetSlots: TemplateAssetSlot[];
   elements: TemplateElement[];
@@ -57,6 +70,7 @@ export interface TemplateProfile {
   createdAt: string;
   designSpec?: Record<string, unknown>;
   layouts: TemplateLayout[];
+  media?: TemplateMediaReference[];
   name: string;
   schemaVersion: 1;
   source: { kind: 'plan' | 'pptx'; planId?: string; sha256?: string };
@@ -65,8 +79,10 @@ export interface TemplateProfile {
   warnings: string[];
 }
 
-export type TemplateSummary = Omit<TemplateProfile, 'layouts' | 'designSpec'> & {
+export type TemplateSummary = Omit<TemplateProfile, 'layouts' | 'designSpec' | 'media'> & {
   layoutCount: number;
+  mediaCount: number;
+  videoCount: number;
 };
 
 export interface TemplateReference {
@@ -77,6 +93,7 @@ export interface TemplateReference {
 export interface TemplateApplication {
   constraints: TemplateConstraints;
   layouts: TemplateLayout[];
+  media?: TemplateMediaReference[];
   name: string;
   templateId: string;
   versionId: string;

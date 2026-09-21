@@ -2,7 +2,6 @@ import { DEFAULT_PROVIDER } from '@lobechat/business-const';
 import {
   DEFAULT_AGENT_CONFIG,
   DEFAULT_AVATAR,
-  DEFAULT_INBOX_AVATAR,
   DEFAULT_MODEL,
   DEFAUTT_AGENT_TTS_CONFIG,
   INBOX_SESSION_ID,
@@ -10,6 +9,7 @@ import {
 import { KnowledgeType } from '@lobechat/types';
 import { describe, expect, it, vi } from 'vitest';
 
+import { JUMI_AVATAR, JUMI_NAME } from '@/const/jumi';
 import { type AgentStoreState } from '@/store/agent/initialState';
 import { initialAgentSliceState } from '@/store/agent/slices/agent/initialState';
 import { initialBuiltinAgentSliceState } from '@/store/agent/slices/builtin';
@@ -147,7 +147,8 @@ describe('agentSelectors', () => {
 
       const meta = agentSelectors.currentAgentMeta(state);
 
-      expect(meta.avatar).toBe(DEFAULT_INBOX_AVATAR);
+      expect(meta.avatar).toBe(JUMI_AVATAR);
+      expect(meta.title).toBe(JUMI_NAME);
     });
   });
 
@@ -183,7 +184,8 @@ describe('agentSelectors', () => {
 
       const meta = agentSelectors.getAgentMetaById('inbox-agent')(state);
 
-      expect(meta.avatar).toBe(DEFAULT_INBOX_AVATAR);
+      expect(meta.avatar).toBe(JUMI_AVATAR);
+      expect(meta.title).toBe(JUMI_NAME);
     });
   });
 

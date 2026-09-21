@@ -41,4 +41,45 @@ describe('presentationTemplateClient', () => {
       }),
     ).rejects.toThrow('Template version was not found');
   });
+
+  it('resumes visual learning with the exact answered question', async () => {
+    const response = {
+      learning: { guidanceHistory: ['answer'], iteration: 2, questions: [], status: 'ready' },
+      templateId: 'template-1',
+      versionId: 'v1',
+    } as const;
+    const fetcher = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(JSON.stringify(response)));
+    await expect(
+      presentationTemplateClient.analyze(
+        { name: 'Reference', templateId: 'template-1', versionId: 'v1' },
+        'Keep the video',
+        'video-role',
+        'preserve',
+      ),
+    ).resolves.toEqual(response);
+    const [url, options] = fetcher.mock.calls[0];
+    expect(url).toBe('/api/runtime/presentation/tools/presentation.template.analyzeVisual');
+    expect(JSON.parse(String(options?.body))).toEqual({
+      guidance: 'Keep the video',
+      questionId: 'video-role',
+      choiceId: 'preserve',
+      templateId: 'template-1',
+      versionId: 'v1',
+    });
+  });
+
+  it('deletes an owned template through the scoped template endpoint', async () => {
+    const fetcher = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(JSON.stringify({ deleted: true }), { status: 200 }));
+
+    await presentationTemplateClient.remove('template / 1');
+
+    expect(fetcher).toHaveBeenCalledWith(
+      '/api/runtime/presentation/templates/template%20%2F%201',
+      expect.objectContaining({ credentials: 'same-origin', method: 'DELETE' }),
+    );
+  });
 });

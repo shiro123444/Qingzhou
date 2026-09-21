@@ -1,5 +1,5 @@
 import { Button, Flexbox, Icon } from '@lobehub/ui';
-import { Input, Popover, Spin, Tooltip } from 'antd';
+import { Input, Popconfirm, Popover, Spin, Tooltip } from 'antd';
 import { createStaticStyles } from 'antd-style';
 import {
   ArrowRight,
@@ -7,6 +7,7 @@ import {
   Check,
   FilePenLine,
   LayoutTemplate,
+  Trash2,
   Upload,
   X,
 } from 'lucide-react';
@@ -15,9 +16,11 @@ import { useTranslation } from 'react-i18next';
 
 import {
   presentationTemplateClient,
+  type PresentationTemplateLearningQuestion,
   type PresentationTemplateSummary,
 } from '@/services/runtime/templateClient';
 
+import { PRESENTATION_PPTX_MAX_UPLOAD_BYTES } from '../../../../packages/runtime-contracts/src';
 import { styles as workspaceStyles } from './style';
 
 const styles = createStaticStyles(({ css, cssVar }) => ({
@@ -34,6 +37,36 @@ const styles = createStaticStyles(({ css, cssVar }) => ({
     font-size: 12px;
     color: ${cssVar.colorError};
     overflow-wrap: anywhere;
+  `,
+  learning: css`
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+
+    padding: 12px;
+    border: 1px solid ${cssVar.colorBorderSecondary};
+    border-radius: 14px;
+
+    background: ${cssVar.colorFillQuaternary};
+  `,
+  learningChoices: css`
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  `,
+  learningQuestion: css`
+    margin: 0;
+
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.45;
+    color: ${cssVar.colorText};
+  `,
+  learningReason: css`
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.45;
+    color: ${cssVar.colorTextSecondary};
   `,
   list: css`
     overflow-y: auto;
@@ -120,6 +153,11 @@ const TemplateLibraryButton = memo<TemplateLibraryButtonProps>(
     const [pending, setPending] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [notice, setNotice] = useState<string | null>(null);
+    const [clarification, setClarification] = useState<{
+      question: PresentationTemplateLearningQuestion;
+      template: PresentationTemplateSummary;
+    } | null>(null);
+    const [guidance, setGuidance] = useState('');
     const fileInput = useRef<HTMLInputElement>(null);
     const applyRequest = useRef<{ key: string; requestId: string } | null>(null);
 
@@ -170,7 +208,6 @@ const TemplateLibraryButton = memo<TemplateLibraryButtonProps>(
       ]);
       setName('');
       setNotice(t('presentationTemplates.saved', { name: template.name }));
-      if (!jobId) onSelectTemplate?.(template);
     };
 
     const run = async (key: string, operation: () => Promise<void>) => {
@@ -199,7 +236,11 @@ const TemplateLibraryButton = memo<TemplateLibraryButtonProps>(
 
     const importPptx = (file: File) =>
       run('import', async () => {
-        if (!/\.pptx$/iu.test(file.name) || file.size > 32 * 1024 * 1024) {
+        if (
+          !/\.pptx$/iu.test(file.name) ||
+          file.size === 0 ||
+          file.size > PRESENTATION_PPTX_MAX_UPLOAD_BYTES
+        ) {
           throw new Error(t('presentationTemplates.invalidFile'));
         }
         const profile = await presentationTemplateClient.importPptx(
@@ -207,7 +248,55 @@ const TemplateLibraryButton = memo<TemplateLibraryButtonProps>(
           name.trim() || file.name.replace(/\.pptx$/iu, ''),
         );
         addTemplate(profile);
+        if (!jobId) {
+          onSelectTemplate?.(profile);
+          setOpen(false);
+        }
       });
+
+    const applyReady = async (template: PresentationTemplateSummary) => {
+      if (!jobId) {
+        onSelectTemplate?.(template);
+        setOpen(false);
+        return;
+      }
+      const key = `${jobId}:${template.templateId}:${template.versionId}`;
+      if (applyRequest.current?.key !== key) {
+        applyRequest.current = { key, requestId: crypto.randomUUID() };
+      }
+      await presentationTemplateClient.apply(jobId, {
+        requestId: applyRequest.current.requestId,
+        templateId: template.templateId,
+        versionId: template.versionId,
+      });
+      await onJobChanged?.();
+      applyRequest.current = null;
+      setNotice(t('presentationTemplates.applied', { name: template.name }));
+    };
+
+    const studyAndApply = async (
+      template: PresentationTemplateSummary,
+      answer?: string,
+      questionId?: string,
+      choiceId?: string,
+    ) => {
+      const result = await presentationTemplateClient.analyze(
+        template,
+        answer,
+        questionId,
+        choiceId,
+      );
+      const question = result.learning.questions[0];
+      if (result.learning.status === 'needs_input' && question) {
+        setClarification({ question, template });
+        setGuidance('');
+        setNotice(t('presentationTemplates.learningPaused'));
+        return;
+      }
+      setClarification(null);
+      setGuidance('');
+      await applyReady(template);
+    };
 
     const apply = (template: PresentationTemplateSummary) =>
       run(template.templateId, async () => {
@@ -216,18 +305,30 @@ const TemplateLibraryButton = memo<TemplateLibraryButtonProps>(
           setOpen(false);
           return;
         }
-        const key = `${jobId}:${template.templateId}:${template.versionId}`;
-        if (applyRequest.current?.key !== key) {
-          applyRequest.current = { key, requestId: crypto.randomUUID() };
-        }
-        await presentationTemplateClient.apply(jobId, {
-          requestId: applyRequest.current.requestId,
-          templateId: template.templateId,
-          versionId: template.versionId,
-        });
-        await onJobChanged?.();
-        applyRequest.current = null;
-        setNotice(t('presentationTemplates.applied', { name: template.name }));
+        await studyAndApply(template);
+      });
+
+    const continueLearning = (answer: string, choiceId?: string) =>
+      run(`clarify:${clarification?.question.id ?? ''}`, async () => {
+        if (!clarification || !answer.trim()) return;
+        await studyAndApply(
+          clarification.template,
+          answer.trim(),
+          clarification.question.id,
+          choiceId,
+        );
+      });
+
+    const removeTemplate = (template: PresentationTemplateSummary) =>
+      run(`delete:${template.templateId}`, async () => {
+        await presentationTemplateClient.remove(template.templateId);
+        setTemplates((current) =>
+          current.filter((item) => item.templateId !== template.templateId),
+        );
+        if (selectedTemplate?.templateId === template.templateId) onSelectTemplate?.(null);
+        if (nativeTemplate?.templateId === template.templateId) setNativeTemplate(null);
+        if (clarification?.template.templateId === template.templateId) setClarification(null);
+        setNotice(t('presentationTemplates.deleted', { name: template.name }));
       });
 
     const editNative = () =>
@@ -357,6 +458,54 @@ const TemplateLibraryButton = memo<TemplateLibraryButtonProps>(
               </Flexbox>
             )}
 
+            {clarification && (
+              <section
+                aria-label={t('presentationTemplates.clarification')}
+                className={styles.learning}
+              >
+                <p className={styles.learningQuestion}>{clarification.question.question}</p>
+                <p className={styles.learningReason}>{clarification.question.reason}</p>
+                <div className={styles.learningChoices}>
+                  {clarification.question.choices.map((choice) => (
+                    <Tooltip key={choice.id} title={choice.consequence}>
+                      <Button
+                        disabled={Boolean(pending)}
+                        size="small"
+                        type={
+                          choice.id === clarification.question.recommendedChoiceId
+                            ? 'primary'
+                            : 'default'
+                        }
+                        onClick={() => void continueLearning(choice.label, choice.id)}
+                      >
+                        {choice.label}
+                      </Button>
+                    </Tooltip>
+                  ))}
+                </div>
+                <Flexbox horizontal align="end" gap={6}>
+                  <Input.TextArea
+                    aria-label={t('presentationTemplates.clarificationAnswer')}
+                    autoSize={{ maxRows: 4, minRows: 1 }}
+                    disabled={Boolean(pending)}
+                    maxLength={2000}
+                    placeholder={t('presentationTemplates.clarificationPlaceholder')}
+                    value={guidance}
+                    onChange={(event) => setGuidance(event.target.value)}
+                  />
+                  <Button
+                    aria-label={t('presentationTemplates.continueLearning')}
+                    className={workspaceStyles.iconButton}
+                    disabled={!guidance.trim() || Boolean(pending)}
+                    icon={<Icon aria-hidden icon={ArrowRight} size={20} />}
+                    loading={pending?.startsWith('clarify:')}
+                    type="text"
+                    onClick={() => void continueLearning(guidance)}
+                  />
+                </Flexbox>
+              </section>
+            )}
+
             {error && (
               <p className={styles.error} role="alert">
                 {error}
@@ -460,6 +609,26 @@ const TemplateLibraryButton = memo<TemplateLibraryButtonProps>(
                         />
                       </Tooltip>
                     )}
+                    <Popconfirm
+                      cancelText={t('presentationTemplates.deleteCancel')}
+                      description={t('presentationTemplates.deleteDescription')}
+                      okButtonProps={{ danger: true }}
+                      okText={t('presentationTemplates.deleteConfirm')}
+                      title={t('presentationTemplates.deleteTitle', { name: template.name })}
+                      onConfirm={() => removeTemplate(template)}
+                    >
+                      <Tooltip title={t('presentationTemplates.delete')}>
+                        <Button
+                          disabled={Boolean(pending)}
+                          icon={<Icon aria-hidden icon={Trash2} size={19} />}
+                          loading={pending === `delete:${template.templateId}`}
+                          type="text"
+                          aria-label={t('presentationTemplates.deleteNamed', {
+                            name: template.name,
+                          })}
+                        />
+                      </Tooltip>
+                    </Popconfirm>
                   </Flexbox>
                 ))
               )}

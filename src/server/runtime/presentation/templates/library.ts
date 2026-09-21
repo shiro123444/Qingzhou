@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, readdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import nodePath from 'node:path';
 
 import type { RuntimeScope } from '../../../../../packages/runtime-contracts/src';
 import { extractPlanTemplate } from './extract';
@@ -14,7 +14,7 @@ import type {
   TemplateSummary,
 } from './types';
 import { PresentationTemplateError } from './types';
-import type { TemplateVisualProfile } from './visual-types';
+import { normalizeTemplateVisualProfile, type TemplateVisualProfile } from './visual-types';
 
 const hash = (value: string | Uint8Array): string =>
   createHash('sha256').update(value).digest('hex');
@@ -31,12 +31,16 @@ export class FilePresentationTemplateLibrary {
   private directory(scope: RuntimeScope): string {
     if (!scope.userId?.trim() || !scope.sessionId?.trim())
       throw new PresentationTemplateError('Authenticated template scope is required');
-    return join(this.root, hash(JSON.stringify([scope.userId, scope.sessionId])), 'templates');
+    return nodePath.join(
+      this.root,
+      hash(JSON.stringify([scope.userId, scope.sessionId])),
+      'templates',
+    );
   }
 
   private versionDirectory(scope: RuntimeScope, templateId: string): string {
     if (!templateId?.trim()) throw new PresentationTemplateError('A template id is required');
-    return join(this.directory(scope), hash(templateId));
+    return nodePath.join(this.directory(scope), hash(templateId));
   }
 
   private async write(path: string, value: string | Uint8Array): Promise<void> {
@@ -59,8 +63,8 @@ export class FilePresentationTemplateLibrary {
     const directory = this.versionDirectory(scope, profile.templateId);
     await mkdir(directory, { mode: 0o700, recursive: true });
     const basename = hash(profile.versionId);
-    if (source) await this.write(join(directory, `${basename}.pptx`), source);
-    await this.write(join(directory, `${basename}.json`), JSON.stringify(profile));
+    if (source) await this.write(nodePath.join(directory, `${basename}.pptx`), source);
+    await this.write(nodePath.join(directory, `${basename}.json`), JSON.stringify(profile));
     return profile;
   }
 
@@ -118,7 +122,7 @@ export class FilePresentationTemplateLibrary {
     try {
       if (versionId) {
         const profile = JSON.parse(
-          await readFile(join(directory, `${hash(versionId)}.json`), 'utf8'),
+          await readFile(nodePath.join(directory, `${hash(versionId)}.json`), 'utf8'),
         ) as TemplateProfile;
         return profile.templateId === templateId && profile.versionId === versionId
           ? profile
@@ -130,7 +134,7 @@ export class FilePresentationTemplateLibrary {
           .filter((name) => name.endsWith('.json'))
           .map(
             async (name) =>
-              JSON.parse(await readFile(join(directory, name), 'utf8')) as TemplateProfile,
+              JSON.parse(await readFile(nodePath.join(directory, name), 'utf8')) as TemplateProfile,
           ),
       );
       return (
@@ -159,18 +163,23 @@ export class FilePresentationTemplateLibrary {
     const summaries = await Promise.all(
       directories.map(async (name): Promise<TemplateSummary | null> => {
         if (!/^[a-f\d]{64}$/u.test(name)) return null;
-        const versionFile = (await readdir(join(directory, name))).find((file) =>
+        const versionFile = (await readdir(nodePath.join(directory, name))).find((file) =>
           file.endsWith('.json'),
         );
         const first = versionFile;
         if (!first) return null;
         const profile = JSON.parse(
-          await readFile(join(directory, name, first), 'utf8'),
+          await readFile(nodePath.join(directory, name, first), 'utf8'),
         ) as TemplateProfile;
         const latest = await this.get(scope, profile.templateId);
         if (!latest) return null;
-        const { layouts, designSpec: _designSpec, ...summary } = latest;
-        return { ...summary, layoutCount: layouts.length };
+        const { layouts, designSpec: _designSpec, media, ...summary } = latest;
+        return {
+          ...summary,
+          layoutCount: layouts.length,
+          mediaCount: media?.length ?? 0,
+          videoCount: media?.filter((item) => item.kind === 'video').length ?? 0,
+        };
       }),
     );
     return summaries
@@ -178,12 +187,26 @@ export class FilePresentationTemplateLibrary {
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
+  async remove(scope: RuntimeScope, templateId: string): Promise<void> {
+    const profile = await this.get(scope, templateId);
+    if (!profile) throw new PresentationTemplateError('Template does not exist in this scope');
+    await rm(this.versionDirectory(scope, templateId), { force: true, recursive: true });
+  }
+
   async resolve(scope: RuntimeScope, reference: TemplateReference): Promise<TemplateApplication> {
     const profile = await this.get(scope, reference.templateId, reference.versionId);
     if (!profile) throw new PresentationTemplateError('Template does not exist in this scope');
-    const { constraints, layouts, name, templateId, versionId } = profile;
+    const { constraints, layouts, media, name, templateId, versionId } = profile;
     const visual = await this.getVisual(scope, { templateId, versionId });
-    return { constraints, layouts, name, templateId, versionId, ...(visual ? { visual } : {}) };
+    return {
+      constraints,
+      layouts,
+      ...(media?.length ? { media } : {}),
+      name,
+      templateId,
+      versionId,
+      ...(visual ? { visual } : {}),
+    };
   }
 
   async getVisual(
@@ -195,17 +218,16 @@ export class FilePresentationTemplateLibrary {
     try {
       const value = JSON.parse(
         await readFile(
-          join(
+          nodePath.join(
             this.versionDirectory(scope, profile.templateId),
             `${hash(profile.versionId)}.visual`,
           ),
           'utf8',
         ),
-      ) as TemplateVisualProfile;
-      return value.schemaVersion === 1 &&
-        value.versionId === profile.versionId &&
-        value.templateId === profile.templateId
-        ? value
+      );
+      const visual = normalizeTemplateVisualProfile(value);
+      return visual.versionId === profile.versionId && visual.templateId === profile.templateId
+        ? visual
         : null;
     } catch (error) {
       if (missing(error)) return null;
@@ -217,7 +239,10 @@ export class FilePresentationTemplateLibrary {
     const profile = await this.get(scope, visual.templateId, visual.versionId);
     if (!profile) throw new PresentationTemplateError('Owned template does not exist');
     await this.write(
-      join(this.versionDirectory(scope, profile.templateId), `${hash(profile.versionId)}.visual`),
+      nodePath.join(
+        this.versionDirectory(scope, profile.templateId),
+        `${hash(profile.versionId)}.visual`,
+      ),
       JSON.stringify(visual),
     );
   }
@@ -231,7 +256,10 @@ export class FilePresentationTemplateLibrary {
     try {
       return new Uint8Array(
         await readFile(
-          join(this.versionDirectory(scope, profile.templateId), `${hash(profile.versionId)}.pptx`),
+          nodePath.join(
+            this.versionDirectory(scope, profile.templateId),
+            `${hash(profile.versionId)}.pptx`,
+          ),
         ),
       );
     } catch (error) {
@@ -277,6 +305,7 @@ export const templatePlannerInstructions = (application: TemplateApplication): s
     ...(application.visual
       ? [
           'The vision-derived visual families and component evidence below take priority over approximate XML layouts. Preserve the relevant family, including texture and artwork. Never substitute generic boxes for learned raster artwork. Baked source text must not be copied. Use the approved asset refs and reserve appropriate whitespace.',
+          'Embedded-media summaries and sampled frame refs are visual evidence. They may guide a static poster or replacement asset, but SVG generation must not claim that dynamic playback was preserved. Use native PPTX editing when original video playback is required.',
         ]
       : []),
     'Select a suitable layout for each page and honor its normalized positions, image slots, palette, font hierarchy, margins and text capacity. Preserve the user’s content and instruction priority. Replace reference text with the current content. Do not blindly copy reference images or invent data.',

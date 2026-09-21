@@ -117,6 +117,37 @@ describe('PresentationStudioStore', () => {
     expect(store.getState().jobs['job-a'].state).toBe('cancelled');
   });
 
+  it('deletes a work and clears only its local projections after the server confirms', async () => {
+    const deletePresentationJob = vi.fn().mockResolvedValue(undefined);
+    const client = makeClient({ deletePresentationJob });
+    const store = createPresentationStudioStore(client);
+    store.setState({
+      artifacts: {
+        'art-a': readyArtifact({ artifactId: 'art-a', metadata: { jobId: 'job-a' } }),
+        'art-b': readyArtifact({ artifactId: 'art-b', metadata: { jobId: 'job-b' } }),
+      },
+      jobOrder: ['job-a', 'job-b'],
+      jobs: {
+        'job-a': queuedJob({ artifactIds: ['art-a'], jobId: 'job-a' }),
+        'job-b': queuedJob({ artifactIds: ['art-b'], jobId: 'job-b' }),
+      },
+      jobTitles: { 'job-a': 'A', 'job-b': 'B' },
+      selectedArtifactId: 'art-a',
+      selectedJobId: 'job-a',
+    });
+    window.sessionStorage.setItem('presentation_studio_active_job_id', 'job-a');
+
+    await expect(store.getState().deleteJob('job-a')).resolves.toBe(true);
+
+    expect(deletePresentationJob).toHaveBeenCalledWith('job-a');
+    expect(store.getState().jobOrder).toEqual(['job-b']);
+    expect(store.getState().jobs['job-a']).toBeUndefined();
+    expect(store.getState().artifacts['art-a']).toBeUndefined();
+    expect(store.getState().artifacts['art-b']).toBeDefined();
+    expect(store.getState().selectedJobId).toBeNull();
+    expect(window.sessionStorage.getItem('presentation_studio_active_job_id')).toBeNull();
+  });
+
   it('retryJob returns the job to queued and clears the previous error', async () => {
     const client = makeClient({
       retryPresentationJob: vi.fn(async () => queuedJob({ state: 'queued' })),

@@ -7,5 +7,5 @@ export const DEFAULT_SUPERVISOR_AVATAR = '🎙️';
 export const DEFAULT_SUPERVISOR_ID = 'supervisor';
 export const DEFAULT_BACKGROUND_COLOR = undefined;
 export const DEFAULT_AGENT_META: MetaData = {};
-export const DEFAULT_INBOX_AVATAR = BRANDING_LOGO_URL || '/brand/qingzhou-mark.svg';
+export const DEFAULT_INBOX_AVATAR = '/brand/jumi/jumi-white-puppy.png';
 export const DEFAULT_USER_AVATAR_URL = BRANDING_LOGO_URL || '/brand/qingzhou-mark.svg';

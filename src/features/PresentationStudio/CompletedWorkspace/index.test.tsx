@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import type {
@@ -107,7 +107,6 @@ describe('CompletedWorkspace', () => {
           ...mockSlides,
           { ...mockSlides[0], artifactId: 'deck-pptx', type: 'pptx' },
         ]}
-        onAiModify={vi.fn()}
         onExport={onExport}
         onRetryJob={vi.fn()}
         onSelectArtifact={onSelectArtifact}
@@ -160,7 +159,6 @@ describe('CompletedWorkspace', () => {
           ...mockSlides,
           { ...mockSlides[0], artifactId: 'deck-pptx', type: 'pptx' },
         ]}
-        onAiModify={vi.fn()}
         onExport={vi.fn()}
         onRetryJob={vi.fn()}
         onSelectArtifact={onSelectArtifact}
@@ -201,7 +199,6 @@ describe('CompletedWorkspace', () => {
           ...mockSlides,
           { ...mockSlides[0], artifactId: 'deck-pptx', type: 'pptx' },
         ]}
-        onAiModify={vi.fn()}
         onExport={vi.fn()}
         onRetryJob={vi.fn()}
         onSelectArtifact={vi.fn()}
@@ -255,7 +252,6 @@ describe('CompletedWorkspace', () => {
           ...mockSlides,
           { ...mockSlides[0], artifactId: 'deck-pptx', type: 'pptx' },
         ]}
-        onAiModify={vi.fn()}
         onExport={onExport}
         onRetryJob={vi.fn()}
         onSelectArtifact={vi.fn()}
@@ -285,7 +281,6 @@ describe('CompletedWorkspace', () => {
           ...mockSlides,
           { ...mockSlides[0], artifactId: 'deck-pptx', type: 'pptx' },
         ]}
-        onAiModify={vi.fn()}
         onExport={vi.fn()}
         onRetryJob={vi.fn()}
         onSelectArtifact={vi.fn()}
@@ -302,5 +297,257 @@ describe('CompletedWorkspace', () => {
     expect(screen.getByTestId('slide-navigator')).toHaveAttribute('data-compact', 'true');
     expect(screen.getByTestId('slide-navigator-item-slide-1')).toHaveTextContent('01');
     expect(screen.getByTestId('slide-navigator-item-slide-1')).not.toHaveTextContent('ready');
+  });
+
+  it('opens a single in-flow composer from the header and the stage command bar', async () => {
+    const onSend = vi.fn(async () => true);
+
+    render(
+      <CompletedWorkspace
+        canExport={true}
+        dismissSlotError={vi.fn()}
+        effectiveSelectedArtifactId="slide-1"
+        exported={null}
+        exporting={false}
+        jobTitles={{ 'job-done': 'AI 演示文稿' }}
+        retryPendingKeys={{}}
+        retrySlot={vi.fn()}
+        selectedJob={{ ...mockJob, versionId: 'v1' }}
+        selectedJobSlots={mockSlots}
+        selectedSlide={mockSlides[0]}
+        slideArtifacts={mockSlides}
+        selectedJobArtifacts={[
+          ...mockSlides,
+          { ...mockSlides[0], artifactId: 'deck-pptx', type: 'pptx' },
+        ]}
+        onCancel={vi.fn(async () => undefined)}
+        onExport={vi.fn()}
+        onRetryJob={vi.fn()}
+        onSelectArtifact={vi.fn()}
+        onSendMessage={onSend}
+      />,
+    );
+
+    expect(screen.getByTestId('slide-command-bar')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '标注修改' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '上一页' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '下一页' })).toBeEnabled();
+    expect(screen.queryByTestId('presentation-conversation')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Continue prompting AI' }));
+    expect(screen.getByTestId('presentation-conversation')).toHaveAttribute('data-open', 'true');
+    expect(screen.getAllByTestId('presentation-conversation-input')).toHaveLength(1);
+
+    fireEvent.click(screen.getByTestId('presentation-conversation-trigger'));
+    expect(screen.queryByTestId('presentation-conversation')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('presentation-conversation-input')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('presentation-conversation-trigger'));
+    expect(screen.getByTestId('presentation-conversation')).toHaveAttribute('data-open', 'true');
+    expect(screen.getAllByTestId('presentation-conversation-input')).toHaveLength(1);
+
+    fireEvent.change(screen.getByTestId('presentation-conversation-input'), {
+      target: { value: '把第二页配色改成科技蓝' },
+    });
+    fireEvent.click(screen.getByTestId('presentation-conversation-send'));
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledWith(
+        'job-done',
+        expect.objectContaining({ content: '把第二页配色改成科技蓝' }),
+      );
+    });
+
+    fireEvent.click(screen.getByTestId('presentation-conversation-collapse'));
+    expect(screen.queryByTestId('presentation-conversation')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Continue prompting AI' }));
+    fireEvent.change(screen.getByTestId('presentation-conversation-input'), {
+      target: { value: '再改一次标题' },
+    });
+    fireEvent.click(screen.getByTestId('presentation-conversation-send'));
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledWith(
+        'job-done',
+        expect.objectContaining({ content: '再改一次标题' }),
+      );
+    });
+  });
+
+  it('frosts retained slides with a live paint overlay while regeneration is running', () => {
+    render(
+      <CompletedWorkspace
+        activity="第 1 页 · 第 1 张素材 · 正在处理素材的透明背景"
+        canExport={true}
+        dismissSlotError={vi.fn()}
+        effectiveSelectedArtifactId="slide-1"
+        exported={null}
+        exporting={false}
+        jobTitles={{ 'job-done': 'AI 演示文稿' }}
+        resolveArtifactUri={() => 'https://example.com/asset.png'}
+        retryPendingKeys={{}}
+        retrySlot={vi.fn()}
+        selectedJob={{ ...mockJob, state: 'running' }}
+        selectedJobSlots={[{ ...mockSlots[0], status: 'generating', artifactIds: ['art-chart-1'] }]}
+        selectedSlide={mockSlides[0]}
+        slideArtifacts={mockSlides}
+        activityHistory={[
+          { id: 'draw', text: '第 1 页 · 第 1 张素材 · 绘画已完成' },
+          { id: 'cutout', text: '第 1 页 · 第 1 张素材 · 正在处理素材的透明背景' },
+        ]}
+        selectedJobArtifacts={[
+          ...mockSlides,
+          { ...mockSlides[0], artifactId: 'deck-pptx', type: 'pptx' },
+        ]}
+        onExport={vi.fn()}
+        onRetryJob={vi.fn()}
+        onSelectArtifact={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId('slide-paint-overlay')).toBeInTheDocument();
+    expect(screen.getByTestId('slide-preview')).toHaveTextContent('正在绘制');
+    expect(screen.getByLabelText(/第 1 页/)).toHaveAttribute('data-painting', 'true');
+    expect(screen.getByTestId('presentation-completed-tag')).toHaveTextContent(
+      '第 1 页 · 第 1 张素材 · 正在处理素材的透明背景',
+    );
+
+    fireEvent.click(screen.getByTestId('presentation-completed-tag'));
+    expect(screen.getByTestId('presentation-activity-history')).toHaveTextContent(
+      '第 1 页 · 第 1 张素材 · 绘画已完成',
+    );
+    expect(screen.getByTestId('presentation-activity-history')).toHaveTextContent(
+      '第 1 页 · 第 1 张素材 · 正在处理素材的透明背景',
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '全景网格' }));
+    expect(screen.getAllByTestId('slide-paint-overlay')).toHaveLength(mockSlides.length);
+  });
+
+  it('keeps the unfinished edit masked after an asset failure and across page navigation', () => {
+    const interruptedJob: PresentationJob = {
+      ...mockJob,
+      error: { code: 'IMAGE_UNAVAILABLE', message: 'Image provider failed' },
+      messages: [
+        {
+          content: '继续优化整套页面',
+          createdAt: t0,
+          error: 'Image provider failed',
+          requestId: 'edit-1',
+          status: 'failed',
+          target: { type: 'deck' },
+        },
+      ],
+      state: 'failed',
+    };
+    const props = {
+      canExport: true,
+      dismissSlotError: vi.fn(),
+      effectiveSelectedArtifactId: 'slide-1',
+      exported: null,
+      exporting: false,
+      jobTitles: { 'job-done': 'AI 演示文稿' },
+      onExport: vi.fn(),
+      onRetryJob: vi.fn(),
+      onSelectArtifact: vi.fn(),
+      retryPendingKeys: {},
+      retrySlot: vi.fn(),
+      selectedJob: interruptedJob,
+      selectedJobArtifacts: mockSlides,
+      selectedJobSlots: [],
+      slideArtifacts: mockSlides,
+    };
+    const { rerender } = render(<CompletedWorkspace {...props} selectedSlide={mockSlides[0]} />);
+
+    expect(screen.getByTestId('slide-paint-overlay')).toHaveTextContent('已保留，等待续绘');
+    expect(within(screen.getByTestId('slide-paint-overlay')).queryByRole('img')).toBeNull();
+
+    rerender(
+      <CompletedWorkspace
+        {...props}
+        effectiveSelectedArtifactId="slide-2"
+        selectedSlide={mockSlides[1]}
+      />,
+    );
+    expect(screen.getByTestId('slide-paint-overlay')).toHaveTextContent('已保留，等待续绘');
+    expect(screen.getByTestId('slide-preview-image')).toHaveAttribute(
+      'src',
+      'data:image/svg+xml,mock-svg-2',
+    );
+  });
+
+  it('shows a complete Chinese status for IMAGE_PLAN_INVALID instead of truncated English', () => {
+    render(
+      <CompletedWorkspace
+        canExport={true}
+        dismissSlotError={vi.fn()}
+        effectiveSelectedArtifactId="slide-1"
+        exported={null}
+        exporting={false}
+        jobTitles={{ 'job-done': 'AI 演示文稿' }}
+        retryPendingKeys={{}}
+        retrySlot={vi.fn()}
+        selectedJobSlots={mockSlots}
+        selectedSlide={mockSlides[0]}
+        slideArtifacts={mockSlides}
+        selectedJob={{
+          ...mockJob,
+          error: {
+            code: 'IMAGE_PLAN_INVALID',
+            message: 'Asset intent analysis returned invalid JSON',
+          },
+          state: 'failed',
+        }}
+        selectedJobArtifacts={[
+          ...mockSlides,
+          { ...mockSlides[0], artifactId: 'deck-pptx', type: 'pptx' },
+        ]}
+        onExport={vi.fn()}
+        onRetryJob={vi.fn()}
+        onSelectArtifact={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByTestId('slide-paint-overlay')).not.toBeInTheDocument();
+    expect(screen.getByTestId('presentation-completed-tag')).toHaveTextContent(
+      '素材规划未完成，请再试一次',
+    );
+    expect(screen.getByTestId('presentation-completed-tag')).not.toHaveTextContent('invalid J');
+  });
+
+  it('shows a complete Chinese status for an empty planner response', () => {
+    render(
+      <CompletedWorkspace
+        canExport={true}
+        dismissSlotError={vi.fn()}
+        effectiveSelectedArtifactId="slide-1"
+        exported={null}
+        exporting={false}
+        jobTitles={{ 'job-done': 'AI 演示文稿' }}
+        retryPendingKeys={{}}
+        retrySlot={vi.fn()}
+        selectedJobSlots={mockSlots}
+        selectedSlide={mockSlides[0]}
+        slideArtifacts={mockSlides}
+        selectedJob={{
+          ...mockJob,
+          error: {
+            code: 'PRESENTATION_INTERNAL_ERROR',
+            message: 'Multimodal planner returned empty response',
+          },
+          state: 'failed',
+        }}
+        selectedJobArtifacts={[
+          ...mockSlides,
+          { ...mockSlides[0], artifactId: 'deck-pptx', type: 'pptx' },
+        ]}
+        onExport={vi.fn()}
+        onRetryJob={vi.fn()}
+        onSelectArtifact={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId('presentation-completed-tag')).toHaveTextContent(
+      '排版未完成，请再试一次',
+    );
+    expect(screen.getByTestId('presentation-completed-tag')).not.toHaveTextContent('empty respon');
   });
 });

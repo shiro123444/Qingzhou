@@ -1,6 +1,15 @@
 /** The wire protocol version shared by RuntimeFacade and its clients. */
 export const RUNTIME_PROTOCOL_VERSION = 'runtime.v1' as const;
 
+/** PPTX templates can legitimately carry high-resolution media and embedded video. */
+export const PRESENTATION_PPTX_MAX_UPLOAD_MIB = 100;
+export const PRESENTATION_PPTX_MAX_UPLOAD_BYTES = PRESENTATION_PPTX_MAX_UPLOAD_MIB * 1024 * 1024;
+
+/** Keep the broader attachment surface bounded independently from native PPTX imports. */
+export const PRESENTATION_ATTACHMENT_MAX_UPLOAD_MIB = 32;
+export const PRESENTATION_ATTACHMENT_MAX_UPLOAD_BYTES =
+  PRESENTATION_ATTACHMENT_MAX_UPLOAD_MIB * 1024 * 1024;
+
 export const PLUGIN_KINDS = ['kernel', 'capability', 'agent-strategy', 'ui'] as const;
 export type RuntimePluginKind = (typeof PLUGIN_KINDS)[number];
 

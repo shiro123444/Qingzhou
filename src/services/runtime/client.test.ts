@@ -442,6 +442,20 @@ describe('RuntimeClient', () => {
     );
   });
 
+  it('deletePresentationJob deletes the selected job endpoint', async () => {
+    const mockFetcher = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ deleted: true }), { status: 200 }));
+    const client = new RuntimeClientImpl({ fetcher: mockFetcher });
+
+    await client.deletePresentationJob('pres job/1');
+
+    expect(mockFetcher).toHaveBeenCalledWith(
+      '/api/runtime/presentation/jobs/pres%20job%2F1',
+      expect.objectContaining({ method: 'DELETE' }),
+    );
+  });
+
   it('cancelPresentationJob posts to /api/runtime/presentation/jobs/:id/cancel and returns job', async () => {
     const cancelledJob: PresentationJob = {
       createdAt: '2026-08-27T00:00:00Z',
@@ -603,7 +617,10 @@ describe('RuntimeClient', () => {
     const binaryData = new Uint8Array([1, 2, 3, 4]);
     const mockFetcher = vi.fn().mockResolvedValue(
       new Response(binaryData, {
-        headers: { 'Content-Type': 'application/vnd.openxmlformats-officedocument.presentationml.presentation' },
+        headers: {
+          'Content-Type':
+            'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        },
         status: 200,
       }),
     );

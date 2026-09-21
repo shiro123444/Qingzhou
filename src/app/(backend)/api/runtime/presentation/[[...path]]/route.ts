@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import nodePath from 'node:path';
 
 import { eq } from 'drizzle-orm';
 import { NextResponse } from 'next/server';
@@ -47,6 +47,7 @@ import type { ImageGenerationCapability } from '@/server/runtime/presentation/im
 import { createImageGenerationCapability } from '@/server/runtime/presentation/image-generation-capability';
 import { handleImageGenerationRequest } from '@/server/runtime/presentation/image-generation-handler';
 import { type PresentationJobEventJournalPort } from '@/server/runtime/presentation/job-event-journal';
+import { createResilientMultimodalChatPort } from '@/server/runtime/presentation/multimodal-chat-fallback';
 import type { PresentationPipelineContext } from '@/server/runtime/presentation/pipeline';
 import type { ProductionProviderReadiness } from '@/server/runtime/presentation/production-command';
 import { PRODUCTION_PRESENTATION_ENV_KEYS } from '@/server/runtime/presentation/production-config';
@@ -71,6 +72,7 @@ import {
   type PresentationJobEventSerializer,
 } from '@/server/runtime/presentation/sse';
 import { FilePresentationTemplateLibrary } from '@/server/runtime/presentation/templates';
+import { createOpenAICompatibleAudioTranscriber } from '@/server/runtime/presentation/templates/audio-transcription';
 import { PptMasterToolchain } from '@/server/runtime/presentation/toolchain';
 
 import type { RuntimeScope } from '../../../../../../../packages/runtime-contracts/src';
@@ -228,6 +230,7 @@ const generationStatusForCode = (code: string): number => {
   if (code === 'PRESENTATION_INVALID' || code === 'PRESENTATION_COMPOSITION_OPTIONS_INVALID') {
     return 400;
   }
+  if (code === 'PRESENTATION_TEMPLATE_INPUT_REQUIRED') return 409;
   if (code === 'NOT_FOUND') return 404;
   if (code === 'PRESENTATION_QUALITY_FAILED' || code === 'PPTX_INVALID') return 502;
   if (code === 'PRESENTATION_WORKER_CANCELLED') return 499;
@@ -286,7 +289,8 @@ const defaultGenerationScopeFactory: PresentationGenerationScopeFactory = async 
               .where(eq(authSessions.userId, sessionUserId))
           : [];
       await migratePresentationSessions(
-        process.env.CORDIS_PRESENTATION_DATA_DIR ?? join(process.cwd(), '.data', 'presentation'),
+        process.env.CORDIS_PRESENTATION_DATA_DIR ??
+          nodePath.join(process.cwd(), '.data', 'presentation'),
         sessionUserId,
         [sessionId, ...verified.map((row) => row.id)],
       );
@@ -378,16 +382,18 @@ const createDefaultGenerationContextFactory = (
   const runnerId = 'ppt-master-generation-toolchain';
   const runner = createProcessPresentationRunner({
     command: [pythonCommand],
+    declareArtifacts: (request) =>
+      request.operation === 'export' ? ['exports/presentation.pptx'] : [],
     id: runnerId,
     maxArtifacts: 64,
   });
-  const scriptsRoot = join(pptMasterRoot, 'skills', 'ppt-master', 'scripts');
+  const scriptsRoot = nodePath.join(pptMasterRoot, 'skills', 'ppt-master', 'scripts');
   const toolchain = new PptMasterToolchain({
     allowedRunnerIds: [runnerId],
-    convertScriptPath: join(scriptsRoot, 'svg_to_pptx.py'),
+    convertScriptPath: nodePath.join(scriptsRoot, 'svg_to_pptx.py'),
     providerCommand: [pythonCommand],
     pptMasterRoot,
-    qualityScriptPath: join(scriptsRoot, 'svg_quality_checker.py'),
+    qualityScriptPath: nodePath.join(scriptsRoot, 'svg_quality_checker.py'),
     runner,
     runnerId,
     timeoutMs: 120_000,
@@ -396,7 +402,7 @@ const createDefaultGenerationContextFactory = (
 
   return (jobId) => {
     const safeJobId = jobId.replaceAll(/[^\w-]/g, '_');
-    const workspacePath = join(tmpdir(), `lobehub-presentation-generation-${safeJobId}`);
+    const workspacePath = nodePath.join(tmpdir(), `lobehub-presentation-generation-${safeJobId}`);
     return {
       plannerContext: {},
       workerContext: {
@@ -407,8 +413,8 @@ const createDefaultGenerationContextFactory = (
           cleanup: () => rm(workspacePath, { force: true, recursive: true }),
           path: workspacePath,
           write: async (relativePath, content) => {
-            const target = join(workspacePath, relativePath);
-            await mkdir(dirname(target), { recursive: true });
+            const target = nodePath.join(workspacePath, relativePath);
+            await mkdir(nodePath.dirname(target), { recursive: true });
             await writeFile(target, content);
           },
         },
@@ -448,6 +454,7 @@ const defaultProductionGenerationComposition = (): PresentationRuntimeCompositio
   const chatEnv = {
     [PRODUCTION_CHAT_ENV_KEYS.apiKey]: chatApiKey,
     [PRODUCTION_CHAT_ENV_KEYS.baseUrl]: process.env[PRODUCTION_CHAT_ENV_KEYS.baseUrl],
+    [PRODUCTION_CHAT_ENV_KEYS.model]: process.env[PRODUCTION_CHAT_ENV_KEYS.model],
   } as const;
 
   const imgEnv = {
@@ -458,7 +465,8 @@ const defaultProductionGenerationComposition = (): PresentationRuntimeCompositio
 
   try {
     const dataRoot =
-      process.env.CORDIS_PRESENTATION_DATA_DIR ?? join(process.cwd(), '.data', 'presentation');
+      process.env.CORDIS_PRESENTATION_DATA_DIR ??
+      nodePath.join(process.cwd(), '.data', 'presentation');
     const artifactStore = new FilePresentationStorage(dataRoot);
     const assetStore = createPresentationArtifactAssetStoreBridge(artifactStore);
     const journalCache = new ScopedPresentationJobEventJournalCache({
@@ -466,11 +474,14 @@ const defaultProductionGenerationComposition = (): PresentationRuntimeCompositio
     });
     const journalBindings = createPresentationRouteJournalBindings(journalCache);
 
-    const multimodalChatPort = chatApiKey
+    const primaryMultimodalChatPort = chatApiKey
       ? createProductionMultimodalChatPort({
           env: chatEnv,
           fetcher: createPresentationChatFetch(globalThis.fetch),
         })
+      : undefined;
+    const multimodalChatPort = primaryMultimodalChatPort
+      ? createResilientMultimodalChatPort(primaryMultimodalChatPort)
       : undefined;
 
     const imageGenerationCapability = imageApiKey
@@ -507,9 +518,26 @@ const defaultProductionGenerationComposition = (): PresentationRuntimeCompositio
       process.env.CORDIS_PPT_PYTHON ?? 'python3',
     );
 
+    let audioTranscriber: ReturnType<typeof createOpenAICompatibleAudioTranscriber> | undefined;
+    const transcriptionApiKey = process.env.OPENAI_API_KEY?.trim();
+    const transcriptionBaseUrl = process.env.OPENAI_BASE_URL?.trim();
+    if (transcriptionApiKey && transcriptionBaseUrl) {
+      try {
+        audioTranscriber = createOpenAICompatibleAudioTranscriber({
+          apiKey: transcriptionApiKey,
+          baseUrl: transcriptionBaseUrl,
+          fetcher: globalThis.fetch,
+          model: process.env.PRESENTATION_AUDIO_TRANSCRIPTION_MODEL,
+        });
+      } catch {
+        // Optional STT must not make the presentation runtime unavailable.
+      }
+    }
+
     const result = createProductionPresentationGenerationComposition({
+      audioTranscriber,
       templateLibrary: new FilePresentationTemplateLibrary({
-        root: join(dataRoot, 'templates'),
+        root: nodePath.join(dataRoot, 'templates'),
       }),
       artifactStore,
       jobRepository: artifactStore,
@@ -522,7 +550,7 @@ const defaultProductionGenerationComposition = (): PresentationRuntimeCompositio
     });
 
     if (configuredDefaultReadiness === undefined) {
-      configuredDefaultReadiness = chatApiKey
+      configuredDefaultReadiness = multimodalChatPort
         ? result.readiness
         : {
             available: false,
@@ -1150,13 +1178,14 @@ const toConversationResponse = async (
       request.headers.get('accept')?.includes('application/x-ndjson')
     ) {
       return conversationStream(
-        (onActivity, signal) =>
+        (onActivity, signal, onCheckpoint) =>
           capability.execute(body as never, {
             scope: resolvedScope,
             tools: contextRuntime,
             capabilities: composition?.atomicRuntime,
             signal,
             onActivity,
+            onCheckpoint,
           }),
         async () => {
           await contextRuntime?.dispose();
@@ -1315,3 +1344,4 @@ const handler = createPresentationRouteHandler();
 
 export const GET = handler;
 export const POST = handler;
+export const DELETE = handler;

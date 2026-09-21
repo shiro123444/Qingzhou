@@ -42,9 +42,9 @@ const getLocalIPs = () => {
 const nextConfig = defineConfig({
   ...(isVercel ? vercelConfig : {}),
   experimental: {
-    // PPT uploads allow 32 MiB files; preserve the full multipart body through
-    // Next's proxy (its 10 MiB default otherwise truncates valid uploads).
-    proxyClientMaxBodySize: '40mb',
+    // PPTX templates allow 100 MiB files. Leave bounded multipart overhead so
+    // Next's proxy does not truncate an otherwise valid upload.
+    proxyClientMaxBodySize: '110mb',
   },
 });
 

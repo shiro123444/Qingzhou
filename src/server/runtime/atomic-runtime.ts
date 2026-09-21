@@ -16,6 +16,8 @@ export interface AtomicInvocation {
   readonly signal?: AbortSignal;
 }
 export interface AtomicOperationEvent {
+  /** Trusted, prompt-free subject supplied by the executing capability. */
+  detail?: string;
   errorCode?: string;
   jobId?: string;
   name: string;

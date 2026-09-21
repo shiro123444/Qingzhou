@@ -94,10 +94,10 @@ describe('server-owned visual references', () => {
     ).toThrow('bounded');
     expect(() =>
       createTrustedChatImages(
-        Array.from({ length: 5 }, () => ({ base64, mimeType: 'image/png' as const })),
+        Array.from({ length: 7 }, () => ({ base64, mimeType: 'image/png' as const })),
         defaultScope,
       ),
-    ).toThrow('four images');
+    ).toThrow('six images');
     expect(() =>
       createTrustedChatImages(
         [{ base64: 'A'.repeat(Math.ceil((8 * 1024 * 1024) / 3) * 4 + 4), mimeType: 'image/png' }],
@@ -175,6 +175,7 @@ describe('GLMMultimodalChatAdapter (C-106)', () => {
     const body = JSON.parse(capturedInit?.body as string);
     expect(body.model).toBe('glm-5.3-flash');
     expect(body.temperature).toBe(0.7);
+    expect(body.thinking).toEqual({ type: 'enabled' });
     expect(body.messages).toEqual([
       { content: 'You are a helpful assistant', role: 'system' },
       { content: 'Hello GLM', role: 'user' },
@@ -183,6 +184,38 @@ describe('GLMMultimodalChatAdapter (C-106)', () => {
     expect(result.id).toBe('chatcmpl-test-123');
     expect(result.choices[0].message.content).toBe('Hello! I am GLM-5.3-Flash.');
     expect(result.usage?.total_tokens).toBe(25);
+  });
+
+  it('preserves empty content and reasoning_content for thinking models', async () => {
+    const fetcher: GLMChatFetcher = vi.fn(async () =>
+      response({
+        choices: [
+          {
+            finish_reason: 'stop',
+            index: 0,
+            message: {
+              content: '',
+              reasoning_content: 'I will return JSON next.',
+              role: 'assistant',
+            },
+          },
+        ],
+        id: 'chatcmpl-reasoning',
+      }),
+    );
+    const port = createGLMMultimodalChatPort(defaultOptions(fetcher));
+    await expect(
+      port.chat({ messages: [{ content: 'plan', role: 'user' }] }, { scope: defaultScope }),
+    ).resolves.toMatchObject({
+      choices: [
+        {
+          message: {
+            content: '',
+            reasoning_content: 'I will return JSON next.',
+          },
+        },
+      ],
+    });
   });
 
   it('supports multimodal vision content with safe remote image URLs', async () => {
@@ -275,6 +308,66 @@ describe('GLMMultimodalChatAdapter (C-106)', () => {
   });
 
   describe('Scope isolation, idempotency, timeout and cancellation', () => {
+    it('does not reuse an earlier inference when the request changes under the same key', async () => {
+      const fetcher = vi.fn<GLMChatFetcher>(async () =>
+        response({ choices: [{ message: { content: 'outline', role: 'assistant' } }] }),
+      );
+      const port = createGLMMultimodalChatPort(defaultOptions(fetcher));
+      const context = { idempotencyKey: 'outline', scope: defaultScope };
+      await port.chat({ messages: [{ content: 'First topic', role: 'user' }] }, context);
+      await port.chat({ messages: [{ content: 'Revised topic', role: 'user' }] }, context);
+      expect(fetcher).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not cache empty responses and block a later successful retry', async () => {
+      const fetcher = vi
+        .fn<GLMChatFetcher>()
+        .mockResolvedValueOnce(
+          response({ choices: [{ message: { content: '', role: 'assistant' } }] }),
+        )
+        .mockResolvedValueOnce(
+          response({ choices: [{ message: { content: 'Recovered', role: 'assistant' } }] }),
+        );
+      const port = createGLMMultimodalChatPort(defaultOptions(fetcher));
+      const context = { idempotencyKey: 'retry', scope: defaultScope };
+      const request: GLMChatRequest = { messages: [{ content: 'Continue', role: 'user' }] };
+      await port.chat(request, context);
+      await expect(port.chat(request, context)).resolves.toMatchObject({
+        choices: [{ message: { content: 'Recovered' } }],
+      });
+      expect(fetcher).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps transport diagnostics in cause while returning a safe recoverable message', async () => {
+      const failure = new TypeError('fetch failed: sensitive upstream diagnostics');
+      const fetcher = vi.fn<GLMChatFetcher>().mockRejectedValue(failure);
+      const port = createGLMMultimodalChatPort(defaultOptions(fetcher));
+      const error = await port
+        .chat({ messages: [{ content: 'Continue', role: 'user' }] }, { scope: defaultScope })
+        .catch((error: unknown) => error);
+      expect(error).toMatchObject({ code: 'CHAT_UNAVAILABLE', cause: failure });
+      expect((error as Error).message).not.toContain('sensitive');
+    });
+
+    it('preserves user cancellation while reading the response body', async () => {
+      const controller = new AbortController();
+      const fetcher = vi.fn<GLMChatFetcher>(async () => ({
+        ok: true,
+        status: 200,
+        text: async () => {
+          controller.abort();
+          throw new TypeError('body interrupted');
+        },
+      }));
+      const port = createGLMMultimodalChatPort(defaultOptions(fetcher));
+      await expect(
+        port.chat(
+          { messages: [{ content: 'Continue', role: 'user' }] },
+          { scope: defaultScope, signal: controller.signal },
+        ),
+      ).rejects.toMatchObject({ code: 'CHAT_CANCELLED' });
+    });
+
     it('requires valid scope with userId and sessionId', async () => {
       const fetcher = vi.fn<GLMChatFetcher>();
       const port = createGLMMultimodalChatPort(defaultOptions(fetcher));
@@ -338,6 +431,28 @@ describe('GLMMultimodalChatAdapter (C-106)', () => {
       expect(err.code).toBe('CHAT_CANCELLED');
     });
 
+    it('enforces timeoutMs and maps a timed out request to CHAT_UNAVAILABLE', async () => {
+      const fetcher = vi.fn<GLMChatFetcher>(
+        async (_endpoint, init) =>
+          new Promise((_, reject) => {
+            init.signal?.addEventListener(
+              'abort',
+              () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })),
+              { once: true },
+            );
+          }),
+      );
+      const port = createGLMMultimodalChatPort(defaultOptions(fetcher));
+
+      await expect(
+        port.chat(
+          { messages: [{ content: 'Hi', role: 'user' }] },
+          { scope: defaultScope, timeoutMs: 5 },
+        ),
+      ).rejects.toMatchObject({ code: 'CHAT_UNAVAILABLE' });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    });
+
     it('maps 401/403 to CHAT_PROVIDER_REJECTED without leaking API key', async () => {
       const fetcher = vi.fn<GLMChatFetcher>(async () =>
         response({ error: { message: 'Invalid API key secret-test-token-12345' } }, 401, false),
@@ -363,6 +478,28 @@ describe('GLMMultimodalChatAdapter (C-106)', () => {
 
       expect(err).toBeInstanceOf(GLMChatProviderError);
       expect(err.code).toBe('CHAT_UNAVAILABLE');
+    });
+
+    it('accepts a gateway SSE envelope for a successful non-stream request', async () => {
+      const fetcher = vi.fn<GLMChatFetcher>(async () =>
+        response(
+          `data: ${JSON.stringify({ choices: [{ message: { content: 'recovered' } }] })}\n\ndata: [DONE]\n`,
+        ),
+      );
+      const port = createGLMMultimodalChatPort(defaultOptions(fetcher));
+
+      await expect(
+        port.chat({ messages: [{ content: 'Hi', role: 'user' }] }, { scope: defaultScope }),
+      ).resolves.toMatchObject({ choices: [{ message: { content: 'recovered' } }] });
+    });
+
+    it('classifies an empty successful provider body as a recoverable payload failure', async () => {
+      const fetcher = vi.fn<GLMChatFetcher>(async () => response(''));
+      const port = createGLMMultimodalChatPort(defaultOptions(fetcher));
+
+      await expect(
+        port.chat({ messages: [{ content: 'Hi', role: 'user' }] }, { scope: defaultScope }),
+      ).rejects.toMatchObject({ code: 'CHAT_PAYLOAD_INVALID' });
     });
   });
 });

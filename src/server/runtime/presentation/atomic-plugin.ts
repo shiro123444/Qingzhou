@@ -22,8 +22,13 @@ import type { ImageGenerationCapability } from './image-generation-capability';
 import type { GLMMultimodalChatPort } from './multimodal-chat-provider-glm';
 import { validatePresentationPlan } from './planner';
 import type { PresentationRevisionAssetPlanner } from './revision-assets';
-import type { FilePresentationTemplateLibrary } from './templates';
+import type { FilePresentationTemplateLibrary, TemplateApplication } from './templates';
 import { nativeTemplateOperations } from './templates/native-operations';
+import { type PresentationVisualCritic, presentationVisualReviewSchema } from './visual-critic';
+import {
+  type PresentationVisualStoryboardPlanner,
+  presentationVisualStoryboardSchema,
+} from './visual-storyboard';
 import type {
   InMemoryPresentationPlanWorker,
   PresentationWorkerContext,
@@ -75,6 +80,8 @@ export const createPresentationAtomicRuntime = (options: {
   chatPort?: GLMMultimodalChatPort;
   templateLibrary?: FilePresentationTemplateLibrary;
   revisionAssetPlanner?: PresentationRevisionAssetPlanner;
+  visualStoryboardPlanner?: PresentationVisualStoryboardPlanner;
+  visualCritic?: PresentationVisualCritic;
   worker: Pick<InMemoryPresentationPlanWorker, 'run'>;
   artifactStore: PresentationArtifactStore;
   imageGenerationCapability?: ImageGenerationCapability;
@@ -384,10 +391,67 @@ export const createPresentationAtomicRuntime = (options: {
             execute: (input: any, ctx: AtomicInvocation) =>
               options.revisionAssetPlanner!.prepare({
                 ...input,
+                onEvent: ctx.onEvent,
                 scope: ctx.scope,
                 jobId: ctx.jobId!,
                 signal: ctx.signal,
               }),
+          },
+        ]
+      : []),
+    ...(options.visualStoryboardPlanner
+      ? [
+          {
+            name: 'presentation.template.mapDeck',
+            description:
+              'Translate a learned visual template into a deck-level storyboard that assigns semantic page roles, visual families, composition archetypes, reusable components and asset modes before slide composition.',
+            input: z
+              .object({
+                jobInput: inputSchema,
+                template: z
+                  .object({
+                    name: z.string().min(1),
+                    templateId: z.string().min(1),
+                    versionId: z.string().min(1),
+                  })
+                  .passthrough(),
+              })
+              .strict(),
+            output: presentationVisualStoryboardSchema,
+            execute: (
+              input: { jobInput: z.infer<typeof inputSchema>; template: TemplateApplication },
+              ctx: AtomicInvocation,
+            ) =>
+              options.visualStoryboardPlanner!.plan(input, {
+                scope: ctx.scope,
+                signal: ctx.signal,
+              }),
+          },
+        ]
+      : []),
+    ...(options.visualCritic
+      ? [
+          {
+            name: 'presentation.template.reviewDeck',
+            description:
+              'Compare rendered slides with the learned template pixels and design program, returning bounded evidence-based visual corrections.',
+            input: z
+              .object({
+                plan: presentationPlanSchema,
+                template: z
+                  .object({
+                    name: z.string().min(1),
+                    templateId: z.string().min(1),
+                    versionId: z.string().min(1),
+                  })
+                  .passthrough(),
+              })
+              .strict(),
+            output: presentationVisualReviewSchema,
+            execute: (
+              input: { plan: PresentationPlan; template: TemplateApplication },
+              ctx: AtomicInvocation,
+            ) => options.visualCritic!.review(input, { scope: ctx.scope, signal: ctx.signal }),
           },
         ]
       : []),
@@ -406,6 +470,7 @@ export const createPresentationAtomicRuntime = (options: {
           'presentation.template.resolve',
           'presentation.template.inspectNative',
           'presentation.template.extractAssets',
+          'presentation.template.extractMedia',
         ].includes(operation.name)
           ? { ...operation, agent: { contexts: ['presentation.intake'], maxCalls: 4 } }
           : operation,

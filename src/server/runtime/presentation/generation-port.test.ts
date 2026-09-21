@@ -2,6 +2,7 @@ import { InMemoryPresentationArtifactStore } from './artifact-store';
 import type { PresentationGenerationCapability } from './generation-capability';
 import { PresentationGenerationPort } from './generation-port';
 import type { ImageGenerationCapability } from './image-generation-capability';
+import { presentationStoryboardInputFingerprint } from './visual-storyboard';
 
 const scope = { request: new Request('https://example.test'), userId: 'u1', sessionId: 's1' };
 const input = { notebookId: 'n1', title: '演示', sourceVersionIds: ['v1'] };
@@ -82,6 +83,50 @@ describe('PresentationGenerationPort', () => {
     await expect(
       port.createJob({ notebookId: 'studio', sourceVersionIds: [], title: '仅提示词演示' }),
     ).resolves.toMatchObject({ jobId: 'job-prompt-only', state: 'queued' });
+  });
+
+  it('aborts and permanently removes a job together with its owned artifacts', async () => {
+    const store = new InMemoryPresentationArtifactStore();
+    const removeJob = vi.fn().mockResolvedValue(undefined);
+    const port = new PresentationGenerationPort(
+      {
+        artifactStore: store,
+        capability: {
+          execute: vi.fn(async () => ({ artifacts: [] })),
+        } as unknown as PresentationGenerationCapability,
+        contextFactory: () => ({
+          plannerContext: {},
+          workerContext: {
+            convert: vi.fn(),
+            jobId: 'ignored',
+            qualityCheck: vi.fn(),
+            workspace: { path: '/tmp', write: vi.fn() },
+          },
+        }),
+        idFactory: () => 'job-delete',
+        repository: {
+          getJob: vi.fn(async () => null),
+          removeJob,
+          saveJob: vi.fn(async () => undefined),
+        },
+      },
+      scope,
+    );
+    await port.createJob(input);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await store.put(scope, {
+      artifactId: 'artifact-delete',
+      metadata: { jobId: 'job-delete' },
+      mimeType: 'image/svg+xml',
+      name: 'slide.svg',
+      type: 'svg',
+    });
+
+    await port.deleteJob('job-delete');
+
+    expect(removeJob).toHaveBeenCalledWith(scope, 'job-delete');
+    await expect(store.get(scope, 'artifact-delete')).resolves.toBeNull();
+    await expect(port.getJob('job-delete')).resolves.toBeNull();
   });
 
   it('runs requested image slots before planning so assets can be referenced by the planner', async () => {
@@ -305,6 +350,79 @@ describe('PresentationGenerationPort', () => {
     const completedRetriedJob = await port.getJob('job-1');
     expect(completedRetriedJob?.state).toBe('completed');
     expect(completedRetriedJob?.artifactIds).toEqual(['art-success']);
+  });
+
+  it('resumes only the latest unfinished edit instead of replaying a stale backlog', async () => {
+    let calls = 0;
+    const capability = {
+      execute: vi.fn(async () => {
+        calls += 1;
+        if (calls === 1) throw new Error('Initial failure');
+        return new Promise(() => undefined);
+      }),
+    } as unknown as PresentationGenerationCapability;
+    const port = new PresentationGenerationPort(
+      {
+        artifactStore: new InMemoryPresentationArtifactStore(),
+        capability,
+        contextFactory: () => ({
+          plannerContext: {},
+          workerContext: {
+            convert: vi.fn(),
+            jobId: 'x',
+            qualityCheck: vi.fn(),
+            workspace: { path: '/tmp', write: vi.fn() },
+          },
+        }),
+        idFactory: () => 'job-latest-only',
+      },
+      scope,
+    );
+    await port.createJob(input);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const internal = port as unknown as {
+      jobs: Map<string, { job: { messages: any[] } }>;
+    };
+    const entry = internal.jobs.get('job-latest-only')!;
+    entry.job.messages = [
+      {
+        content: 'older failed template edit',
+        createdAt: '2026-01-01T00:00:01.000Z',
+        error: 'old error',
+        requestId: 'old',
+        status: 'failed',
+        target: { type: 'deck' },
+      },
+      {
+        content: 'stale queued template edit',
+        createdAt: '2026-01-01T00:00:02.000Z',
+        requestId: 'stale-queued',
+        status: 'queued',
+        target: { type: 'deck' },
+      },
+      {
+        content: 'latest queued template edit',
+        createdAt: '2026-01-01T00:00:03.000Z',
+        error: 'transient error',
+        requestId: 'latest-queued',
+        status: 'queued',
+        target: { type: 'deck' },
+      },
+    ];
+
+    await port.retryJob('job-latest-only');
+
+    expect(
+      entry.job.messages.map(({ error, requestId, status }) => ({ error, requestId, status })),
+    ).toEqual([
+      { error: 'old error', requestId: 'old', status: 'failed' },
+      {
+        error: 'Skipped because a newer edit was resumed.',
+        requestId: 'stale-queued',
+        status: 'failed',
+      },
+      { error: undefined, requestId: 'latest-queued', status: 'queued' },
+    ]);
   });
 
   describe('R4-A Acceptance: 4-phase cancellation & failure persistence', () => {
@@ -566,5 +684,885 @@ describe('PresentationGenerationPort', () => {
         state: 'failed',
       });
     });
+  });
+});
+
+const png = new Uint8Array(
+  Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jN1kAAAAASUVORK5CYII=',
+    'base64',
+  ),
+);
+const samplePlan = {
+  aspectRatio: '16:9',
+  planId: 'plan-1',
+  sourceVersionIds: ['v1'],
+  title: '演示',
+  slides: [
+    {
+      order: 1,
+      slideId: 'cover',
+      svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><text x="40" y="60">Cover</text></svg>',
+    },
+  ],
+};
+const pptxProfile = {
+  constraints: {
+    aspectRatio: '16:9',
+    fontFamilies: [],
+    fontSizes: [],
+    palette: [],
+    spacing: {
+      horizontalGaps: [],
+      margins: { height: 0, width: 0, x: 0, y: 0 },
+      verticalGaps: [],
+    },
+  },
+  createdAt: '2026-01-01T00:00:00.000Z',
+  layouts: [],
+  name: 'Watercolor',
+  schemaVersion: 1 as const,
+  source: { kind: 'pptx' as const, sha256: 'abc' },
+  templateId: 'tmpl-pptx',
+  versionId: 'ver-1',
+  warnings: [],
+};
+const templateVisual = {
+  analyzedAt: '2026-01-01T00:00:00.000Z',
+  components: [],
+  families: [
+    {
+      artwork: 'wash',
+      composition: 'open',
+      id: 'f1',
+      name: 'cover',
+      pages: [1, 2, 3, 4],
+      palette: ['#123456'],
+      preserve: [],
+      typography: 'serif',
+    },
+  ],
+  guidance: 'keep the watercolor language',
+  model: 'vision',
+  pages: [1, 2, 3, 4].map((page) => ({
+    height: 788,
+    nativeTextCount: 0,
+    page,
+    ref: `template-page-${page}`,
+    width: 1400,
+  })),
+  schemaVersion: 1 as const,
+  summary: 'watercolor families',
+  templateId: 'tmpl-pptx',
+  versionId: 'ver-1',
+};
+const pptxApplication = {
+  constraints: pptxProfile.constraints,
+  layouts: pptxProfile.layouts,
+  name: pptxProfile.name,
+  templateId: pptxProfile.templateId,
+  versionId: pptxProfile.versionId,
+  visual: templateVisual,
+};
+
+describe('PresentationGenerationPort completed-state template application', () => {
+  const readyArtifact = {
+    artifactId: 'a1',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    name: 'deck.pptx',
+    sizeBytes: 3,
+    status: 'ready' as const,
+    type: 'pptx',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  };
+
+  const seedTemplatePages = async (store: InMemoryPresentationArtifactStore) => {
+    for (const page of templateVisual.pages) {
+      await store.put(scope, {
+        artifactId: page.ref,
+        bytes: png,
+        mimeType: 'image/png',
+        name: `${page.ref}.png`,
+        type: 'image',
+      });
+    }
+  };
+
+  const createCapability = (planCalls: unknown[] = []) =>
+    ({
+      execute: vi.fn(async (_scope, _input, context) => {
+        const plan = context.initialPlan ?? samplePlan;
+        const prepared = context.preparePlan ? await context.preparePlan(plan) : plan;
+        return { artifacts: [readyArtifact], plan: prepared };
+      }),
+      plan: vi.fn(async (_input, context) => {
+        planCalls.push(context.trustedImages);
+        return samplePlan;
+      }),
+    }) as unknown as PresentationGenerationCapability;
+
+  it('binds a deck storyboard before planning and performs one bounded visual repair pass', async () => {
+    const directedInput = {
+      ...input,
+      options: { outline: [{ title: 'Cover' }] },
+      slideCount: 1,
+      template: 'tmpl-pptx',
+    };
+    const designProgram = {
+      archetypes: [
+        {
+          assetPolicy: [],
+          compositionRules: ['keep the title anchor'],
+          evidencePages: [1],
+          familyId: 'f1',
+          id: 'archetype-f1',
+          name: 'Cover',
+          readingFlow: 'left to right',
+          regions: [],
+          roles: ['cover'],
+          whitespace: 'open center',
+        },
+      ],
+      cadence: { bodyFamilyIds: [], openingFamilyId: 'f1', rules: ['open quietly'] },
+      flexibilities: ['artwork subject may change'],
+      invariants: ['keep watercolor texture'],
+      schemaVersion: 1,
+      tokens: {
+        artwork: ['watercolor'],
+        palette: ['#123456'],
+        surface: ['paper'],
+        typography: ['serif'],
+      },
+    };
+    const application = {
+      ...pptxApplication,
+      visual: { ...templateVisual, designProgram, schemaVersion: 3 as const },
+    };
+    const storyboard = {
+      deckRationale: 'Open with one calm visual.',
+      inputFingerprint: presentationStoryboardInputFingerprint(directedInput),
+      rhythm: ['quiet cover'],
+      schemaVersion: 1 as const,
+      slides: [
+        {
+          archetypeId: 'archetype-f1',
+          assetMode: 'none' as const,
+          componentIds: [],
+          compositionIntent: 'Keep the center open.',
+          continuity: 'Establish the paper texture.',
+          familyId: 'f1',
+          role: 'cover' as const,
+          slideId: 'slide-1',
+        },
+      ],
+      templateId: 'tmpl-pptx',
+      versionId: 'ver-1',
+    };
+    const visualStoryboardPlanner = { plan: vi.fn(async () => storyboard) };
+    const visualCritic = {
+      review: vi
+        .fn()
+        .mockResolvedValueOnce({
+          issues: [
+            {
+              category: 'spacing',
+              evidence: 'title is too close to the edge',
+              instruction: 'move the title right by one margin unit',
+              severity: 'major',
+              slideId: 'cover',
+            },
+          ],
+          passed: false,
+          schemaVersion: 1,
+          summary: 'one spacing issue',
+        })
+        .mockResolvedValueOnce({
+          issues: [],
+          passed: true,
+          schemaVersion: 1,
+          summary: 'spacing now matches the template',
+        }),
+    };
+    let receivedInput: Record<string, unknown> | undefined;
+    const capability = {
+      execute: vi.fn(async (_scope, jobInput, context) => {
+        receivedInput = structuredClone(jobInput);
+        const prepared = await context.preparePlan({
+          ...samplePlan,
+          slides: samplePlan.slides.map((slide) => ({
+            ...slide,
+            metadata: { outline: ['Original point'], title: 'Original title' },
+            notes: 'Original speaker notes',
+          })),
+        });
+        return { artifacts: [readyArtifact], plan: prepared };
+      }),
+      plan: vi.fn(async () => ({
+        ...samplePlan,
+        planId: 'visual-repair-plan',
+        slides: samplePlan.slides.map((slide) => ({
+          ...slide,
+          metadata: { outline: ['Wrong replacement point'], title: 'Wrong replacement title' },
+          notes: 'Wrong replacement notes',
+          svg: slide.svg.replace('Cover', 'Repaired cover'),
+        })),
+      })),
+    } as unknown as PresentationGenerationCapability;
+    const port = new PresentationGenerationPort(
+      {
+        artifactStore: new InMemoryPresentationArtifactStore(),
+        capability,
+        contextFactory: () => ({
+          plannerContext: {},
+          workerContext: {
+            convert: vi.fn(),
+            jobId: 'ignored',
+            qualityCheck: vi.fn(),
+            workspace: { path: '/tmp', write: vi.fn() },
+          },
+        }),
+        idFactory: () => 'job-directed',
+        templateLibrary: {
+          get: vi.fn(async () => ({
+            ...pptxProfile,
+            source: { kind: 'plan' as const, planId: 'source-plan' },
+          })),
+          resolve: vi.fn(async () => structuredClone(application)),
+        } as never,
+        visualCritic: visualCritic as never,
+        visualStoryboardPlanner,
+      },
+      scope,
+    );
+
+    await port.createJob(directedInput);
+    await vi.waitFor(async () =>
+      expect((await port.getJob('job-directed'))?.state).toBe('completed'),
+    );
+    expect(visualStoryboardPlanner.plan).toHaveBeenCalledOnce();
+    expect(receivedInput?.options).toEqual(
+      expect.objectContaining({ visualStoryboard: storyboard }),
+    );
+    expect(capability.plan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        options: expect.objectContaining({ visualStoryboard: storyboard }),
+      }),
+      expect.objectContaining({
+        revision: expect.objectContaining({
+          target: { slideNumber: 1, type: 'slide' },
+        }),
+      }),
+    );
+    expect(visualCritic.review).toHaveBeenCalledTimes(2);
+    await expect(port.readPlan('job-directed')).resolves.toMatchObject({
+      plan: {
+        designSpec: {
+          templateVisualReview: {
+            repaired: true,
+            templateId: 'tmpl-pptx',
+            versionId: 'ver-1',
+          },
+        },
+        slides: [
+          expect.objectContaining({
+            metadata: { outline: ['Original point'], title: 'Original title' },
+            notes: 'Original speaker notes',
+            svg: expect.stringContaining('Repaired cover'),
+          }),
+        ],
+      },
+    });
+  });
+
+  it('replans cached initial assets when a retry learns a newer template context', async () => {
+    const directedInput = {
+      ...input,
+      options: { outline: [{ title: 'Cover' }] },
+      slideCount: 1,
+      template: 'tmpl-pptx',
+    };
+    const designProgram = {
+      archetypes: [
+        {
+          assetPolicy: [],
+          compositionRules: ['keep the title anchor'],
+          evidencePages: [1],
+          familyId: 'f1',
+          id: 'archetype-f1',
+          name: 'Cover',
+          readingFlow: 'left to right',
+          regions: [],
+          roles: ['cover'],
+          whitespace: 'open center',
+        },
+      ],
+      cadence: { bodyFamilyIds: [], openingFamilyId: 'f1', rules: ['open quietly'] },
+      flexibilities: ['artwork subject may change'],
+      invariants: ['keep watercolor texture'],
+      schemaVersion: 1,
+      tokens: {
+        artwork: ['watercolor'],
+        palette: ['#123456'],
+        surface: ['paper'],
+        typography: ['serif'],
+      },
+    };
+    const learnedVisual = { ...templateVisual, designProgram, schemaVersion: 3 as const };
+    const storyboard = {
+      deckRationale: 'Open with one calm visual.',
+      inputFingerprint: presentationStoryboardInputFingerprint(directedInput),
+      rhythm: ['quiet cover'],
+      schemaVersion: 1 as const,
+      slides: [
+        {
+          archetypeId: 'archetype-f1',
+          assetMode: 'generate' as const,
+          componentIds: [],
+          compositionIntent: 'Keep the center open.',
+          continuity: 'Establish the paper texture.',
+          familyId: 'f1',
+          role: 'cover' as const,
+          slideId: 'slide-1',
+        },
+      ],
+      templateId: 'tmpl-pptx',
+      versionId: 'ver-1',
+    };
+    const prepare = vi.fn(async (assetInput) => ({
+      assetArtifactIds: [],
+      input: assetInput.jobInput,
+      intents: [],
+    }));
+    let saved = {
+      initialAssetsComplete: true,
+      input: directedInput,
+      job: {
+        aspectRatio: '16:9' as const,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        jobId: 'job-stale-assets',
+        messages: [],
+        projectId: 'project',
+        revisions: [],
+        slideCount: 1,
+        state: 'failed' as const,
+        title: directedInput.title,
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      },
+      preparedAssets: {
+        initial: {
+          assetArtifactIds: ['stale-asset'],
+          input: {
+            ...directedInput,
+            options: {
+              ...directedInput.options,
+              templateVersionId: 'ver-1',
+              templateVisual,
+            },
+          },
+          intents: [],
+        },
+      },
+    };
+    const port = new PresentationGenerationPort(
+      {
+        artifactStore: new InMemoryPresentationArtifactStore(),
+        capability: createCapability(),
+        contextFactory: () => ({
+          plannerContext: {},
+          workerContext: {
+            convert: vi.fn(),
+            jobId: 'ignored',
+            qualityCheck: vi.fn(),
+            workspace: { path: '/tmp', write: vi.fn() },
+          },
+        }),
+        repository: {
+          getJob: vi.fn(async () => structuredClone(saved) as never),
+          saveJob: vi.fn(async (_scope, snapshot) => {
+            saved = structuredClone(snapshot) as typeof saved;
+          }),
+        },
+        revisionAssetPlanner: { prepare, prepareInitial: vi.fn() } as never,
+        templateLibrary: {
+          get: vi.fn(async () => ({
+            ...pptxProfile,
+            source: { kind: 'plan' as const, planId: 'source-plan' },
+          })),
+          resolve: vi.fn(async () => ({
+            ...pptxApplication,
+            visual: learnedVisual,
+          })),
+        } as never,
+        visualStoryboardPlanner: { plan: vi.fn(async () => storyboard) },
+      },
+      scope,
+    );
+
+    await port.retryJob('job-stale-assets');
+    await vi.waitFor(async () =>
+      expect((await port.getJob('job-stale-assets'))?.state).toBe('completed'),
+    );
+
+    expect(prepare).toHaveBeenCalledOnce();
+    expect(prepare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        jobInput: expect.objectContaining({
+          options: expect.objectContaining({
+            templateVisual: learnedVisual,
+            visualStoryboard: storyboard,
+          }),
+        }),
+      }),
+    );
+    expect(saved.preparedAssets.initial.input.options).toEqual(
+      expect.objectContaining({
+        templateVisual: learnedVisual,
+        visualStoryboard: storyboard,
+      }),
+    );
+  });
+
+  it('keeps valid pages when the optional visual repair model is unavailable', async () => {
+    const capability = {
+      execute: vi.fn(async (_scope, _input, context) => {
+        const prepared = await context.preparePlan(samplePlan);
+        return { artifacts: [readyArtifact], plan: prepared };
+      }),
+      plan: vi.fn(async () => {
+        throw Object.assign(new Error('Multimodal planner returned empty response'), {
+          code: 'CHAT_UNAVAILABLE',
+        });
+      }),
+    } as unknown as PresentationGenerationCapability;
+    const visualCritic = {
+      review: vi.fn(async () => ({
+        issues: [
+          {
+            category: 'spacing' as const,
+            evidence: 'The title margin is tighter than the reference.',
+            instruction: 'Move the title inward while preserving all content.',
+            severity: 'major' as const,
+            slideId: 'cover',
+          },
+        ],
+        passed: false,
+        schemaVersion: 1 as const,
+        summary: 'One bounded spacing repair is recommended.',
+      })),
+    };
+    const port = new PresentationGenerationPort(
+      {
+        artifactStore: new InMemoryPresentationArtifactStore(),
+        capability,
+        contextFactory: () => ({
+          plannerContext: {},
+          workerContext: {
+            convert: vi.fn(),
+            jobId: 'ignored',
+            qualityCheck: vi.fn(),
+            workspace: { path: '/tmp', write: vi.fn() },
+          },
+        }),
+        idFactory: () => 'job-repair-fallback',
+        templateLibrary: {
+          get: vi.fn(async () => ({
+            ...pptxProfile,
+            source: { kind: 'plan' as const, planId: 'source-plan' },
+          })),
+          resolve: vi.fn(async () => structuredClone(pptxApplication)),
+        } as never,
+        visualCritic,
+      },
+      scope,
+    );
+
+    await port.createJob({ ...input, template: 'tmpl-pptx' });
+    await vi.waitFor(async () =>
+      expect((await port.getJob('job-repair-fallback'))?.state).toBe('completed'),
+    );
+
+    expect(capability.plan).toHaveBeenCalledOnce();
+    expect(visualCritic.review).toHaveBeenCalledOnce();
+    await expect(port.readPlan('job-repair-fallback')).resolves.toMatchObject({
+      plan: {
+        designSpec: {
+          templateVisualReview: {
+            repairFailures: [{ code: 'CHAT_UNAVAILABLE', slideId: 'cover' }],
+            repaired: false,
+            repairedSlideIds: [],
+          },
+        },
+      },
+    });
+  });
+
+  it('analyzes a PPTX template, re-resolves visual, then prepares revision assets', async () => {
+    const store = new InMemoryPresentationArtifactStore();
+    await seedTemplatePages(store);
+    const order: string[] = [];
+    let latestSaved:
+      | { input?: { options?: Record<string, unknown>; template?: string } }
+      | undefined;
+    const resolve = vi.fn(async () => {
+      order.push('resolve');
+      return structuredClone(pptxApplication);
+    });
+    const prepare = vi.fn(async (assetInput) => {
+      order.push('prepareAssets');
+      return { assetArtifactIds: [], input: assetInput.jobInput, intents: [] };
+    });
+    const planCalls: unknown[] = [];
+    const capability = createCapability(planCalls);
+    vi.mocked(capability.plan).mockImplementation(async (_input, context) => {
+      order.push('plan');
+      planCalls.push(context.trustedImages);
+      return samplePlan;
+    });
+    const invoke = vi.fn(async (name, payload, invocation) => {
+      if (name === 'presentation.template.analyzeVisual') {
+        order.push('analyzeVisual');
+        expect(invocation).toEqual(
+          expect.objectContaining({
+            jobId: 'job-template',
+            onEvent: expect.any(Function),
+            scope,
+            signal: expect.any(AbortSignal),
+          }),
+        );
+        expect(payload).toEqual({ templateId: 'tmpl-pptx', versionId: 'ver-1' });
+        return structuredClone(templateVisual);
+      }
+      if (name === 'presentation.assets.prepare') {
+        return prepare({ ...payload, jobId: invocation.jobId, scope, signal: invocation.signal });
+      }
+      throw new Error(`unexpected invoke ${name}`);
+    });
+    const port = new PresentationGenerationPort(
+      {
+        artifactStore: store,
+        atomicRuntime: {
+          acquire: vi.fn(async () => () => undefined),
+          catalog: vi.fn(async () => [{ name: 'presentation.template.analyzeVisual' }]),
+          invoke,
+        } as never,
+        capability,
+        contextFactory: () => ({
+          plannerContext: {},
+          workerContext: {
+            convert: vi.fn(),
+            jobId: 'ignored',
+            qualityCheck: vi.fn(),
+            workspace: { path: '/tmp', write: vi.fn() },
+          },
+        }),
+        idFactory: () => 'job-template',
+        repository: {
+          getJob: vi.fn(async () => latestSaved as never),
+          saveJob: vi.fn(async (_scope, snapshot) => {
+            latestSaved = structuredClone(snapshot);
+          }),
+        },
+        revisionAssetPlanner: { prepare, prepareInitial: vi.fn() } as never,
+        templateLibrary: {
+          get: vi.fn(async () => structuredClone(pptxProfile)),
+          resolve,
+        } as never,
+      },
+      scope,
+    );
+
+    await port.createJob(input);
+    await vi.waitFor(async () =>
+      expect((await port.getJob('job-template'))?.state).toBe('completed'),
+    );
+    order.length = 0;
+    prepare.mockClear();
+
+    await port.applyTemplate('job-template', {
+      requestId: 'apply-watercolor',
+      templateId: 'tmpl-pptx',
+      versionId: 'ver-1',
+    });
+    await vi.waitFor(async () =>
+      expect((await port.getJob('job-template'))?.state).toBe('completed'),
+    );
+
+    const analyzed = order.indexOf('analyzeVisual');
+    expect(analyzed).toBeGreaterThan(-1);
+    const afterAnalyze = order.slice(analyzed);
+    expect(afterAnalyze.indexOf('resolve')).toBeGreaterThan(-1);
+    expect(afterAnalyze.indexOf('resolve')).toBeLessThan(afterAnalyze.indexOf('prepareAssets'));
+    expect(afterAnalyze.indexOf('prepareAssets')).toBeLessThan(afterAnalyze.indexOf('plan'));
+    expect(prepare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        jobInput: expect.objectContaining({
+          options: expect.objectContaining({
+            templateVersionId: 'ver-1',
+            templateVisual,
+          }),
+          template: 'tmpl-pptx',
+        }),
+        revision: expect.objectContaining({
+          requestId: 'apply-watercolor',
+          template: { templateId: 'tmpl-pptx', versionId: 'ver-1' },
+        }),
+      }),
+    );
+    expect(latestSaved?.input?.options?.templateVisual).toEqual(templateVisual);
+    expect(planCalls.at(-1)).toEqual(
+      templateVisual.pages.map((page) => ({
+        base64: Buffer.from(png).toString('base64'),
+        mimeType: 'image/png',
+        ref: page.ref,
+      })),
+    );
+  });
+
+  it('still invokes analyzeVisual and resolve when the PPTX visual is already cached', async () => {
+    const store = new InMemoryPresentationArtifactStore();
+    const resolve = vi.fn(async () => structuredClone(pptxApplication));
+    const capability = createCapability();
+    const invoke = vi.fn(async (name, payload) => {
+      if (name === 'presentation.template.analyzeVisual') return structuredClone(templateVisual);
+      if (name === 'presentation.assets.prepare')
+        return { assetArtifactIds: [], input: payload.jobInput, intents: [] };
+      throw new Error(`unexpected invoke ${name}`);
+    });
+    const port = new PresentationGenerationPort(
+      {
+        artifactStore: store,
+        atomicRuntime: {
+          acquire: vi.fn(async () => () => undefined),
+          catalog: vi.fn(async () => [{ name: 'presentation.template.analyzeVisual' }]),
+          invoke,
+        } as never,
+        capability,
+        contextFactory: () => ({
+          plannerContext: {},
+          workerContext: {
+            convert: vi.fn(),
+            jobId: 'ignored',
+            qualityCheck: vi.fn(),
+            workspace: { path: '/tmp', write: vi.fn() },
+          },
+        }),
+        idFactory: () => 'job-cached',
+        revisionAssetPlanner: {
+          prepare: vi.fn(async (assetInput) => ({
+            assetArtifactIds: [],
+            input: assetInput.jobInput,
+            intents: [],
+          })),
+          prepareInitial: vi.fn(),
+        } as never,
+        templateLibrary: {
+          get: vi.fn(async () => structuredClone(pptxProfile)),
+          resolve,
+        } as never,
+      },
+      scope,
+    );
+
+    await port.createJob(input);
+    await vi.waitFor(async () =>
+      expect((await port.getJob('job-cached'))?.state).toBe('completed'),
+    );
+    invoke.mockClear();
+    resolve.mockClear();
+
+    await port.applyTemplate('job-cached', { requestId: 'apply-cached', templateId: 'tmpl-pptx' });
+    await vi.waitFor(async () =>
+      expect((await port.getJob('job-cached'))?.state).toBe('completed'),
+    );
+    expect(invoke).toHaveBeenCalledWith(
+      'presentation.template.analyzeVisual',
+      { templateId: 'tmpl-pptx', versionId: 'ver-1' },
+      expect.objectContaining({ jobId: 'job-cached', signal: expect.any(AbortSignal) }),
+    );
+    expect(resolve).toHaveBeenCalled();
+  });
+
+  it('fails a PPTX apply without visual analysis and does not persist the new template', async () => {
+    const store = new InMemoryPresentationArtifactStore();
+    let latestSaved:
+      | {
+          input: { options?: Record<string, unknown>; template?: string };
+          plan?: unknown;
+        }
+      | undefined;
+    const invoke = vi.fn();
+    const port = new PresentationGenerationPort(
+      {
+        artifactStore: store,
+        atomicRuntime: {
+          acquire: vi.fn(async () => () => undefined),
+          catalog: vi.fn(async () => []),
+          invoke,
+        } as never,
+        capability: createCapability(),
+        contextFactory: () => ({
+          plannerContext: {},
+          workerContext: {
+            convert: vi.fn(),
+            jobId: 'ignored',
+            qualityCheck: vi.fn(),
+            workspace: { path: '/tmp', write: vi.fn() },
+          },
+        }),
+        idFactory: () => 'job-missing-visual',
+        repository: {
+          getJob: vi.fn(async () => latestSaved as never),
+          saveJob: vi.fn(async (_scope, snapshot) => {
+            latestSaved = structuredClone(snapshot) as typeof latestSaved;
+          }),
+        },
+        templateLibrary: {
+          get: vi.fn(async () => structuredClone(pptxProfile)),
+          resolve: vi.fn(async () => ({
+            constraints: pptxProfile.constraints,
+            layouts: [],
+            name: pptxProfile.name,
+            templateId: pptxProfile.templateId,
+            versionId: pptxProfile.versionId,
+          })),
+        } as never,
+      },
+      scope,
+    );
+
+    await port.createJob(input);
+    await vi.waitFor(async () =>
+      expect((await port.getJob('job-missing-visual'))?.state).toBe('completed'),
+    );
+    const completedPlan = latestSaved?.plan;
+    expect(completedPlan).toEqual(samplePlan);
+
+    await port.applyTemplate('job-missing-visual', {
+      requestId: 'apply-missing',
+      templateId: 'tmpl-pptx',
+    });
+    await vi.waitFor(async () =>
+      expect((await port.getJob('job-missing-visual'))?.state).toBe('failed'),
+    );
+    expect(invoke).not.toHaveBeenCalled();
+    expect(latestSaved?.plan).toEqual(completedPlan);
+    expect(latestSaved?.input.template).toBeUndefined();
+    expect(latestSaved?.input.options?.templateVisual).toBeUndefined();
+    expect((await port.getJob('job-missing-visual'))?.error).toMatchObject({
+      code: 'PROVIDER_UNAVAILABLE',
+    });
+  });
+
+  it('passes every verified template page to the initial planner, not only the first two', async () => {
+    const store = new InMemoryPresentationArtifactStore();
+    await seedTemplatePages(store);
+    let trustedImages: unknown;
+    const capability = {
+      execute: vi.fn(async (_scope, _input, context) => {
+        trustedImages = context.plannerContext.trustedImages;
+        const plan = context.initialPlan ?? samplePlan;
+        const prepared = context.preparePlan ? await context.preparePlan(plan) : plan;
+        return { artifacts: [readyArtifact], plan: prepared };
+      }),
+      plan: vi.fn(),
+    } as unknown as PresentationGenerationCapability;
+    const port = new PresentationGenerationPort(
+      {
+        artifactStore: store,
+        atomicRuntime: {
+          acquire: vi.fn(async () => () => undefined),
+          catalog: vi.fn(async () => [{ name: 'presentation.template.analyzeVisual' }]),
+          invoke: vi.fn(async (name) => {
+            if (name === 'presentation.template.analyzeVisual')
+              return structuredClone(templateVisual);
+            throw new Error(`unexpected invoke ${name}`);
+          }),
+        } as never,
+        capability,
+        contextFactory: () => ({
+          plannerContext: {},
+          workerContext: {
+            convert: vi.fn(),
+            jobId: 'ignored',
+            qualityCheck: vi.fn(),
+            workspace: { path: '/tmp', write: vi.fn() },
+          },
+        }),
+        idFactory: () => 'job-pages',
+        templateLibrary: {
+          get: vi.fn(async () => structuredClone(pptxProfile)),
+          resolve: vi.fn(async () => structuredClone(pptxApplication)),
+        } as never,
+      },
+      scope,
+    );
+
+    await port.createJob({ ...input, template: 'tmpl-pptx' });
+    await vi.waitFor(async () => expect((await port.getJob('job-pages'))?.state).toBe('completed'));
+    expect(trustedImages).toEqual(
+      templateVisual.pages.map((page) => ({
+        base64: Buffer.from(png).toString('base64'),
+        mimeType: 'image/png',
+        ref: page.ref,
+      })),
+    );
+  });
+
+  it('keeps plan templates on the existing path when visual analysis is absent', async () => {
+    const store = new InMemoryPresentationArtifactStore();
+    const invoke = vi.fn();
+    const resolve = vi.fn(async () => ({
+      constraints: pptxProfile.constraints,
+      layouts: [],
+      name: 'From plan',
+      templateId: 'tmpl-plan',
+      versionId: 'ver-plan',
+    }));
+    const port = new PresentationGenerationPort(
+      {
+        artifactStore: store,
+        atomicRuntime: {
+          acquire: vi.fn(async () => () => undefined),
+          catalog: vi.fn(async () => []),
+          invoke,
+        } as never,
+        capability: createCapability(),
+        contextFactory: () => ({
+          plannerContext: {},
+          workerContext: {
+            convert: vi.fn(),
+            jobId: 'ignored',
+            qualityCheck: vi.fn(),
+            workspace: { path: '/tmp', write: vi.fn() },
+          },
+        }),
+        idFactory: () => 'job-plan-template',
+        templateLibrary: {
+          get: vi.fn(async () => ({
+            ...pptxProfile,
+            source: { kind: 'plan' as const, planId: 'plan-1' },
+            templateId: 'tmpl-plan',
+            versionId: 'ver-plan',
+          })),
+          resolve,
+        } as never,
+      },
+      scope,
+    );
+
+    await port.createJob(input);
+    await vi.waitFor(async () =>
+      expect((await port.getJob('job-plan-template'))?.state).toBe('completed'),
+    );
+    await port.applyTemplate('job-plan-template', {
+      requestId: 'apply-plan',
+      templateId: 'tmpl-plan',
+    });
+    await vi.waitFor(async () =>
+      expect((await port.getJob('job-plan-template'))?.state).toBe('completed'),
+    );
+    expect(invoke).not.toHaveBeenCalled();
+    expect(resolve).toHaveBeenCalled();
   });
 });

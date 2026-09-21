@@ -190,7 +190,9 @@ export class PptMasterToolchain implements PresentationToolchain {
         workspace,
         // The converter's default auto mode cycles effects across the whole
         // deck. A fixed effect keeps untouched slides stable after page edits.
-        ...(kind === 'convert' ? ['--animation', 'fade'] : []),
+        ...(kind === 'convert'
+          ? ['--output', 'exports/presentation.pptx', '--animation', 'fade']
+          : []),
       ],
       cwd: workspace,
       jobId: `toolchain:${kind}`,

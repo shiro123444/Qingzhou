@@ -35,8 +35,22 @@ export interface PresentationAgentTurnResult {
   execution?: { operation: string; state: string }[];
   message: string;
   phase: 'intake' | 'outline' | 'complete';
+  question?: PresentationAgentQuestion;
   questionId?: string;
   slides?: OutlineSlide[];
+}
+
+export interface PresentationAgentQuestionChoice {
+  description?: string;
+  id: string;
+  label: string;
+}
+
+export interface PresentationAgentQuestion {
+  choices?: PresentationAgentQuestionChoice[];
+  context?: string[];
+  prompt: string;
+  title?: string;
 }
 
 export interface PresentationAgentClient {
@@ -46,7 +60,12 @@ export interface PresentationAgentClient {
   }) => Promise<{ slides: OutlineSlide[] }>;
   turn: (
     input: PresentationAgentTurnInput,
-    options?: { onActivity?: (activity: PresentationActivity) => void; signal?: AbortSignal },
+    options?: {
+      onActivity?: (activity: PresentationActivity) => void;
+      onCheckpoint?: (checkpoint: Pick<PresentationAgentTurnResult, 'brief' | 'slides'>) => void;
+      onMessageDelta?: (delta: string, content: string) => void;
+      signal?: AbortSignal;
+    },
   ) => Promise<PresentationAgentTurnResult>;
 }
 
@@ -93,6 +112,12 @@ export const createPresentationAgentClient = (): PresentationAgentClient => ({
       if (!line.trim()) return;
       const event = JSON.parse(line);
       if (event.type === 'activity') options?.onActivity?.(event.activity);
+      if (event.type === 'checkpoint') options?.onCheckpoint?.(event.checkpoint);
+      if (event.type === 'message_delta' && typeof event.delta === 'string')
+        options?.onMessageDelta?.(
+          event.delta,
+          typeof event.content === 'string' ? event.content : event.delta,
+        );
       if (event.type === 'result') result = event.result;
       if (event.type === 'error') throw new Error(event.message);
     };

@@ -14,8 +14,8 @@ export type TemplatePageRenderer = (
 
 /** Render the native document; an XML approximation cannot reveal raster-only template design. */
 export const renderNativeTemplatePages: TemplatePageRenderer = async (bytes, pages, signal) => {
-  if (pages.length > 4 || pages.some((page) => !Number.isInteger(page) || page < 1))
-    throw new Error('Select one to four template pages');
+  if (pages.length > 24 || pages.some((page) => !Number.isInteger(page) || page < 1))
+    throw new Error('Select one to twenty-four template pages');
   const directory = await mkdtemp(join(tmpdir(), 'jumi-template-vision-'));
   const options = { signal, timeout: 120_000, maxBuffer: 1024 * 1024 };
   try {

@@ -33,12 +33,12 @@ beforeEach(() => {
 });
 
 describe('PresentationStudio acceptance (C-58 phase 1)', () => {
-  it('renders the responsive empty state with an honest demo transport badge', () => {
+  it('renders the responsive empty state with an honest demo transport badge', async () => {
     const client = createPresentationDemoClient();
     render(<PresentationStudio client={client} transportMode="demo" />);
 
     expect(screen.getByTestId('presentation-studio')).toBeInTheDocument();
-    expect(screen.getByTestId('studio-empty-state')).toBeInTheDocument();
+    expect(await screen.findByTestId('studio-empty-state')).toBeInTheDocument();
     expect(screen.getByTestId('presentation-demo-badge')).toHaveTextContent(
       'Demo data — fake transport',
     );
@@ -184,14 +184,19 @@ describe('PresentationStudio acceptance (C-58 phase 1)', () => {
     fireEvent.click(screen.getByRole('button', { name: /Cancel presentation job/i }));
 
     await waitFor(() => {
-      expect(screen.getByRole('status')).toHaveTextContent('Cancelled');
+      expect(screen.getByTestId('presentation-recovery-workspace')).toHaveAttribute(
+        'data-state',
+        'cancelled',
+      );
     });
     expect(screen.getByRole('button', { name: /Retry presentation job/i })).toBeInTheDocument();
     // No artifacts for a cancelled job → export surface stays empty/disabled
-    expect(screen.getByTestId('artifact-panel-empty')).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /Export presentation artifact/i }),
+    ).not.toBeInTheDocument();
   }, 15000);
 
-  it('shows the honest failed state, error detail and retry (no ready artifacts)', async () => {
+  it('shows interrupted creation and retry without the legacy diagnostic panels', async () => {
     const client = createPresentationDemoClient({ fail: true, queuedMs: 90, runningMs: 90 });
     render(<PresentationStudio client={client} pollIntervalMs={40} transportMode="demo" />);
 
@@ -202,7 +207,10 @@ describe('PresentationStudio acceptance (C-58 phase 1)', () => {
 
     await waitFor(
       () => {
-        expect(screen.getByTestId('presentation-job-error')).toHaveTextContent('PPT_MASTER_FAILED');
+        expect(screen.getByTestId('presentation-recovery-workspace')).toHaveAttribute(
+          'data-state',
+          'failed',
+        );
       },
       { timeout: 4000 },
     );
@@ -210,7 +218,9 @@ describe('PresentationStudio acceptance (C-58 phase 1)', () => {
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Retry presentation job/i })).toBeInTheDocument();
     });
-    expect(screen.getByTestId('artifact-panel-empty')).toBeInTheDocument();
+    expect(screen.queryByTestId('artifact-panel-empty')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('presentation-job-error')).not.toBeInTheDocument();
+    expect(screen.getByTestId('presentation-conversation-trigger')).toBeInTheDocument();
   }, 15000);
 
   it('exposes accessible landmarks and keyboard contract for the studio shell', async () => {
@@ -245,22 +255,25 @@ describe('PresentationStudio acceptance (C-58 phase 1)', () => {
 
   it('keeps a reduced-motion and responsive CSS contract for 1440×900 / 390×844', () => {
     const styles = readStyleSource(path.join(FIXTURE, 'style.ts'));
+    const workspaceStyles = readStyleSource(path.join(FIXTURE, 'CompletedWorkspace', 'style.ts'));
     const navigatorStyles = readStyleSource(path.join(FIXTURE, 'SlideNavigator', 'style.ts'));
     const panelStyles = readStyleSource(path.join(FIXTURE, 'ArtifactPanel', 'style.ts'));
     const composerStyles = readStyleSource(path.join(FIXTURE, 'PresentationComposer', 'style.ts'));
     const progressStyles = readStyleSource(path.join(FIXTURE, 'PresentationProgress', 'style.ts'));
 
-    // Desktop 1440×900 three-pane grid
-    expect(styles).toContain('grid-template-columns: 320px minmax(0, 1fr) 320px');
+    // The stage owns the viewport; its overview grid adapts to available width.
+    expect(workspaceStyles).toContain('stageArea: css');
+    expect(workspaceStyles).toContain('grid-template-columns: repeat(4, 1fr)');
 
     // Tablet 1200 collapses the rail; phones 390×844 stack to one column
     expect(styles).toContain('@media (width <= 1200px)');
     expect(styles).toContain('@media (width <= 768px)');
     expect(styles).toContain('@media (width <= 480px)');
 
-    // Navigator switches to a horizontal scroll strip on phones
-    expect(navigatorStyles).toContain('@media (width <= 768px)');
-    expect(navigatorStyles).toContain('scroll-snap-type');
+    // Page navigation remains vertical; the overview collapses on phones.
+    expect(navigatorStyles).toContain('grid-template-columns: minmax(0, 1fr)');
+    expect(workspaceStyles).toContain('@media (width <= 480px)');
+    expect(workspaceStyles).toContain('grid-template-columns: 1fr');
 
     // Every interactive surface honours prefers-reduced-motion
     for (const source of [styles, navigatorStyles, panelStyles, composerStyles, progressStyles]) {
@@ -769,7 +782,10 @@ describe('PresentationStudio real-chain and E2E acceptance (C-104)', () => {
     await waitFor(
       () => {
         expect(cancelPresentationJob).toHaveBeenCalledWith('job-cancelling');
-        expect(screen.getByRole('status')).toHaveTextContent('Cancelled');
+        expect(screen.getByTestId('presentation-recovery-workspace')).toHaveAttribute(
+          'data-state',
+          'cancelled',
+        );
         expect(screen.getByRole('button', { name: /Retry presentation job/i })).toBeInTheDocument();
       },
       { timeout: 5000 },

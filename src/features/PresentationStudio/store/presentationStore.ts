@@ -92,6 +92,7 @@ export type PresentationTransportMode = 'http' | 'demo';
 export type PresentationPendingAction =
   | 'cancel'
   | 'create'
+  | 'delete'
   | 'export'
   | 'refresh'
   | 'retry'
@@ -168,9 +169,16 @@ export interface PresentationStoreOptions {
   transportMode?: PresentationTransportMode;
 }
 
+const appendActivity = (
+  history: { id: string; text: string }[] = [],
+  text: string | undefined,
+  id: string,
+) => (!text || history.at(-1)?.text === text ? history : [...history, { id, text }].slice(-60));
+
 export interface PresentationJobGenerationProgress {
   /** Short real-time action description from backend SSE/snapshot (R1-B / R2-B) */
   activity?: string;
+  activityHistory?: { id: string; text: string }[];
   /** List of generated artifact IDs associated with this job (R2-B) */
   artifactIds?: string[];
   /** Currently active slide number or identifier (1-indexed) */
@@ -253,6 +261,7 @@ export interface PresentationStudioActions {
   applySlotEvent: (jobId: string, event: { data: unknown; seq: number; type: string }) => void;
   cancelJob: (jobId: string) => Promise<void>;
   createJob: (input: PresentationJobInput) => Promise<string | null>;
+  deleteJob: (jobId: string) => Promise<boolean>;
   dismissError: () => void;
   dismissExport: () => void;
   /** Clears a slot's error after the user saw it (C-87 recovery affordance). */
@@ -551,9 +560,7 @@ export const projectGenerationProgress = (
       ? source.action.trim()
       : isString(source.lastAction)
         ? source.lastAction.trim()
-        : isString(source.message)
-          ? source.message.trim()
-          : undefined;
+        : undefined;
 
   const rawCurrent =
     source.currentSlide ?? source.activeSlide ?? source.slideIndex ?? source.slideId;
@@ -754,6 +761,18 @@ export const createPresentationStudioStore = (
       }
 
       set((s) => {
+        const snapshot =
+          projection.kind === 'job' || projection.kind === 'bundle' ? projection.job : undefined;
+        const currentJob = s.jobs[event.job_id];
+        if (
+          snapshot?.jobId === event.job_id &&
+          currentJob &&
+          Date.parse(snapshot.updatedAt ?? '') < Date.parse(currentJob.updatedAt ?? '')
+        ) {
+          // A reconnect can replay an old failure after HTTP already restored
+          // the completed work. Consume its cursor without rolling back the UI.
+          return { lastSeqByJob: { ...s.lastSeqByJob, [event.job_id]: event.seq } };
+        }
         const jobs = { ...s.jobs };
         const jobOrder = s.jobOrder.slice();
         const artifacts = { ...s.artifacts };
@@ -789,6 +808,11 @@ export const createPresentationStudioStore = (
           generationProgressByJob[event.job_id] = {
             ...current,
             ...progress,
+            activityHistory: appendActivity(
+              current.activityHistory,
+              progress.activity,
+              `job:${event.seq}`,
+            ),
             ...(progress.artifactIds
               ? {
                   artifactIds: [
@@ -852,6 +876,79 @@ export const createPresentationStudioStore = (
           clientError: toPresentationError(err),
           pendingActions: { ...s.pendingActions, [jobId]: undefined },
         }));
+      }
+    },
+
+    deleteJob: async (jobId) => {
+      const current = get().pendingActions[jobId];
+      if (current && current !== 'refresh') return false;
+      set((s) => ({
+        clientError: null,
+        pendingActions: { ...s.pendingActions, [jobId]: 'delete' },
+      }));
+      try {
+        if (!client.deletePresentationJob)
+          throw Object.assign(new Error('Presentation deletion is unavailable'), {
+            code: 'PROVIDER_UNAVAILABLE',
+          });
+        await client.deletePresentationJob(jobId);
+        const selectedWasDeleted = get().selectedJobId === jobId;
+        if (selectedWasDeleted && typeof window !== 'undefined' && window.sessionStorage) {
+          try {
+            window.sessionStorage.removeItem('presentation_studio_active_job_id');
+          } catch {}
+        }
+        set((s) => {
+          const artifacts = { ...s.artifacts };
+          const generationProgressByJob = { ...s.generationProgressByJob };
+          const jobs = { ...s.jobs };
+          const jobTitles = { ...s.jobTitles };
+          const lastSeqByJob = { ...s.lastSeqByJob };
+          const pendingActions = { ...s.pendingActions };
+          const slots = { ...s.slots };
+          const slotRetryPending = { ...s.slotRetryPending };
+          const streamStatusByJob = { ...s.streamStatusByJob };
+          const artifactIds = new Set(jobs[jobId]?.artifactIds ?? []);
+          for (const [artifactId, artifact] of Object.entries(artifacts)) {
+            if (artifactIds.has(artifactId) || artifact.metadata?.jobId === jobId) {
+              delete artifacts[artifactId];
+            }
+          }
+          for (const key of Object.keys(slots)) {
+            if (key.startsWith(`${jobId}:`)) delete slots[key];
+          }
+          for (const key of Object.keys(slotRetryPending)) {
+            if (key.startsWith(`${jobId}:`)) delete slotRetryPending[key];
+          }
+          delete generationProgressByJob[jobId];
+          delete jobs[jobId];
+          delete jobTitles[jobId];
+          delete lastSeqByJob[jobId];
+          delete pendingActions[jobId];
+          delete streamStatusByJob[jobId];
+          return {
+            artifacts,
+            generationProgressByJob,
+            jobOrder: s.jobOrder.filter((id) => id !== jobId),
+            jobs,
+            jobTitles,
+            lastSeqByJob,
+            pendingActions,
+            selectedArtifactId: selectedWasDeleted ? null : s.selectedArtifactId,
+            selectedJobId: selectedWasDeleted ? null : s.selectedJobId,
+            slots,
+            slotRetryPending,
+            streamStatus: aggregateJobStreamStatus(streamStatusByJob),
+            streamStatusByJob,
+          };
+        });
+        return true;
+      } catch (error) {
+        set((s) => ({
+          clientError: toPresentationError(error),
+          pendingActions: { ...s.pendingActions, [jobId]: undefined },
+        }));
+        return false;
       }
     },
 
@@ -1098,8 +1195,14 @@ export const createPresentationStudioStore = (
                 allArtifacts[id] !== beforeFetch[id],
               );
             }
-            const latestJob =
-              s.jobs[jobId] !== beforeJob && s.jobs[jobId] ? { ...job, ...s.jobs[jobId] } : job;
+            const currentJob = s.jobs[jobId];
+            const currentTime = Date.parse(currentJob?.updatedAt ?? '');
+            const incomingTime = Date.parse(job.updatedAt ?? '');
+            const keepCurrent =
+              currentJob &&
+              (currentTime > incomingTime ||
+                (currentJob !== beforeJob && !(incomingTime > currentTime)));
+            const latestJob = keepCurrent ? { ...job, ...currentJob } : job;
             const progress = projectGenerationProgress(latestJob);
             const firstId = latestJob.artifactIds?.[0] ?? null;
             const selectedArtifactId =
@@ -1231,7 +1334,43 @@ export const createPresentationStudioStore = (
           slideId,
           status,
         };
-        return { slots: { ...s.slots, [key]: next } };
+        const page = /^slide-(\d+)$/u.exec(slideId)?.[1];
+        const slotKeys = Object.keys(s.slots).filter((item) =>
+          item.startsWith(`${jobId}:${slideId}:`),
+        );
+        const ordinal = slotKeys.includes(key) ? slotKeys.indexOf(key) + 1 : slotKeys.length + 1;
+        const subject = `${page ? `第 ${page} 页 · ` : ''}第 ${ordinal} 张素材`;
+        const activity =
+          status === 'generating'
+            ? `${subject} · 正在绘画`
+            : status === 'ready'
+              ? `${subject} · 绘画已完成`
+              : status === 'failed'
+                ? `${subject} · 绘画未完成`
+                : status === 'cancelled'
+                  ? `${subject} · 已取消`
+                  : undefined;
+        const current = s.generationProgressByJob[jobId] ?? {};
+        const changed = activity && status !== existing?.status;
+        return {
+          slots: { ...s.slots, [key]: next },
+          ...(changed
+            ? {
+                generationProgressByJob: {
+                  ...s.generationProgressByJob,
+                  [jobId]: {
+                    ...current,
+                    activity,
+                    activityHistory: appendActivity(
+                      current.activityHistory,
+                      activity,
+                      `image:${slideId}:${slotId}:${event.seq}`,
+                    ),
+                  },
+                },
+              }
+            : {}),
+        };
       });
     },
 

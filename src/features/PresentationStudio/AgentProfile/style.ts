@@ -2,6 +2,7 @@ import { createStaticStyles } from 'antd-style';
 
 export const styles = createStaticStyles(({ css, cssVar }) => ({
   avatar: css`
+    overflow: hidden;
     display: flex;
     flex-shrink: 0;
     align-items: center;
@@ -11,15 +12,20 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     height: 44px;
     border-radius: 22px;
 
-    color: #fff;
+    background: ${cssVar.colorBgContainer};
+    box-shadow: 0 4px 12px rgb(0 0 0 / 12%);
 
-    background: ${cssVar.colorPrimary};
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+    img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
   `,
   capabilityItem: css`
     display: flex;
     gap: 8px;
     align-items: center;
+
     font-size: 13px;
     color: ${cssVar.colorText};
   `,
@@ -38,7 +44,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     border-radius: 12px;
 
     background: ${cssVar.colorBgContainer};
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+    box-shadow: 0 2px 8px rgb(0 0 0 / 4%);
   `,
   description: css`
     font-size: 13px;
@@ -62,7 +68,8 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     align-items: center;
     justify-content: space-between;
 
-    padding: 9px 12px;
+    padding-block: 9px;
+    padding-inline: 12px;
     border: 1px solid ${cssVar.colorBorderSecondary};
     border-radius: 8px;
 
@@ -87,8 +94,8 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
   sectionTitle: css`
     font-size: 12px;
     font-weight: 600;
-    letter-spacing: 0.5px;
     color: ${cssVar.colorTextTertiary};
+    letter-spacing: 0.5px;
   `,
   tagGroup: css`
     display: flex;

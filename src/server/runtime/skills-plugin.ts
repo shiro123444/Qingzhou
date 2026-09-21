@@ -42,6 +42,14 @@ export function createSkillsPlugin(
               id: 'native-template',
               steps: ['presentation.template.inspectNative', 'presentation.template.fillNative'],
             },
+            {
+              id: 'native-media',
+              steps: [
+                'presentation.template.inspectNative',
+                'presentation.template.extractMedia',
+                'presentation.template.fillNative',
+              ],
+            },
             { id: 'recover-work', steps: ['presentation.job.list', 'presentation.page.read'] },
           ],
           referenceSyntax: { $ref: 'previous_step.ref' },

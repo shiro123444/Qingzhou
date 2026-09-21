@@ -5,10 +5,11 @@ import {
   FileText,
   Image as ImageIcon,
   Layout,
-  Presentation,
   Sparkles,
 } from 'lucide-react';
 import { memo } from 'react';
+
+import { JUMI_AVATAR, JUMI_NAME } from '@/const/jumi';
 
 import { styles } from './style';
 
@@ -40,15 +41,15 @@ export const PresentationAgentProfile = memo<PresentationAgentProfileProps>(
       >
         <div className={styles.header}>
           <div className={styles.avatar}>
-            <Icon icon={Presentation} size={24} />
+            <img alt={JUMI_NAME} src={JUMI_AVATAR} />
           </div>
           <div className={styles.meta}>
             <Flexbox horizontal align="center" gap={6}>
-              <span className={styles.title}>PPT 创作专家</span>
+              <span className={styles.title}>{JUMI_NAME}</span>
               <Tag color="purple">Agent</Tag>
             </Flexbox>
             <span style={{ fontSize: 12, color: 'var(--ant-color-text-secondary)' }}>
-              LobeHub 官方演示文稿智能体
+              清舟演示文稿智能体
             </span>
           </div>
         </div>

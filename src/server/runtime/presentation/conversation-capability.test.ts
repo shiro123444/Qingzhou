@@ -4,7 +4,8 @@ import { z } from 'zod';
 import { AtomicRuntime } from '../atomic-runtime';
 import { createPresentationContextRuntime } from './context-tools';
 import { createPresentationConversationCapability } from './conversation-capability';
-import type { MultimodalChatPort } from './multimodal-chat-provider';
+import { createResilientMultimodalChatPort } from './multimodal-chat-fallback';
+import { type MultimodalChatPort, MultimodalChatProviderError } from './multimodal-chat-provider';
 
 const scope = { userId: 'alice', sessionId: 'account' };
 const plan = {
@@ -87,6 +88,125 @@ describe('autonomous presentation conversation', () => {
     } finally {
       await runtime.dispose();
     }
+  });
+
+  it('repairs empty decisions without rerunning already completed tools', async () => {
+    const chat = chatPort(
+      op('planning.update', { topic: '已确认的主题', plan }),
+      {},
+      { phase: 'intake' },
+      { question: { prompt: '需要多少页？' } },
+    );
+    const checkpoint = vi.fn();
+    const result = await createPresentationConversationCapability({ chat }).execute(command, {
+      scope,
+      onCheckpoint: checkpoint,
+    });
+    expect(checkpoint).toHaveBeenCalledOnce();
+    expect(checkpoint.mock.calls[0][0].brief).toMatchObject({ topic: '已确认的主题', plan });
+    expect(result.question?.prompt).toBe('需要多少页？');
+    expect(result.execution).toEqual([{ operation: 'planning.update', state: 'completed' }]);
+    expect(chat.chat).toHaveBeenCalledTimes(4);
+    expect(JSON.stringify(vi.mocked(chat.chat).mock.calls[3])).toContain('不要重复执行');
+  });
+
+  it('repairs malformed provider envelopes, while retaining a completed plan', async () => {
+    const chat = chatPort();
+    vi.mocked(chat.chat)
+      .mockResolvedValueOnce(response(op('planning.update', { topic: '模型发布', plan })))
+      .mockRejectedValueOnce(
+        new MultimodalChatProviderError(
+          'CHAT_PAYLOAD_INVALID',
+          'Failed to parse multimodal chat response JSON',
+        ),
+      )
+      .mockResolvedValueOnce(response({ phase: 'intake', message: '沿用方案继续。' }));
+    const result = await createPresentationConversationCapability({ chat }).execute(command, {
+      scope,
+    });
+    expect(result.brief.plan).toEqual(plan);
+    expect(result.message).toBe('沿用方案继续。');
+    expect(result.execution).toHaveLength(1);
+  });
+
+  it('publishes completed work before a later provider failure', async () => {
+    const chat = chatPort();
+    vi.mocked(chat.chat)
+      .mockResolvedValueOnce(response(op('planning.update', { topic: '继续此主题', plan })))
+      .mockRejectedValueOnce(new Error('provider unavailable'));
+    const checkpoint = vi.fn();
+    await expect(
+      createPresentationConversationCapability({ chat }).execute(command, {
+        scope,
+        onCheckpoint: checkpoint,
+      }),
+    ).rejects.toThrow('provider unavailable');
+    expect(checkpoint).toHaveBeenCalledOnce();
+    expect(checkpoint.mock.calls[0][0].brief).toMatchObject({ topic: '继续此主题', plan });
+  });
+
+  it('recovers an inference on the primary channel without replaying a completed operation', async () => {
+    const primary = chatPort();
+    vi.mocked(primary.chat)
+      .mockResolvedValueOnce(response(op('planning.update', { topic: '保留现有方案', plan })))
+      .mockRejectedValueOnce(
+        new MultimodalChatProviderError('CHAT_UNAVAILABLE', 'connection reset'),
+      )
+      .mockResolvedValueOnce(response({ phase: 'intake', message: '已继续，方案保持不变。' }));
+    const activity = vi.fn();
+    const checkpoint = vi.fn();
+    const result = await createPresentationConversationCapability({
+      chat: createResilientMultimodalChatPort(primary, { retryDelayMs: 0 }),
+    }).execute(command, { scope, onActivity: activity, onCheckpoint: checkpoint });
+
+    expect(result.brief).toMatchObject({ topic: '保留现有方案', plan });
+    expect(checkpoint).toHaveBeenCalledOnce();
+    expect(result.execution).toEqual([{ operation: 'planning.update', state: 'completed' }]);
+    expect(activity).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: 'presentation.chat',
+        state: 'started',
+        text: '正在恢复模型连接（2/3），保留已完成的步骤',
+      }),
+    );
+    expect(primary.chat).toHaveBeenCalledTimes(3);
+  });
+
+  it('retains usable template receipts across long briefs and multiple turns', async () => {
+    const template = { templateId: 'template-1', versionId: 'version-1' };
+    let brief = {
+      research: JSON.stringify({
+        evidence: [
+          {
+            operation: 'presentation.template.analyzeVisual',
+            result: {
+              ...template,
+              learning: { status: 'ready' },
+              description: '原稿风格'.repeat(6000),
+            },
+          },
+        ],
+      }),
+    };
+    for (let index = 0; index < 8; index++) {
+      const result = await createPresentationConversationCapability({
+        chat: chatPort({ message: '继续沿用原稿。' }),
+      }).execute({ ...command, brief, template }, { scope });
+      brief = { research: result.brief.research! };
+      expect(JSON.parse(brief.research).evidence[0]).toMatchObject({
+        operation: 'presentation.template.analyzeVisual',
+        result: { ...template, learning: { status: 'ready' } },
+      });
+    }
+    const result = await createPresentationConversationCapability({
+      chat: chatPort(
+        op('planning.update', { topic: '继续模板创作', plan }),
+        op('planning.outline'),
+        { slides: [slide] },
+        { phase: 'outline' },
+      ),
+    }).execute({ ...command, brief, template }, { scope });
+    expect(result.slides).toEqual([slide]);
   });
 
   it('can discuss a framework and revise it without invoking outline or imposing a template', async () => {
@@ -194,6 +314,83 @@ describe('autonomous presentation conversation', () => {
     }
   });
 
+  it('retires an exhausted tool while preserving completed evidence and continuing the plan', async () => {
+    const inspect = vi.fn(async () => ({ finding: '已完成的模板证据' }));
+    const runtime = new AtomicRuntime([
+      {
+        id: 'probe',
+        version: '1',
+        operations: [
+          {
+            name: 'probe.inspect',
+            agent: { contexts: ['presentation.intake'], maxCalls: 1 },
+            description: 'Inspect once',
+            input: z.object({}).strict(),
+            execute: inspect,
+          },
+        ],
+      },
+    ]);
+    const chat = chatPort(
+      op('probe.inspect'),
+      op('probe.inspect'),
+      op('planning.update', { topic: '保留进度', plan }),
+      { phase: 'intake', message: '已使用现有证据继续规划。' },
+    );
+    try {
+      const result = await createPresentationConversationCapability({ chat }).execute(command, {
+        scope,
+        capabilities: runtime,
+      });
+      expect(inspect).toHaveBeenCalledOnce();
+      expect(result.message).toBe('已使用现有证据继续规划。');
+      expect(result.brief.plan).toEqual(plan);
+      expect(result.brief.research).toContain('已完成的模板证据');
+      expect(result.execution).toEqual([
+        { operation: 'probe.inspect', state: 'completed' },
+        { operation: 'probe.inspect', state: 'failed' },
+        { operation: 'planning.update', state: 'completed' },
+      ]);
+      expect(JSON.stringify(vi.mocked(chat.chat).mock.calls[2])).toContain('exhaustedTools');
+      expect(JSON.stringify(vi.mocked(chat.chat).mock.calls[2])).toContain('probe.inspect');
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it('restores completed template learning from the saved brief instead of starting over', async () => {
+    const template = { templateId: 'template-1', versionId: 'version-1' };
+    const chat = chatPort(
+      op('planning.update', { topic: '继续模板创作', plan }),
+      op('planning.outline'),
+      { slides: [slide] },
+      { phase: 'outline', message: '沿用已学模板完成大纲。' },
+    );
+    const result = await createPresentationConversationCapability({ chat }).execute(
+      {
+        ...command,
+        brief: {
+          research: JSON.stringify({
+            evidence: [
+              {
+                operation: 'presentation.template.analyzeVisual',
+                result: { ...template, learning: { status: 'ready' } },
+              },
+            ],
+          }),
+        },
+        template,
+      },
+      { scope },
+    );
+
+    expect(result).toMatchObject({
+      message: '沿用已学模板完成大纲。',
+      phase: 'outline',
+      slides: [slide],
+    });
+  });
+
   it('repairs malformed model JSON once and never fabricates an outline receipt', async () => {
     const chat = chatPort(
       { phase: 'outline', message: 'fake completion' },
@@ -217,6 +414,128 @@ describe('autonomous presentation conversation', () => {
     });
     expect(result.phase).toBe('intake');
     expect(result.slides).toBeUndefined();
+    expect(chat.chat).toHaveBeenCalledTimes(3);
+  });
+
+  it('extracts one balanced JSON object from provider prose', async () => {
+    const chat = chatPort();
+    vi.mocked(chat.chat).mockResolvedValueOnce({
+      ...response(null),
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: 'assistant',
+            content:
+              '<think>internal planning</think>我会先确认场景。\n```json\n{"phase":"intake","message":"这份演示主要用于什么场合？","questionId":"audience-scene"}\n```',
+          },
+        },
+      ],
+    });
+
+    await expect(
+      createPresentationConversationCapability({ chat }).execute(command, { scope }),
+    ).resolves.toMatchObject({
+      message: '我已梳理当前信息，接下来需要你确认一个关键决定。',
+      phase: 'intake',
+      question: { prompt: '这份演示主要用于什么场合？' },
+      questionId: 'audience-scene',
+    });
+    expect(chat.chat).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a structured decision question separate from the short chat message', async () => {
+    const chat = chatPort({
+      phase: 'intake',
+      message: '模板已经看完，还需要你确认一个关键决定。',
+      questionId: 'audience-scene',
+      question: {
+        title: '确认使用场景',
+        prompt: '这次主要用于什么场合？',
+        context: ['已观察 6 张真实页面', '第 13 页包含视频'],
+        choices: [
+          { id: 'recruit', label: '社团招新宣讲', description: '面向新生' },
+          { id: 'course', label: '课程介绍' },
+        ],
+      },
+    });
+
+    await expect(
+      createPresentationConversationCapability({ chat }).execute(command, { scope }),
+    ).resolves.toMatchObject({
+      message: '模板已经看完，还需要你确认一个关键决定。',
+      question: {
+        choices: [{ id: 'recruit', label: '社团招新宣讲' }, { id: 'course' }],
+        context: ['已观察 6 张真实页面', '第 13 页包含视频'],
+        prompt: '这次主要用于什么场合？',
+        title: '确认使用场景',
+      },
+      questionId: 'audience-scene',
+    });
+  });
+
+  it('recovers a usable short message when the model returns only a structured question', async () => {
+    const chat = chatPort({
+      phase: 'intake',
+      question: {
+        title: '确认事实范围',
+        prompt: '是否允许联网核实学校与模型资料？',
+        choices: [{ id: 'search', label: '允许联网检索' }],
+      },
+    });
+
+    await expect(
+      createPresentationConversationCapability({ chat }).execute(command, { scope }),
+    ).resolves.toMatchObject({
+      message: '我已梳理当前信息，接下来需要你确认一个关键决定。',
+      phase: 'intake',
+      question: { prompt: '是否允许联网核实学校与模型资料？' },
+      questionId: 't-question-1',
+    });
+  });
+
+  it('recovers a short completion message when an executed outline omits message', async () => {
+    const chat = chatPort(
+      op('planning.update', { topic: '发布演示', plan }),
+      op('planning.outline'),
+      { slides: [slide] },
+      { phase: 'outline' },
+    );
+
+    await expect(
+      createPresentationConversationCapability({ chat }).execute(command, { scope }),
+    ).resolves.toMatchObject({
+      message: '信息已整理完成，我已经生成了逐页大纲。',
+      phase: 'outline',
+      slides: [slide],
+    });
+  });
+
+  it('keeps the current brief and returns a recoverable turn after repeated invalid JSON', async () => {
+    const chat = chatPort();
+    vi.mocked(chat.chat)
+      .mockResolvedValueOnce({
+        ...response(null),
+        choices: [{ index: 0, message: { role: 'assistant', content: '{invalid-1}' } }],
+      })
+      .mockResolvedValueOnce({
+        ...response(null),
+        choices: [{ index: 0, message: { role: 'assistant', content: 'still invalid' } }],
+      })
+      .mockResolvedValueOnce({
+        ...response(null),
+        choices: [{ index: 0, message: { role: 'assistant', content: '```json\n[]\n```' } }],
+      });
+
+    const result = await createPresentationConversationCapability({ chat }).execute(
+      { ...command, brief: { topic: '已保存主题' } },
+      { scope },
+    );
+    expect(result).toMatchObject({
+      brief: { topic: '已保存主题' },
+      message: '刚才的规划结果没有完整生成。我已保留现有信息，请重试本轮或继续补充。',
+      phase: 'intake',
+    });
     expect(chat.chat).toHaveBeenCalledTimes(3);
   });
 });

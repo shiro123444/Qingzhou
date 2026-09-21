@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import type {
   ArtifactSnapshot,
@@ -10,7 +10,7 @@ import type {
   PresentationPort,
   RuntimeScope,
 } from '../../../../packages/runtime-contracts/src';
-import type { AtomicRuntime } from '../atomic-runtime';
+import type { AtomicInvocation, AtomicRuntime } from '../atomic-runtime';
 import { presentationActivity } from './activity';
 import { validateAnnotation } from './annotation';
 import type { PresentationArtifactStore, StoredArtifact } from './artifact-store';
@@ -36,7 +36,19 @@ import type {
   FilePresentationTemplateLibrary,
   TemplateApplication,
   TemplateProfile,
+  TemplateReference,
+  TemplateVisualProfile,
 } from './templates';
+import { templateVisualNeedsInput, templateVisualNeedsRefresh } from './templates';
+import type { PresentationVisualCritic, PresentationVisualReview } from './visual-critic';
+import type {
+  PresentationVisualStoryboard,
+  PresentationVisualStoryboardPlanner,
+} from './visual-storyboard';
+import {
+  presentationStoryboardInputFingerprint,
+  presentationVisualStoryboardSchema,
+} from './visual-storyboard';
 
 export interface PresentationGenerationPortScope extends RuntimeScope {
   readonly request: Request;
@@ -54,6 +66,8 @@ export interface PresentationGenerationPortOptions {
   readonly repository?: PresentationJobRepository;
   readonly revisionAssetPlanner?: PresentationRevisionAssetPlanner;
   readonly templateLibrary?: FilePresentationTemplateLibrary;
+  readonly visualCritic?: PresentationVisualCritic;
+  readonly visualStoryboardPlanner?: PresentationVisualStoryboardPlanner;
 }
 
 interface JobEntry extends StoredPresentationJob {
@@ -72,6 +86,88 @@ const clone = <T>(value: T): T => {
     return output as T;
   }
   return value;
+};
+
+const planVisualFingerprint = (plan: PresentationPlan): string =>
+  createHash('sha256')
+    .update(plan.slides.map((slide) => `${slide.slideId}\u0000${slide.svg}`).join('\u0001'))
+    .digest('hex');
+
+/**
+ * Prepared assets may enrich the outline with concrete refs, so compare only the
+ * learned-template context that must never be rolled back by a retry cache.
+ */
+const learnedTemplateContextFingerprint = (input: PresentationJobInput): string => {
+  const options = input.options as Record<string, unknown> | undefined;
+  const visual = options?.templateVisual as Record<string, unknown> | undefined;
+  const storyboard = options?.visualStoryboard as Record<string, unknown> | undefined;
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        storyboard: storyboard
+          ? {
+              inputFingerprint: storyboard.inputFingerprint,
+              schemaVersion: storyboard.schemaVersion,
+              templateId: storyboard.templateId,
+              versionId: storyboard.versionId,
+            }
+          : null,
+        template: input.template ?? null,
+        templateVersionId: options?.templateVersionId ?? null,
+        visual: visual
+          ? {
+              analyzedAt: visual.analyzedAt,
+              designProgram: visual.designProgram,
+              schemaVersion: visual.schemaVersion,
+              templateId: visual.templateId,
+              versionId: visual.versionId,
+            }
+          : null,
+      }),
+    )
+    .digest('hex');
+};
+
+const preparedAssetsMatchLearnedTemplate = (
+  prepared: PresentationRevisionAssetResult | undefined,
+  input: PresentationJobInput,
+): prepared is PresentationRevisionAssetResult =>
+  Boolean(
+    prepared &&
+    learnedTemplateContextFingerprint(prepared.input) === learnedTemplateContextFingerprint(input),
+  );
+
+const bindTemplateApplication = (
+  input: PresentationJobInput,
+  template: TemplateApplication,
+): PresentationJobInput => ({
+  ...input,
+  template: template.templateId,
+  options: {
+    ...input.options,
+    templateVersionId: template.versionId,
+    templateVisual: template.visual,
+  },
+});
+
+/** Owned visual-page artifact ids only; skip unverified URLs and keep the learner bound. */
+const trustedTemplatePageRefs = (template?: TemplateApplication): string[] => {
+  const refs: string[] = [];
+  for (const page of template?.visual?.pages ?? []) {
+    if (typeof page.ref !== 'string' || !page.ref.trim()) continue;
+    if (/^(?:https?:|data:|\/\/)/iu.test(page.ref)) continue;
+    if (refs.includes(page.ref)) continue;
+    refs.push(page.ref);
+  }
+  return refs.slice(0, 4);
+};
+
+const confirmedDeckLength = (input: PresentationJobInput): number | undefined => {
+  const outline = input.options?.outline;
+  if (Array.isArray(outline) && outline.length) return outline.length;
+  return Number.isInteger(input.slideCount) && (input.slideCount ?? 0) > 0
+    ? input.slideCount
+    : undefined;
 };
 
 const normalizeInput = (value: PresentationJobInput): PresentationJobInput | undefined => {
@@ -537,6 +633,31 @@ export class PresentationGenerationPort implements PresentationPort {
     return clone(entry.job);
   }
 
+  async deleteJob(jobId: string): Promise<void> {
+    const entry = await this.entry(jobId);
+    if (!entry)
+      throw Object.assign(new Error(`Presentation job does not exist: ${jobId}`), {
+        code: 'PRESENTATION_NOT_FOUND',
+      });
+    if (!this.options.repository?.removeJob)
+      throw Object.assign(new Error('Presentation deletion is unavailable'), {
+        code: 'PROVIDER_UNAVAILABLE',
+      });
+
+    entry.controller.abort();
+    await entry.task.catch(() => undefined);
+    await entry.persistence.catch(() => undefined);
+    const ownedArtifacts = (await this.options.artifactStore.listByJob?.(this.scope, jobId)) ?? [];
+    await Promise.all(
+      [...new Set(ownedArtifacts.map((artifact) => artifact.artifactId))].map((artifactId) =>
+        this.options.artifactStore.remove(this.scope, artifactId),
+      ),
+    );
+    await this.options.repository.removeJob(this.scope, jobId);
+    this.jobs.delete(jobId);
+    this.loading.delete(jobId);
+  }
+
   async retryJob(jobId: string): Promise<PresentationJob> {
     const entry = await this.entry(jobId);
     if (!entry)
@@ -550,8 +671,19 @@ export class PresentationGenerationPort implements PresentationPort {
     if (entry.controller.signal.aborted) return clone(entry.job);
     entry.job.state = 'queued';
     entry.job.error = undefined;
-    for (const message of entry.job.messages ?? [])
-      if (message.status === 'failed') message.status = 'queued';
+    // Resume only the newest unfinished instruction. Older queued edits can
+    // survive a provider failure when the user keeps working; replaying that
+    // backlog would apply stale requests before the latest visible task.
+    const unfinishedEdit = entry.job.messages?.findLast((message) => message.status !== 'applied');
+    for (const message of entry.job.messages ?? []) {
+      if (message === unfinishedEdit) {
+        message.status = 'queued';
+        delete message.error;
+      } else if (message.status === 'queued' || message.status === 'applying') {
+        message.status = 'failed';
+        message.error = 'Skipped because a newer edit was resumed.';
+      }
+    }
     await this.save(entry);
     entry.task = this.run(jobId, entry.input, entry.controller);
     return clone(entry.job);
@@ -650,23 +782,350 @@ export class PresentationGenerationPort implements PresentationPort {
     return images;
   }
 
+  private async ensureTemplateApplication(
+    reference: TemplateReference,
+    jobId: string,
+    signal: AbortSignal,
+    publisher?: Pick<PresentationJobEventPublisherPort, 'publish'>,
+  ): Promise<TemplateApplication> {
+    if (!this.options.templateLibrary)
+      throw Object.assign(new Error('Template library is unavailable'), {
+        code: 'PROVIDER_UNAVAILABLE',
+      });
+    const profile = await this.options.templateLibrary.get(
+      this.scope,
+      reference.templateId,
+      reference.versionId,
+    );
+    const cachedVisual =
+      profile && typeof this.options.templateLibrary.getVisual === 'function'
+        ? await this.options.templateLibrary.getVisual(this.scope, {
+            templateId: profile.templateId,
+            versionId: profile.versionId,
+          })
+        : null;
+    const needsVisualAnalysis =
+      profile?.source.kind === 'pptx' ||
+      (cachedVisual ? templateVisualNeedsRefresh(cachedVisual) : false);
+    if (needsVisualAnalysis) {
+      if (!profile)
+        throw Object.assign(new Error('Template does not exist in this scope'), {
+          code: 'PRESENTATION_NOT_FOUND',
+        });
+      const runtime = this.options.atomicRuntime;
+      const canAnalyze = Boolean(
+        runtime &&
+        (await runtime.catalog()).some(
+          (tool) => tool.name === 'presentation.template.analyzeVisual',
+        ),
+      );
+      if (!runtime || !canAnalyze)
+        throw Object.assign(new Error('Visual analysis is required to apply this template'), {
+          code: 'PROVIDER_UNAVAILABLE',
+        });
+      const analyzed = await runtime.invoke<TemplateVisualProfile>(
+        'presentation.template.analyzeVisual',
+        { templateId: profile.templateId, versionId: profile.versionId },
+        {
+          jobId,
+          onEvent: (event) =>
+            publisher?.publish({
+              data: { activity: presentationActivity(event).text, phase: 'template' },
+              idempotencyKey: `${event.operationId}:${event.state}`,
+              jobId,
+              type: PRESENTATION_JOB_EVENT_TYPES.progress,
+            }),
+          scope: this.scope,
+          signal,
+        },
+      );
+      if (templateVisualNeedsInput(analyzed))
+        throw Object.assign(new Error(analyzed.learning.questions[0].question), {
+          code: 'PRESENTATION_TEMPLATE_INPUT_REQUIRED',
+          details: { questions: analyzed.learning.questions },
+        });
+    }
+    const template = await this.options.templateLibrary.resolve(this.scope, {
+      templateId: profile?.templateId ?? reference.templateId,
+      versionId: profile?.versionId ?? reference.versionId,
+    });
+    if (needsVisualAnalysis && !template.visual)
+      throw Object.assign(
+        new Error('Template visual analysis is required before applying this template'),
+        { code: 'PRESENTATION_INVALID' },
+      );
+    return template;
+  }
+
+  private async ensureVisualStoryboard(
+    input: PresentationJobInput,
+    template: TemplateApplication,
+    jobId: string,
+    signal: AbortSignal,
+    publisher?: Pick<PresentationJobEventPublisherPort, 'publish'>,
+  ): Promise<PresentationJobInput> {
+    if (!template.visual?.designProgram || !this.options.visualStoryboardPlanner) return input;
+    if (!confirmedDeckLength(input)) return input;
+    const existing = input.options?.visualStoryboard as
+      | Partial<PresentationVisualStoryboard>
+      | undefined;
+    if (
+      existing?.templateId === template.templateId &&
+      existing.versionId === template.versionId &&
+      existing.inputFingerprint === presentationStoryboardInputFingerprint(input) &&
+      existing.slides?.length === confirmedDeckLength(input)
+    ) {
+      return input;
+    }
+    publisher?.publish({
+      data: { activity: '正在把模板语言编排成整稿故事板', phase: 'template' },
+      idempotencyKey: `template-storyboard:${template.versionId}`,
+      jobId,
+      type: PRESENTATION_JOB_EVENT_TYPES.progress,
+    });
+    const operationInput = { jobInput: input, template };
+    const canInvoke = Boolean(
+      this.options.atomicRuntime &&
+      (await this.options.atomicRuntime.catalog()).some(
+        (tool) => tool.name === 'presentation.template.mapDeck',
+      ),
+    );
+    const storyboard = presentationVisualStoryboardSchema.parse(
+      canInvoke
+        ? await this.options.atomicRuntime!.invoke<PresentationVisualStoryboard>(
+            'presentation.template.mapDeck',
+            operationInput,
+            {
+              jobId,
+              onEvent: (event) =>
+                publisher?.publish({
+                  data: { activity: presentationActivity(event).text, phase: 'template' },
+                  idempotencyKey: `${event.operationId}:${event.state}`,
+                  jobId,
+                  type: PRESENTATION_JOB_EVENT_TYPES.progress,
+                }),
+              scope: this.scope,
+              signal,
+            },
+          )
+        : await this.options.visualStoryboardPlanner.plan(operationInput, {
+            scope: this.scope,
+            signal,
+          }),
+    );
+    if (
+      storyboard.templateId !== template.templateId ||
+      storyboard.versionId !== template.versionId ||
+      storyboard.inputFingerprint !== presentationStoryboardInputFingerprint(input)
+    ) {
+      throw Object.assign(new Error('Visual storyboard does not match this template and outline'), {
+        code: 'PRESENTATION_INVALID',
+      });
+    }
+    return {
+      ...input,
+      options: { ...input.options, visualStoryboard: storyboard },
+    };
+  }
+
+  private async reviewAndRepairVisualPlan(
+    plan: PresentationPlan,
+    input: PresentationJobInput,
+    template: TemplateApplication | undefined,
+    jobId: string,
+    signal: AbortSignal,
+    publisher?: Pick<PresentationJobEventPublisherPort, 'publish'>,
+  ): Promise<PresentationPlan> {
+    if (!template?.visual || !this.options.visualCritic) return plan;
+    const previous = plan.designSpec?.templateVisualReview as
+      | { planFingerprint?: string; templateId?: string; versionId?: string }
+      | undefined;
+    if (
+      previous?.templateId === template.templateId &&
+      previous.versionId === template.versionId &&
+      previous.planFingerprint === planVisualFingerprint(plan)
+    ) {
+      return plan;
+    }
+    const review = async (candidate: PresentationPlan): Promise<PresentationVisualReview> => {
+      const operationInput = { plan: candidate, template };
+      const canInvoke = Boolean(
+        this.options.atomicRuntime &&
+        (await this.options.atomicRuntime.catalog()).some(
+          (tool) => tool.name === 'presentation.template.reviewDeck',
+        ),
+      );
+      return canInvoke
+        ? this.options.atomicRuntime!.invoke<PresentationVisualReview>(
+            'presentation.template.reviewDeck',
+            operationInput,
+            {
+              jobId,
+              onEvent: (event) =>
+                publisher?.publish({
+                  data: { activity: presentationActivity(event).text, phase: 'template' },
+                  idempotencyKey: `${event.operationId}:${event.state}`,
+                  jobId,
+                  type: PRESENTATION_JOB_EVENT_TYPES.progress,
+                }),
+              scope: this.scope,
+              signal,
+            },
+          )
+        : this.options.visualCritic!.review(operationInput, { scope: this.scope, signal });
+    };
+    const initial = await review(plan);
+    const corrections = initial.issues.filter((issue) => issue.severity !== 'minor');
+    let repaired = plan;
+    const repairedSlideIds: string[] = [];
+    const repairFailures: Array<{ code: string; slideId: string }> = [];
+    if (corrections.length) {
+      publisher?.publish({
+        data: { activity: '发现视觉偏差，正在做一次最小修正', phase: 'planner' },
+        idempotencyKey: `template-repair:${template.versionId}`,
+        jobId,
+        type: PRESENTATION_JOB_EVENT_TYPES.progress,
+      });
+      const groups = new Map<string, typeof corrections>();
+      for (const issue of corrections) {
+        groups.set(issue.slideId, [...(groups.get(issue.slideId) ?? []), issue]);
+      }
+      for (const [slideId, issues] of [...groups].slice(0, 4)) {
+        const slide = repaired.slides.find((item) => item.slideId === slideId);
+        if (!slide) continue;
+        const revision: PresentationMessageInput = {
+          content: [
+            '视觉复核后的最小修正。只修改本页 SVG 的层级、间距、构图锚点、可读性或模板气质；保留事实、文字含义、讲稿和所有现有图片引用，不生成新素材。',
+            ...issues.map(
+              (issue) =>
+                `${issue.category}（${issue.severity}）：${issue.instruction}；证据：${issue.evidence}`,
+            ),
+          ]
+            .join('\n')
+            .slice(0, 4000),
+          requestId: `template-visual-repair:${template.versionId}:${slideId}`,
+          target: { slideNumber: slide.order, type: 'slide' },
+        };
+        try {
+          const candidate = await this.options.capability.plan(input, {
+            abortSignal: signal,
+            basePlan: repaired,
+            jobId,
+            revision,
+            scope: this.scope,
+            template,
+            trustedImages: await this.readTrustedImages([
+              ...this.planAssetIds(repaired, revision.target),
+              ...trustedTemplatePageRefs(template),
+            ]),
+          });
+          const candidateSlide = candidate.slides.find((item) => item.slideId === slideId);
+          if (!candidateSlide) {
+            throw Object.assign(new Error(`visual repair omitted slide ${slideId}`), {
+              code: 'PRESENTATION_REPAIR_INVALID',
+            });
+          }
+          // A critic repair is deliberately narrower than a user revision: only the
+          // rendered SVG may change. Keep page identity, outline metadata, speaker
+          // notes, and asset associations exactly as they were before the repair.
+          repaired = {
+            ...repaired,
+            planId: candidate.planId,
+            slides: repaired.slides.map((item) =>
+              item.slideId === slideId ? { ...item, svg: candidateSlide.svg } : item,
+            ),
+          };
+          repairedSlideIds.push(slideId);
+        } catch (error) {
+          if (signal.aborted) throw error;
+          repairFailures.push({
+            code:
+              error &&
+              typeof error === 'object' &&
+              'code' in error &&
+              typeof error.code === 'string'
+                ? error.code
+                : 'PRESENTATION_REPAIR_UNAVAILABLE',
+            slideId,
+          });
+          publisher?.publish({
+            data: {
+              activity: `第 ${slide.order} 页视觉修正暂不可用，保留已完成页面`,
+              phase: 'planner',
+            },
+            idempotencyKey: `template-repair-skipped:${template.versionId}:${slideId}`,
+            jobId,
+            type: PRESENTATION_JOB_EVENT_TYPES.progress,
+          });
+        }
+      }
+    }
+    let final = initial;
+    let finalReviewError: string | undefined;
+    if (repairedSlideIds.length) {
+      try {
+        final = await review(repaired);
+      } catch (error) {
+        if (signal.aborted) throw error;
+        finalReviewError =
+          error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
+            ? error.code
+            : 'PRESENTATION_REVIEW_UNAVAILABLE';
+      }
+    }
+    return {
+      ...repaired,
+      designSpec: {
+        ...repaired.designSpec,
+        templateVisualReview: {
+          final,
+          ...(finalReviewError ? { finalReviewError } : {}),
+          initial,
+          planFingerprint: planVisualFingerprint(repaired),
+          ...(repairFailures.length ? { repairFailures } : {}),
+          repaired: repairedSlideIds.length > 0,
+          repairedSlideIds,
+          reviewedAt: this.now(),
+          templateId: template.templateId,
+          versionId: template.versionId,
+        },
+      },
+    };
+  }
+
   private async prepareAssets(
     jobInput: PresentationJobInput,
     basePlan: PresentationPlan,
     revision: PresentationMessageInput,
     jobId: string,
     signal: AbortSignal,
+    publisher?: PresentationJobEventPublisherPort,
   ): Promise<PresentationRevisionAssetResult> {
     if (!this.options.revisionAssetPlanner)
       return { input: jobInput, intents: [], assetArtifactIds: [] };
     const input = { jobInput, basePlan, revision };
+    const onEvent: NonNullable<AtomicInvocation['onEvent']> = (event) => {
+      publisher?.publish({
+        jobId,
+        type: PRESENTATION_JOB_EVENT_TYPES.progress,
+        idempotencyKey: `operation:${event.operationId}:${event.state}`,
+        data: { activity: presentationActivity(event).text, phase: 'assets' },
+      });
+    };
     return this.options.atomicRuntime
       ? this.options.atomicRuntime.invoke('presentation.assets.prepare', input, {
           scope: this.scope,
           jobId,
           signal,
+          onEvent,
         })
-      : this.options.revisionAssetPlanner.prepare({ ...input, scope: this.scope, jobId, signal });
+      : this.options.revisionAssetPlanner.prepare({
+          ...input,
+          scope: this.scope,
+          jobId,
+          signal,
+          onEvent,
+        });
   }
 
   async listTemplates() {
@@ -674,6 +1133,13 @@ export class PresentationGenerationPort implements PresentationPort {
     return this.options.atomicRuntime
       ? this.options.atomicRuntime.invoke('presentation.template.list', {}, { scope: this.scope })
       : this.options.templateLibrary.list(this.scope);
+  }
+  async deleteTemplate(templateId: string): Promise<void> {
+    if (!this.options.templateLibrary)
+      throw Object.assign(new Error('Template library unavailable'), {
+        code: 'PROVIDER_UNAVAILABLE',
+      });
+    await this.options.templateLibrary.remove(this.scope, templateId);
   }
   async learnTemplate(name: string, jobId: string) {
     const entry = await this.entry(jobId);
@@ -729,6 +1195,7 @@ export class PresentationGenerationPort implements PresentationPort {
     'assets.list',
     'assets.applyMask',
     'presentation.template.extractAssets',
+    'presentation.template.extractMedia',
     'presentation.template.render',
     'presentation.template.analyzeVisual',
     'presentation.template.extractComponent',
@@ -863,62 +1330,50 @@ export class PresentationGenerationPort implements PresentationPort {
     let release: (() => void) | undefined;
     try {
       release = await this.options.atomicRuntime?.acquire('presentation');
-      await this.save(entry);
       const context = this.options.contextFactory(jobId);
       const publisher = this.options.eventPublisherFactory
         ? await this.options.eventPublisherFactory(this.scope, jobId, this.scope.request)
         : undefined;
       try {
+        await this.save(entry);
+        publisher?.publish({
+          data: { job: clone(entry.job) },
+          idempotencyKey: `state:running:${entry.job.updatedAt}`,
+          jobId,
+          scope: this.scope,
+          type: PRESENTATION_JOB_EVENT_TYPES.progress,
+        });
         let generationInput = clone(input);
         let template: TemplateApplication | undefined;
         if (generationInput.template) {
-          if (!this.options.templateLibrary)
-            throw Object.assign(new Error('Template library is unavailable'), {
-              code: 'PROVIDER_UNAVAILABLE',
-            });
-          const templateReference = {
-            templateId: generationInput.template,
-            versionId: generationInput.options?.templateVersionId as string | undefined,
-          };
-          const profile = await this.options.templateLibrary.get(
-            this.scope,
-            templateReference.templateId,
-            templateReference.versionId,
+          template = await this.ensureTemplateApplication(
+            {
+              templateId: generationInput.template,
+              versionId: generationInput.options?.templateVersionId as string | undefined,
+            },
+            jobId,
+            controller.signal,
+            publisher,
+          );
+          generationInput = bindTemplateApplication(generationInput, template);
+          generationInput = await this.ensureVisualStoryboard(
+            generationInput,
+            template,
+            jobId,
+            controller.signal,
+            publisher,
           );
           if (
-            profile?.source.kind === 'pptx' &&
-            this.options.atomicRuntime &&
-            (await this.options.atomicRuntime.catalog()).some(
-              (tool) => tool.name === 'presentation.template.analyzeVisual',
-            )
+            entry.preparedAssets?.initial &&
+            !preparedAssetsMatchLearnedTemplate(entry.preparedAssets.initial, generationInput)
           ) {
-            await this.options.atomicRuntime.invoke(
-              'presentation.template.analyzeVisual',
-              { ...templateReference, versionId: profile.versionId },
-              {
-                scope: this.scope,
-                jobId,
-                signal: controller.signal,
-                onEvent: (event) =>
-                  publisher?.publish({
-                    jobId,
-                    type: PRESENTATION_JOB_EVENT_TYPES.progress,
-                    data: { activity: presentationActivity(event).text, phase: 'template' },
-                    idempotencyKey: `${event.operationId}:${event.state}`,
-                  }),
-              },
-            );
+            const preparedAssets = { ...entry.preparedAssets };
+            delete preparedAssets.initial;
+            entry.preparedAssets = preparedAssets;
+            entry.initialAssetsComplete = false;
           }
-          template = await this.options.templateLibrary.resolve(this.scope, {
-            templateId: generationInput.template,
-            versionId: generationInput.options?.templateVersionId as string | undefined,
-          });
-          generationInput.options = {
-            ...generationInput.options,
-            templateVersionId: template.versionId,
-            templateVisual: template.visual,
-          };
           entry.input = clone(generationInput);
+          await this.save(entry);
         }
         const slots = (generationInput.options as { imageSlots?: unknown[] } | undefined)
           ?.imageSlots;
@@ -1058,6 +1513,7 @@ export class PresentationGenerationPort implements PresentationPort {
                 },
                 jobId,
                 controller.signal,
+                progressPublisher,
               ));
             entry.preparedAssets = { ...entry.preparedAssets, initial: prepared };
             generationInput = prepared.input;
@@ -1090,6 +1546,7 @@ export class PresentationGenerationPort implements PresentationPort {
                     initialRevision,
                     jobId,
                     controller.signal,
+                    progressPublisher,
                   ));
                 entry.preparedAssets = {
                   ...entry.preparedAssets,
@@ -1112,6 +1569,7 @@ export class PresentationGenerationPort implements PresentationPort {
                     trustedImages: await this.readTrustedImages([
                       ...this.planAssetIds(plan, initialRevision.target),
                       ...prepared.assetArtifactIds,
+                      ...trustedTemplatePageRefs(template),
                     ]),
                   });
                 }
@@ -1133,19 +1591,22 @@ export class PresentationGenerationPort implements PresentationPort {
                 await this.publishSnapshot(entry, PRESENTATION_JOB_EVENT_TYPES.progress);
                 if (!message.versionId) {
                   if (message.template) {
-                    template = await this.options.templateLibrary!.resolve(
-                      this.scope,
+                    template = await this.ensureTemplateApplication(
                       message.template,
+                      jobId,
+                      controller.signal,
+                      progressPublisher ?? publisher,
                     );
-                    generationInput = {
-                      ...generationInput,
-                      template: template.templateId,
-                      options: {
-                        ...generationInput.options,
-                        templateVersionId: template.versionId,
-                      },
-                    };
+                    generationInput = bindTemplateApplication(generationInput, template);
+                    generationInput = await this.ensureVisualStoryboard(
+                      generationInput,
+                      template,
+                      jobId,
+                      controller.signal,
+                      progressPublisher ?? publisher,
+                    );
                     entry.input = clone(generationInput);
+                    await this.save(entry);
                   }
                   if (message.patch) {
                     const patch = {
@@ -1170,16 +1631,30 @@ export class PresentationGenerationPort implements PresentationPort {
                         });
                   } else {
                     if (message.annotation) validateAnnotation(plan, message);
-                    const prepared = message.annotation
-                      ? { input: generationInput, assetArtifactIds: [], intents: [] }
-                      : (entry.preparedAssets?.[`message:${message.requestId}`] ??
-                        (await this.prepareAssets(
-                          generationInput,
-                          plan,
-                          message,
-                          jobId,
-                          controller.signal,
-                        )));
+                    let prepared = message.annotation
+                      ? { input: generationInput, assetArtifactIds: [] as string[], intents: [] }
+                      : preparedAssetsMatchLearnedTemplate(
+                            entry.preparedAssets?.[`message:${message.requestId}`],
+                            generationInput,
+                          )
+                        ? entry.preparedAssets?.[`message:${message.requestId}`]
+                        : undefined;
+                    if (!prepared) {
+                      progressPublisher?.publish({
+                        jobId,
+                        type: PRESENTATION_JOB_EVENT_TYPES.progress,
+                        idempotencyKey: `assets:${message.requestId}`,
+                        data: { activity: '正在规划各页素材', phase: 'assets' },
+                      });
+                      prepared = await this.prepareAssets(
+                        generationInput,
+                        plan,
+                        message,
+                        jobId,
+                        controller.signal,
+                        progressPublisher,
+                      );
+                    }
                     entry.preparedAssets = {
                       ...entry.preparedAssets,
                       [`message:${message.requestId}`]: prepared,
@@ -1187,6 +1662,18 @@ export class PresentationGenerationPort implements PresentationPort {
                     await this.save(entry);
                     generationInput = prepared.input;
                     imageArtifactIds.push(...prepared.assetArtifactIds);
+                    progressPublisher?.publish({
+                      jobId,
+                      type: PRESENTATION_JOB_EVENT_TYPES.progress,
+                      idempotencyKey: `layout:${message.requestId}`,
+                      data: {
+                        activity:
+                          message.target.type === 'slide'
+                            ? `正在排版第 ${message.target.slideNumber} 页`
+                            : '素材已就绪，正在排版页面',
+                        phase: 'planner',
+                      },
+                    });
                     plan = await this.options.capability.plan(generationInput, {
                       ...revisionContext.plannerContext,
                       scope: this.scope,
@@ -1196,6 +1683,7 @@ export class PresentationGenerationPort implements PresentationPort {
                       trustedImages: await this.readTrustedImages([
                         ...this.planAssetIds(plan, message.target),
                         ...prepared.assetArtifactIds,
+                        ...trustedTemplatePageRefs(template),
                       ]),
                       template,
                       jobId,
@@ -1211,6 +1699,16 @@ export class PresentationGenerationPort implements PresentationPort {
                 // Keep applying until the revised pages and deck are actually persisted.
                 await this.save(entry);
               }
+              plan = await this.reviewAndRepairVisualPlan(
+                plan,
+                generationInput,
+                template,
+                jobId,
+                controller.signal,
+                progressPublisher,
+              );
+              entry.plan = clone(plan);
+              await this.save(entry);
               return await this.embedOwnedAssets(plan);
             },
             plannerContext: {
@@ -1277,8 +1775,8 @@ export class PresentationGenerationPort implements PresentationPort {
               },
               template,
               trustedImages: await this.readTrustedImages([
-                ...(template?.visual?.pages.map((page) => page.ref).slice(0, 2) ?? []),
                 ...imageArtifactIds,
+                ...trustedTemplatePageRefs(template),
               ]),
               jobId,
               abortSignal: controller.signal,

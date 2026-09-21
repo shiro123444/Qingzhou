@@ -3,26 +3,30 @@ import { Tooltip } from 'antd';
 import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { memo, useCallback, useMemo, useState } from 'react';
 
+import { ConversationPanel } from '../ConversationPanel';
 import SlideNavigator from '../SlideNavigator';
 import ArchitectureDrawer from './ArchitectureDrawer';
 import CapsuleHeader from './CapsuleHeader';
 import PanoramaGrid from './PanoramaGrid';
 import SlideFocusStage from './SlideFocusStage';
+import { revealSrcsForSlide } from './slidePaint';
 import { styles } from './style';
 import type { CompletedViewMode, CompletedWorkspaceProps } from './types';
 
 export const CompletedWorkspace = memo<CompletedWorkspaceProps>(
   ({
+    activity,
+    activityHistory,
     canExport,
-    creating = false,
     dismissSlotError,
     effectiveSelectedArtifactId,
     exported,
     exporting,
     jobTitles,
     jobs,
+    onDeleteJob,
     onSelectJob,
-    onAiModify,
+    onCancel,
     onSendMessage,
     onExport,
     onJobChanged,
@@ -37,11 +41,27 @@ export const CompletedWorkspace = memo<CompletedWorkspaceProps>(
     selectedJobSlots,
     selectedSlide,
     showInspector = true,
+    showSidebarReopen = false,
     slideArtifacts,
   }) => {
     const [viewMode, setViewMode] = useState<CompletedViewMode>('focus');
     const [drawerOpen, setDrawerOpen] = useState(false);
     const [filmstripOpen, setFilmstripOpen] = useState(false);
+    const [conversationOpen, setConversationOpen] = useState(false);
+    const [conversationFocus, setConversationFocus] = useState(0);
+
+    const openConversation = useCallback(() => {
+      setConversationOpen(true);
+      setConversationFocus((value) => value + 1);
+    }, []);
+
+    const toggleConversation = useCallback(() => {
+      if (conversationOpen) {
+        setConversationOpen(false);
+        return;
+      }
+      openConversation();
+    }, [conversationOpen, openConversation]);
 
     const totalSlides = slideArtifacts.length;
     const currentIndex = useMemo(() => {
@@ -89,14 +109,30 @@ export const CompletedWorkspace = memo<CompletedWorkspaceProps>(
       : undefined;
     const presentationStyle =
       typeof selectedSlide?.metadata?.style === 'string' ? selectedSlide.metadata.style : undefined;
+    const latestPendingMessage = selectedJob.messages?.findLast(
+      (message) => message.status !== 'applied',
+    );
+    const paintInterrupted =
+      selectedJob.state === 'failed' && latestPendingMessage?.status === 'failed';
+    const painting =
+      selectedJob.state === 'running' || selectedJob.state === 'queued' || paintInterrupted;
+    const paintingSlideNumber =
+      latestPendingMessage?.target.type === 'slide'
+        ? latestPendingMessage.target.slideNumber
+        : undefined;
+    const focusPainting =
+      painting && (!paintingSlideNumber || paintingSlideNumber === currentIndex + 1);
+    const focusRevealSrcs = revealSrcsForSlide(selectedSlide, selectedJobSlots, resolveArtifactUri);
 
     return (
       <div className={styles.workspaceRoot} data-testid="presentation-completed-workspace">
         {/* Top Capsule Floating Bar */}
         <CapsuleHeader
+          activity={activity}
+          activityHistory={activityHistory}
           canExport={canExport}
           canQuickExport={canExport && Boolean(deckArtifact)}
-          creating={creating}
+          conversationOpen={conversationOpen}
           currentIndex={currentIndex}
           drawerOpen={drawerOpen}
           exported={exported}
@@ -105,14 +141,16 @@ export const CompletedWorkspace = memo<CompletedWorkspaceProps>(
           jobTitle={jobTitle}
           jobs={jobs}
           presentationStyle={presentationStyle}
+          showSidebarReopen={showSidebarReopen}
           slideCount={totalSlides}
           viewMode={viewMode}
           availableFormats={selectedJobArtifacts
             .filter((artifact) => artifact.status === 'ready')
             .map((artifact) => artifact.type)}
-          onAiModify={onAiModify}
+          onDeleteJob={onDeleteJob}
           onJobChanged={onJobChanged}
           onNewPresentation={onNewPresentation}
+          onOpenConversation={openConversation}
           onQuickExport={handleQuickExport}
           onRetryJob={() => onRetryJob(selectedJob.jobId)}
           onSelectJob={onSelectJob}
@@ -171,8 +209,12 @@ export const CompletedWorkspace = memo<CompletedWorkspaceProps>(
           {/* Central Stage: Slide Focus Mode vs Panorama Lightbox Grid */}
           {viewMode === 'focus' ? (
             <SlideFocusStage
+              conversationOpen={conversationOpen}
               currentIndex={currentIndex}
               jobId={selectedJob.jobId}
+              paintInterrupted={paintInterrupted}
+              painting={focusPainting}
+              revealSrcs={focusRevealSrcs}
               selectedSlide={selectedSlide}
               totalSlides={totalSlides}
               versionId={selectedJob.versionId}
@@ -180,11 +222,17 @@ export const CompletedWorkspace = memo<CompletedWorkspaceProps>(
               onOpenDrawer={() => setDrawerOpen(true)}
               onPrev={handlePrev}
               onSendMessage={onSendMessage}
+              onToggleConversation={onSendMessage ? toggleConversation : undefined}
             />
           ) : (
             <PanoramaGrid
+              paintInterrupted={paintInterrupted}
+              painting={painting}
+              paintingSlideNumber={paintingSlideNumber}
+              resolveArtifactUri={resolveArtifactUri}
               selectedArtifactId={effectiveSelectedArtifactId}
               slides={slideArtifacts}
+              slots={selectedJobSlots}
               onSelectSlide={handleBentoSelect}
             />
           )}
@@ -210,6 +258,21 @@ export const CompletedWorkspace = memo<CompletedWorkspaceProps>(
             onSelectArtifact={onSelectArtifact}
           />
         </div>
+
+        {onSendMessage && (
+          <ConversationPanel
+            hideTrigger
+            focusKey={conversationFocus}
+            job={selectedJob}
+            key={selectedJob.jobId}
+            open={conversationOpen}
+            selectedPage={Number(selectedSlide?.metadata?.slideNumber) || undefined}
+            onCancel={onCancel ?? (async () => undefined)}
+            onOpenChange={setConversationOpen}
+            onRetry={async (jobId) => onRetryJob(jobId)}
+            onSend={onSendMessage}
+          />
+        )}
       </div>
     );
   },

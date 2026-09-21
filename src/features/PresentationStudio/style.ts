@@ -6,6 +6,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     display: flex;
     flex: 1;
+    flex-direction: column;
 
     min-width: 0;
     min-height: 0;
@@ -16,8 +17,15 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     flex-direction: column;
 
     min-width: 0;
+    min-height: 0;
+  `,
+  conversationMainCompact: css`
     height: min(760px, calc(100dvh - 120px));
     min-height: 420px;
+  `,
+  conversationMainFill: css`
+    height: 100%;
+    min-height: 0;
   `,
   banner: css`
     display: flex;
@@ -624,24 +632,23 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     display: flex;
     flex: 1;
     flex-direction: column;
-    align-items: center;
-    justify-content: center;
+    align-items: stretch;
 
     box-sizing: border-box;
     width: 100%;
-    max-width: 860px;
     height: 100%;
     min-height: 0;
-    margin-inline: auto;
     padding: 0;
+  `,
+  emptyHeader: css`
+    display: flex;
+    flex-shrink: 0;
+    gap: 8px;
+    align-items: center;
+    justify-content: space-between;
 
-    &:has([data-stage='outline']) {
-      max-width: 100%;
-    }
-
-    @media (width <= 768px) {
-      max-width: 100%;
-    }
+    width: 100%;
+    padding-block: 4px 8px;
   `,
   emptyShell: css`
     position: relative;
@@ -649,13 +656,27 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     display: flex;
     flex: 1;
     flex-direction: column;
-    align-items: center;
-    justify-content: center;
+    align-items: stretch;
 
     box-sizing: border-box;
     width: 100%;
     height: 100%;
     min-height: 0;
+  `,
+  emptyWorks: css`
+    flex-shrink: 0;
+  `,
+  worksPanel: css`
+    overflow: auto;
+
+    width: min(420px, 86vw);
+    max-height: min(60vh, 480px);
+    padding: 4px;
+    border: 1px solid ${cssVar.colorBorderSecondary};
+    border-radius: 12px;
+
+    background: ${cssVar.colorBgElevated};
+    box-shadow: ${cssVar.boxShadowSecondary};
   `,
   emptyDescription: css`
     display: flex;

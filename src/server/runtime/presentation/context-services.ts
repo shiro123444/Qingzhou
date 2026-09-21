@@ -6,6 +6,12 @@ import type { LobeChatDatabase } from '@/database/type';
 import { FileService } from '@/server/services/file';
 import { SearchService } from '@/server/services/search';
 
+import {
+  PRESENTATION_ATTACHMENT_MAX_UPLOAD_BYTES,
+  PRESENTATION_ATTACHMENT_MAX_UPLOAD_MIB,
+  PRESENTATION_PPTX_MAX_UPLOAD_BYTES,
+  PRESENTATION_PPTX_MAX_UPLOAD_MIB,
+} from '../../../../packages/runtime-contracts/src';
 import { presentationAccountScope } from './account-workspace';
 import { readPresentationAttachment } from './attachment-storage';
 import type { PresentationContextServices } from './context-tools';
@@ -52,7 +58,17 @@ export function createPresentationContextServices(
         return readPresentationAttachment(id, presentationAccountScope(userId));
       const file = await files.findById(id);
       if (!file) throw new Error('附件不存在或不属于当前账号');
-      if (file.size > 32 * 1024 * 1024) throw new Error('附件超过 32 MiB，请缩小文件后重试');
+      const pptx =
+        file.fileType ===
+          'application/vnd.openxmlformats-officedocument.presentationml.presentation' ||
+        file.name.toLowerCase().endsWith('.pptx');
+      const maxBytes = pptx
+        ? PRESENTATION_PPTX_MAX_UPLOAD_BYTES
+        : PRESENTATION_ATTACHMENT_MAX_UPLOAD_BYTES;
+      const maxMiB = pptx
+        ? PRESENTATION_PPTX_MAX_UPLOAD_MIB
+        : PRESENTATION_ATTACHMENT_MAX_UPLOAD_MIB;
+      if (file.size > maxBytes) throw new Error(`附件超过 ${maxMiB} MiB，请缩小文件后重试`);
       if (file.fileType.startsWith('image/')) {
         const bytes = await storage.getFileByteArray(file.url);
         const image = await sharp(bytes, { limitInputPixels: 32_000_000 })
@@ -61,6 +77,11 @@ export function createPresentationContextServices(
           .toBuffer();
         return { name: file.name, imageUrl: `data:image/png;base64,${image.toString('base64')}` };
       }
+      if (file.fileType.startsWith('audio/') || file.fileType.startsWith('video/'))
+        return {
+          name: file.name,
+          content: `这是已保存的${file.fileType.startsWith('video/') ? '视频' : '音频'}附件；受信媒体引用为 ${id}。需要替换原生 PPTX 媒体时，将此引用作为 mediaRef。`,
+        };
       const { DocumentService } = await import('@/server/services/document');
       const document = await new DocumentService(db, userId).parseFile(id);
       if (!document.content?.trim())

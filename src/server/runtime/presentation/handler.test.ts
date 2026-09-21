@@ -59,15 +59,17 @@ const post = (path: string, body: unknown): Request =>
   request(path, { method: 'POST', body: JSON.stringify(body) });
 
 describe('presentation HTTP seam', () => {
-  it('matches all six C-19 presentation operations', () => {
+  it('matches the presentation operations including destructive routes', () => {
     const cases: Array<[string, string, PresentationRouteMatch]> = [
       ['/jobs', 'POST', { operation: 'create' }],
       ['/jobs/job-1', 'GET', { operation: 'get', id: 'job-1' }],
+      ['/jobs/job-1', 'DELETE', { operation: 'deleteJob', id: 'job-1' }],
       ['/jobs/job-1/cancel', 'POST', { operation: 'cancel', id: 'job-1' }],
       ['/jobs/job-1/retry', 'POST', { operation: 'retry', id: 'job-1' }],
       ['/artifacts/artifact-1', 'GET', { operation: 'getArtifact', id: 'artifact-1' }],
       ['/artifacts/export', 'POST', { operation: 'exportArtifact' }],
       ['/artifacts/artifact-1/export', 'POST', { operation: 'exportArtifact', id: 'artifact-1' }],
+      ['/templates/template-1', 'DELETE', { operation: 'deleteTemplate', id: 'template-1' }],
     ];
 
     for (const [path, method, expected] of cases) {
@@ -106,6 +108,41 @@ describe('presentation HTTP seam', () => {
 
     expect(response).toMatchObject({ status: 200, body: job });
     expect(getJob).toHaveBeenCalledWith('job-1');
+  });
+
+  it('deletes jobs and templates only through explicit DELETE operations', async () => {
+    const { port } = createPort();
+    const deleteJob = vi.fn().mockResolvedValue(undefined);
+    const deleteTemplate = vi.fn().mockResolvedValue(undefined);
+    const extended = Object.assign(port, {
+      deleteJob,
+      deleteTemplate,
+      listTemplates: vi.fn().mockResolvedValue([]),
+    });
+
+    const deletedJob = await handlePresentationRequest(
+      request('/jobs/job-1', { method: 'DELETE' }),
+      scope,
+      { operation: 'deleteJob', id: 'job-1' },
+      async () => extended,
+    );
+    const deletedTemplate = await handlePresentationRequest(
+      request('/templates/template-1', { method: 'DELETE' }),
+      scope,
+      { operation: 'deleteTemplate', id: 'template-1' },
+      async () => extended,
+    );
+
+    expect(deletedJob).toMatchObject({
+      body: { deleted: true, jobId: 'job-1' },
+      status: 200,
+    });
+    expect(deletedTemplate).toMatchObject({
+      body: { deleted: true, templateId: 'template-1' },
+      status: 200,
+    });
+    expect(deleteJob).toHaveBeenCalledWith('job-1');
+    expect(deleteTemplate).toHaveBeenCalledWith('template-1');
   });
 
   it('cancels a job and returns the port state', async () => {

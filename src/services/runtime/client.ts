@@ -78,6 +78,7 @@ export type RuntimePresentationClient = Pick<
     Pick<
       RuntimeClient,
       | 'createImageGeneration'
+      | 'deletePresentationJob'
       | 'downloadArtifact'
       | 'sendPresentationMessage'
       | 'listPresentationJobs'
@@ -171,6 +172,7 @@ export interface RuntimeClient {
     input: PresentationJobInput,
     options?: { signal?: AbortSignal },
   ) => Promise<PresentationJob>;
+  deletePresentationJob: (jobId: string, options?: { signal?: AbortSignal }) => Promise<void>;
   downloadArtifact: (artifactId: string, options?: { signal?: AbortSignal }) => Promise<Blob>;
   exportArtifact: (
     artifactId: string,
@@ -554,6 +556,20 @@ export class RuntimeClientImpl implements RuntimeClient {
         `Failed to send presentation message (${response.status}): ${await response.text()}`,
       );
     return (await response.json()) as PresentationJob;
+  }
+
+  async deletePresentationJob(jobId: string, options?: { signal?: AbortSignal }): Promise<void> {
+    const response = await this.fetcher(this.resolveUrl(RUNTIME_ENDPOINTS.presentationJob(jobId)), {
+      headers: await this.prepareHeaders(),
+      method: 'DELETE',
+      signal: options?.signal,
+    });
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => '');
+      throw new Error(
+        `Failed to delete presentation job ${jobId} (${response.status} ${response.statusText}): ${errorText}`,
+      );
+    }
   }
 
   async cancelPresentationJob(

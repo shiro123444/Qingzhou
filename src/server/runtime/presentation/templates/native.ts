@@ -1,8 +1,13 @@
 import { createHash } from 'node:crypto';
-import { posix } from 'node:path';
+import nodePath from 'node:path';
 
 import { XMLValidator } from 'fast-xml-parser';
-import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
+import { strFromU8, strToU8, unzipSync, type Zippable, zipSync } from 'fflate';
+
+import { PRESENTATION_PPTX_MAX_UPLOAD_BYTES } from '../../../../../packages/runtime-contracts/src';
+
+const MAX_NATIVE_UNCOMPRESSED_BYTES = 512 * 1024 * 1024;
+const MAX_NATIVE_ENTRY_BYTES = 256 * 1024 * 1024;
 
 const fail = (message: string) =>
   Object.assign(new Error(message), { code: 'PRESENTATION_INVALID' });
@@ -25,7 +30,7 @@ const decode = (text: string) =>
 const attribute = (xml: string, name: string) =>
   new RegExp(`\\b${name}=["']([^"']*)["']`).exec(xml)?.[1];
 export function openNativePptx(bytes: Uint8Array) {
-  if (!bytes.length || bytes.length > 32 * 1024 * 1024)
+  if (!bytes.length || bytes.length > PRESENTATION_PPTX_MAX_UPLOAD_BYTES)
     throw fail('Native PPTX exceeds upload budget');
   let size = 0;
   let count = 0;
@@ -34,8 +39,8 @@ export function openNativePptx(bytes: Uint8Array) {
       size += entry.originalSize;
       if (
         ++count > 5000 ||
-        size > 128 * 1024 * 1024 ||
-        entry.originalSize > 64 * 1024 * 1024 ||
+        size > MAX_NATIVE_UNCOMPRESSED_BYTES ||
+        entry.originalSize > MAX_NATIVE_ENTRY_BYTES ||
         entry.name.split('/').includes('..') ||
         entry.name.startsWith('/')
       )
@@ -48,7 +53,11 @@ export function openNativePptx(bytes: Uint8Array) {
   return files;
 }
 function relationships(files: Record<string, Uint8Array>, path: string) {
-  const relPath = posix.join(posix.dirname(path), '_rels', posix.basename(path) + '.rels');
+  const relPath = nodePath.posix.join(
+    nodePath.posix.dirname(path),
+    '_rels',
+    nodePath.posix.basename(path) + '.rels',
+  );
   return {
     path: relPath,
     xml: files[relPath]
@@ -65,7 +74,7 @@ function slidePaths(files: Record<string, Uint8Array>) {
         attribute(m[0], 'Id'),
         (attribute(m[0], 'Target') ?? '').startsWith('/')
           ? (attribute(m[0], 'Target') ?? '').slice(1)
-          : posix.normalize(posix.join('ppt', attribute(m[0], 'Target') ?? '')),
+          : nodePath.posix.normalize(nodePath.posix.join('ppt', attribute(m[0], 'Target') ?? '')),
       ]),
   );
   return [...strFromU8(files['ppt/presentation.xml']).matchAll(/<(?:p:)?sldId\b[^>]*>/g)]
@@ -75,6 +84,19 @@ function slidePaths(files: Record<string, Uint8Array>) {
 function shapes(xml: string) {
   return [...xml.matchAll(/<p:(sp|pic|graphicFrame)\b[\s\S]*?<\/p:\1>/g)].map((match) => {
     const nonVisual = /<p:cNvPr\b[^>]*>/.exec(match[0])?.[0] ?? '';
+    const mediaRelationships = [
+      ...match[0].matchAll(/<(a:videoFile|a:audioFile|p14:media)\b[^>]*>/g),
+    ].flatMap((entry) => {
+      const relationshipId = attribute(entry[0], 'r:embed') ?? attribute(entry[0], 'r:link');
+      if (!relationshipId) return [];
+      return [
+        {
+          kind:
+            entry[1] === 'a:videoFile' ? 'video' : entry[1] === 'a:audioFile' ? 'audio' : 'media',
+          relationshipId,
+        } as const,
+      ];
+    });
     return {
       id: attribute(nonVisual, 'id') ?? '',
       name: decode(attribute(nonVisual, 'name') ?? ''),
@@ -85,6 +107,7 @@ function shapes(xml: string) {
         decode(run[1]),
       ),
       relationshipId: attribute(/<a:blip\b[^>]*>/.exec(match[0])?.[0] ?? '', 'r:embed'),
+      mediaRelationships,
     };
   });
 }
@@ -95,10 +118,12 @@ export function inspectNativePptx(bytes: Uint8Array) {
     pages: slidePaths(files).map((path, index) => ({
       page: index + 1,
       path,
-      shapes: shapes(strFromU8(files[path])).map(({ source, start, ...shape }) => ({
-        ...shape,
-        editable: shape.kind === 'sp' || shape.kind === 'pic',
-      })),
+      shapes: shapes(strFromU8(files[path])).map(
+        ({ source: _source, start: _start, ...shape }) => ({
+          ...shape,
+          editable: shape.kind === 'sp' || shape.kind === 'pic',
+        }),
+      ),
     })),
     preservedParts: {
       masters: Object.keys(files).filter((p) => /^ppt\/slideMasters\/[^/]+\.xml$/.test(p)).length,
@@ -110,6 +135,7 @@ export function inspectNativePptx(bytes: Uint8Array) {
 }
 export interface NativeTemplatePatch {
   image?: { bytes: Uint8Array; mimeType: string };
+  media?: { bytes: Uint8Array; kind: 'audio' | 'video'; mimeType: string };
   page: number;
   runs?: string[];
   shapeId: string;
@@ -132,8 +158,15 @@ export function fillNativePptx(bytes: Uint8Array, patches: NativeTemplatePatch[]
     touched.add(key);
     const shape = matches[0];
     let replacement = shape.source;
+    let slideChanged = false;
     if (patch.image) {
-      if (patch.text !== undefined || patch.runs || shape.kind !== 'pic' || !shape.relationshipId)
+      if (
+        patch.media ||
+        patch.text !== undefined ||
+        patch.runs ||
+        shape.kind !== 'pic' ||
+        !shape.relationshipId
+      )
         throw fail('Image patch requires a native picture');
       const extension = (
         { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' } as Record<string, string>
@@ -146,7 +179,7 @@ export function fillNativePptx(bytes: Uint8Array, patches: NativeTemplatePatch[]
       const rel = relationships(files, path);
       const relId = `rIdCordis${digest}${patch.shapeId}`;
       if (rel.xml.includes(`Id="${relId}"`)) throw fail('Native relationship collision');
-      const relEntry = `<Relationship Id="${relId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="${posix.relative(posix.dirname(path), media)}"/>`;
+      const relEntry = `<Relationship Id="${relId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="${nodePath.posix.relative(nodePath.posix.dirname(path), media)}"/>`;
       files[rel.path] = strToU8(
         rel.xml.replace(/<\/Relationships\s*>/, relEntry + '</Relationships>'),
       );
@@ -155,12 +188,75 @@ export function fillNativePptx(bytes: Uint8Array, patches: NativeTemplatePatch[]
         new RegExp(`r:embed=["']${shape.relationshipId}["']`),
         `r:embed="${relId}"`,
       );
+      slideChanged = true;
       const types = strFromU8(files['[Content_Types].xml']);
       if (!types.includes(`Extension="${extension}"`)) {
         files['[Content_Types].xml'] = strToU8(
           types.replace(
             '</Types>',
             `<Default Extension="${extension}" ContentType="${patch.image.mimeType}"/></Types>`,
+          ),
+        );
+        changedParts.add('[Content_Types].xml');
+      }
+    } else if (patch.media) {
+      if (patch.text !== undefined || patch.runs || shape.kind !== 'pic')
+        throw fail('Media patch requires a native media picture');
+      const extensions: Record<string, { extension: string; kind: 'audio' | 'video' }> = {
+        'audio/aac': { extension: 'aac', kind: 'audio' },
+        'audio/mp4': { extension: 'm4a', kind: 'audio' },
+        'audio/mpeg': { extension: 'mp3', kind: 'audio' },
+        'audio/ogg': { extension: 'ogg', kind: 'audio' },
+        'audio/wav': { extension: 'wav', kind: 'audio' },
+        'video/mp4': { extension: 'mp4', kind: 'video' },
+        'video/mpeg': { extension: 'mpeg', kind: 'video' },
+        'video/quicktime': { extension: 'mov', kind: 'video' },
+        'video/webm': { extension: 'webm', kind: 'video' },
+        'video/x-m4v': { extension: 'm4v', kind: 'video' },
+        'video/x-ms-wmv': { extension: 'wmv', kind: 'video' },
+        'video/x-msvideo': { extension: 'avi', kind: 'video' },
+      };
+      const mediaType = extensions[patch.media.mimeType];
+      if (!mediaType || mediaType.kind !== patch.media.kind)
+        throw fail('Unsupported native media type');
+      if (!patch.media.bytes.length || patch.media.bytes.length > MAX_NATIVE_ENTRY_BYTES)
+        throw fail('Native replacement media exceeds the entry budget');
+      const relationshipIds = new Set(
+        shape.mediaRelationships
+          .filter((entry) => entry.kind === patch.media!.kind || entry.kind === 'media')
+          .map((entry) => entry.relationshipId),
+      );
+      if (!relationshipIds.size) throw fail('Native media relationship is missing');
+      const digest = createHash('sha256').update(patch.media.bytes).digest('hex').slice(0, 32);
+      const media = `ppt/media/cordis-${digest}.${mediaType.extension}`;
+      files[media] = new Uint8Array(patch.media.bytes);
+      changedParts.add(media);
+      const rel = relationships(files, path);
+      let replacements = 0;
+      const target = nodePath.posix.relative(nodePath.posix.dirname(path), media);
+      const updatedRelationships = rel.xml.replaceAll(/<Relationship\b[^>]*\/>/g, (entry) => {
+        const id = attribute(entry, 'Id');
+        if (!id || !relationshipIds.has(id)) return entry;
+        if (attribute(entry, 'TargetMode') === 'External')
+          throw fail('External media relationships cannot be replaced');
+        const type = attribute(entry, 'Type')?.split('/').at(-1);
+        if (!['audio', 'media', 'video'].includes(type ?? ''))
+          throw fail('Native media relationship type is invalid');
+        replacements++;
+        return /\bTarget=["'][^"']*["']/u.test(entry)
+          ? entry.replace(/\bTarget=["'][^"']*["']/u, `Target="${target}"`)
+          : entry.replace('/>', ` Target="${target}"/>`);
+      });
+      if (replacements !== relationshipIds.size)
+        throw fail('Native media relationship is missing or ambiguous');
+      files[rel.path] = strToU8(updatedRelationships);
+      changedParts.add(rel.path);
+      const types = strFromU8(files['[Content_Types].xml']);
+      if (!types.includes(`Extension="${mediaType.extension}"`)) {
+        files['[Content_Types].xml'] = strToU8(
+          types.replace(
+            '</Types>',
+            `<Default Extension="${mediaType.extension}" ContentType="${patch.media.mimeType}"/></Types>`,
           ),
         );
         changedParts.add('[Content_Types].xml');
@@ -181,13 +277,19 @@ export function fillNativePptx(bytes: Uint8Array, patches: NativeTemplatePatch[]
         (_, start, end) =>
           `${start}${escape(patch.runs ? patch.runs[index++] : index++ === 0 ? patch.text! : '')}${end}`,
       );
+      slideChanged = true;
     }
-    const updated =
-      xml.slice(0, shape.start) + replacement + xml.slice(shape.start + shape.source.length);
-    if (XMLValidator.validate(updated) !== true) throw fail('Native patch produced invalid XML');
-    files[path] = strToU8(updated);
-    changedParts.add(path);
+    if (slideChanged) {
+      const updated =
+        xml.slice(0, shape.start) + replacement + xml.slice(shape.start + shape.source.length);
+      if (XMLValidator.validate(updated) !== true) throw fail('Native patch produced invalid XML');
+      files[path] = strToU8(updated);
+      changedParts.add(path);
+    }
   }
-  const output = zipSync(files, { level: 6, mtime: new Date('1980-01-01T00:00:00Z') });
+  const archive: Zippable = {};
+  for (const [path, data] of Object.entries(files))
+    archive[path] = path.startsWith('ppt/media/') ? [data, { level: 0 }] : data;
+  const output = zipSync(archive, { level: 6, mtime: new Date('1980-01-01T00:00:00Z') });
   return { bytes: output, changedParts: [...changedParts], inspection: inspectNativePptx(output) };
 }

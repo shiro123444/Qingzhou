@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import path from 'node:path';
 
 import type {
   ArtifactSnapshot,
@@ -25,6 +25,7 @@ export interface StoredPresentationJob {
 export interface PresentationJobRepository {
   getJob: (scope: RuntimeScope, jobId: string) => Promise<StoredPresentationJob | null>;
   listJobs?: (scope: RuntimeScope) => Promise<PresentationJob[]>;
+  removeJob?: (scope: RuntimeScope, jobId: string) => Promise<void>;
   saveJob: (scope: RuntimeScope, record: StoredPresentationJob) => Promise<void>;
 }
 
@@ -43,13 +44,13 @@ export class FilePresentationStorage
         code: 'ARTIFACT_SCOPE_MISMATCH',
       });
     }
-    return join(this.root, hash(JSON.stringify([scope.userId, scope.sessionId])), kind);
+    return path.join(this.root, hash(JSON.stringify([scope.userId, scope.sessionId])), kind);
   }
 
   private path(scope: RuntimeScope, kind: string, id: string): string {
     if (!id?.trim())
       throw Object.assign(new Error('A resource id is required'), { code: 'ARTIFACT_INVALID' });
-    return join(this.directory(scope, kind), `${hash(id)}.json`);
+    return path.join(this.directory(scope, kind), `${hash(id)}.json`);
   }
 
   private async read<T>(path: string): Promise<T | null> {
@@ -84,7 +85,9 @@ export class FilePresentationStorage
     const jobs = await Promise.all(
       files
         .filter((f) => /^[a-f0-9]{64}\.json$/.test(f))
-        .map(async (file) => (await this.read<StoredPresentationJob>(join(directory, file)))?.job),
+        .map(
+          async (file) => (await this.read<StoredPresentationJob>(path.join(directory, file)))?.job,
+        ),
     );
     return jobs
       .filter((job): job is PresentationJob => !!job)
@@ -97,6 +100,17 @@ export class FilePresentationStorage
 
   saveJob(scope: RuntimeScope, record: StoredPresentationJob): Promise<void> {
     return this.write(scope, 'jobs', record.job.jobId, record);
+  }
+
+  async removeJob(scope: RuntimeScope, jobId: string): Promise<void> {
+    await Promise.all([
+      unlink(this.path(scope, 'jobs', jobId)).catch((error) => {
+        if (!missing(error)) throw error;
+      }),
+      unlink(path.join(this.directory(scope, 'events'), `${hash(jobId)}.jsonl`)).catch((error) => {
+        if (!missing(error)) throw error;
+      }),
+    ]);
   }
 
   async get(scope: RuntimeScope, artifactId: string): Promise<StoredArtifact | null> {
@@ -149,7 +163,9 @@ export class FilePresentationStorage
     });
     const artifacts: ArtifactSnapshot[] = [];
     for (const file of files.filter((name) => /^[a-f0-9]{64}\.json$/.test(name))) {
-      const stored = await this.read<StoredArtifact & { base64?: string }>(join(directory, file));
+      const stored = await this.read<StoredArtifact & { base64?: string }>(
+        path.join(directory, file),
+      );
       if (stored) {
         const { base64: _bytes, ...snapshot } = stored;
         artifacts.push(snapshot);
@@ -169,7 +185,7 @@ export class FilePresentationStorage
     }
     const output: StoredArtifact[] = [];
     for (const file of files.filter((file) => file.endsWith('.json'))) {
-      const stored = await this.read<StoredArtifact>(join(directory, file));
+      const stored = await this.read<StoredArtifact>(path.join(directory, file));
       if (stored?.metadata?.jobId === jobId) {
         const artifact = await this.get(scope, stored.artifactId);
         if (artifact) output.push(artifact);
@@ -204,7 +220,9 @@ class DurablePresentationJournal extends PresentationJobEventJournal {
   private load(jobId: string): void {
     if (this.loaded.has(jobId)) return;
     try {
-      const lines = readFileSync(join(this.directory, `${hash(jobId)}.jsonl`), 'utf8').split('\n');
+      const lines = readFileSync(path.join(this.directory, `${hash(jobId)}.jsonl`), 'utf8').split(
+        '\n',
+      );
       for (const [index, line] of lines.entries()) {
         if (!line.trim()) continue;
         try {
@@ -232,7 +250,7 @@ class DurablePresentationJournal extends PresentationJobEventJournal {
     const appended = super.append(jobId, event);
     if (appended)
       appendFileSync(
-        join(this.directory, `${hash(jobId)}.jsonl`),
+        path.join(this.directory, `${hash(jobId)}.jsonl`),
         `${JSON.stringify(appended)}\n`,
         { mode: 0o600 },
       );

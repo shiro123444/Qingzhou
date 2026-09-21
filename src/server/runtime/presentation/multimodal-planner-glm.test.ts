@@ -39,6 +39,62 @@ describe('GLMPresentationPlanner (C-106)', () => {
     expect(chat).not.toHaveBeenCalled();
   });
 
+  it('retries once when the first planner reply is empty', async () => {
+    const svg =
+      '<svg viewBox="0 0 960 540" xmlns="http://www.w3.org/2000/svg"><rect width="960" height="540" fill="#ffffff"/></svg>';
+    const chat = vi
+      .fn()
+      .mockResolvedValueOnce({
+        choices: [{ index: 0, message: { content: '', role: 'assistant' } }],
+        created: 1,
+        id: 'empty',
+        model: 'test',
+      })
+      .mockResolvedValueOnce({
+        choices: [
+          {
+            index: 0,
+            message: {
+              content: JSON.stringify({
+                aspectRatio: '16:9',
+                planId: 'plan-retry',
+                slides: [{ order: 1, slideId: 'slide-1', svg }],
+                sourceVersionIds: [],
+                title: 'Retry',
+              }),
+              role: 'assistant',
+            },
+          },
+        ],
+        created: 1,
+        id: 'ok',
+        model: 'test',
+      });
+    const planner = createGLMPresentationPlanner({
+      chatPort: {
+        chat,
+        manifest: {
+          displayName: 'test',
+          model: 'test',
+          providerId: 'test',
+          supportsIdempotency: true,
+          supportsVision: true,
+        },
+        providerId: 'test',
+      },
+    });
+    await expect(
+      planner.plan(
+        { notebookId: 'nb', slideCount: 1, sourceVersionIds: [], title: 'Retry' },
+        { scope: mockScope },
+      ),
+    ).resolves.toMatchObject({ planId: 'plan-retry' });
+    expect(chat).toHaveBeenCalledTimes(2);
+    expect(chat.mock.calls[1][1]).toMatchObject({
+      idempotencyKey: 'structured-json:harvest',
+    });
+  });
+
   it('generates a validated presentation plan from user job input', async () => {
     let capturedRequest: any;
 
@@ -463,6 +519,40 @@ describe('dynamic image revision and learned layout planning', () => {
     expect(result.slides[2]).toEqual(original.slides[2]);
   });
 
+  it('maps a selected revision back to its original outline page', async () => {
+    const outlinedInput: PresentationJobInput = {
+      ...jobInput,
+      options: {
+        outline: [
+          { keyPoints: ['Intro point'], objective: 'Introduce', title: 'Intro outline' },
+          { keyPoints: ['Product point'], objective: 'Explain', title: 'Product outline' },
+          { keyPoints: ['Outro point'], objective: 'Close', title: 'Outro outline' },
+        ],
+      },
+    };
+    const port = makePort({
+      slides: [{ slideId: 'product', svg: basePlan.slides[1].svg }],
+    });
+
+    const result = await createGLMPresentationPlanner({ chatPort: port }).plan(outlinedInput, {
+      basePlan,
+      revision: { ...revision, content: 'Tighten spacing only.' },
+      scope: mockScope,
+    });
+
+    expect(result.slides[1]).toMatchObject({
+      metadata: {
+        outline: ['Product point'],
+        objective: 'Explain',
+        title: 'Product outline',
+      },
+      order: 2,
+      slideId: 'product',
+    });
+    expect(result.slides[0]).toEqual(basePlan.slides[0]);
+    expect(result.slides[2]).toEqual(basePlan.slides[2]);
+  });
+
   it('drops removed image associations and honors an explicit empty speaker note', async () => {
     const original: PresentationPlan = {
       ...basePlan,
@@ -552,6 +642,65 @@ describe('dynamic image revision and learned layout planning', () => {
         }),
       }).plan(imageInput, { scope: mockScope }),
     ).rejects.toThrow('outside the slide');
+  });
+
+  it('repairs an invented image href once and keeps the approved generated asset', async () => {
+    const bad = {
+      slides: [
+        {
+          slideId: 'slide-1',
+          svg: slideSvg(
+            'Title',
+            '<image href="/invented-template-image.png" x="20" y="20" width="100" height="100"/>',
+          ),
+        },
+      ],
+    };
+    const good = {
+      slides: [
+        {
+          slideId: 'slide-1',
+          svg: slideSvg(
+            'Title',
+            '<image href="/api/runtime/presentation/artifacts/real-image" x="480" y="108" width="384" height="324"/>',
+          ),
+        },
+      ],
+    };
+    const response = (value: object) => ({
+      choices: [
+        { index: 0, message: { content: JSON.stringify(value), role: 'assistant' as const } },
+      ],
+      created: 1,
+      id: 'response',
+      model: 'test',
+    });
+    const port = makePort(bad);
+    vi.mocked(port.chat).mockResolvedValueOnce(response(bad)).mockResolvedValueOnce(response(good));
+
+    const plan = await createGLMPresentationPlanner({ chatPort: port }).plan(
+      {
+        ...jobInput,
+        options: {
+          generatedImageSlots: [
+            {
+              assetRefs: [{ ref: 'real-image' }],
+              layout: { fit: 'contain', height: 0.6, width: 0.4, x: 0.5, y: 0.2 },
+              slideId: 'slide-1',
+              slotId: 'hero',
+              state: 'ready',
+            },
+          ],
+        },
+        slideCount: 1,
+      },
+      { scope: mockScope },
+    );
+
+    expect(plan.slides[0].svg).toContain('href="/api/runtime/presentation/artifacts/real-image"');
+    expect(plan.slides[0].svg).not.toContain('invented-template-image');
+    expect(port.chat).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(port.chat).mock.calls[1][1].idempotencyKey).toBe('structured-json:repair');
   });
 
   it('passes learned geometry and capacity to the model rather than only a style name', async () => {

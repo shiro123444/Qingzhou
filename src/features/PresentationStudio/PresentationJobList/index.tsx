@@ -1,5 +1,6 @@
-import { Flexbox } from '@lobehub/ui';
-import { History, Layers } from 'lucide-react';
+import { Button, Flexbox, Icon } from '@lobehub/ui';
+import { Popconfirm, Tooltip } from 'antd';
+import { History, Layers, Trash2 } from 'lucide-react';
 import { memo, useCallback } from 'react';
 
 import type { PresentationJob } from '../../../../packages/runtime-contracts/src/index';
@@ -9,6 +10,7 @@ import { styles } from './style';
 export interface PresentationJobListProps {
   className?: string;
   jobs: PresentationJob[];
+  onDelete?: (jobId: string) => Promise<void> | void;
   onSelect: (jobId: string) => void;
   selectedJobId: string | null;
   titles: Record<string, string>;
@@ -23,7 +25,7 @@ const formatTime = (iso: string): string => {
 };
 
 export const PresentationJobList = memo<PresentationJobListProps>(
-  ({ className, jobs, onSelect, selectedJobId, titles }) => {
+  ({ className, jobs, onDelete, onSelect, selectedJobId, titles }) => {
     const handleSelect = useCallback((jobId: string) => () => onSelect(jobId), [onSelect]);
 
     if (jobs.length === 0) {
@@ -63,30 +65,51 @@ export const PresentationJobList = memo<PresentationJobListProps>(
             const displayTitle = titles[job.jobId] ?? `Job ${shortId(job.jobId)}`;
             return (
               <li key={job.jobId}>
-                <button
-                  aria-label={`${titles[job.jobId] ? `Job ${displayTitle}` : displayTitle}, state: ${job.state}${isSelected ? ', selected' : ''}`}
-                  aria-pressed={isSelected}
-                  className={styles.item}
-                  data-selected={isSelected ? 'true' : 'false'}
-                  data-testid={`presentation-job-${job.jobId}`}
-                  role="option"
-                  tabIndex={0}
-                  onClick={handleSelect(job.jobId)}
-                >
-                  <Flexbox horizontal align="center" gap={8}>
-                    <span
-                      className={styles.itemTitle}
-                      style={{ fontWeight: isSelected ? 600 : 500 }}
+                <div className={styles.itemRow}>
+                  <button
+                    aria-label={`${titles[job.jobId] ? `Job ${displayTitle}` : displayTitle}, state: ${job.state}${isSelected ? ', selected' : ''}`}
+                    aria-pressed={isSelected}
+                    className={styles.item}
+                    data-selected={isSelected ? 'true' : 'false'}
+                    data-testid={`presentation-job-${job.jobId}`}
+                    role="option"
+                    tabIndex={0}
+                    onClick={handleSelect(job.jobId)}
+                  >
+                    <Flexbox horizontal align="center" gap={8}>
+                      <span
+                        className={styles.itemTitle}
+                        style={{ fontWeight: isSelected ? 600 : 500 }}
+                      >
+                        {displayTitle}
+                      </span>
+                      <JobStateTag state={job.state} />
+                    </Flexbox>
+                    <div className={styles.itemMeta}>
+                      <span className={styles.itemId}>{shortId(job.jobId)}</span>
+                      <span>更新于 {formatTime(job.updatedAt)}</span>
+                    </div>
+                  </button>
+                  {onDelete && (
+                    <Popconfirm
+                      cancelText="取消"
+                      description="该作品、页面与导出文件都会被永久删除。"
+                      okButtonProps={{ danger: true }}
+                      okText="删除"
+                      title={`删除「${displayTitle}」？`}
+                      onConfirm={() => onDelete(job.jobId)}
                     >
-                      {displayTitle}
-                    </span>
-                    <JobStateTag state={job.state} />
-                  </Flexbox>
-                  <div className={styles.itemMeta}>
-                    <span className={styles.itemId}>{shortId(job.jobId)}</span>
-                    <span>更新于 {formatTime(job.updatedAt)}</span>
-                  </div>
-                </button>
+                      <Tooltip title="删除作品">
+                        <Button
+                          aria-label={`删除 ${displayTitle}`}
+                          className={styles.deleteButton}
+                          icon={<Icon aria-hidden icon={Trash2} size={16} />}
+                          type="text"
+                        />
+                      </Tooltip>
+                    </Popconfirm>
+                  )}
+                </div>
               </li>
             );
           })}

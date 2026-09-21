@@ -43,11 +43,14 @@ describe('PresentationStudio completed editor shell (C-106)', () => {
       cancelPresentationJob: vi.fn(),
       createPresentationJob: vi.fn(),
       exportArtifact,
-      getArtifact: vi.fn(async (artifactId: string) =>
-        artifactId === 'slide-1' ? slide('slide-1', 1) : slide('slide-2', 2),
-      ),
+      getArtifact: vi.fn(async (artifactId: string) => {
+        if (artifactId === 'deck-pptx') {
+          return { ...slide('deck-pptx', 1), type: 'pptx' as const, artifactId: 'deck-pptx' };
+        }
+        return artifactId === 'slide-1' ? slide('slide-1', 1) : slide('slide-2', 2);
+      }),
       getPresentationJob: vi.fn(async (jobId: string) =>
-        jobId === 'job-done' ? completedJob(['slide-1', 'slide-2']) : null,
+        jobId === 'job-done' ? completedJob(['slide-1', 'slide-2', 'deck-pptx']) : null,
       ),
       retryPresentationJob,
       subscribePresentationJob: vi.fn(),
@@ -79,28 +82,38 @@ describe('PresentationStudio completed editor shell (C-106)', () => {
     expect(screen.getByTestId('slide-navigator-grid')).toBeInTheDocument();
     expect(screen.getByTestId('artifact-panel-list')).toBeInTheDocument();
 
-    // Trigger regenerate from editor toolbar
-    fireEvent.click(screen.getByRole('button', { name: /Retry presentation job/i }));
-    expect(retryPresentationJob).toHaveBeenCalledWith('job-done');
-
-    // Trigger quick export
     fireEvent.click(screen.getByRole('button', { name: /Quick export presentation/i }));
     await waitFor(() => {
-      expect(exportArtifact).toHaveBeenCalledWith('slide-1', 'pptx');
+      expect(exportArtifact).toHaveBeenCalledWith('deck-pptx', 'pptx');
     });
+
+    fireEvent.click(screen.getByRole('button', { name: /Retry presentation job/i }));
+    expect(retryPresentationJob).toHaveBeenCalledWith('job-done');
   }, 15000);
 
-  it('supports AI modification prompt input in the popover', async () => {
-    const createPresentationJob = vi.fn(async () => completedJob([]));
+  it('opens the same stage composer from the header AI button and can send after collapse', async () => {
+    const sendPresentationMessage = vi.fn(async (_jobId: string, input: { content: string }) => ({
+      ...completedJob(['slide-1']),
+      messages: [
+        {
+          content: input.content,
+          createdAt: t0,
+          requestId: 'req-1',
+          status: 'queued',
+          target: { type: 'deck' },
+        },
+      ],
+    }));
     const client = {
       cancelPresentationJob: vi.fn(),
-      createPresentationJob,
+      createPresentationJob: vi.fn(),
       exportArtifact: vi.fn(),
       getArtifact: vi.fn(async () => slide('slide-1', 1)),
       getPresentationJob: vi.fn(async (jobId: string) =>
         jobId === 'job-done' ? completedJob(['slide-1']) : null,
       ),
       retryPresentationJob: vi.fn(),
+      sendPresentationMessage,
       subscribePresentationJob: vi.fn(),
     };
 
@@ -116,20 +129,18 @@ describe('PresentationStudio completed editor shell (C-106)', () => {
       expect(screen.getByTestId('presentation-editor-toolbar')).toBeInTheDocument();
     });
 
-    // Open AI modify popover
     fireEvent.click(screen.getByRole('button', { name: /Continue prompting AI/i }));
-    expect(screen.getByPlaceholderText(/请输入修改要求/)).toBeInTheDocument();
+    expect(screen.getByTestId('presentation-conversation')).toHaveAttribute('data-open', 'true');
+    expect(screen.getAllByTestId('presentation-conversation-input')).toHaveLength(1);
 
-    fireEvent.change(screen.getByPlaceholderText(/请输入修改要求/), {
+    fireEvent.change(screen.getByTestId('presentation-conversation-input'), {
       target: { value: '配色调整为科技蓝，精简第二页' },
     });
-
-    fireEvent.click(screen.getByRole('button', { name: /提交修改/ }));
+    fireEvent.click(screen.getByTestId('presentation-conversation-send'));
     await waitFor(() => {
-      expect(createPresentationJob).toHaveBeenCalledWith(
-        expect.objectContaining({
-          prompt: expect.stringContaining('配色调整为科技蓝'),
-        }),
+      expect(sendPresentationMessage).toHaveBeenCalledWith(
+        'job-done',
+        expect.objectContaining({ content: '配色调整为科技蓝，精简第二页' }),
       );
     });
   }, 15000);

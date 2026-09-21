@@ -22,7 +22,7 @@ export function createPresentationContextRuntime(services: PresentationContextSe
           agent: { contexts: ['presentation.intake'] },
           name: 'context.readFile',
           description:
-            'Read an owned uploaded file, including actual document text or image pixels.',
+            'Read an owned uploaded file, including actual document text, image pixels, or an account-scoped mediaRef for audio/video.',
           input: z.object({ id: z.string().min(1) }).strict(),
           execute: ({ id }) => services.readFile(id),
         },

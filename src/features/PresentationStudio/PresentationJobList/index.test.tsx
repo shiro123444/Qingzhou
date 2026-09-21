@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { PresentationJob } from '../../../../packages/runtime-contracts/src/index';
@@ -73,5 +73,24 @@ describe('PresentationJobList', () => {
     expect(JOB_STATE_COLORS.running).toBe('processing');
     expect(JOB_STATE_COLORS.queued).toBe('default');
     expect(JOB_STATE_COLORS.cancelled).toBe('default');
+  });
+
+  it('requires confirmation before deleting a saved work', async () => {
+    const onDelete = vi.fn().mockResolvedValue(undefined);
+    render(
+      <PresentationJobList
+        jobs={[job('job-a', 'completed')]}
+        selectedJobId={null}
+        titles={{ 'job-a': '年度复盘' }}
+        onDelete={onDelete}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '删除 年度复盘' }));
+    expect(await screen.findByText('删除「年度复盘」？')).toBeInTheDocument();
+    expect(onDelete).not.toHaveBeenCalled();
+    fireEvent.click(screen.getAllByRole('button', { name: /删\s*除/u }).at(-1)!);
+    await waitFor(() => expect(onDelete).toHaveBeenCalledWith('job-a'));
   });
 });
