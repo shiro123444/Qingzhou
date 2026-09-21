@@ -673,3 +673,75 @@ it('defaults template component reuse to the learned box and rejects text, redra
     fit: 'contain',
   });
 });
+
+it('tells initial art direction to generate new subjects instead of pasting template photos', async () => {
+  const templateChat = chatPort([]);
+  await createRevisionAssetPlanner({ chatPort: templateChat }).prepare(visualJobInput);
+  const templateSystem = vi.mocked(templateChat.chat).mock.calls[0][0].messages[0]
+    .content as string;
+  expect(templateSystem).toContain('style lock');
+  expect(templateSystem).toContain('Never paste original template photographs');
+});
+
+it('draws with learned style references then cuts out overlapping slots', async () => {
+  const generateIntent = {
+    action: 'generate' as const,
+    layout: { fit: 'contain' as const, height: 0.7, width: 0.4, x: 0.55, y: 0.15 },
+    prompt: 'A watercolor robot holding a notebook, no text.',
+    size: '1024x1024' as const,
+    slideId: 'cover',
+    slotId: 'hero',
+  };
+  const second = {
+    ...generateIntent,
+    prompt: 'Watercolor stationery on textured paper, no text.',
+    slideId: 'product',
+    slotId: 'prop',
+  };
+  const generate = vi.fn(async (_scope, slots: Array<{ slotId: string; slideId: string }>) => ({
+    jobId: visualJobInput.jobId,
+    scope,
+    slots: slots.map((slot) => ({
+      assetRefs: [{ ref: `drawn:${slot.slotId}` }],
+      slideId: slot.slideId,
+      slotId: slot.slotId,
+      state: 'ready' as const,
+    })),
+  }));
+  let started = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const processAssets = vi.fn(async () => {
+    started += 1;
+    const id = started;
+    if (id === 1) await gate;
+    return { ref: `cut-${id}` };
+  });
+  const pending = createRevisionAssetPlanner({
+    chatPort: chatPort([generateIntent, second]),
+    imageGenerationCapability: { generate },
+    processAssets,
+  }).prepare({
+    ...visualJobInput,
+    revision: { ...visualJobInput.revision, requestId: 'initial-assets' },
+  });
+  await vi.waitFor(() => expect(started).toBe(2));
+  release();
+  const result = await pending;
+  expect(generate).toHaveBeenCalledTimes(2);
+  const generatedSlots = generate.mock.calls.map((call) => call[1][0]);
+  expect(generatedSlots).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        background: 'opaque',
+        prompt: expect.stringContaining('STYLE REFERENCE ONLY'),
+        referenceAssetRefs: ['template-page-1'],
+      }),
+    ]),
+  );
+  expect(generatedSlots.some((slot) => slot.prompt.includes('watercolor robot'))).toBe(true);
+  expect(processAssets.mock.calls[0][0][0].input.ref).toMatch(/^drawn:/);
+  expect(result.assetArtifactIds).toEqual(['cut-1', 'cut-2']);
+});

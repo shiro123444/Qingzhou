@@ -496,6 +496,8 @@ export interface ImageGenerationResult {
 
 /** Request for a batch of images. All values are JSON-serializable. */
 export interface ImageGenerationRequest {
+  /** Requested real alpha channel; providers may require a separate cutout step. */
+  background?: 'transparent' | 'opaque' | 'auto';
   /** Number of images requested (>= 1). Providers may clamp and report. */
   count?: number;
   /** Caller-supplied stable key; identical keys may be served idempotently. */
@@ -508,6 +510,8 @@ export interface ImageGenerationRequest {
   prompt: string;
   /** Opaque vendor-neutral style/quality hint (e.g. `standard` | `hd`). */
   quality?: string;
+  /** Owned raster references resolved by the server, never caller-supplied URLs or bytes. */
+  referenceAssetRefs?: readonly string[];
   /** Requested pixel size as `WIDTHxHEIGHT` (e.g. `1024x1024`), if supported. */
   size?: string;
 }

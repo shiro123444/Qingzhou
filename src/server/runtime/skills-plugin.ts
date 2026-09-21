@@ -39,6 +39,15 @@ export function createSkillsPlugin(
               ],
             },
             {
+              id: 'style-artwork',
+              steps: [
+                'assets.generate',
+                'assets.removeBackground',
+                'assets.transform',
+                'assets.compose',
+              ],
+            },
+            {
               id: 'native-template',
               steps: ['presentation.template.inspectNative', 'presentation.template.fillNative'],
             },

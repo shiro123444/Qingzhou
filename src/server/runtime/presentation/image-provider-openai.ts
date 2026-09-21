@@ -56,6 +56,11 @@ export type OpenAIImageUriResolver = (
   uri: string,
 ) => AssetRef | string | null | Promise<AssetRef | string | null>;
 
+export type OpenAIImageReferenceReader = (
+  scope: RuntimeScope,
+  ref: string,
+) => Promise<{ bytes: Uint8Array; mimeType: string } | null>;
+
 export interface OpenAIImageProviderOptions {
   readonly apiKey: string;
   readonly assetSink?: OpenAIImageAssetSink;
@@ -64,6 +69,7 @@ export interface OpenAIImageProviderOptions {
   readonly model?: string;
   readonly now?: () => number | string | Date;
   readonly providerId?: string;
+  readonly readReferenceAsset?: OpenAIImageReferenceReader;
   readonly resolveAssetUri?: OpenAIImageUriResolver;
   /** Alias for callers that name the injected URI seam `uriResolver`. */
   readonly uriResolver?: OpenAIImageUriResolver;
@@ -243,6 +249,21 @@ const validateRequest = (request: ImageGenerationRequest): number => {
   if (request.idempotencyKey !== undefined && !nonEmptyString(request.idempotencyKey)) {
     throw invalid('idempotencyKey must be a non-empty string when provided', 'idempotencyKey');
   }
+  if (
+    request.referenceAssetRefs !== undefined &&
+    (!Array.isArray(request.referenceAssetRefs) ||
+      request.referenceAssetRefs.length > 4 ||
+      request.referenceAssetRefs.some(
+        (ref) =>
+          !nonEmptyString(ref) || ref.length > 256 || /^(?:https?:|data:|file:|\/|\.)/iu.test(ref),
+      ))
+  )
+    throw invalid('References must be owned raster asset ids', 'referenceAssetRefs');
+  if (
+    request.background !== undefined &&
+    !['transparent', 'opaque', 'auto'].includes(request.background)
+  )
+    throw invalid('Invalid image background mode', 'background');
   return requestCount(request);
 };
 
@@ -320,6 +341,7 @@ export class OpenAIImageGenerationPort implements ImageGenerationPort {
   private readonly fetcher: OpenAIImageFetcher;
   private readonly now: () => number | string | Date;
   private readonly resolveAssetUri?: OpenAIImageUriResolver;
+  private readonly readReferenceAsset?: OpenAIImageReferenceReader;
   private readonly storedAssets = new Map<string, StoredAsset>();
 
   constructor(options: OpenAIImageProviderOptions) {
@@ -362,6 +384,7 @@ export class OpenAIImageGenerationPort implements ImageGenerationPort {
     this.now = options.now ?? (() => Date.now());
     this.providerId = options.providerId?.trim() ?? 'openai.image';
     this.resolveAssetUri = resolveAssetUri;
+    this.readReferenceAsset = options.readReferenceAsset;
     this.manifest = manifestFor(this.providerId);
   }
 
@@ -374,22 +397,52 @@ export class OpenAIImageGenerationPort implements ImageGenerationPort {
     const signal = context?.signal;
     if (signal?.aborted) throw cancelled();
 
-    const body = JSON.stringify({
+    const fields = {
       model: this.model,
       n: count,
       prompt: request.prompt,
       ...(request.quality === undefined ? {} : { quality: request.quality }),
       ...(request.size === undefined ? {} : { size: request.size }),
-    });
+      ...(request.background === undefined ? {} : { background: request.background }),
+    };
+    let body: BodyInit = JSON.stringify(fields);
+    let endpoint = this.endpoint;
     const headers: Record<string, string> = {
       'Authorization': `Bearer ${this.apiKey}`,
       'Content-Type': 'application/json',
     };
     if (request.idempotencyKey) headers['Idempotency-Key'] = request.idempotencyKey;
 
+    if (request.referenceAssetRefs?.length) {
+      if (!this.readReferenceAsset || !/\/images\/generations$/u.test(endpoint))
+        throw invalid('Reference-guided image generation is unavailable');
+      const form = new FormData();
+      for (const [key, value] of Object.entries(fields)) form.set(key, String(value));
+      for (const [index, ref] of request.referenceAssetRefs.entries()) {
+        if (signal?.aborted) throw cancelled();
+        const source = await this.readReferenceAsset(scope, ref);
+        if (
+          !source?.bytes.length ||
+          source.bytes.length > 8 * 1024 * 1024 ||
+          !['image/png', 'image/jpeg', 'image/webp'].includes(source.mimeType)
+        )
+          throw invalid('A readable owned raster reference is required', 'referenceAssetRefs');
+        const extension = source.mimeType === 'image/jpeg' ? 'jpg' : source.mimeType.split('/')[1];
+        form.append(
+          'image[]',
+          new Blob([new Uint8Array(source.bytes)], { type: source.mimeType }),
+          `reference-${index}.${extension}`,
+        );
+      }
+      if (signal?.aborted) throw cancelled();
+      body = form;
+      endpoint = endpoint.replace(/\/generations$/u, '/edits');
+      delete headers['Content-Type']; // Let fetch supply the multipart boundary.
+    }
+
     let response: OpenAIImageFetchResponse;
     try {
-      response = await this.fetcher(this.endpoint, {
+      response = await this.fetcher(endpoint, {
         body,
         headers,
         method: 'POST',

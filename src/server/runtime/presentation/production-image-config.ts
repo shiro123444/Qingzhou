@@ -13,6 +13,7 @@ import type {
   OpenAIImageAssetSink,
   OpenAIImageFetcher,
   OpenAIImageProviderOptions,
+  OpenAIImageReferenceReader,
   OpenAIImageUriResolver,
 } from './image-provider-openai';
 import { createOpenAIImageGenerationPort } from './image-provider-openai';
@@ -43,6 +44,7 @@ export interface ProductionOpenAIImageProviderDependencies {
   readonly fetcher: OpenAIImageFetcher;
   readonly now?: NonNullable<OpenAIImageProviderOptions['now']>;
   readonly providerId?: string;
+  readonly readReferenceAsset?: OpenAIImageReferenceReader;
   readonly resolveAssetUri?: OpenAIImageUriResolver;
   readonly uriResolver?: OpenAIImageUriResolver;
 }
@@ -181,6 +183,9 @@ export const loadProductionOpenAIImageProviderOptions = (
     apiKey: config.apiKey,
     endpoint: config.endpoint,
     fetcher: dependencies.fetcher,
+    ...(dependencies.readReferenceAsset
+      ? { readReferenceAsset: dependencies.readReferenceAsset }
+      : {}),
     ...(dependencies.assetSink === undefined ? {} : { assetSink: dependencies.assetSink }),
     model: config.model,
     ...(dependencies.now === undefined ? {} : { now: dependencies.now }),

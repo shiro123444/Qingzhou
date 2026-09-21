@@ -255,6 +255,48 @@ describe('C-88 OpenAI-compatible ImageGenerationPort adapter', () => {
     });
   });
 
+  it('sends owned style references through the edits endpoint as multipart images', async () => {
+    const fetcher = vi.fn<OpenAIImageFetcher>(async (endpoint, init) => {
+      expect(endpoint).toBe('https://images.example.test/v1/images/edits');
+      expect(init.headers).toEqual({ Authorization: 'Bearer sk-test-secret' });
+      expect(init.body).toBeInstanceOf(FormData);
+      const body = init.body as FormData;
+      expect(body.get('prompt')).toBe('new watercolor stationery, no text');
+      expect(body.get('background')).toBe('opaque');
+      expect(body.getAll('image[]')).toHaveLength(1);
+      return response({ data: [{ url: 'https://cdn.example.test/styled.png' }] });
+    });
+    const readReferenceAsset = vi.fn(async () => ({
+      bytes: new Uint8Array([1, 2, 3, 4]),
+      mimeType: 'image/png',
+    }));
+    const port = createOpenAIImageGenerationPort(optionsFor(fetcher, { readReferenceAsset }));
+    const result = await port.generate(
+      {
+        background: 'opaque',
+        prompt: 'new watercolor stationery, no text',
+        referenceAssetRefs: ['template-page-1'],
+      },
+      context(),
+    );
+    expect(result[0]?.asset.ref).toBe('https://cdn.example.test/styled.png');
+    expect(readReferenceAsset).toHaveBeenCalledWith(scope, 'template-page-1');
+  });
+
+  it('rejects caller-supplied URLs as style references', async () => {
+    const port = createOpenAIImageGenerationPort(
+      optionsFor(vi.fn(), {
+        readReferenceAsset: async () => ({ bytes: new Uint8Array([1]), mimeType: 'image/png' }),
+      }),
+    );
+    await expect(
+      port.generate(
+        { prompt: 'copy this', referenceAssetRefs: ['https://evil.example/ref.png'] },
+        context(),
+      ),
+    ).rejects.toMatchObject({ code: 'IMAGE_REQUEST_INVALID' });
+  });
+
   it('fails closed when explicit provider credentials are missing', () => {
     const fetcher = vi.fn<OpenAIImageFetcher>();
 

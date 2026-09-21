@@ -177,6 +177,9 @@ it('resolves a family-local archetype alias without weakening family or componen
     componentIds: ['p1-leaf'],
     familyId: 'soft',
   });
+  expect(vi.mocked(chat.chat).mock.calls[0][0].messages[0].content).toContain(
+    'assetMode 必须是 generate',
+  );
   expect(storyboard.slides[0].layoutId).toBeUndefined();
 });
 

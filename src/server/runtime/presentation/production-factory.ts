@@ -548,6 +548,7 @@ export const createProductionPresentationGenerationComposition = (
             },
             (name) =>
               [
+                'assets.generate',
                 'assets.removeBackground',
                 'assets.keyColor',
                 'assets.transform',

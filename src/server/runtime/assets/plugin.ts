@@ -399,11 +399,13 @@ export function createAssetPlugin(
     operations.push({
       name: 'assets.generate',
       description:
-        'Generate a real raster asset. The returned ref can feed cutout, transform, compose and slide placement.',
+        'Generate artwork from a subject brief and owned visual reference images. Use referenceAssetRefs to inherit the learned palette, brushwork and rendering language while drawing new content. The returned ref can feed cutout, transform, compose and slide placement.',
       input: z
         .object({
           prompt: z.string().min(1).max(4000),
           requestId: z.string().min(1).max(128),
+          referenceAssetRefs: z.array(id).max(4).optional(),
+          background: z.enum(['transparent', 'opaque', 'auto']).optional(),
           size: z.enum(['1024x1024', '1024x1536', '1536x1024']).default('1024x1024'),
         })
         .strict(),
@@ -413,6 +415,8 @@ export function createAssetPlugin(
           [
             {
               prompt: input.prompt,
+              referenceAssetRefs: input.referenceAssetRefs,
+              background: input.background,
               idempotencyKey: input.requestId,
               size: input.size,
               slideId: 'asset',

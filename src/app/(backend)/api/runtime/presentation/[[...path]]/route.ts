@@ -497,6 +497,12 @@ const defaultProductionGenerationComposition = (): PresentationRuntimeCompositio
               scope,
             }),
           imagePort: createProductionOpenAIImageGenerationPort(imgEnv, {
+            readReferenceAsset: async (scope, ref) => {
+              const artifact = await artifactStore.get(scope, ref);
+              return artifact?.bytes && artifact.mimeType
+                ? { bytes: artifact.bytes, mimeType: artifact.mimeType }
+                : null;
+            },
             assetSink: async ({ bytes, metadata, scope }) => {
               const artifactId = `image-${createHash('sha256').update(bytes).digest('hex').slice(0, 32)}`;
               const stored = await assetStore.put(scope, {

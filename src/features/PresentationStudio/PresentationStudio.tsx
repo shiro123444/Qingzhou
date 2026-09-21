@@ -1,5 +1,5 @@
 import { Button, Flexbox, Icon, Tag } from '@lobehub/ui';
-import { Alert, Dropdown, Spin } from 'antd';
+import { Dropdown, Spin } from 'antd';
 import { FlaskConical } from 'lucide-react';
 import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -43,6 +43,7 @@ import {
   type PresentationClient,
   type PresentationTransportMode,
 } from './store/presentationStore';
+import { StudioNotice } from './StudioNotice';
 import { styles } from './style';
 
 const updatePresentationLocation = (jobId: string | null) => {
@@ -547,17 +548,15 @@ export const PresentationStudio = memo<PresentationStudioProps>(
           )}
         </header>
 
-        {/* C-80: while a dedicated export-failure alert is showing, the generic
-            clientError alert is suppressed for export-origin codes. */}
-        {clientError && !(exportError && clientError.code === exportError.code) && (
-          <div className={styles.errorBox} data-testid="presentation-client-error">
-            {clientError.code === 'PROVIDER_UNAVAILABLE' ? (
-              <Alert
-                closable
-                showIcon
-                data-testid="presentation-provider-unavailable"
-                role="alert"
-                type="warning"
+        <div className={styles.noticeHost} data-testid="presentation-notice-host">
+          {/* Overlay notices keep the canvas from shifting. Export-origin client
+              errors stay on the dedicated export bubble. */}
+          {clientError && !(exportError && clientError.code === exportError.code) ? (
+            clientError.code === 'PROVIDER_UNAVAILABLE' ? (
+              <StudioNotice
+                key="provider-unavailable"
+                testId="presentation-provider-unavailable"
+                tone="warning"
                 action={
                   <Flexbox gap={8}>
                     <Button
@@ -595,7 +594,7 @@ export const PresentationStudio = memo<PresentationStudioProps>(
                     </span>
                   </span>
                 }
-                message={
+                title={
                   <span>
                     演示文稿生成服务当前不可用
                     <span style={{ display: 'none' }}>
@@ -606,13 +605,12 @@ export const PresentationStudio = memo<PresentationStudioProps>(
                 onClose={dismissError}
               />
             ) : (
-              <Alert
-                closable
-                showIcon
+              <StudioNotice
                 description={clientError.message}
-                role="alert"
-                type="error"
-                message={
+                key={`client-${clientError.code}`}
+                testId="presentation-client-error"
+                tone="error"
+                title={
                   <span>
                     运行时错误: {clientError.code}
                     <span style={{ display: 'none' }}>
@@ -622,17 +620,14 @@ export const PresentationStudio = memo<PresentationStudioProps>(
                 }
                 onClose={dismissError}
               />
-            )}
-          </div>
-        )}
+            )
+          ) : null}
 
-        {exportError && (
-          <div className={styles.errorBox} data-testid="presentation-export-error">
-            <Alert
-              closable
-              showIcon
-              role="alert"
-              type="error"
+          {exportError ? (
+            <StudioNotice
+              key={`export-error-${exportError.artifactId}-${exportError.format}`}
+              testId="presentation-export-error"
+              tone="error"
               action={
                 <Button
                   aria-busy={Boolean(exporting)}
@@ -656,7 +651,7 @@ export const PresentationStudio = memo<PresentationStudioProps>(
                   </span>
                 </span>
               }
-              message={
+              title={
                 <span>
                   {`导出失败: ${exportError.code}`}
                   <span style={{ display: 'none' }}>{`Export failed: ${exportError.code}`}</span>
@@ -664,15 +659,13 @@ export const PresentationStudio = memo<PresentationStudioProps>(
               }
               onClose={dismissExport}
             />
-          </div>
-        )}
+          ) : null}
 
-        {exported && (
-          <div className={styles.exportNotice} data-testid="presentation-export-notice">
-            <Alert
-              closable
-              showIcon
-              type="success"
+          {exported ? (
+            <StudioNotice
+              key={`export-${exported.artifactId}-${exported.format}`}
+              testId="presentation-export-notice"
+              tone="success"
               description={
                 exported.uri ? (
                   <a download data-testid="presentation-export-download" href={exported.uri}>
@@ -680,7 +673,7 @@ export const PresentationStudio = memo<PresentationStudioProps>(
                   </a>
                 ) : undefined
               }
-              message={
+              title={
                 <span>
                   {`${exported.format.toUpperCase()} 已就绪`}
                   <span style={{ display: 'none' }}>
@@ -690,8 +683,8 @@ export const PresentationStudio = memo<PresentationStudioProps>(
               }
               onClose={dismissExport}
             />
-          </div>
-        )}
+          ) : null}
+        </div>
 
         <div className={styles.conversationLayout}>
           <div className={`${styles.conversationMain} ${styles.conversationMainFill}`}>
