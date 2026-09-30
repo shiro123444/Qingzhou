@@ -666,6 +666,16 @@ export interface SceneTextNode extends SceneNodeBase {
   text: string;
 }
 
+/** A mathematical expression rendered from editable LaTeX source. */
+export interface SceneFormulaNode extends SceneNodeBase {
+  color?: string;
+  display?: boolean;
+  fontSize?: number;
+  kind: 'formula';
+  /** Retained independently of vector output so the expression can be re-edited. */
+  latex: string;
+}
+
 /** A primitive vector shape node. */
 export interface SceneShapeNode extends SceneNodeBase {
   /** Fill color as CSS color string; `transparent` is allowed. */
@@ -717,6 +727,7 @@ export interface SceneGroupNode extends SceneNodeBase {
 /** Discriminated union of all scene nodes. */
 export type SceneNode =
   | SceneChartNode
+  | SceneFormulaNode
   | SceneGroupNode
   | SceneImageNode
   | SceneShapeNode
@@ -819,6 +830,15 @@ export const validateSlideScene = (scene: unknown): SlideSceneValidation => {
   ): boolean => {
     for (const node of nodes) {
       if (!isWireRecord(node)) return false;
+      if (
+        node.kind === 'formula' &&
+        (typeof node.latex !== 'string' ||
+          !node.latex.trim() ||
+          node.latex.length > 2000 ||
+          (node.fontSize !== undefined &&
+            (!isFiniteNumber(node.fontSize) || node.fontSize < 24 || node.fontSize > 64)))
+      )
+        return false;
       const rect = (node as { rect?: unknown }).rect;
       if (
         !isWireRecord(rect) ||

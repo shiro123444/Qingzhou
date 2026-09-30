@@ -14,7 +14,10 @@ import { FilePresentationStorage } from './file-storage';
 import { PresentationGenerationCapability } from './generation-capability';
 import { PresentationGenerationPort } from './generation-port';
 import { handlePresentationRequest, matchPresentationRoute } from './handler';
+import type { MultimodalChatPort } from './multimodal-chat-provider';
 import { PresentationGenerationPipelineImpl } from './pipeline';
+import { FileTeachingMemory, TeachingLearning } from './teaching-memory';
+import { FilePresentationTemplateLibrary } from './templates/library';
 import { InMemoryPresentationPlanWorker } from './worker';
 
 const owner: RuntimeScope = { sessionId: 'owner-session', userId: 'owner' };
@@ -40,7 +43,13 @@ const createHarness = async () => {
   const root = await mkdtemp(join(tmpdir(), 'presentation-public-tools-'));
   const storage = new FilePresentationStorage(root);
   const planner = { plan: vi.fn(async () => structuredClone(source)) };
+  const teaching = new TeachingLearning(
+    new FileTeachingMemory(join(root, 'memory')),
+    new FilePresentationTemplateLibrary({ root: join(root, 'templates') }),
+    {} as MultimodalChatPort,
+  );
   const runtime = createPresentationAtomicRuntime({
+    operations: teaching.operations(),
     artifactStore: storage,
     planner,
     worker: new InMemoryPresentationPlanWorker(),
@@ -132,6 +141,67 @@ const createHarness = async () => {
 };
 
 describe('public presentation atomic tools', () => {
+  it('exposes teaching retrieval/composition but never an approval tool', async () => {
+    const { call } = await createHarness();
+    const catalog = JSON.stringify((await call(undefined)).body);
+    expect(catalog).toContain('presentation.teaching.analyze');
+    expect(catalog).toContain('presentation.teaching.search');
+    expect(catalog).toContain('presentation.teaching.compose');
+    expect(catalog).not.toContain('presentation.teaching.review');
+    expect((await call('presentation.teaching.search', { query: '教学' })).status).toBe(200);
+    expect((await call('presentation.teaching.compose', { ids: [] })).status).toBe(200);
+    expect((await call('presentation.teaching.review', { action: 'confirm' })).status).not.toBe(
+      200,
+    );
+  });
+  it('exposes lesson compilation and does not certify a non-teaching deck as a lesson', async () => {
+    const { call } = await createHarness();
+    const catalog = await call(undefined);
+    expect(JSON.stringify(catalog.body)).toContain('presentation.lesson.compile');
+    const compiled = await call('presentation.lesson.compile', {
+      input: { notebookId: 'n', title: 'Ordinary', sourceVersionIds: [] },
+    });
+    expect(compiled.status).toBe(200);
+    expect(JSON.stringify(compiled.body)).toContain('Ordinary');
+    const validated = await call('presentation.lesson.validate', { plan: source });
+    expect(validated.status).not.toBe(200);
+  });
+  it('exposes formula measurement and composes its measured bounds into vector rendering', async () => {
+    const { call } = await createHarness();
+    const measured = await call('presentation.formula.measure', { latex: 'x^2', fontSize: 28 });
+    expect(measured.status).toBe(200);
+    // Public dispatch must preserve the measurement payload, not only list a tool name.
+    expect(JSON.stringify(measured.body)).toContain('minRectWidth');
+  });
+  it('exposes scientific diagram geometry as a Cordis measurement capability', async () => {
+    const { call } = await createHarness();
+    const result = await call('presentation.diagram.measure', {
+      width: 420,
+      block: {
+        id: 'visual-1',
+        kind: 'scientific-diagram',
+        title: '方法比较',
+        rect: { x: 0, y: 0, width: 420, height: 180 },
+        provenance: { kind: 'illustrative' },
+        spec: {
+          type: 'plot',
+          xRange: [0, 1],
+          yRange: [0, 1],
+          xLabel: 'x',
+          yLabel: 'y',
+          series: ['GD', 'SGD', 'Adam', 'AdamW'].map((label) => ({
+            label,
+            points: [
+              [0, 0],
+              [1, 1],
+            ],
+          })),
+        },
+      },
+    });
+    expect(result.status).toBe(200);
+    expect(JSON.stringify(result.body)).toContain('224');
+  });
   it('exposes discoverable public schemas, dispatches owned page reads and rejects internal execution tools', async () => {
     const { call, initial } = await createHarness();
     const catalog = await call(undefined);

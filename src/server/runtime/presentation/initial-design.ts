@@ -2,11 +2,20 @@ import type {
   PresentationJobInput,
   PresentationPlan,
 } from '../../../../packages/runtime-contracts/src';
+import { readContentIntents } from './content-intent';
 
 /** Structured design envelopes used before any SVG composition or image generation. */
 export const initialDesignPlan = (input: PresentationJobInput): PresentationPlan | undefined => {
-  const outline = input.options?.outline;
-  if (!Array.isArray(outline) || !outline.length || outline.length !== input.slideCount) return;
+  const confirmed = input.options?.outline;
+  // Prompt-only creation needs an asset envelope before SVG composition too.
+  const outline =
+    Array.isArray(confirmed) && confirmed.length
+      ? confirmed
+      : readContentIntents(input).map((intent) => ({
+          title: intent.claim,
+          speakerNotes: undefined,
+        }));
+  if (!outline.length || outline.length !== input.slideCount) return;
   const ratio = input.aspectRatio ?? '16:9';
   const height = ratio === '4:3' ? 720 : 540;
   const storyboard = input.options?.visualStoryboard as

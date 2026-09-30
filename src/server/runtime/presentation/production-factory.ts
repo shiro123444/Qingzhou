@@ -39,12 +39,22 @@ import {
   InMemoryPresentationArtifactStore,
   type PresentationArtifactStore,
 } from './artifact-store';
+import {
+  type CutoutTransparency,
+  requestsCutout,
+  verifyCutoutTransparency,
+} from './artwork-pipeline';
 import { atomicPlanner, atomicWorker, createPresentationAtomicRuntime } from './atomic-plugin';
+import { type CapabilityMemory, capabilityMemoryOperations } from './capability-memory';
 import {
   createPresentationRuntimeComposition,
   type PresentationGenerationContextFactory,
   type PresentationRuntimeComposition,
 } from './composition';
+import {
+  createPresentationContentCompiler,
+  type PresentationContentCompiler,
+} from './content-intent';
 import type {
   PresentationJobEventJournalLoader,
   ScopedPresentationJobEventJournalCache,
@@ -69,6 +79,8 @@ import type { ProductionPresentationEnv } from './production-config';
 import { loadProductionPresentationProviderOptions } from './production-config';
 import { createRevisionAssetPlanner } from './revision-assets';
 import { createProcessPresentationRunner, type ProcessPresentationRunnerOptions } from './runner';
+import type { FileTeachingMemory } from './teaching-memory';
+import { TeachingLearning } from './teaching-memory';
 import type { FilePresentationTemplateLibrary } from './templates';
 import type { PresentationAudioTranscriber } from './templates/audio-transcription';
 import { TemplateVisualLearning } from './templates/visual-learning';
@@ -397,9 +409,13 @@ export const createPptMasterProductionComposition =
 export interface ProductionPresentationGenerationCompositionOptions {
   readonly artifactStore?: PresentationArtifactStore;
   readonly audioTranscriber?: PresentationAudioTranscriber;
+  readonly capabilityMemory?: CapabilityMemory;
+  readonly contentCompiler?: PresentationContentCompiler;
   readonly contextFactory?: PresentationGenerationContextFactory;
   readonly defaultSlideCount?: number;
   readonly env?: ProductionPresentationEnv;
+  /** Generated-image budget for one job; defaults to the asset planner's own bound. */
+  readonly imageBudget?: number;
   readonly imageGenerationCapability?: ImageGenerationCapability;
   readonly jobRepository?: PresentationJobRepository;
   readonly journalCache?: ScopedPresentationJobEventJournalCache;
@@ -408,6 +424,7 @@ export interface ProductionPresentationGenerationCompositionOptions {
   readonly now?: () => string;
   readonly planner?: PresentationPlanner;
   readonly runnerFactory?: (provider: ProductionPresentationProvider) => PresentationRunner;
+  readonly teachingMemory?: FileTeachingMemory;
   readonly templateLibrary?: FilePresentationTemplateLibrary;
   readonly worker?: Pick<InMemoryPresentationPlanWorker, 'run'>;
   readonly workspaceFactory?: (jobId: string) => PresentationWorkerWorkspace;
@@ -444,6 +461,16 @@ export const createProductionPresentationGenerationComposition = (
       : undefined);
 
   const worker = options.worker ?? new InMemoryPresentationPlanWorker();
+  // One budget for the whole deck: the compiler plans within it and the asset planner enforces it.
+  const imageBudget =
+    options.imageBudget ?? loadProductionPresentationProviderOptions(options.env ?? {}).imageBudget;
+  const contentCompiler =
+    options.contentCompiler ??
+    (!options.planner && options.multimodalChatPort
+      ? createPresentationContentCompiler(options.multimodalChatPort, options.defaultSlideCount, {
+          ...(imageBudget === undefined ? {} : { maxRasterVisuals: imageBudget }),
+        })
+      : undefined);
   const artifactStore =
     options.artifactStore ??
     new InMemoryPresentationArtifactStore(options.now ? () => options.now!() : undefined);
@@ -467,6 +494,7 @@ export const createProductionPresentationGenerationComposition = (
   const templateVisualLearning =
     options.templateLibrary && options.multimodalChatPort
       ? new TemplateVisualLearning({
+          memory: options.capabilityMemory,
           audioTranscriber: options.audioTranscriber,
           library: options.templateLibrary,
           store: artifactStore,
@@ -482,6 +510,7 @@ export const createProductionPresentationGenerationComposition = (
   const revisionAssetPlanner = options.multimodalChatPort
     ? createRevisionAssetPlanner({
         chatPort: options.multimodalChatPort,
+        ...(imageBudget === undefined ? {} : { maxGeneratedSlots: imageBudget }),
         readReusableAssets: async (refs, input) => {
           const assets = await Promise.all(
             refs.map(async (ref) => {
@@ -558,14 +587,39 @@ export const createProductionPresentationGenerationComposition = (
           );
           const result = output.last as { ref?: string };
           if (!result?.ref) throw new Error('Asset workflow did not return an image');
-          return { ref: result.ref };
+          // A cutout workflow can succeed while returning an opaque bitmap. Measure the produced
+          // pixels here, where the server owns the bytes, so every caller gets a fact instead of
+          // an assumption about the workflow name.
+          let transparency: CutoutTransparency | undefined;
+          if (requestsCutout(steps)) {
+            const stored = await artifactStore.get(input.scope, result.ref);
+            if (stored?.bytes) transparency = await verifyCutoutTransparency(stored.bytes);
+          }
+          return { ref: result.ref, ...(transparency ? { transparency } : {}) };
         },
       })
     : undefined;
+  const teachingLearning =
+    options.teachingMemory && options.templateLibrary && options.multimodalChatPort
+      ? new TeachingLearning(
+          options.teachingMemory,
+          options.templateLibrary,
+          options.multimodalChatPort,
+          { store: artifactStore },
+        )
+      : undefined;
   const atomicRuntime: AtomicRuntime | undefined = planner
     ? createPresentationAtomicRuntime({
         planner,
-        operations: templateVisualLearning?.operations(),
+        contentCompiler,
+        teachingMemory: options.teachingMemory,
+        operations: [
+          ...(teachingLearning?.operations() ?? []),
+          ...(templateVisualLearning?.operations() ?? []),
+          ...(options.capabilityMemory
+            ? capabilityMemoryOperations(options.capabilityMemory, options.jobRepository)
+            : []),
+        ],
         chatPort: options.multimodalChatPort,
         worker,
         artifactStore,
@@ -616,6 +670,10 @@ export const createProductionPresentationGenerationComposition = (
 
   const composition = createPresentationRuntimeComposition({
     atomicRuntime,
+    contentCompiler,
+    capabilityMemory: options.capabilityMemory,
+    teachingMemory: options.teachingMemory,
+    teachingLearning,
     templateLibrary: options.templateLibrary,
     revisionAssetPlanner,
     visualStoryboardPlanner,

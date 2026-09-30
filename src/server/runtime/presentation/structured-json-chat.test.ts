@@ -99,6 +99,38 @@ describe('structured JSON chat', () => {
     expect(chat).toHaveBeenCalledTimes(1);
   });
 
+  it('repairs JavaScript-flavoured answer syntax without burning a retry', async () => {
+    const chat = vi.fn(async () =>
+      result('{"slides":[{"slideId":"slide-1",renderer:"image",fidelity:"conceptual"}]}'),
+    );
+    await expect(
+      completeStructuredJson({
+        chat: port(chat),
+        context: { idempotencyKey: 'content', scope },
+        request: { messages: [{ content: 'compile', role: 'user' }] },
+      }),
+    ).resolves.toMatchObject({
+      value: { slides: [{ fidelity: 'conceptual', renderer: 'image', slideId: 'slide-1' }] },
+    });
+    expect(chat).toHaveBeenCalledTimes(1);
+  });
+
+  it('repairs a JavaScript-flavoured harvest instead of failing the stage', async () => {
+    const chat = vi
+      .fn()
+      .mockResolvedValueOnce(result('', { reasoning_content: 'I will pick a diagram.' }))
+      .mockResolvedValueOnce(result("{'intents':[{'id':'visual-1',renderer:'image',},]}"));
+    await expect(
+      completeStructuredJson({
+        chat: port(chat),
+        context: { idempotencyKey: 'intent', scope },
+        request: { messages: [{ content: 'plan', role: 'user' }] },
+      }),
+    ).resolves.toMatchObject({ value: { intents: [{ id: 'visual-1', renderer: 'image' }] } });
+    expect(chat).toHaveBeenCalledTimes(2);
+    expect(chat.mock.calls[1][0].messages.at(-1).content).toMatch(/双引号/u);
+  });
+
   it('repairs a schema failure in a follow-up turn', async () => {
     const chat = vi
       .fn()

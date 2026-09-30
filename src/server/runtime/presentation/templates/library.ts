@@ -4,6 +4,7 @@ import nodePath from 'node:path';
 
 import type { RuntimeScope } from '../../../../../packages/runtime-contracts/src';
 import { extractPlanTemplate } from './extract';
+import { learningStatus, type TemplateLearningJob } from './learning-job';
 import { extractPptxTemplate } from './pptx';
 import type {
   ImportTemplateInput,
@@ -174,8 +175,27 @@ export class FilePresentationTemplateLibrary {
         const latest = await this.get(scope, profile.templateId);
         if (!latest) return null;
         const { layouts, designSpec: _designSpec, media, ...summary } = latest;
+        const [job, visual] = await Promise.all([
+          this.getLearningJob(scope, latest),
+          this.getVisual(scope, latest),
+        ]);
+        const observedPages = visual?.pages.map((page) => page.page) ?? [];
         return {
           ...summary,
+          ...(job
+            ? { learning: learningStatus(job) }
+            : visual
+              ? {
+                  learning: {
+                    state: visual.learning.status,
+                    totalPages: layouts.length,
+                    observedPages,
+                    remainingPages: Array.from({ length: layouts.length }, (_, i) => i + 1).filter(
+                      (page) => !observedPages.includes(page),
+                    ),
+                  },
+                }
+              : {}),
           layoutCount: layouts.length,
           mediaCount: media?.length ?? 0,
           videoCount: media?.filter((item) => item.kind === 'video').length ?? 0,
@@ -244,6 +264,43 @@ export class FilePresentationTemplateLibrary {
         `${hash(profile.versionId)}.visual`,
       ),
       JSON.stringify(visual),
+    );
+  }
+
+  async getLearningJob(
+    scope: RuntimeScope,
+    reference: TemplateReference,
+  ): Promise<TemplateLearningJob | null> {
+    const profile = await this.get(scope, reference.templateId, reference.versionId);
+    if (!profile) throw new PresentationTemplateError('Owned template does not exist');
+    try {
+      const job = JSON.parse(
+        await readFile(
+          nodePath.join(
+            this.versionDirectory(scope, profile.templateId),
+            `${hash(profile.versionId)}.learning`,
+          ),
+          'utf8',
+        ),
+      ) as TemplateLearningJob;
+      return job.templateId === profile.templateId && job.versionId === profile.versionId
+        ? job
+        : null;
+    } catch (error) {
+      if (missing(error)) return null;
+      throw error;
+    }
+  }
+
+  async saveLearningJob(scope: RuntimeScope, job: TemplateLearningJob): Promise<void> {
+    const profile = await this.get(scope, job.templateId, job.versionId);
+    if (!profile) throw new PresentationTemplateError('Owned template does not exist');
+    await this.write(
+      nodePath.join(
+        this.versionDirectory(scope, profile.templateId),
+        `${hash(profile.versionId)}.learning`,
+      ),
+      JSON.stringify(job),
     );
   }
 

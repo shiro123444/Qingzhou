@@ -1,6 +1,12 @@
+import { lessonOutline, type LessonPlan, type TeacherBrief } from '@/types/presentationLesson';
+import type { TeachingSelection } from '@/types/presentationTeaching';
+
+import { PRESENTATION_CONTENT_BUDGET } from './content-intent';
 import type { PresentationConversationBrief } from './conversation-capability';
+import { proposeLesson } from './lesson';
 import type { MultimodalChatPort } from './multimodal-chat-provider';
 import { completeStructuredJson } from './structured-json-chat';
+import type { FileTeachingMemory } from './teaching-memory';
 
 export interface PresentationOutlineSlide {
   readonly claim?: string;
@@ -13,10 +19,12 @@ export interface PresentationOutlineSlide {
 }
 
 export interface PresentationOutlineCommand {
-  readonly brief: PresentationConversationBrief;
+  readonly brief: PresentationConversationBrief & { teacherBrief?: TeacherBrief };
+  readonly currentLessonPlan?: LessonPlan;
   readonly currentSlides?: readonly PresentationOutlineSlide[];
   readonly instruction?: string;
   readonly operation: 'propose' | 'rewrite';
+  readonly teachingSelection?: TeachingSelection;
 }
 
 export interface PresentationOutlineCapability {
@@ -26,7 +34,7 @@ export interface PresentationOutlineCapability {
       readonly scope: { readonly sessionId: string; readonly userId: string };
       readonly signal?: AbortSignal;
     },
-  ) => Promise<{ slides: PresentationOutlineSlide[] }>;
+  ) => Promise<{ slides: PresentationOutlineSlide[]; lessonPlan?: LessonPlan }>;
   readonly id: 'presentation.outline';
 }
 
@@ -43,10 +51,23 @@ const normalizeSlides = (value: unknown): PresentationOutlineSlide[] => {
     }
     return {
       id: nonEmpty(slide.id) ? slide.id.trim() : `slide-${index + 1}`,
-      keyPoints: slide.keyPoints.filter(nonEmpty).map((point) => point.trim()),
+      keyPoints: slide.keyPoints
+        .filter(nonEmpty)
+        .slice(0, PRESENTATION_CONTENT_BUDGET.maxKeyPoints)
+        .map((point) => point.trim()),
       ...(nonEmpty(slide.claim) ? { claim: slide.claim.trim() } : {}),
       ...(nonEmpty(slide.objective) ? { objective: slide.objective.trim() } : {}),
-      ...(nonEmpty(slide.speakerNotes) ? { speakerNotes: slide.speakerNotes.trim() } : {}),
+      ...(nonEmpty(slide.speakerNotes) ||
+      slide.keyPoints.filter(nonEmpty).length > PRESENTATION_CONTENT_BUDGET.maxKeyPoints
+        ? {
+            speakerNotes: [
+              nonEmpty(slide.speakerNotes) ? slide.speakerNotes.trim() : '',
+              ...slide.keyPoints.filter(nonEmpty).slice(PRESENTATION_CONTENT_BUDGET.maxKeyPoints),
+            ]
+              .filter(Boolean)
+              .join('\n'),
+          }
+        : {}),
       title: slide.title.trim(),
       ...(nonEmpty(slide.visualSuggestion)
         ? { visualSuggestion: slide.visualSuggestion.trim() }
@@ -57,6 +78,7 @@ const normalizeSlides = (value: unknown): PresentationOutlineSlide[] => {
 
 export const createPresentationOutlineCapability = (options: {
   readonly chat: MultimodalChatPort;
+  readonly teachingMemory?: FileTeachingMemory;
 }): PresentationOutlineCapability => {
   if (!options?.chat || typeof options.chat.chat !== 'function') {
     throw new TypeError('A multimodal chat port is required');
@@ -71,6 +93,27 @@ export const createPresentationOutlineCapability = (options: {
         });
       }
       const current = command.currentSlides ?? [];
+      if (brief.teacherBrief) {
+        if (command.teachingSelection?.ids.length && !options.teachingMemory)
+          throw new Error('Teaching memory is not configured');
+        const patterns =
+          command.teachingSelection && options.teachingMemory
+            ? await options.teachingMemory.compose(context.scope, command.teachingSelection)
+            : [];
+        const lessonPlan = await proposeLesson(
+          options.chat,
+          {
+            brief: brief.teacherBrief,
+            topic: brief.topic!,
+            material: { research: brief.research, slides: current },
+            current: command.currentLessonPlan,
+            patterns,
+            instruction: command.instruction,
+          },
+          context,
+        );
+        return { lessonPlan, slides: lessonOutline(lessonPlan) };
+      }
       return completeStructuredJson({
         chat: options.chat,
         context: { scope: context.scope, ...(context.signal ? { signal: context.signal } : {}) },

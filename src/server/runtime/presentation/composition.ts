@@ -2,6 +2,8 @@ import type { ImageGenerationPort, RuntimeScope } from '../../../../packages/run
 import type { AtomicRuntime } from '../atomic-runtime';
 import type { PresentationArtifactStore } from './artifact-store';
 import type { PresentationAssetStore } from './asset-store';
+import type { CapabilityMemory } from './capability-memory';
+import type { PresentationContentCompiler } from './content-intent';
 import {
   createPresentationConversationCapability,
   type PresentationConversationCapability,
@@ -37,6 +39,7 @@ import {
 } from './outline-capability';
 import type { PresentationPipelineContext } from './pipeline';
 import type { PresentationRevisionAssetPlanner } from './revision-assets';
+import type { FileTeachingMemory, TeachingLearning } from './teaching-memory';
 import type { FilePresentationTemplateLibrary } from './templates';
 import type { PresentationVisualCritic } from './visual-critic';
 import type { PresentationVisualStoryboardPlanner } from './visual-storyboard';
@@ -51,6 +54,8 @@ export type PresentationRuntimeGenerationHandler = (
 export interface PresentationRuntimeCompositionOptions {
   readonly atomicRuntime?: AtomicRuntime;
   readonly capability?: PresentationGenerationCapability;
+  readonly capabilityMemory?: CapabilityMemory;
+  readonly contentCompiler?: PresentationContentCompiler;
   readonly contextFactory?: PresentationGenerationContextFactory;
   /** Artifact store used by the asynchronous `/jobs` generation bridge. */
   readonly generationArtifactStore?: PresentationArtifactStore;
@@ -67,6 +72,8 @@ export interface PresentationRuntimeCompositionOptions {
   readonly now?: () => string;
   readonly portFactory?: PresentationPortFactory;
   readonly revisionAssetPlanner?: PresentationRevisionAssetPlanner;
+  readonly teachingLearning?: TeachingLearning;
+  readonly teachingMemory?: FileTeachingMemory;
   readonly templateLibrary?: FilePresentationTemplateLibrary;
   readonly visualCritic?: PresentationVisualCritic;
   readonly visualStoryboardPlanner?: PresentationVisualStoryboardPlanner;
@@ -104,6 +111,7 @@ export interface PresentationRuntimeComposition {
   readonly portFactory?: PresentationPortFactory;
   reset: (scope?: PresentationEventJournalScope) => number;
   readonly revisionAssetPlanner?: PresentationRevisionAssetPlanner;
+  readonly teachingLearning?: TeachingLearning;
   readonly templateLibrary?: FilePresentationTemplateLibrary;
 }
 
@@ -302,6 +310,8 @@ export const createPresentationRuntimeComposition = (
           const port = createPresentationGenerationPort(
             {
               atomicRuntime: compositionOptions.atomicRuntime,
+              contentCompiler: compositionOptions.contentCompiler,
+              capabilityMemory: compositionOptions.capabilityMemory,
               templateLibrary: compositionOptions.templateLibrary,
               revisionAssetPlanner: compositionOptions.revisionAssetPlanner,
               visualStoryboardPlanner: compositionOptions.visualStoryboardPlanner,
@@ -364,10 +374,14 @@ export const createPresentationRuntimeComposition = (
     ? createPresentationConversationCapability({ chat: compositionOptions.multimodalChatPort })
     : undefined;
   const outlineCapability = compositionOptions.multimodalChatPort
-    ? createPresentationOutlineCapability({ chat: compositionOptions.multimodalChatPort })
+    ? createPresentationOutlineCapability({
+        chat: compositionOptions.multimodalChatPort,
+        teachingMemory: compositionOptions.teachingMemory,
+      })
     : undefined;
 
   return {
+    teachingLearning: compositionOptions.teachingLearning,
     atomicRuntime: compositionOptions.atomicRuntime,
     ...(conversationCapability ? { conversationCapability } : {}),
     generationEventPublisherFactory: bindings.generationEventPublisherFactory,

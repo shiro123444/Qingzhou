@@ -3,8 +3,8 @@ import { createStaticStyles } from 'antd-style';
 import { ChevronDownIcon } from 'lucide-react';
 import { memo, useCallback } from 'react';
 
-import { JUMI_CHAT_MODEL_NAME } from '@/const/jumi';
 import ModelSwitchPanel from '@/features/ModelSwitchPanel';
+import { useEnabledChatModels } from '@/hooks/useEnabledChatModels';
 import { useJumiChatModel } from '@/hooks/useJumiChatModel';
 import { useAgentStore } from '@/store/agent';
 
@@ -39,21 +39,25 @@ const ModelLabel = memo(() => {
   const { dropdownPlacement } = useActionBarContext();
 
   const agentId = useAgentId();
-  const { model, provider } = useJumiChatModel(agentId);
+  const { model, provider, selectionAgentId } = useJumiChatModel(agentId);
   const updateAgentConfigById = useAgentStore((s) => s.updateAgentConfigById);
 
-  const displayName = JUMI_CHAT_MODEL_NAME;
+  const enabledModels = useEnabledChatModels();
+  const displayName =
+    enabledModels.find((item) => item.id === provider)?.children.find((item) => item.id === model)
+      ?.displayName || model;
 
   const handleModelChange = useCallback(
     async (params: { model: string; provider: string }) => {
-      if (agentId !== 'ppt-agent') await updateAgentConfigById(agentId, params);
+      if (selectionAgentId) await updateAgentConfigById(selectionAgentId, params);
     },
-    [agentId, updateAgentConfigById],
+    [selectionAgentId, updateAgentConfigById],
   );
 
   return (
     <ModelSwitchPanel
       model={model}
+      open={selectionAgentId ? undefined : false}
       openOnHover={false}
       placement={dropdownPlacement}
       provider={provider}

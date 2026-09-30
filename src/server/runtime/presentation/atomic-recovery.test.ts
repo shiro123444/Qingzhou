@@ -11,6 +11,7 @@ import type {
   PresentationPlan,
 } from '../../../../packages/runtime-contracts/src';
 import { atomicPlanner, atomicWorker, createPresentationAtomicRuntime } from './atomic-plugin';
+import { FileCapabilityCapsuleStore } from './capability-memory';
 import { FilePresentationStorage } from './file-storage';
 import { PresentationGenerationCapability } from './generation-capability';
 import { PresentationGenerationPort } from './generation-port';
@@ -51,6 +52,90 @@ afterEach(async () => {
 });
 
 describe('Cordis presentation recovery and template scope', () => {
+  it('persists successful per-page drafts and restores them into the planner after process recreation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'ppt-draft-checkpoint-'));
+    roots.push(root);
+    const storage = new FilePresentationStorage(root);
+    const memory = new FileCapabilityCapsuleStore(join(root, 'memory'));
+    const compose = vi.spyOn(memory, 'compose');
+    let attempt = 0;
+    const execute = vi.fn(async (_scope, plannedInput, context) => {
+      expect(plannedInput.options.generatedImageSlots).toEqual([
+        {
+          slideId: 'first',
+          slotId: 'image-1',
+          assetRefs: [{ ref: 'owned-image' }],
+          state: 'ready',
+        },
+      ]);
+      if (++attempt === 1) {
+        await context.plannerContext.onSlideDraft(initialPlan.slides[0]);
+        throw new Error('The next page failed');
+      }
+      expect(context.plannerContext.resumeSlides).toEqual([initialPlan.slides[0]]);
+      return { artifacts: [], plan: await context.preparePlan(initialPlan) };
+    });
+    const makePort = () =>
+      new PresentationGenerationPort(
+        {
+          artifactStore: storage,
+          repository: storage,
+          capabilityMemory: memory,
+          revisionAssetPlanner: {
+            prepareInitial: vi.fn(),
+            prepare: vi.fn(async (request) => ({
+              input: {
+                ...request.jobInput,
+                options: {
+                  ...request.jobInput.options,
+                  generatedImageSlots: [
+                    {
+                      slideId: 'first',
+                      slotId: 'image-1',
+                      assetRefs: [{ ref: 'owned-image' }],
+                      state: 'ready',
+                    },
+                  ],
+                },
+              },
+              assetArtifactIds: [],
+              intents: [],
+            })),
+          },
+          capability: { execute } as unknown as PresentationGenerationCapability,
+          idFactory: () => 'draft-job',
+          contextFactory: () => ({
+            plannerContext: {},
+            workerContext: {
+              jobId: 'unused',
+              convert: vi.fn(),
+              qualityCheck: vi.fn(),
+              workspace: { path: root, write: vi.fn() },
+            },
+          }),
+        },
+        scope,
+      );
+    const first = makePort();
+    await first.createJob({
+      notebookId: 'n',
+      title: 'Recovery',
+      slideCount: 2,
+      sourceVersionIds: [],
+      options: { outline: [{ title: 'First' }, { title: 'Second' }] },
+    });
+    await vi.waitFor(async () => expect((await first.getJob('draft-job'))?.state).toBe('failed'));
+    expect((await storage.getJob(scope, 'draft-job'))?.draftCheckpoint?.slides).toHaveLength(1);
+    await first.dispose();
+    const second = makePort();
+    cleanups.push(() => second.dispose());
+    await second.retryJob('draft-job');
+    await vi.waitFor(async () =>
+      expect((await second.getJob('draft-job'))?.state).toBe('completed'),
+    );
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(compose).toHaveBeenCalledOnce();
+  });
   it('restores prepared assets across planner failures and process recreation, retaining all image ids and pinned templates', async () => {
     const root = await mkdtemp(join(tmpdir(), 'ppt-atomic-recovery-'));
     roots.push(root);

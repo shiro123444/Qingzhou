@@ -1,6 +1,9 @@
 import { type PluginProfile } from '@lobechat/cordis-runtime';
 import { z } from 'zod';
 
+import { lessonPlanSchema, teacherBriefSchema } from '@/types/presentationLesson';
+import { teachingSelectionSchema } from '@/types/presentationTeaching';
+
 import type {
   PlannerContext,
   PresentationPlan,
@@ -17,11 +20,25 @@ import {
 } from '../atomic-runtime';
 import { createSkillsPlugin } from '../skills-plugin';
 import type { PresentationArtifactStore } from './artifact-store';
+import type { PresentationContentCompiler } from './content-intent';
 import type { PresentationGenerationPort } from './generation-port';
 import type { ImageGenerationCapability } from './image-generation-capability';
+import {
+  assertLessonPublishable,
+  assertLessonRevision,
+  bindLessonPlan,
+  compileLessonInput,
+  proposeLesson,
+} from './lesson';
 import type { GLMMultimodalChatPort } from './multimodal-chat-provider-glm';
 import { validatePresentationPlan } from './planner';
 import type { PresentationRevisionAssetPlanner } from './revision-assets';
+import {
+  minimumScientificDiagramSize,
+  renderScientificDiagram,
+  semanticBlockSchema,
+} from './semantic-blocks';
+import type { FileTeachingMemory } from './teaching-memory';
 import type { FilePresentationTemplateLibrary, TemplateApplication } from './templates';
 import { nativeTemplateOperations } from './templates/native-operations';
 import { type PresentationVisualCritic, presentationVisualReviewSchema } from './visual-critic';
@@ -82,6 +99,8 @@ export const createPresentationAtomicRuntime = (options: {
   revisionAssetPlanner?: PresentationRevisionAssetPlanner;
   visualStoryboardPlanner?: PresentationVisualStoryboardPlanner;
   visualCritic?: PresentationVisualCritic;
+  contentCompiler?: PresentationContentCompiler;
+  teachingMemory?: FileTeachingMemory;
   worker: Pick<InMemoryPresentationPlanWorker, 'run'>;
   artifactStore: PresentationArtifactStore;
   imageGenerationCapability?: ImageGenerationCapability;
@@ -89,6 +108,121 @@ export const createPresentationAtomicRuntime = (options: {
   profile?: PluginProfile;
 }) => {
   const operations: AtomicOperation[] = [
+    ...(options.chatPort
+      ? [
+          {
+            name: 'presentation.lesson.plan',
+            description:
+              'Propose a teacher-led lesson with separate visible stages, private cues and student tasks. This is a proposal, not teacher approval.',
+            input: z
+              .object({
+                brief: teacherBriefSchema,
+                topic: z.string().min(1),
+                material: z.unknown().optional(),
+                current: lessonPlanSchema.optional(),
+                instruction: z.string().trim().max(4000).optional(),
+                teachingSelection: teachingSelectionSchema.optional(),
+              })
+              .strict(),
+            execute: async (input: any, ctx: AtomicInvocation) => {
+              if (input.teachingSelection?.ids.length && !options.teachingMemory)
+                throw new Error('Teaching memory is not configured');
+              const patterns =
+                input.teachingSelection && options.teachingMemory
+                  ? await options.teachingMemory.compose(ctx.scope, input.teachingSelection)
+                  : [];
+              return proposeLesson(
+                options.chatPort!,
+                { ...input, patterns },
+                { scope: ctx.scope, signal: ctx.signal },
+              );
+            },
+          },
+        ]
+      : []),
+    {
+      name: 'presentation.lesson.compile',
+      description:
+        'Compile a supplied lesson into ordered, teacher-advanced public stages, retaining private cues separately in the owned input.',
+      input: z.object({ input: inputSchema }).strict(),
+      execute: ({ input }) => compileLessonInput(input),
+    },
+    {
+      name: 'presentation.lesson.revise',
+      description:
+        'Validate a proposed lesson revision. Locked teacher beats cannot be changed, deleted or reordered. Does not confirm the proposal.',
+      input: z.object({ previous: lessonPlanSchema, next: lessonPlanSchema }).strict(),
+      execute: ({ previous, next }) => {
+        assertLessonRevision(previous, next);
+        return next;
+      },
+    },
+    {
+      name: 'presentation.lesson.validate',
+      description:
+        'Validate stage identity, withheld literal content and reserved boardwork region. Does not certify learning outcomes or raster-image semantics.',
+      input: z.object({ plan: presentationPlanSchema }).strict(),
+      execute: ({ plan }) => {
+        if (!plan.designSpec?.lessonPlan)
+          throw new Error('A teaching plan is required for lesson validation');
+        assertLessonPublishable(plan);
+        return { passed: true };
+      },
+    },
+    ...(options.contentCompiler
+      ? [
+          {
+            name: 'presentation.content.compile',
+            description:
+              'Compile confirmed slide content into claims, LaTeX formulas and semantic renderer choices.',
+            input: z.object({ input: inputSchema }).strict(),
+            execute: ({ input }: any, ctx: AtomicInvocation) =>
+              options.contentCompiler!.compile(input, { scope: ctx.scope, signal: ctx.signal }),
+          },
+        ]
+      : []),
+    {
+      name: 'presentation.formula.measure',
+      description:
+        'Measure LaTeX before layout using the same vector engine as final rendering. Reserve the returned minimum rectangle without shrinking.',
+      input: z
+        .object({
+          latex: z.string().trim().min(1).max(2000),
+          display: z.boolean().default(true),
+          fontSize: z.number().finite().min(24).max(64).default(28),
+        })
+        .strict(),
+      execute: async (input) => (await import('./formula-renderer')).measureFormula(input),
+    },
+    {
+      name: 'presentation.formula.render',
+      description:
+        'Render validated LaTeX into self-contained vector paths while retaining editable source.',
+      input: semanticBlockSchema.options[0],
+      execute: async (input) => ({
+        svg: await (await import('./formula-renderer')).renderFormula(input),
+        source: input,
+      }),
+    },
+    {
+      name: 'presentation.diagram.measure',
+      description:
+        'Measure the minimum width and height for a scientific diagram, including plot legends, before assigning its page rectangle.',
+      input: z
+        .object({
+          block: semanticBlockSchema.options[1],
+          width: z.number().finite().min(280).max(960),
+        })
+        .strict(),
+      execute: ({ block, width }) => minimumScientificDiagramSize(block, width),
+    },
+    {
+      name: 'presentation.diagram.render',
+      description:
+        'Render scientific plot or graph data deterministically with explicit illustrative or sourced provenance.',
+      input: semanticBlockSchema.options[1],
+      execute: (input) => ({ svg: renderScientificDiagram(input), source: input }),
+    },
     {
       name: 'presentation.job.list',
       description: 'Recover the authenticated account’s recent presentations across logins.',
@@ -101,12 +235,15 @@ export const createPresentationAtomicRuntime = (options: {
         'Plan a new presentation or revise selected existing slides, returning editable SVG pages.',
       input: z.object({ input: inputSchema }).strict(),
       output: presentationPlanSchema,
-      execute: ({ input }, ctx) =>
-        options.planner.plan(input, {
-          ...(ctx.services?.plannerContext as PlannerContext),
-          scope: ctx.scope,
-          abortSignal: ctx.signal,
-        }),
+      execute: async ({ input }, ctx) =>
+        bindLessonPlan(
+          await options.planner.plan(compileLessonInput(input), {
+            ...(ctx.services?.plannerContext as PlannerContext),
+            scope: ctx.scope,
+            abortSignal: ctx.signal,
+          }),
+          input,
+        ),
     },
     {
       name: 'presentation.slide.read',
@@ -444,12 +581,13 @@ export const createPresentationAtomicRuntime = (options: {
                     templateId: z.string().min(1),
                     versionId: z.string().min(1),
                   })
-                  .passthrough(),
+                  .passthrough()
+                  .optional(),
               })
               .strict(),
             output: presentationVisualReviewSchema,
             execute: (
-              input: { plan: PresentationPlan; template: TemplateApplication },
+              input: { plan: PresentationPlan; template?: TemplateApplication },
               ctx: AtomicInvocation,
             ) => options.visualCritic!.review(input, { scope: ctx.scope, signal: ctx.signal }),
           },

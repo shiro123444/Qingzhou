@@ -57,6 +57,22 @@ const expectCode = async (operation: Promise<unknown>, code: string) =>
   expect(operation).rejects.toMatchObject({ code });
 
 describe('C-52 presentation plan worker', () => {
+  it('never exports or publishes artifacts for a plan with unresolved major review issues', async () => {
+    const { context: ctx } = context();
+    await expect(
+      new InMemoryPresentationPlanWorker().run(
+        {
+          ...plan,
+          designSpec: {
+            templateVisualReview: { final: { passed: false, issues: [{ severity: 'major' }] } },
+          },
+        },
+        ctx,
+      ),
+    ).rejects.toMatchObject({ code: 'PRESENTATION_QUALITY_FAILED' });
+    expect(ctx.convert).not.toHaveBeenCalled();
+    expect(ctx.workspace.write).not.toHaveBeenCalled();
+  });
   it('projects speaker notes into live previews and saved slide artifacts without losing legacy metadata notes', async () => {
     const journal = new PresentationJobEventJournal();
     const publisher = new PresentationJobEventPublisher(journal);

@@ -23,6 +23,14 @@ export const templateDesignProgramSchema = z
             compositionRules: z.array(z.string().min(1).max(500)).min(1).max(16),
             evidencePages: z.array(z.number().int().positive()).min(1).max(24),
             familyId: z.string().min(1).max(60),
+            header: z
+              .object({
+                box: designProgramBoxSchema,
+                fill: z.string().regex(/^#[a-f\d]{6}$/iu),
+                textColor: z.string().regex(/^#[a-f\d]{6}$/iu),
+              })
+              .strict()
+              .optional(),
             id: z.string().regex(/^[\w-]{1,80}$/u),
             name: z.string().min(1).max(100),
             readingFlow: z.string().min(1).max(800),
@@ -88,6 +96,8 @@ interface ProgramSource {
     readonly id: string;
     readonly name: string;
     readonly rationale: string;
+    /** Source page of the observation; carried through for callers, unused by the compiler. */
+    readonly page?: number;
     readonly role: 'background' | 'decoration' | 'artwork' | 'frame' | 'heading';
     readonly treatment: 'reuse' | 'crop' | 'removeBackground' | 'redraw' | 'native';
   }[];
@@ -136,6 +146,18 @@ const rolesFor = (
   return uniq(roles);
 };
 
+const isHeaderBand = (component: ProgramSource['components'][number]) =>
+  component.role === 'heading' &&
+  component.box.y <= 0.2 &&
+  component.box.width >= 0.75 &&
+  component.box.x <= 0.1;
+
+const isFooterBand = (component: ProgramSource['components'][number]) =>
+  component.role === 'frame' && component.box.y >= 0.65 && component.box.width >= 0.75;
+
+const signatureId = (familyId: string, suffix: string) =>
+  `archetype-${familyId}-${suffix}`.replaceAll(/[^\w-]/gu, '-').slice(0, 80);
+
 const behaviorFor = (
   component: ProgramSource['components'][number],
 ): TemplateDesignProgram['archetypes'][number]['regions'][number]['behavior'] => {
@@ -149,6 +171,90 @@ const behaviorFor = (
   if (component.role === 'background') return 'locked';
   if (component.role === 'decoration') return 'optional';
   return 'elastic';
+};
+
+const regionFor = (component: ProgramSource['components'][number]) => ({
+  behavior:
+    component.role === 'heading' && isHeaderBand(component)
+      ? ('locked' as const)
+      : behaviorFor(component),
+  box: component.box,
+  componentId: component.id,
+  relation: boundedText(
+    component.role === 'decoration'
+      ? 'Keep its edge relationship and visual direction; scale with nearby content rather than pinning it blindly.'
+      : component.rationale || 'Keep the observed relationship to its neighboring content.',
+    500,
+  ),
+  role: component.role,
+});
+
+/** One palette can still need several page machines: cover, text, figure, close. */
+const layoutSignatures = (
+  family: ProgramSource['families'][number],
+  components: ProgramSource['components'],
+) => {
+  const header = components.filter(isHeaderBand);
+  const footer = components.filter(isFooterBand);
+  if (!header.length) return [];
+  const artwork = components.filter((component) => component.role === 'artwork');
+  const shared = {
+    assetPolicy: boundedTexts(
+      [...header, ...footer].map(
+        (component) => `${component.name}: ${component.treatment}; ${component.rationale}`,
+      ),
+      500,
+    ).slice(0, 12),
+    evidencePages: uniq(family.pages),
+    familyId: family.id,
+    readingFlow: boundedText(
+      family.composition || 'Title band, then the page claim, then the close.',
+      800,
+    ),
+    whitespace: boundedText(
+      'The header band stays fixed. Body content and figures use the open field beneath it.',
+      800,
+    ),
+  };
+  const signatures: TemplateDesignProgram['archetypes'] = [
+    {
+      ...shared,
+      compositionRules: ['封面只保留锁定通栏、标题和留白，不堆正文卡片。'],
+      id: signatureId(family.id, 'cover'),
+      name: `${family.name} · 封面`,
+      regions: header.map(regionFor),
+      roles: ['cover'],
+    },
+  ];
+  if (footer.length)
+    signatures.push({
+      ...shared,
+      compositionRules: ['正文保留锁定通栏和底部结论条。公式保持实测字号，放不下时拆页。'],
+      id: signatureId(family.id, 'content'),
+      name: `${family.name} · 正文`,
+      regions: [...header, ...footer].map(regionFor),
+      roles: ['content', 'section'],
+    });
+  signatures.push({
+    ...shared,
+    compositionRules: [
+      '图解页把可读配图放在主区域，至少 180px。公式过多时公式留在推导页，不要把图压成一条。',
+    ],
+    id: signatureId(family.id, 'figure'),
+    name: `${family.name} · 图解`,
+    regions: [...header, ...artwork].map(regionFor).slice(0, 24),
+    roles: ['data', 'comparison', 'process'],
+  });
+  if (footer.length)
+    signatures.push({
+      ...shared,
+      compositionRules: ['收束页保留通栏和结论条，用一张总图或三五个结论，不重复正文密度。'],
+      id: signatureId(family.id, 'closing'),
+      name: `${family.name} · 收束`,
+      regions: [...header, ...footer].map(regionFor),
+      roles: ['closing'],
+    });
+  return signatures;
 };
 
 /** Compile observations into a reusable design language instead of a bag of fixed boxes. */
@@ -165,54 +271,56 @@ export const compileTemplateDesignProgram = (
   const opening = orderedFamilies.find((family) => family.pages.includes(firstPage));
   const closing = [...orderedFamilies].reverse().find((family) => family.pages.includes(lastPage));
 
-  const canonical = templateDesignProgramSchema.parse({
-    archetypes: orderedFamilies.map((family) => {
-      const components = source.components.filter((item) => item.familyId === family.id);
-      const compositionRules = boundedTexts(
-        [
-          family.composition || 'Preserve the observed hierarchy and anchor relationships.',
-          ...family.preserve,
-        ],
+  const familyArchetypes = orderedFamilies.flatMap((family) => {
+    const components = source.components.filter((item) => item.familyId === family.id);
+    const signatures = layoutSignatures(family, components);
+    const claimed = new Set(signatures.flatMap((signature) => signature.roles));
+    const roles = rolesFor(family, firstPage, lastPage).filter((role) => !claimed.has(role));
+    if (!roles.length) return [];
+    const compositionRules = boundedTexts(
+      [
+        family.composition || 'Preserve the observed hierarchy and anchor relationships.',
+        ...family.preserve,
+      ],
+      500,
+    );
+    return {
+      assetPolicy: boundedTexts(
+        components.map(
+          (component) => `${component.name}: ${component.treatment}; ${component.rationale}`,
+        ),
         500,
-      );
-      return {
-        assetPolicy: boundedTexts(
-          components.map(
-            (component) => `${component.name}: ${component.treatment}; ${component.rationale}`,
-          ),
-          500,
-        ).slice(0, 12),
-        compositionRules: (compositionRules.length
-          ? compositionRules
-          : ['Preserve the observed hierarchy and anchor relationships.']
-        ).slice(0, 16),
-        evidencePages: uniq(family.pages),
-        familyId: family.id,
-        id: `archetype-${family.id}`.replaceAll(/[^\w-]/gu, '-').slice(0, 80),
-        name: family.name,
-        readingFlow: boundedText(
-          family.composition || 'Follow the observed title, content and artwork anchors.',
-          800,
+      ).slice(0, 12),
+      compositionRules: (compositionRules.length
+        ? compositionRules
+        : ['Preserve the observed hierarchy and anchor relationships.']
+      ).slice(0, 16),
+      evidencePages: uniq(family.pages),
+      familyId: family.id,
+      id: `archetype-${family.id}`.replaceAll(/[^\w-]/gu, '-').slice(0, 80),
+      name: family.name,
+      readingFlow: boundedText(
+        family.composition || 'Follow the observed title, content and artwork anchors.',
+        800,
+      ),
+      regions: components.map(regionFor),
+      roles,
+      whitespace: boundedText(
+        `Preserve the negative-space rhythm described by: ${family.composition || 'the observed reference pages'}`,
+        800,
+      ),
+    };
+  });
+  const canonical = templateDesignProgramSchema.parse({
+    archetypes: [
+      ...familyArchetypes,
+      ...orderedFamilies.flatMap((family) =>
+        layoutSignatures(
+          family,
+          source.components.filter((item) => item.familyId === family.id),
         ),
-        regions: components.map((component) => ({
-          behavior: behaviorFor(component),
-          box: component.box,
-          componentId: component.id,
-          relation: boundedText(
-            component.role === 'decoration'
-              ? 'Keep its edge relationship and visual direction; scale with nearby content rather than pinning it blindly.'
-              : component.rationale || 'Keep the observed relationship to its neighboring content.',
-            500,
-          ),
-          role: component.role,
-        })),
-        roles: rolesFor(family, firstPage, lastPage),
-        whitespace: boundedText(
-          `Preserve the negative-space rhythm described by: ${family.composition || 'the observed reference pages'}`,
-          800,
-        ),
-      };
-    }),
+      ),
+    ].slice(0, 12),
     cadence: {
       bodyFamilyIds: uniq(
         orderedFamilies
@@ -222,9 +330,9 @@ export const compileTemplateDesignProgram = (
       ...(closing ? { closingFamilyId: closing.id } : {}),
       ...(opening ? { openingFamilyId: opening.id } : {}),
       rules: [
-        'Choose a family by the semantic role of the slide, not by page number alone.',
-        'Repeat anchors and texture consistently while varying density to match the narrative beat.',
-        'Use section changes deliberately; do not alternate families randomly between adjacent pages.',
+        'Choose a layout signature by the page job: cover, derivation, figure, or close. Do not reuse one catch-all archetype for every slide.',
+        'A required figure keeps at least 180px. When measured formulas do not leave that band, put the formulas and the figure on separate pages.',
+        'Repeat the locked header while varying the body. Do not compress a figure to imitate a dense reference page.',
       ],
     },
     flexibilities: [
@@ -234,14 +342,20 @@ export const compileTemplateDesignProgram = (
     ],
     invariants: (() => {
       const values = boundedTexts(
-        [...orderedFamilies.flatMap((family) => family.preserve), source.guidance],
+        [
+          ...(source.components.some(isHeaderBand) ? ['顶部通栏标题栏常驻且高度固定'] : []),
+          ...orderedFamilies.flatMap((family) => family.preserve),
+          source.guidance,
+        ],
         500,
       );
       return (
         values.length
           ? values
           : ['Preserve the observed visual hierarchy and anchor relationships.']
-      ).slice(0, 20);
+      )
+        .filter((rule) => !/压缩配图|优先压缩/u.test(rule))
+        .slice(0, 20);
     })(),
     schemaVersion: 1,
     tokens: {
@@ -310,6 +424,19 @@ export const compileTemplateDesignProgram = (
       );
       return {
         ...archetype,
+        ...(() => {
+          // A body header must never leak to the cover merely because both share a family.
+          const candidates = proposed.archetypes.filter(
+            (item) =>
+              item.familyId === archetype.familyId &&
+              item.header &&
+              item.roles.some((role) => archetype.roles.includes(role)) &&
+              item.evidencePages.some((page) => archetype.evidencePages.includes(page)),
+          );
+          const exact = candidates.find((item) => item.id === archetype.id);
+          const selected = exact ?? (candidates.length === 1 ? candidates[0] : undefined);
+          return selected?.header ? { header: selected.header } : {};
+        })(),
         assetPolicy: uniq([...learned.assetPolicy, ...archetype.assetPolicy]).slice(0, 12),
         compositionRules: uniq([...learned.compositionRules, ...archetype.compositionRules]).slice(
           0,
@@ -317,13 +444,30 @@ export const compileTemplateDesignProgram = (
         ),
         readingFlow: learned.readingFlow,
         regions: enrichedRegions.slice(0, 24),
-        roles: uniq([...learned.roles, ...archetype.roles]),
+        roles: (() => {
+          const claimed = new Set(
+            canonical.archetypes
+              .filter(
+                (item) =>
+                  item.familyId === archetype.familyId &&
+                  item.id !== archetype.id &&
+                  /-(?:cover|content|figure|closing)$/u.test(item.id),
+              )
+              .flatMap((item) => item.roles),
+          );
+          const merged = uniq([...learned.roles, ...archetype.roles]).filter(
+            (role) => archetype.roles.includes(role) || !claimed.has(role),
+          );
+          return merged.length ? merged : archetype.roles;
+        })(),
         whitespace: learned.whitespace,
       };
     }),
     cadence: {
       ...canonical.cadence,
-      rules: uniq([...proposed.cadence.rules, ...canonical.cadence.rules]).slice(0, 12),
+      rules: uniq([...proposed.cadence.rules, ...canonical.cadence.rules])
+        .filter((rule) => !/压缩配图|优先压缩/u.test(rule))
+        .slice(0, 12),
     },
     flexibilities: uniq([...proposed.flexibilities, ...canonical.flexibilities]).slice(0, 20),
     invariants: uniq([...proposed.invariants, ...canonical.invariants]).slice(0, 20),

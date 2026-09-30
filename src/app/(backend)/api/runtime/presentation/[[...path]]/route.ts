@@ -16,6 +16,7 @@ import {
 } from '@/server/runtime/presentation/account-workspace';
 import { createPresentationArtifactAssetStoreBridge } from '@/server/runtime/presentation/asset-store';
 import { uploadPresentationAttachment } from '@/server/runtime/presentation/attachment-storage';
+import { FileCapabilityCapsuleStore } from '@/server/runtime/presentation/capability-memory';
 import type { PresentationRuntimeComposition } from '@/server/runtime/presentation/composition';
 import { createPresentationContextServices } from '@/server/runtime/presentation/context-services';
 import { createPresentationContextRuntime } from '@/server/runtime/presentation/context-tools';
@@ -61,19 +62,21 @@ import {
   createProductionOpenAIImageGenerationPort,
   PRODUCTION_IMAGE_ENV_KEYS,
 } from '@/server/runtime/presentation/production-image-config';
-import {
-  createProductionMultimodalChatPort,
-  PRODUCTION_CHAT_ENV_KEYS,
-} from '@/server/runtime/presentation/production-multimodal-chat-config';
 import { createPresentationChatFetch } from '@/server/runtime/presentation/resilient-fetch';
 import { createProcessPresentationRunner } from '@/server/runtime/presentation/runner';
 import {
   createPresentationJobEventSseResponse,
   type PresentationJobEventSerializer,
 } from '@/server/runtime/presentation/sse';
+import { handleTeachingRequest } from '@/server/runtime/presentation/teaching-handler';
+import { FileTeachingMemory } from '@/server/runtime/presentation/teaching-memory';
 import { FilePresentationTemplateLibrary } from '@/server/runtime/presentation/templates';
 import { createOpenAICompatibleAudioTranscriber } from '@/server/runtime/presentation/templates/audio-transcription';
 import { PptMasterToolchain } from '@/server/runtime/presentation/toolchain';
+import {
+  createUserChatProvider,
+  userChatEndpoint,
+} from '@/server/runtime/presentation/user-chat-provider';
 
 import type { RuntimeScope } from '../../../../../../../packages/runtime-contracts/src';
 
@@ -335,16 +338,7 @@ const defaultProductionPortFactory = (): PresentationPortFactory => {
         pptMasterRoot: root,
       }),
     });
-    configuredDefaultReadiness = process.env[PRODUCTION_CHAT_ENV_KEYS.apiKey]
-      ? composition.readiness
-      : {
-          available: false,
-          commandAvailable: false,
-          code: 'PROVIDER_UNAVAILABLE',
-          provider: composition.readiness.provider,
-          runnerId: composition.readiness.runnerId,
-          state: 'unavailable',
-        };
+    configuredDefaultReadiness = composition.readiness;
     const scopedCache = createScopedPresentationPortCache({
       factory: async (scope) => composition.portFactory(scope as PptMasterPresentationScope),
     });
@@ -426,9 +420,7 @@ const createDefaultGenerationContextFactory = (
 const defaultProductionGenerationComposition = (): PresentationRuntimeComposition | undefined => {
   const root = process.env.CORDIS_PPT_MASTER_ROOT;
   const runnerPath = process.env.CORDIS_PPT_RUNNER;
-  // The presentation planner uses one provider-neutral, OpenAI-compatible
-  // multimodal endpoint. Retired BAI/GLM variables are intentionally ignored.
-  const chatApiKey = process.env[PRODUCTION_CHAT_ENV_KEYS.apiKey];
+  // Chat credentials and selection are resolved per authenticated user, not at startup.
   const imageApiKey = process.env[PRODUCTION_IMAGE_ENV_KEYS.apiKey];
 
   // If the presentation runner (ppt-master) is not configured, do not assemble
@@ -438,7 +430,7 @@ const defaultProductionGenerationComposition = (): PresentationRuntimeCompositio
     return undefined;
   }
 
-  const pptEnv = {
+  const pptEnv: Readonly<Record<string, string | undefined>> = {
     [PRODUCTION_PRESENTATION_ENV_KEYS.provider]:
       process.env[PRODUCTION_PRESENTATION_ENV_KEYS.provider] ?? 'ppt-master',
     [PRODUCTION_PRESENTATION_ENV_KEYS.command]:
@@ -449,13 +441,9 @@ const defaultProductionGenerationComposition = (): PresentationRuntimeCompositio
     [PRODUCTION_PRESENTATION_ENV_KEYS.allowedRunnerIds]:
       process.env[PRODUCTION_PRESENTATION_ENV_KEYS.allowedRunnerIds] ??
       JSON.stringify(['ppt-master-runner']),
-  } as const;
-
-  const chatEnv = {
-    [PRODUCTION_CHAT_ENV_KEYS.apiKey]: chatApiKey,
-    [PRODUCTION_CHAT_ENV_KEYS.baseUrl]: process.env[PRODUCTION_CHAT_ENV_KEYS.baseUrl],
-    [PRODUCTION_CHAT_ENV_KEYS.model]: process.env[PRODUCTION_CHAT_ENV_KEYS.model],
-  } as const;
+    [PRODUCTION_PRESENTATION_ENV_KEYS.imageBudget]:
+      process.env[PRODUCTION_PRESENTATION_ENV_KEYS.imageBudget],
+  };
 
   const imgEnv = {
     [PRODUCTION_IMAGE_ENV_KEYS.apiKey]: imageApiKey,
@@ -474,15 +462,16 @@ const defaultProductionGenerationComposition = (): PresentationRuntimeCompositio
     });
     const journalBindings = createPresentationRouteJournalBindings(journalCache);
 
-    const primaryMultimodalChatPort = chatApiKey
-      ? createProductionMultimodalChatPort({
-          env: chatEnv,
-          fetcher: createPresentationChatFetch(globalThis.fetch),
-        })
-      : undefined;
-    const multimodalChatPort = primaryMultimodalChatPort
-      ? createResilientMultimodalChatPort(primaryMultimodalChatPort)
-      : undefined;
+    const multimodalChatPort = createResilientMultimodalChatPort(
+      createUserChatProvider({
+        fetcher: createPresentationChatFetch(globalThis.fetch),
+        resolve: async (scope) => {
+          const { getServerDB } = await import('@/database/core/db-adaptor');
+          const { resolveUserChatProvider } = await import('@/server/services/modelProvider');
+          return resolveUserChatProvider(await getServerDB(), scope.userId);
+        },
+      }),
+    );
 
     const imageGenerationCapability = imageApiKey
       ? createImageGenerationCapability({
@@ -541,6 +530,10 @@ const defaultProductionGenerationComposition = (): PresentationRuntimeCompositio
     }
 
     const result = createProductionPresentationGenerationComposition({
+      teachingMemory: new FileTeachingMemory(nodePath.join(dataRoot, 'teaching-memory')),
+      capabilityMemory: new FileCapabilityCapsuleStore(
+        nodePath.join(dataRoot, 'capability-memory'),
+      ),
       audioTranscriber,
       templateLibrary: new FilePresentationTemplateLibrary({
         root: nodePath.join(dataRoot, 'templates'),
@@ -556,16 +549,7 @@ const defaultProductionGenerationComposition = (): PresentationRuntimeCompositio
     });
 
     if (configuredDefaultReadiness === undefined) {
-      configuredDefaultReadiness = multimodalChatPort
-        ? result.readiness
-        : {
-            available: false,
-            commandAvailable: false,
-            code: 'PROVIDER_UNAVAILABLE',
-            provider: result.readiness.provider,
-            runnerId: result.readiness.runnerId,
-            state: 'unavailable',
-          };
+      configuredDefaultReadiness = result.readiness;
     }
 
     return result.composition;
@@ -771,7 +755,10 @@ const readinessSourceFor = (
   return configuredDefaultReadiness;
 };
 
-const toReadinessResponse = async (options: PresentationRouteOptions): Promise<Response> => {
+const toReadinessResponse = async (
+  options: PresentationRouteOptions,
+  scope: PresentationAuthScope,
+): Promise<Response> => {
   try {
     const source = readinessSourceFor(options);
     if (source === undefined) {
@@ -781,6 +768,28 @@ const toReadinessResponse = async (options: PresentationRouteOptions): Promise<R
     }
     const value = typeof source === 'function' ? await source() : source;
     const readiness = projectReadiness(value);
+    // Injected test/deployer readiness remains caller-owned. Default readiness
+    // must check this user's configuration, never another user's or a global key.
+    if (
+      readiness.available &&
+      options.readiness === undefined &&
+      options.productionComposition === undefined
+    ) {
+      try {
+        const { resolveUserChatProvider } = await import('@/server/services/modelProvider');
+        const provider = await resolveUserChatProvider(
+          scope.serverDB as LobeChatDatabase,
+          scope.userId,
+        );
+        userChatEndpoint(provider.baseURL);
+        if (!provider.supportsVision) throw new Error('Vision required');
+      } catch {
+        return NextResponse.json(
+          { ...readiness, available: false, code: 'PROVIDER_UNAVAILABLE', state: 'unavailable' },
+          { status: 503 },
+        );
+      }
+    }
     return NextResponse.json(readiness, {
       status: readiness.available ? 200 : 503,
     });
@@ -1255,6 +1264,29 @@ const toOutlineProposalResponse = async (
   }
 };
 
+const toTeachingResponse = async (
+  request: Request,
+  authenticated: PresentationAuthScope,
+  composition: PresentationRuntimeComposition | undefined,
+  scopeFactory: PresentationGenerationScopeFactory,
+): Promise<Response> => {
+  try {
+    const scope = await scopeFactory(request, authenticated);
+    if (scope.userId !== authenticated.userId)
+      throw generationScopeError('FORBIDDEN', 'Teaching scope mismatch');
+    if (!composition?.teachingLearning)
+      throw Object.assign(new Error('Teaching learning is unavailable'), {
+        code: 'PROVIDER_UNAVAILABLE',
+      });
+    return await handleTeachingRequest(request, scope, composition.teachingLearning, async () => {
+      const session = await auth.api.getSession({ headers: serverSessionHeaders(request) });
+      return session?.user?.id === authenticated.userId && Boolean(session?.session?.id);
+    });
+  } catch (error) {
+    return generationErrorResponse(error);
+  }
+};
+
 const hasExplicitIndividualSeam = (options: PresentationRouteOptions): boolean =>
   options.generationCapability !== undefined ||
   options.imageGenerationCapability !== undefined ||
@@ -1314,35 +1346,43 @@ export const createPresentationRouteHandler = (
         )
       : (options.portFactory ?? configuredDefaultPortFactory));
   return authenticate((request, scope) =>
-    isPresentationJobEventsRequest(request)
-      ? toJobEventResponse(request, scope, options, composition, generationScopeFactory)
-      : isPresentationReadinessRequest(request)
-        ? toReadinessResponse(options)
-        : imageGenerationPath(request)
-          ? toImageGenerationResponse(
-              request,
-              scope,
-              options.imageGenerationCapability,
-              composition,
-              generationScopeFactory,
-            )
-          : outlinePath(request)
-            ? new URL(request.url).searchParams.get('mode') === 'propose'
-              ? toOutlineProposalResponse(request, scope, composition, generationScopeFactory)
-              : toOutlineResponse(request, scope, composition, generationScopeFactory)
-            : conversationPath(request)
-              ? toConversationResponse(request, scope, composition, generationScopeFactory)
-              : generationPath(request)
-                ? toGenerationResponse(
-                    request,
-                    scope,
-                    options.generationCapability,
-                    options.generationContextFactory,
-                    generationScopeFactory,
-                    options.generationEventPublisherFactory,
-                    composition,
-                  )
-                : toNextResponse(request, scope, portFactory, composition, generationScopeFactory),
+    new URL(request.url).pathname.endsWith('/presentation/teaching')
+      ? toTeachingResponse(request, scope, composition, generationScopeFactory)
+      : isPresentationJobEventsRequest(request)
+        ? toJobEventResponse(request, scope, options, composition, generationScopeFactory)
+        : isPresentationReadinessRequest(request)
+          ? toReadinessResponse(options, scope)
+          : imageGenerationPath(request)
+            ? toImageGenerationResponse(
+                request,
+                scope,
+                options.imageGenerationCapability,
+                composition,
+                generationScopeFactory,
+              )
+            : outlinePath(request)
+              ? new URL(request.url).searchParams.get('mode') === 'propose'
+                ? toOutlineProposalResponse(request, scope, composition, generationScopeFactory)
+                : toOutlineResponse(request, scope, composition, generationScopeFactory)
+              : conversationPath(request)
+                ? toConversationResponse(request, scope, composition, generationScopeFactory)
+                : generationPath(request)
+                  ? toGenerationResponse(
+                      request,
+                      scope,
+                      options.generationCapability,
+                      options.generationContextFactory,
+                      generationScopeFactory,
+                      options.generationEventPublisherFactory,
+                      composition,
+                    )
+                  : toNextResponse(
+                      request,
+                      scope,
+                      portFactory,
+                      composition,
+                      generationScopeFactory,
+                    ),
   );
 };
 

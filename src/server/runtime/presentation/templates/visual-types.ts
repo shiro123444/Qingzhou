@@ -97,16 +97,31 @@ export const templateVisualAnalysisSchema = z.object({
     )
     .max(24),
   guidance: z.string().min(1).max(2500),
-  designProgram: templateDesignProgramSchema.optional(),
+  // The authoritative program is compiled server-side; a model-authored one is only a hint,
+  // so a malformed hint must not fail the whole template analysis.
+  designProgram: templateDesignProgramSchema.optional().catch(undefined),
   questions: z.array(templateLearningQuestionSchema).max(3).default([]),
 });
 export interface TemplateRenderedPage {
+  contentKinds?: string[];
   height: number;
   nativeTextCount: number;
   page: number;
   ref: string;
   width: number;
 }
+const styleAtlasSchema = z
+  .array(
+    z
+      .object({
+        familyId: z.string(),
+        ref: z.string(),
+        sourcePage: z.number().int().positive(),
+        componentId: z.string(),
+      })
+      .strict(),
+  )
+  .max(12);
 export type TemplateVisualAnalysis = z.infer<typeof templateVisualAnalysisSchema>;
 export type TemplateLearningQuestion = z.infer<typeof templateLearningQuestionSchema>;
 export type TemplateMediaAnalysis = z.infer<typeof templateMediaAnalysisSchema>;
@@ -118,6 +133,7 @@ export type TemplateVisualProfile = Omit<TemplateVisualAnalysis, 'designProgram'
   model: string;
   analyzedAt: string;
   learning: {
+    coverage?: { totalPages: number; observedPages: number[]; remainingPages: number[] };
     guidanceHistory: string[];
     iteration: number;
     questions: TemplateLearningQuestion[];
@@ -125,6 +141,7 @@ export type TemplateVisualProfile = Omit<TemplateVisualAnalysis, 'designProgram'
   };
   media: TemplateMediaAnalysis[];
   pages: TemplateRenderedPage[];
+  styleAtlas?: z.infer<typeof styleAtlasSchema>;
 };
 
 const storedTemplateVisualProfileSchema = templateVisualAnalysisSchema.extend({
@@ -132,6 +149,13 @@ const storedTemplateVisualProfileSchema = templateVisualAnalysisSchema.extend({
   model: z.string().min(1),
   learning: z
     .object({
+      coverage: z
+        .object({
+          totalPages: z.number().int().positive(),
+          observedPages: z.array(z.number().int().positive()),
+          remainingPages: z.array(z.number().int().positive()),
+        })
+        .optional(),
       guidanceHistory: z.array(z.string().min(1).max(2000)).max(32),
       iteration: z.number().int().nonnegative().max(32),
       questions: z.array(templateLearningQuestionSchema).max(3),
@@ -143,12 +167,14 @@ const storedTemplateVisualProfileSchema = templateVisualAnalysisSchema.extend({
     z.object({
       height: z.number().positive(),
       nativeTextCount: z.number().int().nonnegative(),
+      contentKinds: z.array(z.string()).max(12).optional(),
       page: z.number().int().positive(),
       ref: z.string().min(1),
       width: z.number().positive(),
     }),
   ),
   schemaVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+  styleAtlas: styleAtlasSchema.optional(),
   templateId: z.string().min(1),
   versionId: z.string().min(1),
 });
@@ -164,7 +190,15 @@ export const normalizeTemplateVisualProfile = (value: unknown): TemplateVisualPr
   const parsed = storedTemplateVisualProfileSchema.parse(value);
   const normalized: TemplateVisualProfile = {
     ...parsed,
-    designProgram: parsed.designProgram ?? compileTemplateDesignProgram(parsed),
+    designProgram: compileTemplateDesignProgram(
+      {
+        components: parsed.components,
+        families: parsed.families,
+        guidance: parsed.guidance,
+        summary: parsed.summary,
+      },
+      parsed.designProgram,
+    ),
     learning: parsed.learning ?? {
       guidanceHistory: [],
       iteration: 0,

@@ -61,3 +61,70 @@ describe('presentationAgentClient conversation stream', () => {
     expect(result).toMatchObject({ message: '模板', phase: 'intake' });
   });
 });
+
+it('ends an idle stream while retaining already delivered checkpoints', async () => {
+  vi.useFakeTimers();
+  const cancel = vi.fn();
+  const onCheckpoint = vi.fn();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(
+        encoder.encode(
+          JSON.stringify({ type: 'checkpoint', checkpoint: { brief: { topic: 'saved' } } }) + '\n',
+        ),
+      );
+    },
+    cancel,
+  });
+  const fetch = vi
+    .spyOn(globalThis, 'fetch')
+    .mockResolvedValue(
+      new Response(stream, { headers: { 'content-type': 'application/x-ndjson' } }),
+    );
+  try {
+    const pending = createPresentationAgentClient({
+      idleTimeoutMs: 100,
+      totalTimeoutMs: 1000,
+    }).turn({ messages: [], references: [], threadId: 't' }, { onCheckpoint });
+    const rejected = expect(pending).rejects.toThrow('连接长时间无响应');
+    await vi.advanceTimersByTimeAsync(101);
+    await rejected;
+    expect(onCheckpoint).toHaveBeenCalledWith({ brief: { topic: 'saved' } });
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    fetch.mockRestore();
+    vi.useRealTimers();
+  }
+});
+
+it('heartbeats reset idle time but cannot bypass the total deadline', async () => {
+  vi.useFakeTimers();
+  let output!: ReadableStreamDefaultController<Uint8Array>;
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      output = controller;
+    },
+  });
+  const fetch = vi
+    .spyOn(globalThis, 'fetch')
+    .mockResolvedValue(
+      new Response(stream, { headers: { 'content-type': 'application/x-ndjson' } }),
+    );
+  try {
+    const pending = createPresentationAgentClient({ idleTimeoutMs: 100, totalTimeoutMs: 250 }).turn(
+      { messages: [], references: [], threadId: 't' },
+    );
+    const rejected = expect(pending).rejects.toThrow('本轮处理超时');
+    for (let i = 0; i < 3; i++) {
+      await vi.advanceTimersByTimeAsync(80);
+      output.enqueue(encoder.encode('{"type":"heartbeat"}\n'));
+    }
+    await vi.advanceTimersByTimeAsync(11);
+    await rejected;
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    fetch.mockRestore();
+    vi.useRealTimers();
+  }
+});

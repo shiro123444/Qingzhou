@@ -118,6 +118,22 @@ export function inspectNativePptx(bytes: Uint8Array) {
     pages: slidePaths(files).map((path, index) => ({
       page: index + 1,
       path,
+      contentKinds: [
+        ...(/<(?:m:oMath|a14:m|p:oleObj)\b/u.test(strFromU8(files[path]))
+          ? ['formula-or-embedded-object']
+          : []),
+        ...(/<c:chart\b/u.test(strFromU8(files[path])) ? ['chart'] : []),
+        ...(/<a:tbl\b/u.test(strFromU8(files[path])) ? ['table'] : []),
+        ...(/<(?:p:cxnSp|dgm:relIds)\b/u.test(strFromU8(files[path])) ? ['diagram'] : []),
+        ...(shapes(strFromU8(files[path])).filter((shape) => shape.kind === 'pic').length
+          ? ['image']
+          : []),
+        ...(shapes(strFromU8(files[path]))
+          .flatMap((shape) => shape.runs)
+          .join('').length > 400
+          ? ['dense-text']
+          : ['sparse-text']),
+      ],
       shapes: shapes(strFromU8(files[path])).map(
         ({ source: _source, start: _start, ...shape }) => ({
           ...shape,

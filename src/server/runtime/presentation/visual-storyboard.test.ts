@@ -165,6 +165,79 @@ const chatPort = (
   providerId: 'vision',
 });
 
+it('accepts the contract/binding envelope the prompt documents', async () => {
+  const payload = response([]);
+  const chat: GLMMultimodalChatPort = {
+    ...chatPort([]),
+    chat: vi.fn(async () => ({
+      choices: [
+        {
+          index: 0,
+          message: {
+            content: JSON.stringify({
+              binding: {
+                inputFingerprint: payload.inputFingerprint,
+                templateId: 'template-1',
+                versionId: 'version-1',
+              },
+              contract: payload,
+            }),
+            role: 'assistant' as const,
+          },
+        },
+      ],
+      created: 1,
+      id: 'storyboard',
+      model: 'vision',
+    })),
+  };
+  const storyboard = await createPresentationVisualStoryboardPlanner({ chat }).plan(
+    { jobInput, template },
+    { scope },
+  );
+  expect(storyboard.slides).toHaveLength(2);
+  expect(storyboard.deckRationale).toBe(payload.deckRationale);
+  expect(storyboard.templateId).toBe('template-1');
+  expect(storyboard.inputFingerprint).toBe(payload.inputFingerprint);
+});
+
+it('keeps Image enabled on a scientific page with mixed per-block requirements', async () => {
+  const mixedInput = {
+    ...jobInput,
+    options: {
+      ...jobInput.options,
+      contentIntents: {
+        inputFingerprint: 'mixed-v2',
+        slides: [1, 2].map((page) => ({
+          slideId: `slide-${page}`,
+          claim: 'Hybrid',
+          formulas: [],
+          visualKind: 'scientific-diagram',
+          visualReason: 'Precise curve and illustration',
+          visuals: [
+            { id: 'curve', kind: 'chart', brief: 'Precise curve', required: true },
+            {
+              id: 'anatomy',
+              kind: 'scientific-illustration',
+              brief: 'Clear brain structure',
+              required: true,
+            },
+          ],
+        })),
+      },
+    },
+  };
+  const chat = chatPort([], {
+    inputFingerprint: presentationStoryboardInputFingerprint(mixedInput),
+  });
+  const storyboard = await createPresentationVisualStoryboardPlanner({ chat }).plan(
+    { jobInput: mixedInput, template },
+    { scope },
+  );
+  expect(storyboard.slides.every((s) => s.assetMode === 'mixed')).toBe(true);
+  expect(storyboard.slides[0].assetBrief).toContain('anatomy');
+});
+
 it('resolves a family-local archetype alias without weakening family or component safety', async () => {
   const chat = chatPort(['leaf'], undefined, { archetypeId: 'soft', layoutId: 'invented' });
   const storyboard = await createPresentationVisualStoryboardPlanner({ chat }).plan(
@@ -218,6 +291,56 @@ it('maps the complete outline to template archetypes before slide composition', 
   expect(JSON.stringify(vi.mocked(chat.chat).mock.calls[0][0].messages)).toContain(
     'lower-right artwork anchor',
   );
+});
+
+it.each(['', '  \n ', null])(
+  'omits empty optional prose on native pages without repeating planning (%j)',
+  async (empty) => {
+    const chat = chatPort([], undefined, {
+      assetMode: 'native',
+      assetBrief: empty,
+      layoutId: empty,
+    });
+    const storyboard = await createPresentationVisualStoryboardPlanner({ chat }).plan(
+      { jobInput, template },
+      { scope },
+    );
+    expect(storyboard.slides).toHaveLength(2);
+    expect(
+      storyboard.slides.every(
+        (slide) => slide.assetBrief === undefined && slide.layoutId === undefined,
+      ),
+    ).toBe(true);
+    expect(chat.chat).toHaveBeenCalledOnce();
+  },
+);
+
+it('still requires an actual artwork brief for generated subjects', async () => {
+  const chat = chatPort([], undefined, { assetMode: 'generate', assetBrief: ' ' });
+  await expect(
+    createPresentationVisualStoryboardPlanner({ chat }).plan({ jobInput, template }, { scope }),
+  ).rejects.toThrow('第 1 页需要生成素材');
+  expect(chat.chat).toHaveBeenCalledTimes(2);
+});
+
+it('keeps the brief for a generated page while accepting a native page without artwork', async () => {
+  const original = response([]);
+  const chat = chatPort([], {
+    slides: original.slides.map((slide, index) => ({
+      ...slide,
+      assetMode: index === 0 ? 'generate' : 'native',
+      assetBrief: index === 0 ? '  A new coral paper plane with room for editable text.  ' : '',
+    })),
+  });
+  const storyboard = await createPresentationVisualStoryboardPlanner({ chat }).plan(
+    { jobInput, template },
+    { scope },
+  );
+  expect(storyboard.slides[0].assetBrief).toBe(
+    'A new coral paper plane with room for editable text.',
+  );
+  expect(storyboard.slides[1].assetBrief).toBeUndefined();
+  expect(chat.chat).toHaveBeenCalledOnce();
 });
 
 it('binds omitted identity and protocol metadata from the trusted job and template', async () => {

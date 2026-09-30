@@ -3,10 +3,12 @@ import { describe, expect, it, vi } from 'vitest';
 import type {
   ImageGenerationPort,
   PresentationPlan,
+  RuntimeScope,
 } from '../../../../packages/runtime-contracts/src';
 import { ImageGenerationEventPublisher, InMemoryImageGenerationEventJournal } from './asset-events';
 import { InMemoryPresentationAssetStore } from './asset-store';
 import { createImageGenerationCapability } from './image-generation-capability';
+import type { ImageGenerationSlot } from './image-generation-planner';
 import type { GLMChatResult, GLMMultimodalChatPort } from './multimodal-chat-provider-glm';
 import {
   boundPresentationPromptText,
@@ -14,6 +16,7 @@ import {
   parseAssetIntentPayload,
   type PresentationRevisionAssetInput,
   type RevisionAssetIntent,
+  type RevisionAssetPlannerOptions,
 } from './revision-assets';
 
 const scope = { sessionId: 'session-1', userId: 'user-1' };
@@ -106,6 +109,111 @@ const imageCapability = () => {
 };
 
 describe('presentation revision assets', () => {
+  const mixedInput = (kind = 'scientific-illustration'): PresentationRevisionAssetInput => ({
+    ...input,
+    jobInput: {
+      ...input.jobInput,
+      options: {
+        contentIntents: {
+          slides: [
+            {
+              slideId: 'product',
+              claim: 'Illustration and precise plot coexist',
+              formulas: [],
+              visualKind: 'scientific-diagram',
+              visualReason: 'Mixed scientific content',
+              visuals: [
+                {
+                  id: 'product-photo',
+                  kind,
+                  renderer: 'image',
+                  brief: 'Show connected cell structures, no experimental data',
+                  required: true,
+                },
+                { id: 'curve', kind: 'chart', brief: 'Measured curve', required: true },
+              ],
+            },
+          ],
+        },
+      },
+    },
+  });
+
+  it.each(['scientific-illustration', 'scientific-diagram'])(
+    'generates %s artwork on a mixed chart page and binds its stable visual identity',
+    async (kind) => {
+      const images = imageCapability();
+      const planner = createRevisionAssetPlanner({
+        chatPort: chatPort(),
+        imageGenerationCapability: images.capability,
+      });
+      const result = await planner.prepare(mixedInput(kind));
+      expect(images.port.generate).toHaveBeenCalledTimes(1);
+      expect(result.input.options?.generatedImageSlots).toEqual([
+        expect.objectContaining({
+          visualBinding: {
+            visualId: 'product-photo',
+            kind,
+            origin: 'generated',
+          },
+        }),
+      ]);
+      expect(result.intents[0].prompt).toContain('Show connected cell structures');
+      expect(result.intents[0].prompt).toContain('not experimental evidence');
+      expect(result.intents[0].prompt).toContain('flat 2D');
+      expect(vi.mocked(images.port.generate).mock.calls[0][0].prompt).toContain('Flat 2D');
+    },
+  );
+
+  it('completes a required illustration with a server-authored brief while refusing to rasterize its precise chart', async () => {
+    const images = imageCapability();
+    const result = await createRevisionAssetPlanner({
+      chatPort: chatPort([]),
+      imageGenerationCapability: images.capability,
+    }).prepare(mixedInput());
+    // Empty operations must not ship a page with a missing illustration: the server still
+    // generates the required artwork, from the brief the content compiler already approved.
+    expect(result.intents).toEqual([
+      expect.objectContaining({ action: 'generate', slideId: 'product', slotId: 'product-photo' }),
+    ]);
+    expect(images.port.generate).toHaveBeenCalledTimes(1);
+    await expect(
+      createRevisionAssetPlanner({
+        chatPort: chatPort([{ ...replaceIntent, slotId: 'curve' }]),
+        imageGenerationCapability: imageCapability().capability,
+      }).prepare(mixedInput()),
+    ).rejects.toThrow('not a planned raster');
+  });
+
+  it('preserves an already embedded illustration during a text-only edit without regenerating it', async () => {
+    const revisedPlan = {
+      ...basePlan,
+      slides: basePlan.slides.map((s) =>
+        s.slideId !== 'product'
+          ? s
+          : {
+              ...s,
+              metadata: {
+                visualAssets: [
+                  {
+                    visualId: 'product-photo',
+                    kind: 'scientific-illustration',
+                    origin: 'generated',
+                    ref: replaceIntent.ref,
+                  },
+                ],
+              },
+            },
+      ),
+    };
+    const images = imageCapability();
+    const result = await createRevisionAssetPlanner({
+      chatPort: chatPort([]),
+      imageGenerationCapability: images.capability,
+    }).prepare({ ...mixedInput(), basePlan: revisedPlan });
+    expect(result.intents).toEqual([]);
+    expect(images.port.generate).not.toHaveBeenCalled();
+  });
   it('extracts intent JSON from think tags, fences, arrays, and mixed prose', () => {
     expect(parseAssetIntentPayload('<think>draft</think>{"intents":[]}')).toEqual({ intents: [] });
     expect(parseAssetIntentPayload('```json\n{"intents":[]}\n```')).toEqual({ intents: [] });
@@ -114,6 +222,261 @@ describe('presentation revision assets', () => {
     });
     expect(parseAssetIntentPayload('[]')).toEqual({ intents: [] });
     expect(() => parseAssetIntentPayload('not json')).toThrow(/invalid JSON/u);
+  });
+
+  it('keeps server-drawn relations out of the bitmap prompt', async () => {
+    const images = imageCapability();
+    const annotated = mixedInput();
+    const slides = (annotated.jobInput.options as { contentIntents?: { slides: any[] } })
+      .contentIntents!.slides;
+    slides[0].visuals[0] = {
+      ...slides[0].visuals[0],
+      annotations: [
+        { from: { x: 0.1, y: 0.9 }, label: '−∇f(x*)', to: { x: 0.8, y: 0.2 }, type: 'vector' },
+        { at: { x: 0.5, y: 0.1 }, text: '切点 x*', type: 'label' },
+      ],
+    };
+    await createRevisionAssetPlanner({
+      chatPort: chatPort([replaceIntent]),
+      imageGenerationCapability: images.capability,
+    }).prepare(annotated);
+    const request = JSON.stringify(vi.mocked(images.port.generate).mock.calls[0]);
+    expect(request).toContain('Do not paint them yourself');
+    expect(request).toContain('−∇f(x*)');
+    expect(request).toContain('切点 x*');
+  });
+
+  it('generates a required raster slot the model omitted instead of failing the deck', async () => {
+    const images = imageCapability();
+    const result = await createRevisionAssetPlanner({
+      chatPort: chatPort([]),
+      imageGenerationCapability: images.capability,
+    }).prepare(mixedInput());
+    expect(images.port.generate).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(vi.mocked(images.port.generate).mock.calls[0])).toContain(
+      'product-photo',
+    );
+    expect(result.intents).toEqual([
+      expect.objectContaining({
+        action: 'generate',
+        prompt: 'Show connected cell structures, no experimental data',
+        slideId: 'product',
+        slotId: 'product-photo',
+      }),
+    ]);
+  });
+
+  const stickerInput = (): PresentationRevisionAssetInput => ({
+    ...input,
+    jobInput: {
+      ...input.jobInput,
+      options: {
+        contentIntents: {
+          slides: [
+            {
+              claim: 'A badge marks the takeaway',
+              formulas: [],
+              slideId: 'product',
+              visualKind: 'illustration',
+              visualReason: 'Decoration only',
+              visuals: [
+                {
+                  brief: 'Friendly round sticker of a smiling speaker',
+                  id: 'mood',
+                  // `renderer` is intentionally absent: stickers are raster by definition.
+                  kind: 'sticker',
+                  required: true,
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+  });
+
+  it('forces a transparent cutout and a corner placement for a decoration sticker', async () => {
+    const images = imageCapability();
+    const processAssets = vi.fn(async (_steps: unknown, _input: unknown) => ({
+      ref: 'cutout-owned',
+    }));
+    const result = await createRevisionAssetPlanner({
+      chatPort: chatPort([
+        {
+          action: 'generate',
+          layout: { fit: 'contain', height: 0.5, width: 0.5, x: 0.4, y: 0.4 },
+          prompt: 'Round sticker of a smiling teal speaker, flat vector, no text.',
+          size: '1024x1024',
+          slideId: 'product',
+          slotId: 'mood',
+        },
+      ]),
+      imageGenerationCapability: images.capability,
+      processAssets,
+    }).prepare(stickerInput());
+    // The server supplies the cutout itself: the model never asked for transparent artwork.
+    const steps = processAssets.mock.calls[0][0] as { operation: string }[];
+    expect(steps.map((step) => step.operation)).toEqual(['assets.removeBackground']);
+    expect(result.assetArtifactIds).toEqual(['cutout-owned']);
+    expect(result.intents[0].layout).toEqual({
+      fit: 'contain',
+      height: 0.28,
+      width: 0.28,
+      x: 0.4,
+      y: 0.4,
+    });
+  });
+
+  it('places a sticker the model forgot in the safe corner and cuts it out itself', async () => {
+    const images = imageCapability();
+    const processAssets = vi.fn(async () => ({ ref: 'cutout-owned' }));
+    const result = await createRevisionAssetPlanner({
+      chatPort: chatPort([]),
+      imageGenerationCapability: images.capability,
+      processAssets,
+    }).prepare(stickerInput());
+    expect(result.intents).toEqual([
+      expect.objectContaining({
+        action: 'generate',
+        artwork: { background: 'transparent', role: 'decoration' },
+        layout: { fit: 'contain', height: 0.2, width: 0.2, x: 0.76, y: 0.72 },
+        prompt: 'Friendly round sticker of a smiling speaker',
+        slideId: 'product',
+        slotId: 'mood',
+      }),
+    ]);
+    expect(images.port.generate).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops a sticker whose cutout came back opaque instead of pasting a white block', async () => {
+    const images = imageCapability();
+    const events: { name: string; state?: string }[] = [];
+    const result = await createRevisionAssetPlanner({
+      chatPort: chatPort([
+        {
+          action: 'generate',
+          layout: { fit: 'contain', height: 0.5, width: 0.5, x: 0.4, y: 0.4 },
+          prompt: 'Round sticker of a smiling teal speaker, flat vector, no text.',
+          size: '1024x1024',
+          slideId: 'product',
+          slotId: 'mood',
+        },
+      ]),
+      imageGenerationCapability: images.capability,
+      processAssets: async () => ({
+        ref: 'cutout-owned',
+        transparency: {
+          checked: true,
+          hasAlphaChannel: false,
+          transparentRatio: 0,
+          verified: false,
+        },
+      }),
+    }).prepare({
+      ...stickerInput(),
+      onEvent: (event) => events.push({ name: event.name, state: event.state }),
+    });
+    expect(result.assetArtifactIds).toEqual([]);
+    expect(result.input.options?.generatedImageSlots).toEqual([]);
+    expect(events).toContainEqual({
+      name: 'presentation.assets.sticker.opaque',
+      state: 'failed',
+    });
+  });
+
+  it('records a server-verified cutout as a binding fact', async () => {
+    const images = imageCapability();
+    const result = await createRevisionAssetPlanner({
+      chatPort: chatPort([
+        {
+          action: 'generate',
+          layout: { fit: 'contain', height: 0.5, width: 0.5, x: 0.4, y: 0.4 },
+          prompt: 'Round sticker of a smiling teal speaker, flat vector, no text.',
+          size: '1024x1024',
+          slideId: 'product',
+          slotId: 'mood',
+        },
+      ]),
+      imageGenerationCapability: images.capability,
+      processAssets: async () => ({
+        ref: 'cutout-owned',
+        transparency: {
+          checked: true,
+          hasAlphaChannel: true,
+          transparentRatio: 0.62,
+          verified: true,
+        },
+      }),
+    }).prepare(stickerInput());
+    expect(result.assetArtifactIds).toEqual(['cutout-owned']);
+    expect(result.input.options?.generatedImageSlots).toEqual([
+      expect.objectContaining({
+        visualBinding: {
+          kind: 'sticker',
+          origin: 'generated',
+          transparency: 'verified',
+          visualId: 'mood',
+        },
+      }),
+    ]);
+  });
+
+  it('keeps unverified cutout content but flags it opaque for review', async () => {
+    const images = imageCapability();
+    const result = await createRevisionAssetPlanner({
+      chatPort: chatPort([
+        {
+          action: 'generate',
+          artwork: { background: 'transparent', role: 'subject' },
+          layout: { fit: 'contain', height: 0.5, width: 0.5, x: 0.4, y: 0.4 },
+          processing: [
+            { id: 'cutout', input: { ref: '$source' }, operation: 'assets.removeBackground' },
+          ],
+          prompt: 'A watercolor robot holding a notebook, no text.',
+          size: '1024x1024',
+          slideId: 'product',
+          slotId: 'mood',
+        },
+      ]),
+      imageGenerationCapability: images.capability,
+      processAssets: async () => ({
+        ref: 'cutout-owned',
+        transparency: {
+          checked: true,
+          hasAlphaChannel: true,
+          transparentRatio: 0,
+          verified: false,
+        },
+      }),
+    }).prepare({
+      ...stickerInput(),
+      jobInput: {
+        ...stickerInput().jobInput,
+        options: {
+          contentIntents: {
+            slides: [
+              {
+                claim: 'A robot explains the takeaway',
+                formulas: [],
+                slideId: 'product',
+                visualKind: 'illustration',
+                visualReason: 'Content, not decoration',
+                visuals: [
+                  { brief: 'A watercolor robot', id: 'mood', kind: 'illustration', required: true },
+                ],
+              },
+            ],
+          },
+        },
+      },
+    });
+    // Content is never silently dropped: the server only states the fact it measured.
+    expect(result.assetArtifactIds).toEqual(['cutout-owned']);
+    expect(result.input.options?.generatedImageSlots).toEqual([
+      expect.objectContaining({
+        visualBinding: expect.objectContaining({ transparency: 'opaque' }),
+      }),
+    ]);
   });
 
   it('retries once when the first intent analysis reply is not JSON', async () => {
@@ -160,6 +523,34 @@ describe('presentation revision assets', () => {
     expect(text).not.toContain('A'.repeat(256));
     expect(text).not.toContain('B'.repeat(256));
     expect(inlinePlan.slides[1].svg).toContain(embedded);
+  });
+
+  it('plans a deck revision from compact page evidence instead of full SVG paths', async () => {
+    const chat = chatPort([]);
+    const densePlan: PresentationPlan = {
+      ...basePlan,
+      slides: basePlan.slides.map((slide) => ({
+        ...slide,
+        svg: slide.svg.replace('</svg>', `<path d="${'M 10 10 L 20 20 '.repeat(5000)}"/></svg>`),
+      })),
+    };
+    await expect(
+      createRevisionAssetPlanner({ chatPort: chat }).prepare({
+        ...input,
+        basePlan: densePlan,
+        revision: {
+          content: 'Do not reserve boardwork space; retain the existing visual assets.',
+          requestId: 'deck-layout-revision',
+          target: { type: 'deck' },
+        },
+      }),
+    ).resolves.toMatchObject({ intents: [] });
+    const request = vi.mocked(chat.chat).mock.calls[0][0];
+    const content = request.messages[1].content;
+    const payload = typeof content === 'string' ? content : JSON.stringify(content);
+    expect(payload).toContain('visibleText');
+    expect(payload).toContain('imageRegions');
+    expect(payload).not.toContain('M 10 10 L 20 20');
   });
 
   it('summarizes encoded inline SVG and rejects remaining oversized text before a provider call', () => {
@@ -521,6 +912,9 @@ const templateVisual = {
   ],
   model: 'vision',
   pages: [{ height: 788, nativeTextCount: 0, page: 1, ref: 'template-page-1', width: 1400 }],
+  styleAtlas: [
+    { familyId: 'f1', ref: 'template-style-1', sourcePage: 1, componentId: 'cutout-leaf' },
+  ],
   schemaVersion: 1 as const,
   summary: 'watercolor',
   templateId: 'tmpl',
@@ -688,6 +1082,7 @@ it('draws with learned style references then cuts out overlapping slots', async 
     action: 'generate' as const,
     layout: { fit: 'contain' as const, height: 0.7, width: 0.4, x: 0.55, y: 0.15 },
     prompt: 'A watercolor robot holding a notebook, no text.',
+    artwork: { role: 'subject' as const, background: 'transparent' as const },
     size: '1024x1024' as const,
     slideId: 'cover',
     slotId: 'hero',
@@ -698,7 +1093,7 @@ it('draws with learned style references then cuts out overlapping slots', async 
     slideId: 'product',
     slotId: 'prop',
   };
-  const generate = vi.fn(async (_scope, slots: Array<{ slotId: string; slideId: string }>) => ({
+  const generate = vi.fn(async (_scope: RuntimeScope, slots: readonly ImageGenerationSlot[]) => ({
     jobId: visualJobInput.jobId,
     scope,
     slots: slots.map((slot) => ({
@@ -713,12 +1108,14 @@ it('draws with learned style references then cuts out overlapping slots', async 
   const gate = new Promise<void>((resolve) => {
     release = resolve;
   });
-  const processAssets = vi.fn(async () => {
-    started += 1;
-    const id = started;
-    if (id === 1) await gate;
-    return { ref: `cut-${id}` };
-  });
+  const processAssets = vi.fn<NonNullable<RevisionAssetPlannerOptions['processAssets']>>(
+    async () => {
+      started += 1;
+      const id = started;
+      if (id === 1) await gate;
+      return { ref: `cut-${id}` };
+    },
+  );
   const pending = createRevisionAssetPlanner({
     chatPort: chatPort([generateIntent, second]),
     imageGenerationCapability: { generate },
@@ -737,11 +1134,116 @@ it('draws with learned style references then cuts out overlapping slots', async 
       expect.objectContaining({
         background: 'opaque',
         prompt: expect.stringContaining('STYLE REFERENCE ONLY'),
-        referenceAssetRefs: ['template-page-1'],
+        referenceAssetRefs: ['template-style-1'],
       }),
     ]),
   );
   expect(generatedSlots.some((slot) => slot.prompt.includes('watercolor robot'))).toBe(true);
   expect(processAssets.mock.calls[0][0][0].input.ref).toMatch(/^drawn:/);
   expect(result.assetArtifactIds).toEqual(['cut-1', 'cut-2']);
+});
+
+it('preserves complete photographs instead of automatically cutting them out during initial creation', async () => {
+  const { capability, port } = imageCapability();
+  const processAssets = vi.fn(async () => ({ ref: 'incorrect-cutout' }));
+  const result = await createRevisionAssetPlanner({
+    chatPort: chatPort([{ ...replaceIntent, artwork: { role: 'scene', background: 'preserve' } }]),
+    imageGenerationCapability: capability,
+    processAssets,
+  }).prepare({ ...input, revision: { ...input.revision, requestId: 'initial-assets' } });
+  expect(port.generate).toHaveBeenCalledOnce();
+  expect(processAssets).not.toHaveBeenCalled();
+  expect(result.assetArtifactIds).toEqual(['image:session-1:speaker']);
+});
+
+it('rejects old subject artwork even if the visual model marked it reusable', async () => {
+  const extractTemplateComponent = vi.fn(async () => ({
+    ref: 'old-photo',
+    needsTransparency: false,
+  }));
+  const changedVisual = {
+    ...templateVisual,
+    components: templateVisual.components.map((component) =>
+      component.id === 'hero-photo' ? { ...component, treatment: 'reuse' as const } : component,
+    ),
+  };
+  await expect(
+    createRevisionAssetPlanner({
+      chatPort: chatPort([
+        { action: 'reuse', componentId: 'hero-photo', slideId: 'cover', slotId: 'hero' },
+      ]),
+      extractTemplateComponent,
+    }).prepare({
+      ...visualJobInput,
+      jobInput: { ...visualJobInput.jobInput, options: { templateVisual: changedVisual } },
+    }),
+  ).rejects.toMatchObject({ code: 'IMAGE_PLAN_INVALID' });
+  expect(extractTemplateComponent).not.toHaveBeenCalled();
+});
+
+it('repairs an empty asset plan when the storyboard requires a new subject', async () => {
+  const chat = chatPort([{ ...replaceIntent, action: 'generate', ref: undefined }]);
+  vi.mocked(chat.chat).mockResolvedValueOnce(response([]));
+  const { capability } = imageCapability();
+  const result = await createRevisionAssetPlanner({
+    chatPort: chat,
+    imageGenerationCapability: capability,
+  }).prepare({
+    ...input,
+    jobInput: {
+      ...input.jobInput,
+      options: { visualStoryboard: { slides: [{ slideId: 'product', assetMode: 'generate' }] } },
+    },
+    revision: { ...input.revision, requestId: 'initial-assets' },
+  });
+  expect(chat.chat).toHaveBeenCalledTimes(2);
+  expect(result.assetArtifactIds).toHaveLength(1);
+});
+
+it('reuses completed siblings and source images when retrying failed cutout work', async () => {
+  const intents = ['one', 'two'].map((slotId) => ({
+    action: 'generate',
+    slideId: 'cover',
+    slotId,
+    prompt: `An isolated watercolor ${slotId}`,
+    artwork: { role: 'subject', background: 'transparent' },
+    size: '1024x1024',
+    layout: { x: 0.1, y: 0.1, width: 0.3, height: 0.4, fit: 'contain' },
+  }));
+  const chat = chatPort(intents);
+  const generate = vi.fn(async (_scope: RuntimeScope, slots: readonly ImageGenerationSlot[]) => ({
+    scope,
+    jobId: input.jobId,
+    slots: slots.map((slot) => ({
+      ...slot,
+      state: 'ready' as const,
+      assetRefs: [{ ref: `raw-${slot.slotId}` }],
+    })),
+  }));
+  let failOnce = true;
+  const processed: string[] = [];
+  const planner = createRevisionAssetPlanner({
+    chatPort: chat,
+    imageGenerationCapability: { generate },
+    processAssets: async (steps) => {
+      const ref = (steps[0].input as { ref: string }).ref;
+      processed.push(ref);
+      if (ref.endsWith(':one') && failOnce) {
+        failOnce = false;
+        throw new Error('cutout unavailable');
+      }
+      return { ref: `cut-${ref}` };
+    },
+  });
+  const initial = {
+    ...input,
+    revision: { ...input.revision, requestId: 'initial-assets', target: { type: 'deck' as const } },
+  };
+  await expect(planner.prepare(initial)).rejects.toThrow('cutout unavailable');
+  const result = await planner.prepare(initial);
+  expect(result.assetArtifactIds).toHaveLength(2);
+  expect(chat.chat).toHaveBeenCalledOnce();
+  expect(generate).toHaveBeenCalledTimes(2);
+  expect(processed.filter((ref) => ref.endsWith(':one'))).toHaveLength(2);
+  expect(processed.filter((ref) => ref.endsWith(':two'))).toHaveLength(1);
 });

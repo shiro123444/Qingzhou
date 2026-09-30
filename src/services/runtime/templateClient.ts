@@ -1,9 +1,15 @@
+import type { PresentationLearningStatus } from '@/types/presentationLearning';
+
 import type { PresentationJob } from '../../../packages/runtime-contracts/src';
 
 /** The template library's UI projection; layouts stay on the server. */
 export interface PresentationTemplateSummary {
   constraints?: { palette: string[] };
   layoutCount?: number;
+  learning?: Pick<
+    PresentationLearningStatus,
+    'state' | 'observedPages' | 'remainingPages' | 'totalPages'
+  >;
   mediaCount?: number;
   name: string;
   source?: { kind: string };
@@ -31,6 +37,7 @@ export interface PresentationTemplateLearningQuestion {
 
 export interface PresentationTemplateLearningResult {
   learning: {
+    coverage?: { totalPages: number; observedPages: number[]; remainingPages: number[] };
     guidanceHistory: string[];
     iteration: number;
     questions: PresentationTemplateLearningQuestion[];
@@ -74,6 +81,11 @@ export const presentationTemplateClient = {
         ...(guidance?.trim() ? { guidance: guidance.trim() } : {}),
         ...(questionId?.trim() ? { questionId: questionId.trim() } : {}),
         ...(choiceId?.trim() ? { choiceId: choiceId.trim() } : {}),
+        ...(!guidance &&
+        template.learning &&
+        ['failed', 'interrupted', 'cancelled'].includes(template.learning.state)
+          ? { resume: true }
+          : {}),
         templateId: template.templateId,
         versionId: template.versionId,
       }),

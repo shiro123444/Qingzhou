@@ -28,6 +28,7 @@ export const conversationStream = (
   ) => Promise<PresentationConversationResult>,
   dispose: () => Promise<void>,
   requestSignal: AbortSignal,
+  timing: { heartbeatMs?: number; totalTimeoutMs?: number } = {},
 ): Response => {
   const abort = new AbortController();
   const signal = AbortSignal.any([requestSignal, abort.signal]);
@@ -40,6 +41,21 @@ export const conversationStream = (
           if (!closed && !signal.aborted)
             controller.enqueue(encoder.encode(`${JSON.stringify(value)}\n`));
         };
+        const heartbeat = setInterval(
+          () => send({ type: 'heartbeat' }),
+          timing.heartbeatMs ?? 15_000,
+        );
+        const deadline = setTimeout(
+          () => {
+            send({ type: 'error', message: '本轮处理超时，已保存的学习进度可以重试恢复' });
+            abort.abort(new Error('Presentation conversation timed out'));
+            if (!closed) {
+              closed = true;
+              controller.close();
+            }
+          },
+          timing.totalTimeoutMs ?? 15 * 60_000,
+        );
         try {
           const result = await execute(
             (activity) => send({ type: 'activity', activity }),
@@ -51,6 +67,8 @@ export const conversationStream = (
         } catch (error) {
           send({ type: 'error', message: error instanceof Error ? error.message : '创作暂时中断' });
         } finally {
+          clearInterval(heartbeat);
+          clearTimeout(deadline);
           try {
             await dispose();
           } finally {

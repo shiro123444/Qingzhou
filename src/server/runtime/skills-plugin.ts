@@ -30,6 +30,29 @@ export function createSkillsPlugin(
           tools: (await runtime().catalog()).filter((tool) => COMPOSABLE_OPERATIONS.has(tool.name)),
           recipes: [
             {
+              id: 'mixed-scientific-presentation',
+              description:
+                'Compile per-block visual requirements; measure formulas and scientific figures before layout; generate qualitative illustrations independently while rendering precise plots deterministically. Compose owned assets inside measured regions, retain provenance in metadata, and verify every required asset is embedded. Works with or without a template.',
+              steps: [
+                'presentation.content.compile',
+                'presentation.formula.measure',
+                'presentation.diagram.measure',
+                'assets.generate',
+                'presentation.formula.render',
+                'presentation.diagram.render',
+              ],
+            },
+            {
+              id: 'learned-presentation',
+              description:
+                'Retrieve verified style, layout and rendering recipes from earlier work; compose relevant atoms under the current task and content budget.',
+              steps: [
+                'presentation.memory.search',
+                'presentation.memory.load',
+                'presentation.memory.compose',
+              ],
+            },
+            {
               id: 'transparent-artwork',
               steps: [
                 'assets.generate',
@@ -40,6 +63,8 @@ export function createSkillsPlugin(
             },
             {
               id: 'style-artwork',
+              description:
+                'Reference-guided artwork: pass owned text-free style-atlas crops to generate, never whole template pages; remove the background only for a subject/decoration with a transparent policy. Scenes, backgrounds and textures preserve their pixels and skip cutout.',
               steps: [
                 'assets.generate',
                 'assets.removeBackground',

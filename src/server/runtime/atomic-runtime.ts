@@ -28,7 +28,7 @@ export interface AtomicOperationEvent {
 }
 export interface AtomicOperation {
   /** Trusted plugin opt-in to agent discovery; never accepted from user input. */
-  agent?: { contexts: string[]; maxCalls?: number };
+  agent?: { contexts: readonly string[]; maxCalls?: number };
   description: string;
   execute: (input: any, invocation: AtomicInvocation) => unknown | Promise<unknown>;
   input: ZodTypeAny;

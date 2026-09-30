@@ -90,3 +90,38 @@ describe('presentation replacement activity stream', () => {
     await vi.waitFor(() => expect(dispose).toHaveBeenCalledOnce());
   });
 });
+
+it('sends heartbeats during long provider work and terminates at the overall deadline', async () => {
+  vi.useFakeTimers();
+  const dispose = vi.fn(async () => {});
+  try {
+    const response = conversationStream(
+      async (_activity, signal) => {
+        await new Promise<void>((resolve) =>
+          signal.addEventListener('abort', () => resolve(), { once: true }),
+        );
+        throw new Error('aborted');
+      },
+      dispose,
+      new AbortController().signal,
+      { heartbeatMs: 50, totalTimeoutMs: 120 },
+    );
+    const reader = response.body!.getReader();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(JSON.parse(new TextDecoder().decode((await reader.read()).value))).toEqual({
+      type: 'heartbeat',
+    });
+    await vi.advanceTimersByTimeAsync(71);
+    const rest: string[] = [];
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      rest.push(new TextDecoder().decode(part.value));
+    }
+    expect(rest.join('')).toContain('本轮处理超时');
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    vi.useRealTimers();
+  }
+});

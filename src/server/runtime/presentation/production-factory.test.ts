@@ -1,3 +1,4 @@
+import sharp from 'sharp';
 import { describe, expect, it, vi } from 'vitest';
 
 import type {
@@ -6,6 +7,8 @@ import type {
   PresentationRunner,
 } from '../../../../packages/cordis-kernel/src/presentation';
 import { PresentationError } from '../../../../packages/cordis-kernel/src/presentation';
+import { InMemoryPresentationArtifactStore } from './artifact-store';
+import * as contentIntent from './content-intent';
 import type { ProductionPresentationProvider } from './production-command';
 import {
   PRODUCTION_PRESENTATION_ENV_KEYS,
@@ -23,6 +26,15 @@ import {
   createPptMasterProductionPresentationPortFactory,
   createProductionPresentationGenerationComposition,
 } from './production-factory';
+
+// Spying on an ESM export is impossible, so the module is wrapped while keeping the real one.
+vi.mock('./content-intent', async (importOriginal) => {
+  const actual = await importOriginal<typeof contentIntent>();
+  return {
+    ...actual,
+    createPresentationContentCompiler: vi.fn(actual.createPresentationContentCompiler),
+  };
+});
 
 const baseScope = (
   overrides: Partial<PptMasterPresentationScope> = {},
@@ -497,29 +509,54 @@ describe('C-77 production presentation composition wiring', () => {
 
 describe('createProductionPresentationGenerationComposition (R2-A pipeline)', () => {
   const makeMockChatPort = () => ({
-    chat: vi.fn(async () => ({
+    chat: vi.fn(async (request: any) => ({
       choices: [
         {
           message: {
-            content: JSON.stringify({
-              aspectRatio: '16:9',
-              planId: 'plan-real-1',
-              slides: [
-                {
-                  notes: '封面',
-                  order: 1,
-                  slideId: 'slide-1',
-                  svg: '<svg viewBox="0 0 960 540" xmlns="http://www.w3.org/2000/svg"><rect width="960" height="540" fill="#0f172a"/><text x="480" y="270" font-size="36" fill="#f8fafc" text-anchor="middle">产品发布会</text></svg>',
-                },
-                {
-                  notes: '核心亮点',
-                  order: 2,
-                  slideId: 'slide-2',
-                  svg: '<svg viewBox="0 0 960 540" xmlns="http://www.w3.org/2000/svg"><rect width="960" height="540" fill="#1e293b"/><text x="100" y="100" font-size="28" fill="#38bdf8">核心亮点</text></svg>',
-                },
-              ],
-              title: '产品发布会',
-            }),
+            content: JSON.stringify(
+              request.messages[0].content.startsWith('你是演示内容编译器')
+                ? {
+                    slides: [1, 2].map((index) => ({
+                      slideId: `slide-${index}`,
+                      claim: '产品发布会',
+                      formulas: [],
+                      visualKind: index === 1 ? 'illustration' : 'none',
+                      visualReason: '封面视觉和简短要点',
+                      visuals:
+                        index === 1
+                          ? [
+                              {
+                                id: 'hero-img',
+                                kind: 'illustration',
+                                brief: '发布会主视觉',
+                                required: true,
+                              },
+                            ]
+                          : [],
+                    })),
+                  }
+                : request.messages[0].content.includes('视觉总监')
+                  ? { schemaVersion: 1, passed: true, issues: [], summary: '逐页审查通过' }
+                  : {
+                      aspectRatio: '16:9',
+                      planId: 'plan-real-1',
+                      slides: [
+                        {
+                          notes: '封面',
+                          order: 1,
+                          slideId: 'slide-1',
+                          svg: '<svg viewBox="0 0 960 540" xmlns="http://www.w3.org/2000/svg"><rect width="960" height="540" fill="#0f172a"/><text x="480" y="270" font-size="36" fill="#f8fafc" text-anchor="middle">产品发布会</text><image href="/api/runtime/presentation/artifacts/asset-hero-img" x="650" y="300" width="240" height="180"/></svg>',
+                        },
+                        {
+                          notes: '核心亮点',
+                          order: 2,
+                          slideId: 'slide-2',
+                          svg: '<svg viewBox="0 0 960 540" xmlns="http://www.w3.org/2000/svg"><rect width="960" height="540" fill="#1e293b"/><text x="100" y="100" font-size="28" fill="#38bdf8">核心亮点</text></svg>',
+                        },
+                      ],
+                      title: '产品发布会',
+                    },
+            ),
           },
         },
       ],
@@ -530,7 +567,7 @@ describe('createProductionPresentationGenerationComposition (R2-A pipeline)', ()
   const makeMockImageCapability = () => ({
     generate: vi.fn(async (_scope: unknown, slots: any[]) => ({
       slots: slots.map((s) => ({
-        assetRef: `asset-${s.slotId}`,
+        assetRefs: [{ ref: `asset-${s.slotId}` }],
         slideId: s.slideId,
         slotId: s.slotId,
         state: 'ready' as const,
@@ -562,9 +599,49 @@ describe('createProductionPresentationGenerationComposition (R2-A pipeline)', ()
     expect(imageCap.generate).not.toHaveBeenCalled();
   });
 
+  it('passes one deck image budget to both the content compiler and the asset planner', () => {
+    vi.mocked(contentIntent.createPresentationContentCompiler).mockClear();
+    createProductionPresentationGenerationComposition({
+      env: {
+        ...validPipelineEnv,
+        [PRODUCTION_PRESENTATION_ENV_KEYS.imageBudget]: '3',
+      },
+      imageGenerationCapability: makeMockImageCapability() as any,
+      multimodalChatPort: makeMockChatPort() as any,
+    });
+    expect(vi.mocked(contentIntent.createPresentationContentCompiler)).toHaveBeenCalledWith(
+      expect.anything(),
+      undefined,
+      { maxRasterVisuals: 3 },
+    );
+
+    vi.mocked(contentIntent.createPresentationContentCompiler).mockClear();
+    createProductionPresentationGenerationComposition({
+      env: validPipelineEnv,
+      imageGenerationCapability: makeMockImageCapability() as any,
+      multimodalChatPort: makeMockChatPort() as any,
+    });
+    expect(vi.mocked(contentIntent.createPresentationContentCompiler)).toHaveBeenCalledWith(
+      expect.anything(),
+      undefined,
+      {},
+    );
+  });
+
   it('runs complete planner -> image provider -> worker -> artifact pipeline end-to-end', async () => {
     const chatPort = makeMockChatPort();
     const imageCap = makeMockImageCapability();
+    const scope = baseScope({ userId: 'u-gen', sessionId: 's-gen' });
+    const artifactStore = new InMemoryPresentationArtifactStore();
+    await artifactStore.put(scope, {
+      artifactId: 'asset-hero-img',
+      name: 'hero.png',
+      type: 'image',
+      mimeType: 'image/png',
+      bytes: await sharp({ create: { width: 80, height: 60, channels: 3, background: '#2563eb' } })
+        .png()
+        .toBuffer(),
+    });
     const mockWorker = {
       run: vi.fn(async (plan: any, context: any) => {
         const artifacts = [
@@ -593,6 +670,7 @@ describe('createProductionPresentationGenerationComposition (R2-A pipeline)', ()
     };
 
     const { composition, readiness } = createProductionPresentationGenerationComposition({
+      artifactStore,
       env: validPipelineEnv,
       imageGenerationCapability: imageCap as any,
       multimodalChatPort: chatPort as any,
@@ -603,7 +681,6 @@ describe('createProductionPresentationGenerationComposition (R2-A pipeline)', ()
     const generationPortFactory = composition.generationPortFactory!;
     expect(generationPortFactory).toBeDefined();
 
-    const scope = baseScope({ userId: 'u-gen', sessionId: 's-gen' });
     const port = generationPortFactory(scope);
 
     // Create job with imageSlots
@@ -621,7 +698,10 @@ describe('createProductionPresentationGenerationComposition (R2-A pipeline)', ()
     expect(created.state).toBe('queued');
 
     // Wait for background generation to finish
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await vi.waitFor(async () => {
+      const job = await port.getJob(created.jobId);
+      expect(job?.state, JSON.stringify(job?.error)).toBe('completed');
+    });
 
     // Check image capability was called with normalized slots
     expect(imageCap.generate).toHaveBeenCalledWith(
@@ -642,6 +722,10 @@ describe('createProductionPresentationGenerationComposition (R2-A pipeline)', ()
 
     // Check worker executed and produced artifacts
     expect(mockWorker.run).toHaveBeenCalled();
+    expect(mockWorker.run.mock.calls[0][0].slides[0].svg).toContain('data:image/png;base64,');
+    expect(mockWorker.run.mock.calls[0][0].slides[0].metadata.visualAssets).toEqual([
+      expect.objectContaining({ visualId: 'hero-img', kind: 'illustration', origin: 'generated' }),
+    ]);
 
     // Verify job completed and all artifacts are readable
     const job = await port.getJob(created.jobId);
@@ -649,9 +733,9 @@ describe('createProductionPresentationGenerationComposition (R2-A pipeline)', ()
       jobId: created.jobId,
       state: 'completed',
     });
-    expect(job?.artifactIds?.length).toBe(3); // pptx + 2 slide svgs
+    expect(job?.artifactIds?.length).toBe(4); // image + pptx + 2 slide svgs
 
-    const pptxArtifact = await port.getArtifact(job!.artifactIds![0]);
+    const pptxArtifact = await port.getArtifact(`${created.jobId}:deck.pptx`);
     expect(pptxArtifact).toMatchObject({
       mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
       name: 'deck.pptx',

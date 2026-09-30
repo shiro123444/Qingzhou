@@ -2,6 +2,7 @@ import { Button, Icon } from '@lobehub/ui';
 import { Tooltip } from 'antd';
 import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { memo, useCallback, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { ConversationPanel } from '../ConversationPanel';
 import SlideNavigator from '../SlideNavigator';
@@ -44,6 +45,11 @@ export const CompletedWorkspace = memo<CompletedWorkspaceProps>(
     showSidebarReopen = false,
     slideArtifacts,
   }) => {
+    const { t } = useTranslation('common');
+    const studentHandout = selectedJobArtifacts.find(
+      (artifact) =>
+        artifact.status === 'ready' && artifact.metadata?.artifactRole === 'student-handout',
+    );
     const [viewMode, setViewMode] = useState<CompletedViewMode>('focus');
     const [drawerOpen, setDrawerOpen] = useState(false);
     const [filmstripOpen, setFilmstripOpen] = useState(false);
@@ -168,6 +174,17 @@ export const CompletedWorkspace = memo<CompletedWorkspaceProps>(
         />
 
         {/* Main Body Layout: Collapsible Filmstrip + Stage + Architecture Drawer */}
+        {studentHandout && (
+          <div>
+            <a
+              download="student-handout.md"
+              href={`/api/runtime/presentation/artifacts/${encodeURIComponent(studentHandout.artifactId)}?raw=true`}
+            >
+              {t('presentationLesson.handout')}
+            </a>
+            <span> · {t('presentationLesson.exportNotice')}</span>
+          </div>
+        )}
         <div className={styles.mainLayout}>
           {/* Collapsible Slide Filmstrip Dock (defaults collapsed) */}
           <div className={styles.filmstripContainer} data-open={filmstripOpen ? 'true' : 'false'}>

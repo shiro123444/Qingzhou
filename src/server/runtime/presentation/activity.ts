@@ -3,6 +3,23 @@ import type { PresentationActivity } from '@/types/presentationActivity';
 import type { AtomicOperationEvent } from '../atomic-runtime';
 
 const labels: Record<string, string> = {
+  'presentation.teaching.analyze': '读取连续页并提出待审阅的教学模式',
+  'presentation.teaching.search': '检索教师确认的教学模式',
+  'presentation.teaching.compose': '组合有条件的教学模式',
+  'presentation.lesson.plan': '规划教师主导的教学环节',
+  'presentation.lesson.compile': '编排分阶段讲解',
+  'presentation.lesson.revise': '校验教学计划修改与教师锁定',
+  'presentation.lesson.validate': '检查教学呈现约束',
+  'presentation.content.compile': '识别公式与科研图需求',
+  'presentation.formula.render': '渲染数学公式',
+  'presentation.formula.measure': '测量公式排版尺寸',
+  'presentation.diagram.render': '绘制结构化科研图',
+  'presentation.diagram.measure': '测量科研图所需空间',
+  'presentation.memory.promote': '确认创作经验',
+  'presentation.memory.search': '查找已学习的创作能力',
+  'presentation.memory.load': '读取学习依据',
+  'presentation.memory.compose': '组合已验证的创作能力',
+  'presentation.memory.recordOutcome': '记录学习反馈',
   'context.readFile': '读取参考材料',
   'context.readSkill': '读取创作技能',
   'context.search': '搜索相关资料',

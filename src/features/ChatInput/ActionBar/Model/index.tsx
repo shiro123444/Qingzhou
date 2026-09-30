@@ -36,19 +36,20 @@ const ModelSwitch = memo(() => {
   const iconSize = actionSize?.size ?? 20;
 
   const agentId = useAgentId();
-  const { model, provider } = useJumiChatModel(agentId);
+  const { model, provider, selectionAgentId } = useJumiChatModel(agentId);
   const updateAgentConfigById = useAgentStore((s) => s.updateAgentConfigById);
 
   const handleModelChange = useCallback(
     async (params: { model: string; provider: string }) => {
-      if (agentId !== 'ppt-agent') await updateAgentConfigById(agentId, params);
+      if (selectionAgentId) await updateAgentConfigById(selectionAgentId, params);
     },
-    [agentId, updateAgentConfigById],
+    [selectionAgentId, updateAgentConfigById],
   );
 
   return (
     <ModelSwitchPanel
       model={model}
+      open={selectionAgentId ? undefined : false}
       placement={dropdownPlacement}
       provider={provider}
       onModelChange={handleModelChange}

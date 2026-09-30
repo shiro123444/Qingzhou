@@ -1,10 +1,40 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { StudioNotice } from './StudioNotice';
 
 describe('StudioNotice', () => {
-  it('counts down then dismisses without occupying layout flow', async () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('restarts the lifetime for a repeated notification', () => {
+    vi.useFakeTimers();
+    const onClose = vi.fn();
+    const { rerender } = render(
+      <StudioNotice
+        resetKey={1}
+        testId="notice"
+        title="PPTX 已就绪"
+        tone="success"
+        onClose={onClose}
+      />,
+    );
+    act(() => vi.advanceTimersByTime(3000));
+    expect(onClose).not.toHaveBeenCalled();
+    rerender(
+      <StudioNotice
+        resetKey={2}
+        testId="notice"
+        title="PPTX 已就绪"
+        tone="success"
+        onClose={onClose}
+      />,
+    );
+    act(() => vi.advanceTimersByTime(2000));
+    expect(onClose).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(3000));
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+  it('dismisses automatically without occupying layout flow', async () => {
     const onClose = vi.fn();
     render(
       <div style={{ height: 200, position: 'relative' }}>
@@ -19,7 +49,6 @@ describe('StudioNotice', () => {
     );
     const notice = screen.getByTestId('presentation-export-notice');
     expect(notice).toHaveAttribute('role', 'status');
-    expect(screen.getByTestId('presentation-export-notice-countdown')).toHaveTextContent('1');
     await waitFor(() => expect(onClose).toHaveBeenCalled(), { timeout: 1000 });
   });
 

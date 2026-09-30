@@ -2,6 +2,8 @@ import nodePath from 'node:path';
 
 import { strFromU8, unzipSync } from 'fflate';
 
+import type { TeachingPageObservation } from '@/types/presentationTeaching';
+
 import {
   PRESENTATION_PPTX_MAX_UPLOAD_BYTES,
   PRESENTATION_PPTX_MAX_UPLOAD_MIB,
@@ -76,6 +78,7 @@ interface Transform {
 /** Read OOXML as data only. Embedded programs, external relations and macros are never executed. */
 export const extractPptxTemplate = (
   bytes: Uint8Array,
+  observe?: (page: TeachingPageObservation) => void,
 ): {
   constraints: TemplateConstraints;
   layouts: TemplateLayout[];
@@ -423,6 +426,47 @@ export const extractPptxTemplate = (
     const notes = notesPath
       ? textContent(object(object(read(notesPath).notes).cSld)).trim()
       : undefined;
+    if (observe) {
+      const timing = object(slide.timing);
+      const targets = descendants(timing, 'spTgt').map((node) => attribute(node, 'spid'));
+      const builds = descendants(timing, 'cTn').filter((node) =>
+        ['clickEffect', 'withEffect', 'afterEffect'].includes(attribute(node, 'nodeType') ?? ''),
+      );
+      observe({
+        builds: builds.slice(0, 64).map((node) => ({
+          id: (attribute(node, 'id') ?? '').slice(0, 80),
+          nodeType: (attribute(node, 'nodeType') ?? '').slice(0, 80),
+          presetClass: (attribute(node, 'presetClass') ?? '').slice(0, 80),
+          targets: [
+            ...new Set(
+              descendants(node, 'spTgt').map((target) =>
+                (attribute(target, 'spid') ?? '').slice(0, 80),
+              ),
+            ),
+          ].slice(0, 64),
+          effects: descendants(node, 'animEffect')
+            .map((effect) => (attribute(effect, 'filter') ?? '').slice(0, 120))
+            .slice(0, 64),
+        })),
+        buildsTruncated: builds.length > 64,
+        page: index + 1,
+        text: descendants(object(slide.cSld), 'txBody')
+          .flatMap((body) => array(body.p).map(textContent))
+          .filter(Boolean)
+          .join('\n'),
+        notes: notes ?? '',
+        imageRefs: assetSlots.flatMap((slot) => (slot.reference ? [slot.reference] : [])),
+        cues: `Page ${index + 1}; text elements ${elements.filter((el) => el.kind === 'text').length}; image slots ${assetSlots.length}; timing present ${Boolean(slide.timing)}; timing nodes ${descendants(timing, 'cTn').length}; target shape IDs ${[...new Set(targets)].join(',')}; effects ${descendants(
+          timing,
+          'animEffect',
+        )
+          .map((node) => attribute(node, 'filter'))
+          .filter(Boolean)
+          .join(
+            ',',
+          )}. Timing is structural evidence, not lecture duration or a reconstructed click sequence.`,
+      });
+    }
     return {
       assetSlots,
       elements,

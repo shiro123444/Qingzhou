@@ -510,7 +510,11 @@ export class RuntimeClientImpl implements RuntimeClient {
       { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: '{}' },
     );
     if (!response.ok) throw new Error(`Failed to restore presentations (${response.status})`);
-    return ((await response.json()) as { jobs: PresentationJob[] }).jobs;
+    // A body without a `jobs` array means "no saved works": returning undefined here made the store's
+    // `jobs.map(...)` throw, and the studio showed a raw `Cannot read properties of undefined`
+    // notice instead of its honest empty state.
+    const payload = (await response.json()) as { jobs?: PresentationJob[] } | undefined;
+    return Array.isArray(payload?.jobs) ? payload.jobs : [];
   }
 
   async getPresentationJob(

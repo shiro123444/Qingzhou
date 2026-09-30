@@ -9,6 +9,8 @@ export interface StudioNoticeProps {
   description?: ReactNode;
   durationMs?: number;
   onClose: () => void;
+  /** A new notification restarts its lifetime even when its type/file is unchanged. */
+  resetKey?: object | string | number;
   role?: 'alert' | 'status';
   testId: string;
   title: ReactNode;
@@ -22,20 +24,21 @@ const DEFAULT_DURATION: Record<StudioNoticeTone, number> = {
 };
 
 export const StudioNotice = memo<StudioNoticeProps>(
-  ({ action, description, durationMs, onClose, role, testId, title, tone }) => {
+  ({ action, description, durationMs, onClose, resetKey, role, testId, title, tone }) => {
     const timeout = durationMs ?? DEFAULT_DURATION[tone];
     const onCloseRef = useRef(onClose);
     const [elapsed, setElapsed] = useState(false);
     onCloseRef.current = onClose;
 
     useEffect(() => {
+      setElapsed(false);
       const frame = window.requestAnimationFrame(() => setElapsed(true));
       const id = window.setTimeout(() => onCloseRef.current(), timeout);
       return () => {
         window.cancelAnimationFrame(frame);
         window.clearTimeout(id);
       };
-    }, [timeout]);
+    }, [timeout, resetKey]);
 
     return (
       <div
@@ -48,14 +51,7 @@ export const StudioNotice = memo<StudioNoticeProps>(
               ? styles.noticeWarning
               : styles.noticeError
         }`}
-        style={{
-          opacity: elapsed ? 0.55 : 1,
-          transitionDuration: `${timeout}ms`,
-        }}
       >
-        <span className={styles.noticeCountdown} data-testid={`${testId}-countdown`}>
-          {Math.ceil(timeout / 1000)}
-        </span>
         <span
           aria-hidden
           className={styles.noticeTimer}

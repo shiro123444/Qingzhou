@@ -1,3 +1,4 @@
+import { extractModelJson } from './model-json';
 import type {
   GLMChatContext,
   GLMChatRequest,
@@ -5,34 +6,9 @@ import type {
   GLMMultimodalChatPort,
 } from './multimodal-chat-provider-glm';
 
+export { extractModelJson } from './model-json';
+
 type ChatPort = GLMMultimodalChatPort;
-
-const tryParseJson = (text: string): unknown => {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return undefined;
-  }
-};
-
-/** Extract a JSON value from fences, think-tags, or mixed model prose. */
-export const extractModelJson = (content: string): unknown => {
-  const cleaned = content
-    .replaceAll(/<think>[\s\S]*?<\/think>/giu, '')
-    .replaceAll(/<thinking>[\s\S]*?<\/thinking>/giu, '')
-    .replace(/^```(?:json)?\s*/iu, '')
-    .replace(/\s*```$/u, '')
-    .trim();
-  const direct = tryParseJson(cleaned);
-  if (direct !== undefined) return direct;
-  const start = cleaned.indexOf('{');
-  const end = cleaned.lastIndexOf('}');
-  if (start >= 0 && end > start) {
-    const extracted = tryParseJson(cleaned.slice(start, end + 1));
-    if (extracted !== undefined) return extracted;
-  }
-  throw new SyntaxError('Model response was not valid JSON');
-};
 
 const DEFAULT_MAX_TOKENS = 16_000;
 const HARVEST_MAX_TOKENS = 32_000;
@@ -86,17 +62,19 @@ const harvestPrompt = (truncated: boolean, reasoning?: string): string => {
   const thought = reasoning?.trim()
     ? `\n已完成的思考摘要：\n${reasoning.trim().slice(0, 6000)}`
     : '';
+  const syntax =
+    '\n严格 JSON：所有键和字符串都用双引号，不能使用单引号、注释、尾随逗号或未加引号的键。';
   if (truncated) {
-    return `上一轮输出在 JSON 完成前被截断。请承接未完成部分，输出完整可解析的 JSON 对象。不要只返回思维链，不要 markdown。${thought}`;
+    return `上一轮输出在 JSON 完成前被截断。请承接未完成部分，输出完整可解析的 JSON 对象。不要只返回思维链，不要 markdown。${syntax}${thought}`;
   }
-  return `上一轮只完成了思考，没有给出最终 JSON。请基于已有思考输出完整可解析的 JSON 对象。不要只返回思维链，不要 markdown。${thought}`;
+  return `上一轮只完成了思考，没有给出最终 JSON。请基于已有思考输出完整可解析的 JSON 对象。不要只返回思维链，不要 markdown。${syntax}${thought}`;
 };
 
 export interface CompleteStructuredJsonOptions<T> {
   readonly chat: ChatPort;
   readonly context: GLMChatContext;
   readonly emptyError?: string;
-  readonly parse?: (value: unknown, raw: string) => T;
+  readonly parse?: (value: unknown, raw: string) => T | Promise<T>;
   readonly request: GLMChatRequest;
 }
 
@@ -171,7 +149,11 @@ export const completeStructuredJson = async <T = unknown>(
   }
 
   try {
-    return { raw: current.content, result, value: options.parse(current.parsed, current.content) };
+    return {
+      raw: current.content,
+      result,
+      value: await options.parse(current.parsed, current.content),
+    };
   } catch (error) {
     result = await call(
       [
@@ -187,6 +169,10 @@ export const completeStructuredJson = async <T = unknown>(
     );
     current = read(result);
     if (current.parsed === undefined) throw new Error(emptyError, { cause: error });
-    return { raw: current.content, result, value: options.parse(current.parsed, current.content) };
+    return {
+      raw: current.content,
+      result,
+      value: await options.parse(current.parsed, current.content),
+    };
   }
 };

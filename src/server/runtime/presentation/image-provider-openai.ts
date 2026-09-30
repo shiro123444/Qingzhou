@@ -121,6 +121,33 @@ const payloadInvalid = (message: string, path?: string): OpenAIImageProviderErro
 const unavailable = (message = 'Image provider is unavailable'): OpenAIImageProviderError =>
   providerError('IMAGE_UNAVAILABLE', message);
 
+const transportErrorCode = (error: unknown): string => {
+  const cause = isRecord(error) && isRecord(error.cause) ? error.cause : error;
+  const code = isRecord(cause) ? cause.code : undefined;
+  // Never log arbitrary exception messages: gateways may include credentials or
+  // request bodies. Only known transport codes are safe diagnostic fields.
+  return typeof code === 'string' &&
+    [
+      'ECONNRESET',
+      'ECONNREFUSED',
+      'ENOTFOUND',
+      'EAI_AGAIN',
+      'ETIMEDOUT',
+      'UND_ERR_CONNECT_TIMEOUT',
+      'UND_ERR_HEADERS_TIMEOUT',
+      'UND_ERR_BODY_TIMEOUT',
+      'ERR_TLS_CERT_ALTNAME_INVALID',
+      'CERT_HAS_EXPIRED',
+      'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+      'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+      'DEPTH_ZERO_SELF_SIGNED_CERT',
+      'SELF_SIGNED_CERT_IN_CHAIN',
+      'UNKNOWN_CERTIFICATE_VERIFICATION_ERROR',
+    ].includes(code)
+    ? code
+    : 'UNKNOWN';
+};
+
 const cancelled = (): OpenAIImageProviderError =>
   providerError('IMAGE_CANCELLED', 'Image generation was cancelled', 'signal');
 
@@ -450,15 +477,29 @@ export class OpenAIImageGenerationPort implements ImageGenerationPort {
       });
     } catch (error) {
       if (isAbortError(error, signal)) throw cancelled();
-      throw unavailable();
+      const code = transportErrorCode(error);
+      console.warn('[presentation.image] request failed', {
+        operation: request.referenceAssetRefs?.length ? 'reference' : 'generate',
+        phase: 'transport',
+        transportCode: code,
+      });
+      throw unavailable(`Image provider connection failed (${code})`);
     }
     if (!response || typeof response.ok !== 'boolean')
       throw payloadInvalid('provider response is invalid');
     if (!response.ok) {
+      console.warn('[presentation.image] request failed', {
+        httpStatus: response.status,
+        operation: request.referenceAssetRefs?.length ? 'reference' : 'generate',
+        phase: 'response',
+      });
       if (response.status >= 400 && response.status < 500) {
-        throw providerError('IMAGE_PROVIDER_REJECTED', 'Image provider rejected the request');
+        throw providerError(
+          'IMAGE_PROVIDER_REJECTED',
+          `Image provider rejected the request (HTTP ${response.status})`,
+        );
       }
-      throw unavailable();
+      throw unavailable(`Image provider returned HTTP ${response.status}`);
     }
     if (signal?.aborted) throw cancelled();
 
@@ -532,7 +573,8 @@ export class OpenAIImageGenerationPort implements ImageGenerationPort {
         asset = normalizeRef(sinkAsset, `data.${index}`);
       } catch (error) {
         if (error instanceof OpenAIImageProviderError) throw error;
-        throw unavailable();
+        console.warn('[presentation.image] asset processing failed', { phase: 'persist' });
+        throw unavailable('Generated image could not be saved');
       }
     } else if (source.source === 'url' && this.resolveAssetUri) {
       try {
@@ -542,7 +584,8 @@ export class OpenAIImageGenerationPort implements ImageGenerationPort {
         asset = normalizeRef(resolved, `data.${index}`);
       } catch (error) {
         if (error instanceof OpenAIImageProviderError) throw error;
-        throw unavailable();
+        console.warn('[presentation.image] asset processing failed', { phase: 'resolve' });
+        throw unavailable('Generated image URL could not be resolved');
       }
     } else {
       const ref =

@@ -73,6 +73,14 @@ export async function runSkillSteps(
   );
 }
 export const COMPOSABLE_OPERATIONS = new Set([
+  'presentation.memory.search',
+  'presentation.memory.load',
+  'presentation.memory.compose',
+  'presentation.content.compile',
+  'presentation.formula.render',
+  'presentation.formula.measure',
+  'presentation.diagram.measure',
+  'presentation.diagram.render',
   'assets.inspect',
   'assets.list',
   'assets.applyMask',

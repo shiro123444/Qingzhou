@@ -672,4 +672,30 @@ describe('RuntimeClient', () => {
     expect(receivedEvents[0].seq).toBe(3);
     expect(receivedEvents[1].seq).toBe(4);
   });
+
+  it('listPresentationJobs degrades a body without a jobs array to an empty list', async () => {
+    // The studio maps the result straight into its store, so a missing array used to throw
+    // `Cannot read properties of undefined (reading 'map')` and surface an internal error.
+    for (const body of [{}, { jobs: null }, { jobs: 'nope' }]) {
+      const mockFetcher = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(body), {
+          headers: { 'Content-Type': 'application/json' },
+          status: 200,
+        }),
+      );
+      await expect(
+        new RuntimeClientImpl({ fetcher: mockFetcher }).listPresentationJobs(),
+      ).resolves.toEqual([]);
+    }
+
+    const withJobs = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ jobs: [{ jobId: 'job-1' }] }), {
+        headers: { 'Content-Type': 'application/json' },
+        status: 200,
+      }),
+    );
+    await expect(
+      new RuntimeClientImpl({ fetcher: withJobs }).listPresentationJobs(),
+    ).resolves.toEqual([{ jobId: 'job-1' }]);
+  });
 });

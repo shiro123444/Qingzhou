@@ -15,11 +15,13 @@ import { type PresentationJobEvent, PresentationJobEventJournal } from './job-ev
 import type { PresentationRevisionAssetResult } from './revision-assets';
 
 export interface StoredPresentationJob {
+  draftCheckpoint?: { fingerprint: string; slides: PresentationPlan['slides'] };
   initialAssetsComplete?: boolean;
   input: PresentationJobInput;
   job: PresentationJob;
   plan?: PresentationPlan;
   preparedAssets?: Record<string, PresentationRevisionAssetResult>;
+  revisionCheckpoint?: { requestId: string; completedSlideIds: string[] };
 }
 
 export interface PresentationJobRepository {

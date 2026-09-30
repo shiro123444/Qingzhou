@@ -85,6 +85,65 @@ it('upgrades owned visual caches into the current design and learning profile in
   });
 });
 
+it('splits a header-and-footer family into cover, body, figure and closing signatures', () => {
+  const program = compileTemplateDesignProgram({
+    components: [
+      {
+        box: { height: 0.13, width: 1, x: 0, y: 0 },
+        containsText: true,
+        familyId: 'academic',
+        id: 'p4-header',
+        name: '顶部通栏',
+        page: 4,
+        rationale: 'locked title band',
+        role: 'heading',
+        treatment: 'native',
+      },
+      {
+        box: { height: 0.16, width: 0.96, x: 0.02, y: 0.82 },
+        containsText: true,
+        familyId: 'academic',
+        id: 'p4-footer',
+        name: '结论条',
+        page: 4,
+        rationale: 'closing band',
+        role: 'frame',
+        treatment: 'native',
+      },
+    ],
+    families: [
+      {
+        artwork: '学术示意图',
+        composition: '通栏标题，底部结论',
+        id: 'academic',
+        name: '蓝红学术',
+        pages: [1, 4, 18],
+        palette: ['#2C6EB5', '#B21818'],
+        preserve: ['顶部通栏'],
+        typography: '白字标题',
+      },
+    ],
+    guidance: '当正文信息量极大时，优先压缩配图垂直高度',
+    summary: '学术课件',
+  });
+  expect(program.archetypes.map((archetype) => archetype.id)).toEqual([
+    'archetype-academic-cover',
+    'archetype-academic-content',
+    'archetype-academic-figure',
+    'archetype-academic-closing',
+  ]);
+  expect(program.archetypes[0].regions[0]).toMatchObject({ behavior: 'locked', role: 'heading' });
+  expect(program.archetypes.find((item) => item.id.endsWith('-figure'))?.roles).toEqual([
+    'data',
+    'comparison',
+    'process',
+  ]);
+  expect(program.invariants.some((rule) => rule.includes('顶部通栏'))).toBe(true);
+  expect(program.invariants.some((rule) => /压缩配图/u.test(rule))).toBe(false);
+  expect(program.cadence.rules.some((rule) => /压缩配图/u.test(rule))).toBe(false);
+  expect(program.cadence.rules.some((rule) => rule.includes('180px'))).toBe(true);
+});
+
 it('bounds verbose visual observations instead of rejecting the entire learned template', () => {
   const verbose = '细腻的水彩纸张、暖色晕染与呼吸感留白。'.repeat(160);
   const program = compileTemplateDesignProgram({

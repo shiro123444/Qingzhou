@@ -2,6 +2,8 @@ import { InMemoryPresentationArtifactStore } from './artifact-store';
 import type { PresentationGenerationCapability } from './generation-capability';
 import { PresentationGenerationPort } from './generation-port';
 import type { ImageGenerationCapability } from './image-generation-capability';
+import type { PresentationRevisionAssetPlanner } from './revision-assets';
+import type { PresentationVisualCritic } from './visual-critic';
 import { presentationStoryboardInputFingerprint } from './visual-storyboard';
 
 const scope = { request: new Request('https://example.test'), userId: 'u1', sessionId: 's1' };
@@ -425,6 +427,71 @@ describe('PresentationGenerationPort', () => {
     ]);
   });
 
+  it('resumes the checkpointed revision when later edits died before leaving the transport', async () => {
+    let calls = 0;
+    const capability = {
+      execute: vi.fn(async () => {
+        calls += 1;
+        if (calls === 1) throw new Error('Initial failure');
+        return new Promise(() => undefined);
+      }),
+    } as unknown as PresentationGenerationCapability;
+    const port = new PresentationGenerationPort(
+      {
+        artifactStore: new InMemoryPresentationArtifactStore(),
+        capability,
+        contextFactory: () => ({
+          plannerContext: {},
+          workerContext: {
+            convert: vi.fn(),
+            jobId: 'x',
+            qualityCheck: vi.fn(),
+            workspace: { path: '/tmp', write: vi.fn() },
+          },
+        }),
+        idFactory: () => 'job-checkpoint-resume',
+      },
+      scope,
+    );
+    await port.createJob(input);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const entry = (
+      port as unknown as {
+        jobs: Map<
+          string,
+          {
+            job: { messages: Array<Record<string, unknown>> };
+            revisionCheckpoint?: { requestId: string };
+          }
+        >;
+      }
+    ).jobs.get('job-checkpoint-resume')!;
+    entry.revisionCheckpoint = { requestId: 'laid-out' };
+    entry.job.messages = [
+      {
+        content: 'revision that laid out the first pages',
+        createdAt: '2026-01-01T00:00:01.000Z',
+        error: 'Graph label needs more space',
+        requestId: 'laid-out',
+        status: 'failed',
+        target: { type: 'deck' },
+      },
+      {
+        content: 'later transport failure',
+        createdAt: '2026-01-01T00:00:02.000Z',
+        error: 'Multimodal chat provider returned HTTP 503',
+        requestId: 'transport',
+        status: 'failed',
+        target: { type: 'deck' },
+      },
+    ];
+    await port.retryJob('job-checkpoint-resume');
+    expect(entry.job.messages.map(({ requestId, status }) => ({ requestId, status }))).toEqual([
+      { requestId: 'laid-out', status: 'queued' },
+      { requestId: 'transport', status: 'failed' },
+    ]);
+  });
+
   describe('R4-A Acceptance: 4-phase cancellation & failure persistence', () => {
     it('cancels during planner phase and maintains terminal cancelled state', async () => {
       const store = new InMemoryPresentationArtifactStore();
@@ -802,7 +869,7 @@ describe('PresentationGenerationPort completed-state template application', () =
       }),
     }) as unknown as PresentationGenerationCapability;
 
-  it('binds a deck storyboard before planning and performs one bounded visual repair pass', async () => {
+  it('binds a deck storyboard and repairs defects newly exposed by the first visual pass', async () => {
     const directedInput = {
       ...input,
       options: { outline: [{ title: 'Cover' }] },
@@ -878,10 +945,24 @@ describe('PresentationGenerationPort completed-state template application', () =
           summary: 'one spacing issue',
         })
         .mockResolvedValueOnce({
+          issues: [
+            {
+              category: 'hierarchy',
+              evidence: 'the corrected title needs a clearer subtitle hierarchy',
+              instruction: 'align the subtitle with the corrected title',
+              severity: 'major',
+              slideId: 'cover',
+            },
+          ],
+          passed: false,
+          schemaVersion: 1,
+          summary: 'one hierarchy issue remains',
+        })
+        .mockResolvedValueOnce({
           issues: [],
           passed: true,
           schemaVersion: 1,
-          summary: 'spacing now matches the template',
+          summary: 'spacing and hierarchy now match the template',
         }),
     };
     let receivedInput: Record<string, unknown> | undefined;
@@ -954,7 +1035,8 @@ describe('PresentationGenerationPort completed-state template application', () =
         }),
       }),
     );
-    expect(visualCritic.review).toHaveBeenCalledTimes(2);
+    expect(visualCritic.review).toHaveBeenCalledTimes(3);
+    expect(capability.plan).toHaveBeenCalledTimes(2);
     await expect(port.readPlan('job-directed')).resolves.toMatchObject({
       plan: {
         designSpec: {
@@ -1123,7 +1205,252 @@ describe('PresentationGenerationPort completed-state template application', () =
     );
   });
 
-  it('keeps valid pages when the optional visual repair model is unavailable', async () => {
+  it('re-prepares required assets a resumed plan never received instead of shipping a blank page', async () => {
+    const directedInput = {
+      ...input,
+      options: {
+        contentIntents: {
+          slides: [
+            {
+              claim: 'A split page keeps its figure',
+              formulas: [],
+              slideId: 'cover',
+              visualKind: 'scientific-diagram',
+              visualReason: 'Required figure',
+              visuals: [
+                {
+                  brief: 'Convex feasible set with a supporting hyperplane',
+                  id: 'visual-1',
+                  kind: 'scientific-diagram',
+                  renderer: 'image',
+                  required: true,
+                },
+              ],
+            },
+          ],
+        },
+      },
+      slideCount: 1,
+    };
+    // The resumed plan carries the page but no asset binding for its required figure.
+    const plan = {
+      ...samplePlan,
+      slides: [
+        {
+          order: 1,
+          slideId: 'cover',
+          svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"></svg>',
+        },
+      ],
+    };
+    const prepare = vi.fn(async (assetInput: { jobInput: unknown }) => ({
+      assetArtifactIds: [],
+      input: assetInput.jobInput,
+      intents: [],
+    }));
+    let saved = {
+      initialAssetsComplete: true,
+      input: directedInput,
+      job: {
+        aspectRatio: '16:9' as const,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        jobId: 'job-missing-figure',
+        messages: [],
+        projectId: 'project',
+        revisions: [],
+        slideCount: 1,
+        state: 'failed' as const,
+        title: directedInput.title,
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      },
+      plan,
+    };
+    const port = new PresentationGenerationPort(
+      {
+        artifactStore: new InMemoryPresentationArtifactStore(),
+        capability: createCapability(),
+        contextFactory: () => ({
+          plannerContext: {},
+          workerContext: {
+            convert: vi.fn(),
+            jobId: 'ignored',
+            qualityCheck: vi.fn(),
+            workspace: { path: '/tmp', write: vi.fn() },
+          },
+        }),
+        repository: {
+          getJob: vi.fn(async () => structuredClone(saved) as never),
+          saveJob: vi.fn(async (_scope, snapshot) => {
+            saved = structuredClone(snapshot) as typeof saved;
+          }),
+        },
+        revisionAssetPlanner: { prepare, prepareInitial: vi.fn() } as never,
+      },
+      scope,
+    );
+
+    await port.retryJob('job-missing-figure');
+    await vi.waitFor(async () =>
+      expect((await port.getJob('job-missing-figure'))?.state).toBe('completed'),
+    );
+
+    // Without coverage invalidation a completed job skips the assets step and the page stays blank.
+    expect(prepare).toHaveBeenCalledOnce();
+  });
+
+  it.each(['artwork-style', 'scientific-semantics', 'template-fidelity'] as const)(
+    'repairs a critic-confirmed %s mismatch through asset tools and retains page identity',
+    async (category) => {
+      const store = new InMemoryPresentationArtifactStore();
+      await seedTemplatePages(store);
+      await store.put(scope, {
+        artifactId: 'new-art',
+        bytes: png,
+        mimeType: 'image/png',
+        name: 'art.png',
+        type: 'image',
+      });
+      const capability = createCapability();
+      vi.mocked(capability.execute).mockImplementation(async (_scope, _input, context) => {
+        const candidate = {
+          ...samplePlan,
+          slides: samplePlan.slides.map((s) => ({
+            ...s,
+            metadata: {
+              visualAssets: [
+                {
+                  visualId: 'subject',
+                  kind: 'scientific-illustration',
+                  origin: 'generated',
+                  ref: '/api/runtime/presentation/artifacts/old-art',
+                },
+              ],
+            },
+          })),
+        };
+        return {
+          artifacts: [readyArtifact],
+          plan: await context.preparePlan!(candidate),
+          worker: {
+            artifacts: [],
+            jobId: 'job-artwork-repair',
+            planId: candidate.planId,
+            qualityReport: { passed: true },
+          },
+        };
+      });
+      vi.mocked(capability.plan).mockImplementation(async () => ({
+        ...samplePlan,
+        slides: [
+          {
+            ...samplePlan.slides[0],
+            notes: 'Do not overwrite the original notes',
+            metadata: {
+              visualAssets: [
+                {
+                  visualId: 'subject',
+                  kind: 'scientific-illustration',
+                  origin: 'generated',
+                  ref: '/api/runtime/presentation/artifacts/new-art',
+                },
+              ],
+            },
+            svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><image href="/api/runtime/presentation/artifacts/new-art" width="200" height="200"/></svg>',
+          },
+        ],
+      }));
+      const prepare: PresentationRevisionAssetPlanner['prepare'] = vi.fn(async (request) => ({
+        assetArtifactIds: request.revision.requestId === 'initial-assets' ? [] : ['new-art'],
+        input: request.jobInput,
+        intents: [],
+      }));
+      const visualCritic: PresentationVisualCritic = {
+        review: vi
+          .fn()
+          .mockResolvedValueOnce({
+            issues: [
+              {
+                category,
+                visualId: 'subject',
+                evidence: 'Photorealistic subject conflicts with watercolor reference',
+                instruction:
+                  'Redraw only the subject with the learned watercolor brushwork, transparent background',
+                severity: 'major',
+                slideId: 'cover',
+              },
+            ],
+            passed: false,
+            schemaVersion: 1,
+            summary: 'Subject style mismatch',
+          })
+          .mockResolvedValueOnce({
+            issues: [],
+            passed: true,
+            schemaVersion: 1,
+            summary: 'Style restored',
+          }),
+      };
+      const port = new PresentationGenerationPort(
+        {
+          artifactStore: store,
+          capability,
+          contextFactory: () => ({
+            plannerContext: {},
+            workerContext: {
+              convert: vi.fn(),
+              jobId: 'ignored',
+              qualityCheck: vi.fn(),
+              workspace: { path: '/tmp', write: vi.fn() },
+            },
+          }),
+          idFactory: () => 'job-artwork-repair',
+          templateLibrary: {
+            get: vi.fn(async () => ({
+              ...pptxProfile,
+              source: { kind: 'plan', planId: 'source-plan' },
+            })),
+            resolve: vi.fn(async () => structuredClone(pptxApplication)),
+          } as never,
+          revisionAssetPlanner: { prepare, prepareInitial: vi.fn() },
+          visualCritic,
+        },
+        scope,
+      );
+      await port.createJob({ ...input, template: 'tmpl-pptx' });
+      await vi.waitFor(async () =>
+        expect((await port.getJob('job-artwork-repair'))?.state).toBe('completed'),
+      );
+      expect(prepare).toHaveBeenCalledWith(
+        expect.objectContaining({
+          revision: expect.objectContaining({
+            requestId: expect.stringMatching(/^template-visual-repair:[a-f\d]{24}$/u),
+            target: { type: 'slide', slideNumber: 1 },
+          }),
+          jobInput: expect.objectContaining({
+            options: expect.objectContaining({ templateVisual }),
+          }),
+        }),
+      );
+      expect(visualCritic.review).toHaveBeenCalledTimes(2);
+      const saved = await port.readPlan('job-artwork-repair');
+      expect(saved.plan?.slides[0]).toMatchObject({
+        slideId: 'cover',
+        order: 1,
+        metadata: {
+          generatedAssetRefs: ['new-art'],
+          visualAssets: [
+            { visualId: 'subject', ref: '/api/runtime/presentation/artifacts/new-art' },
+          ],
+        },
+      });
+      expect(saved.plan?.slides[0].notes).toBe(
+        category === 'scientific-semantics' ? 'Do not overwrite the original notes' : undefined,
+      );
+      expect((await port.getJob('job-artwork-repair'))?.artifactIds).toContain('new-art');
+    },
+  );
+
+  it('retains a draft and blocks publication when a major visual repair is unavailable', async () => {
     const capability = {
       execute: vi.fn(async (_scope, _input, context) => {
         const prepared = await context.preparePlan(samplePlan);
@@ -1179,11 +1506,14 @@ describe('PresentationGenerationPort completed-state template application', () =
 
     await port.createJob({ ...input, template: 'tmpl-pptx' });
     await vi.waitFor(async () =>
-      expect((await port.getJob('job-repair-fallback'))?.state).toBe('completed'),
+      expect((await port.getJob('job-repair-fallback'))?.state).toBe('failed'),
     );
 
     expect(capability.plan).toHaveBeenCalledOnce();
     expect(visualCritic.review).toHaveBeenCalledOnce();
+    expect((await port.getJob('job-repair-fallback'))?.error?.code).toBe(
+      'PRESENTATION_QUALITY_FAILED',
+    );
     await expect(port.readPlan('job-repair-fallback')).resolves.toMatchObject({
       plan: {
         designSpec: {

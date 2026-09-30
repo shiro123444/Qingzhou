@@ -1,8 +1,8 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type {
   ArtifactSnapshot,
@@ -43,6 +43,20 @@ const typeTitle = (value: string) => {
 };
 
 describe('PresentationStudio production transport regression (C-78)', () => {
+  // The suite's shared environment persists DOM, storage, timers and the URL between cases: the studio
+  // deep-links its selected job into `?jobId=`, so without a reset the next test mounted straight into
+  // the previous test's job and never reached its own empty state.
+  const resetEnvironment = () => {
+    cleanup();
+    document.body.innerHTML = '';
+    window.localStorage.clear();
+    window.sessionStorage.clear();
+    window.history.replaceState(null, '', '/');
+  };
+
+  beforeEach(resetEnvironment);
+  afterEach(resetEnvironment);
+
   it('shows the honest Runtime HTTP badge and no demo badge while streaming errors occur', () => {
     const fetcher = vi.fn(async () => jsonResponse(503, {}));
     render(<PresentationStudio client={httpClient(fetcher)} />);
@@ -104,24 +118,37 @@ describe('PresentationStudio production transport regression (C-78)', () => {
   });
 
   it('recovers through the real HTTP seam and dismisses the hint only on success', async () => {
-    const fetcher = vi
-      .fn()
-      .mockResolvedValueOnce(
-        jsonResponse(503, {
-          error: { code: 'PROVIDER_UNAVAILABLE', message: 'PPT Master is not configured' },
-        }),
-      )
-      .mockResolvedValueOnce(jsonResponse(200, queuedJob('job-http-recovered')));
+    // The studio restores the job list first, so the mock must key off the request, not off order:
+    // a `mockResolvedValueOnce` chain handed the 503 to the restore call and the create the 200.
+    let configured = false;
+    const fetcher = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url) === '/api/runtime/presentation/jobs' && init?.method === 'POST') {
+        if (!configured) {
+          return jsonResponse(503, {
+            error: { code: 'PROVIDER_UNAVAILABLE', message: 'PPT Master is not configured' },
+          });
+        }
+        return jsonResponse(200, queuedJob('job-http-recovered'));
+      }
+      return jsonResponse(404, {});
+    });
+    const createCalls = () =>
+      fetcher.mock.calls.filter(
+        (call) =>
+          String(call[0]).endsWith('/api/runtime/presentation/jobs') && call[1]?.method === 'POST',
+      );
+
     render(<PresentationStudio client={httpClient(fetcher)} />);
 
     typeTitle('HTTP recovery deck');
     fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
-    await screen.findByTestId('presentation-provider-unavailable');
+    await screen.findByTestId('presentation-provider-unavailable', {}, { timeout: 5000 });
 
+    configured = true;
     fireEvent.click(screen.getByTestId('presentation-provider-resubmit'));
 
     await waitFor(() => {
-      expect(fetcher).toHaveBeenCalledTimes(2);
+      expect(createCalls()).toHaveLength(2);
     });
     await waitFor(() => {
       expect(screen.getByTestId('presentation-job-job-http-recovered')).toBeInTheDocument();
@@ -142,15 +169,21 @@ describe('PresentationStudio production transport regression (C-78)', () => {
       }
       return jsonResponse(404, {});
     });
+    const createCalls = () =>
+      fetcher.mock.calls.filter(
+        (call) =>
+          String(call[0]).endsWith('/api/runtime/presentation/jobs') && call[1]?.method === 'POST',
+      );
     render(<PresentationStudio client={httpClient(fetcher)} />);
 
     typeTitle('HTTP retry deck');
     fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
-    await screen.findByTestId('presentation-provider-unavailable');
+    await screen.findByTestId('presentation-provider-unavailable', {}, { timeout: 5000 });
 
     fireEvent.click(screen.getByTestId('presentation-provider-resubmit'));
     await waitFor(() => {
-      expect(fetcher).toHaveBeenCalledTimes(2);
+      // Only the create endpoint is counted: the studio also restores the job list on mount.
+      expect(createCalls()).toHaveLength(2);
     });
 
     expect(screen.getByTestId('presentation-provider-unavailable')).toBeInTheDocument();
@@ -158,15 +191,30 @@ describe('PresentationStudio production transport regression (C-78)', () => {
     expect(screen.getByTestId('studio-empty-state')).toBeInTheDocument();
   });
 
-  it('shows no recovery entry without a draft and never fires the create endpoint', () => {
-    const fetcher = vi.fn(async () => jsonResponse(200, {}));
+  it('shows no recovery entry without a draft and never fires the create endpoint', async () => {
+    const fetcher = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse(200, {}),
+    );
     render(<PresentationStudio client={httpClient(fetcher)} />);
 
     expect(screen.queryByTestId('presentation-provider-resubmit')).not.toBeInTheDocument();
     expect(screen.queryByTestId('presentation-provider-unavailable')).not.toBeInTheDocument();
-    // No accidental POST went out and the empty state stays honest.
-    expect(fetcher).not.toHaveBeenCalled();
-    expect(screen.getByTestId('studio-empty-state')).toBeInTheDocument();
+    // An empty job-list body means "no saved works", so the empty state stays honest instead of
+    // leaking an internal `Cannot read properties of undefined` notice while the spinner hangs.
+    // An empty job-list body means "no saved works", so the empty state stays honest instead of
+    // leaking an internal `Cannot read properties of undefined` notice while the spinner hangs.
+    expect(
+      await screen.findByTestId('studio-empty-state', {}, { timeout: 15_000 }),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId('presentation-client-error')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('studio-loading')).not.toBeInTheDocument();
+    // No accidental create POST went out; only the job-list restore call may.
+    expect(
+      fetcher.mock.calls.filter(
+        (call) =>
+          String(call[0]).endsWith('/api/runtime/presentation/jobs') && call[1]?.method === 'POST',
+      ),
+    ).toHaveLength(0);
   });
 
   it('preserves jobs, artifacts and lastSeq through a real-HTTP provider failure', async () => {

@@ -479,9 +479,6 @@ export class GLMMultimodalChatAdapter implements GLMMultimodalChatPort {
     const payload: Record<string, unknown> = {
       messages: validatedMessages,
       model: resolvedModel,
-      // DeepSeek V4 thinking is on by default and can spend max_tokens on
-      // reasoning_content, leaving message.content empty.
-      thinking: { type: 'enabled' },
       ...(typeof request.temperature === 'number' ? { temperature: request.temperature } : {}),
       ...(typeof request.max_tokens === 'number' ? { max_tokens: request.max_tokens } : {}),
       ...(request.response_format ? { response_format: request.response_format } : {}),
@@ -534,17 +531,11 @@ export class GLMMultimodalChatAdapter implements GLMMultimodalChatPort {
       if (response.status === 429 || response.status >= 500) {
         throw unavailable(`Multimodal chat provider returned HTTP ${response.status}`);
       }
-      let errBody = '';
-      try {
-        if (typeof response.text === 'function') errBody = await response.text();
-        else if (typeof response.json === 'function')
-          errBody = JSON.stringify(await response.json());
-      } catch {
-        // ignore
-      }
+      // Gateways may echo Authorization headers or prompts in error bodies.
+      // Only the status is safe to propagate through the public runtime API.
       throw providerError(
         'CHAT_REQUEST_INVALID',
-        `Multimodal chat provider returned HTTP ${response.status}${errBody ? `: ${errBody}` : ''}`,
+        `Multimodal chat provider returned HTTP ${response.status}`,
       );
     }
 

@@ -93,5 +93,23 @@ export function createPresentationContextServices(
       if (!result.results?.length) throw new Error('搜索服务没有返回可用来源，请调整关键词后重试');
       return { results: result.results.slice(0, 6) };
     },
+    fetchPages: async (urls) => {
+      const allowed = [
+        ...new Set(urls.map((url) => url.trim()).filter((url) => url.startsWith('https://'))),
+      ].slice(0, 3);
+      if (!allowed.length) throw new Error('只能抓取 https 页面');
+      const crawled = await new SearchService().crawlPages({ urls: allowed });
+      return {
+        pages: crawled.results.map((page) => {
+          const body = page.data && 'content' in page.data ? page.data.content : '';
+          const title = page.data && 'title' in page.data ? page.data.title : undefined;
+          return {
+            url: page.originalUrl,
+            ...(title ? { title: String(title).slice(0, 200) } : {}),
+            content: String(body ?? '').slice(0, 6000),
+          };
+        }),
+      };
+    },
   };
 }

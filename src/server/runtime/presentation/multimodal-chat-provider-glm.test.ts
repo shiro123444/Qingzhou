@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, expect, it, vi } from 'vitest';
 
 import type { RuntimeScope } from '../../../../packages/runtime-contracts/src';
@@ -175,7 +176,7 @@ describe('GLMMultimodalChatAdapter (C-106)', () => {
     const body = JSON.parse(capturedInit?.body as string);
     expect(body.model).toBe('glm-5.3-flash');
     expect(body.temperature).toBe(0.7);
-    expect(body.thinking).toEqual({ type: 'enabled' });
+    expect(body.thinking).toBeUndefined();
     expect(body.messages).toEqual([
       { content: 'You are a helpful assistant', role: 'system' },
       { content: 'Hello GLM', role: 'user' },

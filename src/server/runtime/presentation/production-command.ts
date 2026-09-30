@@ -26,6 +26,11 @@ export interface ProductionPresentationProviderOptions {
   readonly command?: readonly string[];
   /** Static argv inserted between command and operation-specific arguments. */
   readonly commandArgs?: readonly string[];
+  /**
+   * Generated images one job may request. A deck whose content plan needs more raster
+   * visuals than this cannot be satisfied, so the value is deployable configuration.
+   */
+  readonly imageBudget?: number;
   /** Provider identifier used by the PresentationPort and audit records. */
   readonly provider?: string;
   /** Runner identifier checked against `allowedRunnerIds`. */

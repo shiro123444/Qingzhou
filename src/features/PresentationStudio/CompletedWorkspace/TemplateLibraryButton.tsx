@@ -571,7 +571,20 @@ const TemplateLibraryButton = memo<TemplateLibraryButtonProps>(
                         onClick={() => void apply(template)}
                       >
                         <Icon aria-hidden icon={LayoutTemplate} size={22} />
-                        <span className={styles.name}>{template.name}</span>
+                        <span className={styles.name}>
+                          {template.name}
+                          {template.learning && (
+                            <span className={styles.learningReason}>
+                              {' · '}
+                              {t('presentationTemplates.learningCoverage', {
+                                observed: template.learning.observedPages.length,
+                                total: template.learning.totalPages,
+                              })}
+                              {' · '}
+                              {t(`presentationTemplates.learningState.${template.learning.state}`)}
+                            </span>
+                          )}
+                        </span>
                         <span aria-hidden className={styles.palette}>
                           {template.constraints?.palette.slice(0, 3).map((color, index) => (
                             <span key={`${color}:${index}`} style={{ backgroundColor: color }} />

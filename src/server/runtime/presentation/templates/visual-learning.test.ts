@@ -7,7 +7,7 @@ import sharp from 'sharp';
 import { afterEach, expect, it, vi } from 'vitest';
 
 import { InMemoryPresentationArtifactStore } from '../artifact-store';
-import type { GLMMultimodalChatPort } from '../multimodal-chat-provider-glm';
+import { GLMChatProviderError, type GLMMultimodalChatPort } from '../multimodal-chat-provider-glm';
 import { FilePresentationTemplateLibrary } from './library';
 import type { TemplateMediaAnalyzer } from './media-analysis';
 import { TemplateVisualLearning } from './visual-learning';
@@ -408,4 +408,338 @@ it('surveys the whole native deck and keeps a diverse bounded set instead of fix
   );
   expect(pages).toHaveLength(6);
   expect(pages.map((page) => page.page)).toEqual(expect.arrayContaining([1, 8]));
+});
+
+it('includes an embedded formula page that uniform sampling and pixel similarity would miss', async () => {
+  const root = await mkdtemp(nodePath.join(tmpdir(), 'qingzhou-semantic-survey-'));
+  directories.push(root);
+  const entries = unzipSync(fixture(48));
+  entries['ppt/slides/slide2.xml'] = strToU8(
+    '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:graphicFrame><p:oleObj progId="Equation.3"/></p:graphicFrame></p:spTree></p:cSld></p:sld>',
+  );
+  const library = new FilePresentationTemplateLibrary({ root });
+  const profile = await library.importPptx(scope, {
+    bytes: zipSync(entries),
+    name: 'Formula course',
+  });
+  const pixels = await sharp({
+    create: { width: 160, height: 90, channels: 3, background: '#ffffff' },
+  })
+    .jpeg()
+    .toBuffer();
+  const renderer = vi.fn(async (_bytes: Uint8Array, pages: number[]) => {
+    expect(pages.length).toBeLessThanOrEqual(24);
+    expect(pages).toEqual(expect.arrayContaining([1, 2, 48]));
+    return pages.map((page) => ({ page, bytes: pixels }));
+  });
+  const pages = await new TemplateVisualLearning({
+    chat: {} as GLMMultimodalChatPort,
+    library,
+    renderer,
+    store: new InMemoryPresentationArtifactStore(),
+  }).render({ templateId: profile.templateId }, { scope });
+  expect(pages).toHaveLength(6);
+  expect(pages.find((page) => page.page === 2)?.contentKinds).toContain(
+    'formula-or-embedded-object',
+  );
+});
+
+interface ProbeRequest {
+  messages: { content: unknown }[];
+}
+
+/** Page numbers the model was actually asked to look at, read back from the request itself. */
+const sentPages = (request: ProbeRequest): number[] => {
+  const pages: number[] = [];
+  for (const message of request.messages) {
+    if (!Array.isArray(message.content)) continue;
+    for (const part of message.content as { text?: string; type?: string }[]) {
+      if (part.type !== 'text') continue;
+      const page = /原稿第 (\d+) 页/u.exec(part.text ?? '')?.[1];
+      if (page) pages.push(Number(page));
+    }
+  }
+  return pages;
+};
+
+const analysisFor = (pages: number[]) => ({
+  summary: '图像密集型模板',
+  families: pages.map((page) => ({
+    artwork: '摄影底图',
+    composition: '照片与留白',
+    id: `family-${page}`,
+    name: `视觉族 ${page}`,
+    pages: [page],
+    palette: ['#113355'],
+    preserve: ['照片构图'],
+    typography: '大标题',
+  })),
+  components: pages.map((page) => ({
+    box: { height: 0.4, width: 0.4, x: 0.1, y: 0.1 },
+    containsText: false,
+    familyId: `family-${page}`,
+    id: `photo-${page}`,
+    name: `照片 ${page}`,
+    page,
+    rationale: '独立照片',
+    role: 'artwork' as const,
+    treatment: 'crop' as const,
+  })),
+  guidance: '保留照片族差异',
+});
+
+const imageHeavyTemplate = async () => {
+  const root = await mkdtemp(nodePath.join(tmpdir(), 'jumi-visual-budget-'));
+  directories.push(root);
+  const library = new FilePresentationTemplateLibrary({ root });
+  const profile = await library.importPptx(scope, { bytes: fixture(8), name: 'Image heavy' });
+  const renderer = vi.fn(async (_bytes: Uint8Array, pages: number[]) =>
+    Promise.all(
+      pages.map(async (page) => ({
+        bytes: await sharp({
+          create: {
+            background: { b: page * 20, g: 255 - page * 20, r: page * 28 },
+            channels: 3,
+            height: 90,
+            width: 160,
+          },
+        })
+          .jpeg()
+          .toBuffer(),
+        page,
+      })),
+    ),
+  );
+  return { library, profile, renderer };
+};
+
+const learningWith = (
+  chat: GLMMultimodalChatPort['chat'],
+  library: FilePresentationTemplateLibrary,
+  renderer: ReturnType<typeof vi.fn>,
+) =>
+  new TemplateVisualLearning({
+    chat: {
+      chat,
+      manifest: {
+        displayName: 'Vision',
+        model: 'vision-test',
+        providerId: 'test',
+        supportsIdempotency: true,
+        supportsVision: true,
+      },
+      providerId: 'test',
+    },
+    library,
+    renderer,
+    store: new InMemoryPresentationArtifactStore(),
+  });
+
+it('retries a dropped reference transfer with fewer pages instead of blaming the template', async () => {
+  const { library, profile, renderer } = await imageHeavyTemplate();
+  const failure = new GLMChatProviderError(
+    'CHAT_UNAVAILABLE',
+    '模型连接暂时中断，已完成的步骤已保留，请继续重试。',
+  );
+  let attempts = 0;
+  const chat = vi.fn<GLMMultimodalChatPort['chat']>(async (request) => {
+    attempts += 1;
+    if (attempts === 1) throw failure;
+    const pages = sentPages(request as unknown as ProbeRequest);
+    return {
+      choices: [
+        {
+          index: 0,
+          message: { content: JSON.stringify(analysisFor(pages)), role: 'assistant' as const },
+        },
+      ],
+      created: 1,
+      id: 'vision',
+      model: 'vision-test',
+    };
+  });
+  const learning = learningWith(chat, library, renderer);
+  const result = await learning.analyze({ templateId: profile.templateId }, { scope });
+  const first = sentPages(chat.mock.calls[0][0] as unknown as ProbeRequest);
+  const second = sentPages(chat.mock.calls[1][0] as unknown as ProbeRequest);
+  expect(first).toHaveLength(6);
+  expect(second).toHaveLength(3);
+  expect(result.pages.map((page) => page.page)).toEqual(second);
+  expect(result.families.flatMap((family) => family.pages)).toEqual(second);
+});
+
+it('keeps a persistent transport failure a provider error, not a template defect', async () => {
+  const { library, profile, renderer } = await imageHeavyTemplate();
+  const chat = vi.fn<GLMMultimodalChatPort['chat']>(async () => {
+    throw new GLMChatProviderError('CHAT_UNAVAILABLE', '模型连接暂时中断，已完成的步骤已保留。');
+  });
+  await expect(
+    learningWith(chat, library, renderer).analyze({ templateId: profile.templateId }, { scope }),
+  ).rejects.toMatchObject({ code: 'CHAT_UNAVAILABLE' });
+  expect(chat).toHaveBeenCalledTimes(2);
+});
+
+it('ignores a malformed model-authored design program instead of failing the analysis', async () => {
+  const { library, profile, renderer } = await imageHeavyTemplate();
+  const chat = vi.fn<GLMMultimodalChatPort['chat']>(async (request) => {
+    const pages = sentPages(request as unknown as ProbeRequest);
+    return {
+      choices: [
+        {
+          index: 0,
+          message: {
+            content: JSON.stringify({
+              ...analysisFor(pages),
+              designProgram: {
+                archetypes: [{ id: 'arch_agenda', regions: [{ role: 'content' }] }],
+                schemaVersion: 1,
+              },
+            }),
+            role: 'assistant' as const,
+          },
+        },
+      ],
+      created: 1,
+      id: 'vision',
+      model: 'vision-test',
+    };
+  });
+  const result = await learningWith(chat, library, renderer).analyze(
+    { templateId: profile.templateId },
+    { scope },
+  );
+  expect(result.families).toHaveLength(6);
+  expect(result.designProgram.archetypes.length).toBeGreaterThan(0);
+});
+
+it('reports malformed component coordinates as a content defect without shrinking the request', async () => {
+  const { library, profile, renderer } = await imageHeavyTemplate();
+  const chat = vi.fn<GLMMultimodalChatPort['chat']>(async (request) => {
+    const pages = sentPages(request as unknown as ProbeRequest);
+    const analysis = analysisFor(pages);
+    return {
+      choices: [
+        {
+          index: 0,
+          message: {
+            content: JSON.stringify({
+              ...analysis,
+              components: [
+                { ...analysis.components[0], box: { height: 40, width: 30, x: 10, y: 20 } },
+              ],
+            }),
+            role: 'assistant' as const,
+          },
+        },
+      ],
+      created: 1,
+      id: 'vision',
+      model: 'vision-test',
+    };
+  });
+  await expect(
+    learningWith(chat, library, renderer).analyze({ templateId: profile.templateId }, { scope }),
+  ).rejects.toThrow('组件坐标不可靠');
+  expect(
+    chat.mock.calls.map((call) => sentPages(call[0] as unknown as ProbeRequest).length),
+  ).toEqual([6, 6]);
+});
+
+it('resumes a persisted observation after a worker restart without repeating vision work', async () => {
+  const root = await mkdtemp(nodePath.join(tmpdir(), 'ppt-learning-resume-'));
+  directories.push(root);
+  const library = new FilePresentationTemplateLibrary({ root });
+  const profile = await library.importPptx(scope, { bytes: fixture(8), name: 'Eight pages' });
+  const store = new InMemoryPresentationArtifactStore();
+  const jpeg = await sharp({
+    create: { width: 200, height: 100, channels: 3, background: '#008866' },
+  })
+    .jpeg()
+    .toBuffer();
+  const renderer = vi.fn(async (_bytes, pages: number[]) =>
+    pages.map((page) => ({ page, bytes: jpeg })),
+  );
+  const chat = vi.fn<GLMMultimodalChatPort['chat']>(async () => ({
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: 'assistant',
+          content: JSON.stringify({
+            summary: '简洁绿底',
+            families: [
+              {
+                id: 'green',
+                name: '绿色',
+                pages: [1, 8],
+                palette: ['#008866'],
+                typography: '大标题',
+                composition: '留白',
+                artwork: '纯色',
+                preserve: ['配色'],
+              },
+            ],
+            components: [],
+            guidance: '保留绿色',
+            questions: [],
+          }),
+        },
+      },
+    ],
+    id: 'observation',
+    model: 'test',
+    created: 1,
+  }));
+  const options = {
+    library,
+    store,
+    renderer,
+    chat: {
+      chat,
+      providerId: 'test',
+      manifest: {
+        providerId: 'test',
+        model: 'test',
+        displayName: 'Vision',
+        supportsVision: true,
+        supportsIdempotency: true,
+      },
+    } satisfies GLMMultimodalChatPort,
+  };
+  const save = vi
+    .spyOn(library, 'saveVisual')
+    .mockRejectedValueOnce(new Error('disk temporarily unavailable'));
+  await expect(
+    new TemplateVisualLearning(options).analyze({ ...profile, pages: [1, 8] }, { scope }),
+  ).rejects.toThrow('disk temporarily unavailable');
+  expect(await library.getLearningJob(scope, profile)).toMatchObject({
+    state: 'failed',
+    phase: 'compile',
+    observation: { pages: [{ page: 1 }, { page: 8 }] },
+  });
+  save.mockRestore();
+  // A fresh learner has no in-memory pending map or previous conversation context.
+  const result = await new TemplateVisualLearning(options).analyze(
+    { ...profile, resume: true },
+    { scope },
+  );
+  expect(chat).toHaveBeenCalledTimes(1);
+  expect(renderer).toHaveBeenCalledTimes(1);
+  expect(result.learning.coverage).toEqual({
+    totalPages: 8,
+    observedPages: [1, 8],
+    remainingPages: [2, 3, 4, 5, 6, 7],
+  });
+  expect(await library.getLearningJob(scope, profile)).toMatchObject({
+    state: 'ready',
+    attempt: 2,
+  });
+  const listed = (await library.list(scope))[0];
+  expect(listed.learning).toMatchObject({ state: 'ready', observedPages: [1, 8], totalPages: 8 });
+  expect(listed.learning).not.toHaveProperty('input');
+  expect(listed.learning).not.toHaveProperty('observation');
+  expect(await library.list({ ...scope, userId: 'someone-else' })).toEqual([]);
+  await expect(
+    library.getLearningJob({ ...scope, userId: 'someone-else' }, profile),
+  ).rejects.toThrow('Owned template');
 });

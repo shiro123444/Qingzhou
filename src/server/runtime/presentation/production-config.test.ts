@@ -32,6 +32,27 @@ describe('C-75 production provider configuration loader', () => {
       runnerId: 'ppt-master-runner',
     });
   });
+  it('exposes a deployable generated-image budget and rejects malformed values', () => {
+    expect(
+      loadProductionPresentationProviderOptions({
+        ...validEnv,
+        [PRODUCTION_PRESENTATION_ENV_KEYS.imageBudget]: '16',
+      }).imageBudget,
+    ).toBe(16);
+    expect(loadProductionPresentationProviderOptions(validEnv).imageBudget).toBeUndefined();
+    expect(
+      loadProductionPresentationProviderOptions({
+        ...validEnv,
+        [PRODUCTION_PRESENTATION_ENV_KEYS.imageBudget]: '',
+      }).imageBudget,
+    ).toBeUndefined();
+    expect(() =>
+      loadProductionPresentationProviderOptions({
+        ...validEnv,
+        [PRODUCTION_PRESENTATION_ENV_KEYS.imageBudget]: '-1',
+      }),
+    ).toThrow(/non-negative integer/u);
+  });
 
   it('returns incomplete options for missing provider or command and C-73 stays unavailable', () => {
     const missing = loadProductionPresentationProviderOptions({});

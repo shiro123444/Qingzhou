@@ -90,6 +90,54 @@ describe('autonomous presentation conversation', () => {
     }
   });
 
+  it('asks before downloading search results and fetches only after the teacher confirms the urls', async () => {
+    const url = 'https://example.com/kkt';
+    const fetchPages = vi.fn(async () => ({ pages: [{ url, content: 'KKT 条件来自 Boyd。' }] }));
+    const runtime = createPresentationContextRuntime({
+      readFile: vi.fn(),
+      readSkill: vi.fn(),
+      search: vi.fn(),
+      fetchPages,
+      listSkills: async () => [],
+    });
+    try {
+      const paused = await createPresentationConversationCapability({
+        chat: chatPort(op('context.fetchPages', { urls: [url] })),
+      }).execute({ ...command, tools: { search: true, skillIds: [] } }, { scope, tools: runtime });
+      expect(fetchPages).not.toHaveBeenCalled();
+      expect(paused.question?.title).toBe('要抓取这些页面吗');
+      expect(paused.question?.context).toEqual([url]);
+      expect(paused.question?.choices?.map((choice) => choice.label)).toEqual([
+        '抓取这些页面',
+        '只用搜索摘要',
+      ]);
+      const confirmed = await createPresentationConversationCapability({
+        chat: chatPort(op('context.fetchPages', { urls: [url] }), {
+          phase: 'intake',
+          message: '已把来源写进资料。',
+        }),
+      }).execute(
+        {
+          ...command,
+          messages: [
+            ...command.messages,
+            {
+              role: 'user',
+              content: `确认后将下载这些链接的正文：\n${url}\n用户决定：抓取这些页面`,
+            },
+          ],
+          tools: { search: true, skillIds: [] },
+        },
+        { scope, tools: runtime },
+      );
+      expect(fetchPages).toHaveBeenCalledWith([url]);
+      expect(confirmed.brief.research).toContain('Boyd');
+      expect(confirmed.message).toBe('已把来源写进资料。');
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
   it('repairs empty decisions without rerunning already completed tools', async () => {
     const chat = chatPort(
       op('planning.update', { topic: '已确认的主题', plan }),

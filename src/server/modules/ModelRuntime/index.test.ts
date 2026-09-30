@@ -26,7 +26,11 @@ import { type ClientSecretPayload } from '@lobechat/types';
 import { ModelProvider } from 'model-bank';
 import { describe, expect, it, vi } from 'vitest';
 
-import { buildPayloadFromKeyVaults, initModelRuntimeWithUserPayload } from './index';
+import {
+  buildPayloadFromKeyVaults,
+  initModelRuntimeWithUserPayload,
+  resolveRuntimeProvider,
+} from './index';
 
 // 模拟依赖项
 vi.mock('@/envs/llm', () => ({
@@ -65,38 +69,62 @@ vi.mock('@/envs/llm', () => ({
  * with user payload. Test case below will test both the methods
  */
 describe('initModelRuntimeWithUserPayload method', () => {
-  it('pins Nexus chat to the configured Gemini backend while preserving image runtime', async () => {
-    vi.stubEnv('ANTHROPIC_AUTH_TOKEN', 'test-jumi-chat-key');
-    vi.stubEnv('ANTHROPIC_BASE_URL', 'https://chat.example.test');
-    const imageRuntime = { chat: vi.fn(), createImage: vi.fn() } as unknown as ModelRuntime;
-    const chatRuntime = {
-      chat: vi.fn().mockResolvedValue('chat-response'),
-    } as unknown as ModelRuntime;
+  it('preserves Nexus user credentials and model despite unrelated chat environment values', async () => {
+    vi.stubEnv('ANTHROPIC_AUTH_TOKEN', 'deployment-chat-key');
+    vi.stubEnv('ANTHROPIC_BASE_URL', 'https://deployment.example.test');
+    vi.stubEnv('ANTHROPIC_MODEL', 'deployment-model');
+    const chat = vi.fn().mockResolvedValue('chat-response');
+    const originalRuntime = { chat, createImage: vi.fn() } as unknown as ModelRuntime;
     const initialize = vi
       .spyOn(ModelRuntime, 'initializeWithProvider')
-      .mockReturnValueOnce(imageRuntime)
-      .mockReturnValueOnce(chatRuntime);
+      .mockReturnValue(originalRuntime);
     try {
       const runtime = initModelRuntimeWithUserPayload(ModelProvider.Nexus, {
-        apiKey: 'image-key',
-        baseURL: 'https://image.example.test',
+        apiKey: 'user-key',
+        baseURL: 'https://cli.tinimodel.com/v1',
       });
-      expect(runtime).toBe(imageRuntime);
-      expect(runtime.createImage).toBe(imageRuntime.createImage);
-      await runtime.chat({ model: 'stale-model', messages: [] });
-      expect(chatRuntime.chat).toHaveBeenCalledWith(
-        expect.objectContaining({ model: 'gemini-3.8-flash-high' }),
-        undefined,
-      );
-      expect(initialize.mock.calls[1][1]).toEqual(
+      expect(runtime).toBe(originalRuntime);
+      expect(runtime.chat).toBe(chat);
+      await runtime.chat({ model: 'user-selected-model', messages: [] });
+      expect(chat).toHaveBeenCalledWith({ model: 'user-selected-model', messages: [] });
+      expect(initialize).toHaveBeenCalledTimes(1);
+      expect(initialize).toHaveBeenCalledWith(
+        ModelProvider.Nexus,
         expect.objectContaining({
-          apiKey: 'test-jumi-chat-key',
-          baseURL: 'https://chat.example.test/v1',
+          apiKey: 'user-key',
+          baseURL: 'https://cli.tinimodel.com/v1',
         }),
+        undefined,
       );
     } finally {
       initialize.mockRestore();
       vi.unstubAllEnvs();
+    }
+  });
+
+  it('resolves custom OpenAI-compatible providers without replacing their endpoint', () => {
+    const initialize = vi
+      .spyOn(ModelRuntime, 'initializeWithProvider')
+      .mockReturnValue({} as ModelRuntime);
+    try {
+      const runtimeProvider = resolveRuntimeProvider('my-tini-provider', 'openai');
+      expect(runtimeProvider).toBe('openai');
+      expect(resolveRuntimeProvider('my-tini-provider')).toBe('openai');
+      initModelRuntimeWithUserPayload(
+        'my-tini-provider',
+        buildPayloadFromKeyVaults(
+          { apiKey: 'user-tini-key', baseURL: 'https://cli.tinimodel.com/v1' },
+          runtimeProvider,
+        ),
+        { userId: 'alice' },
+      );
+      expect(initialize).toHaveBeenCalledWith(
+        'openai',
+        { apiKey: 'user-tini-key', baseURL: 'https://cli.tinimodel.com/v1', userId: 'alice' },
+        undefined,
+      );
+    } finally {
+      initialize.mockRestore();
     }
   });
 

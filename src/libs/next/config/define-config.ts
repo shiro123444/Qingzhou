@@ -30,6 +30,9 @@ export function defineConfig(config: CustomNextConfig) {
       '*': [
         'public/**/*',
         '.next/static/**/*',
+        // MathJax loads font ranges dynamically; keep them in standalone deployments.
+        'node_modules/@mathjax/src/mjs/**/*',
+        'node_modules/.pnpm/@mathjax+mathjax-newcm-font@*/node_modules/@mathjax/mathjax-newcm-font/mjs/**/*',
 
         // Only needed for Docker standalone builds.
         // On Vercel (serverless), including native bindings can easily exceed function size limits.
@@ -353,6 +356,7 @@ export function defineConfig(config: CustomNextConfig) {
     // @napi-rs/canvas is a native module that can't be bundled by Turbopack
     // pdfjs-dist uses @napi-rs/canvas for DOMMatrix polyfill in Node.js environment
     serverExternalPackages: config.serverExternalPackages ?? [
+      '@mathjax/src',
       'pdfkit',
       '@napi-rs/canvas',
       '@lobehub/editor',

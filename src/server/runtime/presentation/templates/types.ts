@@ -1,3 +1,5 @@
+import type { PresentationLearningStatus } from '@/types/presentationLearning';
+
 import type { PresentationPlan } from '../../../../../packages/runtime-contracts/src';
 import type { TemplateVisualProfile } from './visual-types';
 
@@ -80,6 +82,10 @@ export interface TemplateProfile {
 }
 
 export type TemplateSummary = Omit<TemplateProfile, 'layouts' | 'designSpec' | 'media'> & {
+  learning?: Pick<
+    PresentationLearningStatus,
+    'state' | 'observedPages' | 'remainingPages' | 'totalPages'
+  >;
   layoutCount: number;
   mediaCount: number;
   videoCount: number;

@@ -555,6 +555,7 @@ export const PresentationStudio = memo<PresentationStudioProps>(
             clientError.code === 'PROVIDER_UNAVAILABLE' ? (
               <StudioNotice
                 key="provider-unavailable"
+                resetKey={clientError}
                 testId="presentation-provider-unavailable"
                 tone="warning"
                 action={
@@ -608,6 +609,7 @@ export const PresentationStudio = memo<PresentationStudioProps>(
               <StudioNotice
                 description={clientError.message}
                 key={`client-${clientError.code}`}
+                resetKey={clientError}
                 testId="presentation-client-error"
                 tone="error"
                 title={
@@ -626,6 +628,7 @@ export const PresentationStudio = memo<PresentationStudioProps>(
           {exportError ? (
             <StudioNotice
               key={`export-error-${exportError.artifactId}-${exportError.format}`}
+              resetKey={exportError}
               testId="presentation-export-error"
               tone="error"
               action={
@@ -664,6 +667,7 @@ export const PresentationStudio = memo<PresentationStudioProps>(
           {exported ? (
             <StudioNotice
               key={`export-${exported.artifactId}-${exported.format}`}
+              resetKey={exported}
               testId="presentation-export-notice"
               tone="success"
               description={

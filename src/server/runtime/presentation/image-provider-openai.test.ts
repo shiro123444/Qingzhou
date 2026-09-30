@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type {
   ImageGenerationContext,
@@ -33,6 +33,69 @@ const optionsFor = (fetcher: OpenAIImageFetcher, overrides: Record<string, unkno
 });
 
 describe('C-88 OpenAI-compatible ImageGenerationPort adapter', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('records HTTP status without reading or exposing an upstream error body', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const json = vi.fn(async () => ({ error: 'sk-test-secret private prompt' }));
+    const port = createOpenAIImageGenerationPort(
+      optionsFor(async () => ({ ok: false, status: 524, json })),
+    );
+    await expect(port.generate({ prompt: 'private prompt' }, context())).rejects.toMatchObject({
+      code: 'IMAGE_UNAVAILABLE',
+      message: 'Image provider returned HTTP 524',
+    });
+    expect(json).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith('[presentation.image] request failed', {
+      httpStatus: 524,
+      operation: 'generate',
+      phase: 'response',
+    });
+    expect(JSON.stringify(warn.mock.calls)).not.toMatch(/sk-test-secret|private prompt/u);
+  });
+
+  it.each(['ECONNRESET', 'sk-test-secret'])(
+    'only records allow-listed transport codes (%s)',
+    async (code) => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const port = createOpenAIImageGenerationPort(
+        optionsFor(async () => {
+          throw new TypeError('private prompt sk-test-secret', { cause: { code } });
+        }),
+      );
+      const expected = code === 'ECONNRESET' ? code : 'UNKNOWN';
+      await expect(port.generate({ prompt: 'private prompt' }, context())).rejects.toMatchObject({
+        code: 'IMAGE_UNAVAILABLE',
+        message: `Image provider connection failed (${expected})`,
+      });
+      expect(warn).toHaveBeenCalledWith('[presentation.image] request failed', {
+        operation: 'generate',
+        phase: 'transport',
+        transportCode: expected,
+      });
+      expect(JSON.stringify(warn.mock.calls)).not.toMatch(/sk-test-secret|private prompt/u);
+    },
+  );
+
+  it('distinguishes a failed local asset save from a failed image request', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const port = createOpenAIImageGenerationPort(
+      optionsFor(async () => response({ data: [{ b64_json: 'aGVsbG8=' }] }), {
+        assetSink: async () => {
+          throw new Error('private filesystem details');
+        },
+      }),
+    );
+    await expect(port.generate({ prompt: 'image' }, context())).rejects.toMatchObject({
+      code: 'IMAGE_UNAVAILABLE',
+      message: 'Generated image could not be saved',
+    });
+    expect(warn).toHaveBeenCalledWith('[presentation.image] asset processing failed', {
+      phase: 'persist',
+    });
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('private filesystem');
+  });
+
   it('maps prompt, size, quality and count to the Images API without exposing the key', async () => {
     const signal = new AbortController().signal;
     const fetcher = vi.fn<OpenAIImageFetcher>(async (_endpoint, init) => {

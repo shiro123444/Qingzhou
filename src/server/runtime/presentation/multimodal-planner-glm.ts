@@ -1,9 +1,9 @@
+import { parseString } from '../../../../packages/file-loaders/src/utils/parser-utils';
 /**
  * Multimodal Presentation Planner & Outline Generator.
  *
  * Uses the provider-neutral multimodal chat port to generate structured plans and outlines.
  */
-
 import type {
   PlannerContext,
   PresentationJobInput,
@@ -14,6 +14,25 @@ import type {
   RuntimeScope,
 } from '../../../../packages/runtime-contracts/src';
 import { reviseAnnotation } from './annotation';
+import { overlayAssetAnnotations } from './asset-annotations';
+import {
+  CONTENT_RENDERING_INSTRUCTIONS,
+  isNativeVisual,
+  isRasterVisual,
+  readContentIntents,
+  readVisualAssetBindings,
+  type VisualAssetBinding,
+  visualAssetBindingSchema,
+  visualRequirements,
+} from './content-intent';
+import { contentLayout } from './content-layout';
+import { inspectPresentationContent, promoteReadablePlainText } from './content-quality';
+import {
+  LESSON_RENDERING_INSTRUCTIONS,
+  prepareLessonDraft,
+  publicLessonStages,
+  readLessonPlan,
+} from './lesson';
 import {
   createTrustedChatImages,
   type GLMChatContentPart,
@@ -29,8 +48,15 @@ import {
   type RevisionAssetIntent,
   validateAssetPlacement,
 } from './revision-assets';
+import {
+  renderSemanticBlocks,
+  SEMANTIC_BLOCK_FORMAT,
+  semanticAuthoringSvg,
+} from './semantic-blocks';
+import { recoverSemanticSlideLayout } from './semantic-layout-recovery';
 import { completeStructuredJson } from './structured-json-chat';
 import { type TemplateApplication, templatePlannerInstructions } from './templates';
+import { inspectVisualOccupancy, reconcileNativeVisualAssets } from './visual-ownership';
 
 export interface GLMPresentationPlannerOptions {
   readonly chatPort: GLMMultimodalChatPort;
@@ -87,6 +113,7 @@ const normalizeSvg = (value: unknown, slideId: string, aspectRatio: string): str
 };
 
 interface PlannedVisualAsset {
+  readonly binding?: VisualAssetBinding;
   readonly layout?: PresentationAssetPlacement;
   readonly ref: string;
 }
@@ -101,6 +128,94 @@ const svgViewBox = (svg: string): number[] => {
     throw new PresentationPlanError('Image layout requires a finite SVG viewBox');
   return values;
 };
+
+/** Annotation coordinates follow the final composition, including deterministic reflow. */
+const actualAssetPlacement = (
+  svg: string,
+  asset: PlannedVisualAsset,
+): PresentationAssetPlacement | undefined => {
+  const [x, y, width, height] = svgViewBox(svg);
+  const tag = [...svg.matchAll(/<image\b[^>]*>/giu)].find((match) =>
+    presentationImageRefs(match[0]).some(
+      (ref) => ref.replace(/\?raw=true$/u, '') === presentationAssetHref(asset.ref),
+    ),
+  )?.[0];
+  if (!tag) return;
+  const value = (key: string) => Number(new RegExp(`\\s${key}=["']([^"']+)`, 'u').exec(tag)?.[1]);
+  const placement = {
+    x: (value('x') - x) / width,
+    y: (value('y') - y) / height,
+    width: value('width') / width,
+    height: value('height') / height,
+    fit: asset.layout?.fit ?? ('contain' as const),
+  };
+  if ([placement.x, placement.y, placement.width, placement.height].every(Number.isFinite))
+    return placement;
+};
+
+/** Keep the same image viewport aspect when moving annotated artwork, including letterboxing. */
+const preserveAnnotatedViewport = (
+  svg: string,
+  previous: string,
+  asset: PlannedVisualAsset,
+): string => {
+  const old = actualAssetPlacement(previous, asset);
+  const next = actualAssetPlacement(svg, asset);
+  if (!old || !next) return svg;
+  const [, , oldWidth, oldHeight] = svgViewBox(previous);
+  const [minX, minY, width, height] = svgViewBox(svg);
+  const aspect = (old.width * oldWidth) / (old.height * oldHeight);
+  if (!Number.isFinite(aspect) || aspect <= 0) return svg;
+  const boxWidth = next.width * width,
+    boxHeight = next.height * height;
+  const fittedWidth = Math.min(boxWidth, boxHeight * aspect);
+  const fittedHeight = fittedWidth / aspect;
+  const document = parseString(svg);
+  const image = Array.from(document.getElementsByTagName('image')).find(
+    (element) =>
+      (element.getAttribute('href') ?? element.getAttribute('xlink:href'))?.replace(
+        /\?raw=true$/u,
+        '',
+      ) === presentationAssetHref(asset.ref),
+  );
+  if (!image) return svg;
+  image.setAttribute('x', String(minX + next.x * width + (boxWidth - fittedWidth) / 2));
+  image.setAttribute('y', String(minY + next.y * height + (boxHeight - fittedHeight) / 2));
+  image.setAttribute('width', String(fittedWidth));
+  image.setAttribute('height', String(fittedHeight));
+  const original = Array.from(parseString(previous).getElementsByTagName('image')).find(
+    (element) =>
+      (element.getAttribute('href') ?? element.getAttribute('xlink:href'))?.replace(
+        /\?raw=true$/u,
+        '',
+      ) === presentationAssetHref(asset.ref),
+  );
+  image.setAttribute(
+    'preserveAspectRatio',
+    original?.getAttribute('preserveAspectRatio') || 'xMidYMid meet',
+  );
+  return document.toString();
+};
+
+const authoredBodyText = (svg: string, title: string): string[] =>
+  Array.from(parseString(svg).getElementsByTagName('text')).flatMap((text) => {
+    for (
+      let node: Element | null = text;
+      node;
+      node = node.parentNode?.nodeType === 1 ? (node.parentNode as Element) : null
+    )
+      if (
+        [
+          'data-content-id',
+          'data-scientific-diagram',
+          'data-formula-latex',
+          'data-asset-annotations',
+        ].some((key) => node!.hasAttribute(key))
+      )
+        return [];
+    const value = text.textContent?.trim();
+    return value && value !== title ? [value] : [];
+  });
 
 /** Fill only a region explicitly designed for this asset; never guess fixed coordinates. */
 const attachGeneratedAssets = (svg: string, assets: readonly PlannedVisualAsset[]): string => {
@@ -122,6 +237,28 @@ const attachGeneratedAssets = (svg: string, assets: readonly PlannedVisualAsset[
     result = `${result.slice(0, insertion)}${image}${result.slice(insertion)}`;
   }
   return result;
+};
+
+/**
+ * A wording revision must keep the page's existing real images. When the model drops one anyway,
+ * restore it verbatim from the base plan instead of failing the whole deck.
+ */
+const restorePreservedImages = (
+  composed: string,
+  original: string | undefined,
+  refs: readonly string[],
+): string => {
+  if (!original || !refs.length) return composed;
+  const present = new Set(presentationImageRefs(composed));
+  const missing = new Set(refs.filter((ref) => !present.has(ref)));
+  if (!missing.size) return composed;
+  const tags = [...original.matchAll(/<image\b[^>]*?\/?>/giu)].filter((match) => {
+    const href = /\b(?:xlink:)?href\s*=\s*["']([^"']+)["']/iu.exec(match[0])?.[1];
+    return href ? missing.has(href) : false;
+  });
+  const insertion = composed.lastIndexOf('</svg>');
+  if (!tags.length || insertion < 0) return composed;
+  return `${composed.slice(0, insertion)}${tags.map((match) => match[0]).join('')}${composed.slice(insertion)}`;
 };
 
 /** Normalize only an alias of an explicitly supplied asset; never guess a replacement. */
@@ -235,6 +372,29 @@ export class GLMPresentationPlanner implements PresentationPlanner {
       const composed: PresentationSlidePlan[] = [];
       for (const [pageIndex, page] of outline.entries()) {
         const pageId = `slide-${pageIndex + 1}`;
+        const resumed = Array.isArray(context.resumeSlides)
+          ? (context.resumeSlides as PresentationSlidePlan[]).find(
+              (s) => s.slideId === pageId && s.order === pageIndex + 1,
+            )
+          : undefined;
+        if (resumed) {
+          const cached = validatePresentationPlan({
+            planId: 'checkpoint',
+            title: input.title,
+            aspectRatio: input.aspectRatio ?? '16:9',
+            sourceVersionIds: input.sourceVersionIds,
+            slides: [{ ...resumed, order: 1 }],
+          });
+          const quality = input.options?.contentIntents
+            ? inspectPresentationContent(cached)
+            : undefined;
+          if (quality && !quality.passed)
+            throw new PresentationPlanError(
+              `Saved draft no longer passes content checks: ${JSON.stringify(quality.issues)}`,
+            );
+          composed.push(resumed);
+          continue;
+        }
         if (typeof context.onSlideStart === 'function') await context.onSlideStart(pageIndex + 1);
         const result = await this.plan(
           {
@@ -259,6 +419,7 @@ export class GLMPresentationPlanner implements PresentationPlanner {
         title: input.title,
         aspectRatio: input.aspectRatio ?? '16:9',
         sourceVersionIds: [...input.sourceVersionIds],
+        ...(input.options?.contentIntents ? { designSpec: { contentPolicyVersion: 1 } } : {}),
         slides: composed,
       };
     }
@@ -273,6 +434,32 @@ export class GLMPresentationPlanner implements PresentationPlanner {
         scope,
         (context.abortSignal ?? context.signal) as AbortSignal | undefined,
       );
+    if (basePlan && revision?.target.type === 'deck' && !context.pagePass) {
+      // A conversation about the whole deck still needs one bounded rendering
+      // request per page. Sending every full SVG at once exhausts the model
+      // context and prevents the teacher's revision from being applied at all.
+      let current = basePlan;
+      const completed = new Set(
+        Array.isArray(context.completedRevisionSlideIds)
+          ? context.completedRevisionSlideIds.filter(
+              (id: unknown): id is string => typeof id === 'string',
+            )
+          : [],
+      );
+      for (const [index] of basePlan.slides.entries()) {
+        const slideId = basePlan.slides[index].slideId;
+        if (completed.has(slideId)) continue;
+        current = await this.plan(input, {
+          ...context,
+          basePlan: current,
+          pagePass: true,
+          revision: { ...revision, target: { slideNumber: index + 1, type: 'slide' } },
+        });
+        if (typeof context.onRevisionSlide === 'function')
+          await context.onRevisionSlide(current, slideId);
+      }
+      return current;
+    }
     const selectedSlides =
       basePlan && revision
         ? basePlan.slides.filter(
@@ -288,6 +475,7 @@ export class GLMPresentationPlanner implements PresentationPlanner {
     const [ratioWidth, ratioHeight] = aspectRatio.split(':').map(Number);
     const canvasHeight = ratioWidth > 0 && ratioHeight > 0 ? (960 * ratioHeight) / ratioWidth : 540;
     const inputOptions = (input.options ?? {}) as Record<string, unknown>;
+    const contentIntents = readContentIntents(input);
     const requestedStyle = typeof inputOptions.style === 'string' ? inputOptions.style.trim() : '';
 
     let userPrompt = [
@@ -300,11 +488,41 @@ export class GLMPresentationPlanner implements PresentationPlanner {
       .filter(Boolean)
       .join('\n');
     if (selectedSlides && revision) {
-      userPrompt = `请修改以下原稿页面，保留没有要求修改的内容、图片和布局。只返回这些页面，不添加其他页面。保持 slideId。\n修改要求：${revision.content}\n画幅：${aspectRatio}\n原稿：${JSON.stringify(selectedSlides)}\n返回 ${selectedSlides.length} 页完整 SVG 的 JSON PresentationPlan。`;
+      const editableSlides = selectedSlides.map((slide) => ({
+        ...slide,
+        ...(readLessonPlan(input) ? { notes: undefined, metadata: undefined } : {}),
+        svg: semanticAuthoringSvg(slide.svg, slide.metadata?.contentBlocks),
+        contentBlocks: slide.metadata?.contentBlocks,
+      }));
+      userPrompt = `请修改以下原稿页面，保留没有要求修改的内容、图片和布局。只返回这些页面，不添加其他页面。保持 slideId。公式与图形已恢复为空锚点和contentBlocks源；修改源与rect，由服务端重绘，不要在空锚点中手绘路径。\n修改要求：${revision.content}\n画幅：${aspectRatio}\n原稿：${JSON.stringify(editableSlides)}\n返回 ${selectedSlides.length} 页完整 SVG 与contentBlocks的 JSON PresentationPlan。`;
     }
     if (context.template) {
       userPrompt += `\n\n${templatePlannerInstructions(context.template as TemplateApplication)}`;
     }
+    userPrompt += `\n\n${CONTENT_RENDERING_INSTRUCTIONS}\n${SEMANTIC_BLOCK_FORMAT}`;
+    const teachingStages = publicLessonStages(
+      input,
+      context.pageSlideId
+        ? [String(context.pageSlideId)]
+        : selectedSlides?.map((slide) => slide.slideId),
+    );
+    if (teachingStages.length) {
+      // The full deck prompt/outline can disclose an answer planned for a later
+      // stage. Use only this stage's public projection in the rendering request.
+      if (!selectedSlides)
+        userPrompt = `主题：${title}\n画幅：${aspectRatio}\n返回 ${slideCount} 页完整SVG与contentBlocks的JSON。\n${CONTENT_RENDERING_INSTRUCTIONS}\n${SEMANTIC_BLOCK_FORMAT}`;
+      userPrompt += `\n${LESSON_RENDERING_INSTRUCTIONS}\n批准的教学阶段：${JSON.stringify(teachingStages)}`;
+    }
+    const relevantIntents = contentIntents.filter((intent) =>
+      context.pageSlideId
+        ? intent.slideId === context.pageSlideId
+        : selectedSlides
+          ? selectedSlides.some((slide) => slide.slideId === intent.slideId)
+          : true,
+    );
+    if (relevantIntents.length) userPrompt += `\n内容编译结果：${JSON.stringify(relevantIntents)}`;
+    if (inputOptions.learnedCapabilities && !teachingStages.length)
+      userPrompt += `\n已验证的历史学习能力（仅为参考，当前用户指令、内容语义与字号预算优先）：${JSON.stringify(inputOptions.learnedCapabilities)}`;
     const visualStoryboard = inputOptions.visualStoryboard as
       | { deckRationale?: unknown; rhythm?: unknown; slides?: unknown[] }
       | undefined;
@@ -317,7 +535,7 @@ export class GLMPresentationPlanner implements PresentationPlanner {
         if (selectedSlides) return selectedSlides.some((slide) => slide.slideId === slideId);
         return true;
       });
-      userPrompt += `\n\n整稿视觉故事板（这是排版与素材的共同决策，逐页执行但保持跨页节奏）：${JSON.stringify({ deckRationale: visualStoryboard.deckRationale, rhythm: visualStoryboard.rhythm, slides: relevantDirections })}`;
+      userPrompt += `\n\n整稿视觉故事板（这是排版与素材的共同决策，逐页执行但保持跨页节奏）：${JSON.stringify({ ...(teachingStages.length ? {} : { deckRationale: visualStoryboard.deckRationale, rhythm: visualStoryboard.rhythm }), slides: relevantDirections })}`;
     }
     const revisionAssetIntents = (input.options?.revisionAssetIntents ??
       []) as RevisionAssetIntent[];
@@ -356,7 +574,15 @@ export class GLMPresentationPlanner implements PresentationPlanner {
             record.layout === undefined ? undefined : validateAssetPlacement(record.layout);
           generatedAssetsBySlide.set(slideId, [
             ...(generatedAssetsBySlide.get(slideId) ?? []),
-            ...refs.map((ref) => ({ layout, ref })),
+            ...refs.map((ref) => {
+              const parsed = visualAssetBindingSchema.safeParse({
+                ...(record.visualBinding && typeof record.visualBinding === 'object'
+                  ? record.visualBinding
+                  : {}),
+                ref: presentationAssetHref(ref),
+              });
+              return { layout, ref, ...(parsed.success ? { binding: parsed.data } : {}) };
+            }),
           ]);
           const slotId = typeof record.slotId === 'string' ? record.slotId : 'unknown';
           const state = typeof record.state === 'string' ? record.state : 'unknown';
@@ -408,8 +634,45 @@ export class GLMPresentationPlanner implements PresentationPlanner {
       });
       contentParts.push({ image_url: { url }, type: 'image_url' });
     });
+    if (relevantIntents.length)
+      contentParts.push({
+        type: 'text',
+        text: `CURRENT PAGE OUTPUT CONTRACT — check every item before returning JSON:\n${JSON.stringify(
+          relevantIntents.map((intent) => ({
+            slideId: intent.slideId,
+            usableContentRect: contentLayout(
+              teachingStages.find((s) => s.slideId === intent.slideId)?.boardSpace,
+              aspectRatio,
+            ),
+            formulas: intent.formulas
+              .filter((f) => f.placement !== 'notes')
+              .map((f) => ({
+                id: f.id,
+                latex: f.latex,
+                display: f.display ?? true,
+                ...f.measurement,
+              })),
+            vectorBlocks: visualRequirements(intent)
+              .filter(isNativeVisual)
+              .map((v) => ({
+                id: v.id,
+                fidelity: v.fidelity,
+                minimumWidth: 280,
+                // Plot legends consume vertical space before the geometry. The
+                // measured block may need more; this is a planning floor only.
+                minimumHeight: v.kind === 'chart' ? 260 : 224,
+                graphNodeLabelMaxCharacters: 12,
+              })),
+            images: generatedAssetsBySlide.get(intent.slideId)?.map((a) => ({
+              id: a.binding?.visualId,
+              href: presentationAssetHref(a.ref),
+              layout: a.layout,
+            })),
+          })),
+        )}\ncontentBlocks has ONLY kind:"formula" or kind:"scientific-diagram". An illustration is NOT a contentBlock: place its real href with SVG <image>, do not add kind:illustration/image. Do not add explanation/placement/measurement to formula blocks. Never change exact LaTeX. Do not invent English subtitles, credits or headings. All body text ≥24px; only short labels ≤16 characters and footers may be 16px. Simplify words instead of shrinking. Scientific claims must state applicable assumptions. Do not repeat unqualified convergence or complexity guarantees from an outline; explain necessary conditions and limitations in notes.`,
+      });
 
-    const parsePlan = (parsedPlan: any): PresentationPlan => {
+    const parsePlan = async (parsedPlan: any): Promise<PresentationPlan> => {
       if (!parsedPlan || typeof parsedPlan !== 'object' || Array.isArray(parsedPlan))
         throw new PresentationPlanError('The planner must return a PresentationPlan object');
       const rawSlides = Array.isArray(parsedPlan.slides) ? parsedPlan.slides : [];
@@ -437,119 +700,377 @@ export class GLMPresentationPlanner implements PresentationPlanner {
       const fallbackPlan: PresentationPlan = {
         aspectRatio,
         planId: parsedPlan.planId || `plan-${Date.now()}`,
-        slides: plannedSlides.map((s: any, idx: number): PresentationSlidePlan => {
-          const originalSlide = selectedSlides?.[idx];
-          const requestedId =
-            (context.pageSlideId as string | undefined) ??
-            originalSlide?.slideId ??
-            (typeof s?.slideId === 'string' && s.slideId.trim()
-              ? s.slideId.trim()
-              : `slide-${idx + 1}`);
-          const slideId = usedSlideIds.has(requestedId) ? `slide-${idx + 1}` : requestedId;
-          usedSlideIds.add(slideId);
-          const outlineIndex =
-            (context.pageIndex as number | undefined) ??
-            (originalSlide ? Math.max(0, originalSlide.order - 1) : idx);
-          const outlinePage = Array.isArray(input.options?.outline)
-            ? input.options.outline[outlineIndex]
-            : undefined;
-          const slideTitle =
-            (typeof outlinePage?.title === 'string' ? outlinePage.title : undefined) ??
-            (typeof s?.title === 'string' && s.title.trim()
-              ? s.title.trim()
-              : typeof originalSlide?.metadata?.title === 'string' &&
-                  originalSlide.metadata.title.trim()
-                ? originalSlide.metadata.title.trim()
-                : idx === 0
-                  ? title
-                  : `第 ${idx + 1} 页`);
-          const visualDirection = Array.isArray(visualStoryboard?.slides)
-            ? visualStoryboard.slides.find(
-                (item) =>
-                  item &&
-                  typeof item === 'object' &&
-                  (item as { slideId?: unknown }).slideId === requestedId,
+        ...(contentIntents.length ? { designSpec: { contentPolicyVersion: 1 } } : {}),
+        slides: await Promise.all(
+          plannedSlides.map(async (s: any, idx: number): Promise<PresentationSlidePlan> => {
+            const originalSlide = selectedSlides?.[idx];
+            const requestedId =
+              (context.pageSlideId as string | undefined) ??
+              originalSlide?.slideId ??
+              (typeof s?.slideId === 'string' && s.slideId.trim()
+                ? s.slideId.trim()
+                : `slide-${idx + 1}`);
+            const slideId = usedSlideIds.has(requestedId) ? `slide-${idx + 1}` : requestedId;
+            usedSlideIds.add(slideId);
+            const outlineIndex =
+              (context.pageIndex as number | undefined) ??
+              (originalSlide ? Math.max(0, originalSlide.order - 1) : idx);
+            const outlinePage = Array.isArray(input.options?.outline)
+              ? input.options.outline[outlineIndex]
+              : undefined;
+            const slideTitle =
+              (typeof outlinePage?.title === 'string' ? outlinePage.title : undefined) ??
+              (typeof s?.title === 'string' && s.title.trim()
+                ? s.title.trim()
+                : typeof originalSlide?.metadata?.title === 'string' &&
+                    originalSlide.metadata.title.trim()
+                  ? originalSlide.metadata.title.trim()
+                  : idx === 0
+                    ? title
+                    : `第 ${idx + 1} 页`);
+            const visualDirection = Array.isArray(visualStoryboard?.slides)
+              ? visualStoryboard.slides.find(
+                  (item) =>
+                    item &&
+                    typeof item === 'object' &&
+                    (item as { slideId?: unknown }).slideId === requestedId,
+                )
+              : undefined;
+            const slideAssets =
+              generatedAssetsBySlide.get(slideId) ??
+              (!selectedSlides ? generatedAssetsBySlide.get(`slide-${idx + 1}`) : undefined) ??
+              [];
+            const slideRefs = slideAssets.map((asset) => asset.ref);
+            const originalRefs = selectedSlides?.[idx]
+              ? presentationImageRefs(selectedSlides[idx].svg)
+              : [];
+            const removedRefs = revisionAssetIntents
+              .filter(
+                (intent) =>
+                  intent.slideId === slideId &&
+                  (intent.action === 'remove' || intent.action === 'replace'),
               )
-            : undefined;
-          const slideAssets =
-            generatedAssetsBySlide.get(slideId) ??
-            (!selectedSlides ? generatedAssetsBySlide.get(`slide-${idx + 1}`) : undefined) ??
-            [];
-          const slideRefs = slideAssets.map((asset) => asset.ref);
-          const originalRefs = selectedSlides?.[idx]
-            ? presentationImageRefs(selectedSlides[idx].svg)
-            : [];
-          const removedRefs = revisionAssetIntents
-            .filter(
-              (intent) =>
-                intent.slideId === slideId &&
-                (intent.action === 'remove' || intent.action === 'replace'),
-            )
-            .map((intent) => intent.ref!);
-          const preservedRefs = originalRefs.filter((ref) => !removedRefs.includes(ref));
-          const referenceUrls = Array.isArray(input.options?.references)
-            ? (input.options.references as { url?: string }[]).flatMap((ref) =>
-                typeof ref?.url === 'string' ? [ref.url] : [],
-              )
-            : [];
-          const permittedRefs = [
-            ...preservedRefs,
-            ...slideRefs.map(presentationAssetHref),
-            ...referenceUrls,
-          ];
-          const normalized = normalizeProvidedImageHrefs(
-            normalizeSvg(s?.svg, slideId, aspectRatio),
-            permittedRefs,
-          );
-          const svg = attachGeneratedAssets(normalized, slideAssets);
-          validatePlacedAssets(svg, slideAssets, [
-            ...preservedRefs,
-            ...slideRefs.map(presentationAssetHref),
-            ...referenceUrls,
-          ]);
-          const resultingRefs = presentationImageRefs(svg);
-          if (preservedRefs.some((ref) => !resultingRefs.includes(ref)))
-            throw new PresentationPlanError(
-              'The revision removed an image that should be preserved',
+              .map((intent) => intent.ref!);
+            const preservedRefs = originalRefs.filter((ref) => !removedRefs.includes(ref));
+            const referenceUrls = Array.isArray(input.options?.references)
+              ? (input.options.references as { url?: string }[]).flatMap((ref) =>
+                  typeof ref?.url === 'string' ? [ref.url] : [],
+                )
+              : [];
+            const permittedRefs = [
+              ...preservedRefs,
+              ...slideRefs.map(presentationAssetHref),
+              ...referenceUrls,
+            ];
+            const normalizedSvg = normalizeProvidedImageHrefs(
+              normalizeSvg(s?.svg, slideId, aspectRatio),
+              permittedRefs,
             );
-          const previousAssetRefs = Array.isArray(originalSlide?.metadata?.generatedAssetRefs)
-            ? originalSlide.metadata.generatedAssetRefs.filter(
-                (ref): ref is string => typeof ref === 'string',
+            const normalized = contentIntents.length
+              ? promoteReadablePlainText(normalizedSvg)
+              : normalizedSvg;
+            let content!: Awaited<ReturnType<typeof renderSemanticBlocks>> & {
+              overflowNotes?: string;
+            };
+            let layoutRecovered = false;
+            try {
+              content = await renderSemanticBlocks(
+                normalized,
+                s?.contentBlocks,
+                contentIntents.find((intent) => intent.slideId === slideId),
+              );
+            } catch (error) {
+              const intent = contentIntents.find((item) => item.slideId === slideId);
+              const stage = teachingStages.find((item) => item.slideId === slideId);
+              if (
+                intent &&
+                /Formula .*reserve at least|Formula .*needs .*enlarge|Semantic blocks .*overlap|Plot requires at least|Scientific diagrams need at least|requires a reproducible quadratic\/taylor recipe|Graph (?:label|needs|layer|branches|nodes)|needs a wider node|Vertical graph labels/u.test(
+                  String(error),
+                )
+              ) {
+                try {
+                  content = await recoverSemanticSlideLayout({
+                    aspectRatio,
+                    boardSpace: stage?.boardSpace,
+                    intent,
+                    rawBlocks: s?.contentBlocks,
+                    title: stage?.title ?? slideTitle,
+                    visibleContent: stage?.visibleContent ?? outlinePage?.keyPoints,
+                    imageRefs: [
+                      ...preservedRefs,
+                      ...slideAssets.map((asset) => presentationAssetHref(asset.ref)),
+                    ],
+                  });
+                  layoutRecovered = true;
+                } catch {
+                  // Keep the model's precise error for its bounded repair turn.
+                }
+              }
+              if (layoutRecovered) {
+                // The deterministic layout uses the approved content and diagram source.
+              } else {
+                // A bounded repair must see all independent failures at once, not
+                // fix a missing diagram only to discover unreadable type afterwards.
+                const quality = contentIntents.length
+                  ? inspectPresentationContent({
+                      planId: 'content-preflight',
+                      title,
+                      aspectRatio,
+                      sourceVersionIds: [],
+                      slides: [{ slideId, order: idx + 1, svg: normalized }],
+                    })
+                  : undefined;
+                throw new PresentationPlanError(
+                  `${String(error)}${quality?.issues.length ? `\nAlso fix all typography/content violations: ${JSON.stringify(quality.issues)}` : ''}`,
+                );
+              }
+            }
+            let composedSvg = restorePreservedImages(
+              attachGeneratedAssets(content.svg, slideAssets),
+              originalSlide?.svg,
+              preservedRefs,
+            );
+            const currentIntent = contentIntents.find((item) => item.slideId === slideId);
+            const ownershipMetadata = {
+              contentBlocks: content.blocks,
+              visualRequirements: visualRequirements(currentIntent),
+              visualAssets: [
+                ...readVisualAssetBindings(originalSlide?.metadata?.visualAssets),
+                ...slideAssets.flatMap((asset) => (asset.binding ? [asset.binding] : [])),
+              ],
+            };
+            const ownedComposition = reconcileNativeVisualAssets({
+              slideId,
+              order: idx + 1,
+              svg: composedSvg,
+              metadata: ownershipMetadata,
+            });
+            composedSvg = ownedComposition.svg;
+            const beforeReflow = composedSvg;
+            if (currentIntent && inspectVisualOccupancy(ownedComposition).length) {
+              const stage = teachingStages.find((item) => item.slideId === slideId);
+              content = await recoverSemanticSlideLayout({
+                aspectRatio,
+                boardSpace: stage?.boardSpace,
+                intent: currentIntent,
+                rawBlocks: content.blocks,
+                title: stage?.title ?? slideTitle,
+                visibleContent:
+                  stage?.visibleContent ??
+                  outlinePage?.keyPoints ??
+                  authoredBodyText(composedSvg, slideTitle),
+                imageRefs: presentationImageRefs(composedSvg),
+              });
+              composedSvg = content.svg;
+              for (const asset of slideAssets)
+                if (
+                  currentIntent.visuals?.some(
+                    (visual) => visual.id === asset.binding?.visualId && visual.annotations?.length,
+                  )
+                )
+                  composedSvg = preserveAnnotatedViewport(composedSvg, beforeReflow, asset);
+              layoutRecovered = true;
+            }
+            // Read the declarations straight from the compiled intents: `intent` is declared
+            // later in this scope, so referencing it here would be a temporal dead zone.
+            const annotationsFor = (visualId: string) =>
+              contentIntents
+                .find((item) => item.slideId === slideId)
+                ?.visuals?.find((visual) => visual.id === visualId)?.annotations;
+            const annotatedAssets = slideAssets.flatMap((asset) => {
+              const annotations = asset.binding
+                ? annotationsFor(asset.binding.visualId)
+                : undefined;
+              return annotations?.length
+                ? [
+                    {
+                      annotations,
+                      layout: actualAssetPlacement(composedSvg, asset) ?? asset.layout,
+                      visualId: asset.binding!.visualId,
+                    },
+                  ]
+                : [];
+            });
+            let svg = annotatedAssets.length
+              ? overlayAssetAnnotations(composedSvg, svgViewBox(composedSvg), annotatedAssets)
+              : composedSvg;
+            const intent = contentIntents.find((item) => item.slideId === slideId);
+            const allBindings = [
+              ...readVisualAssetBindings(originalSlide?.metadata?.visualAssets),
+              ...slideAssets.flatMap((asset) => (asset.binding ? [asset.binding] : [])),
+            ];
+            const reconciled = reconcileNativeVisualAssets({
+              slideId,
+              order: idx + 1,
+              svg,
+              metadata: {
+                contentBlocks: content.blocks,
+                visualRequirements: visualRequirements(intent),
+                visualAssets: allBindings,
+              },
+            });
+            svg = reconciled.svg;
+            const remainingBindings = readVisualAssetBindings(reconciled.metadata?.visualAssets);
+            const retiredRefs = new Set(
+              allBindings
+                .filter((binding) => !remainingBindings.some((item) => item.ref === binding.ref))
+                .flatMap((binding) => [binding.ref, `${binding.ref}?raw=true`]),
+            );
+            validatePlacedAssets(
+              svg,
+              slideAssets.filter((asset) => !retiredRefs.has(presentationAssetHref(asset.ref))),
+              [...preservedRefs, ...slideRefs.map(presentationAssetHref), ...referenceUrls],
+            );
+            const resultingRefs = presentationImageRefs(svg);
+            const bindings = remainingBindings.filter(
+              (asset) =>
+                resultingRefs.includes(asset.ref) ||
+                resultingRefs.includes(`${asset.ref}?raw=true`),
+            );
+            const visualAssets = [
+              ...new Map(bindings.map((asset) => [asset.visualId, asset])).values(),
+            ];
+            for (const visual of intent?.visuals?.filter(
+              (v) => v.required && (isRasterVisual(v) || v.kind === 'source-figure'),
+            ) ?? []) {
+              if (
+                !visualAssets.some(
+                  (asset) =>
+                    asset.visualId === visual.id &&
+                    asset.kind === visual.kind &&
+                    (visual.kind !== 'source-figure' || asset.origin === 'provided'),
+                )
               )
-            : [];
-          const generatedAssetRefs = [...new Set([...previousAssetRefs, ...slideRefs])].filter(
-            (ref) => {
-              const href = presentationAssetHref(ref);
-              return resultingRefs.includes(href) || resultingRefs.includes(`${href}?raw=true`);
-            },
-          );
-          return {
-            metadata: {
-              ...originalSlide?.metadata,
-              ...s?.metadata,
-              generatedAssetRefs,
-              ...(requestedStyle ? { style: requestedStyle } : {}),
-              ...(visualDirection && typeof visualDirection === 'object'
-                ? { visualDirection }
-                : {}),
-              title: slideTitle,
-              ...(outlinePage
-                ? {
-                    outline: outlinePage.keyPoints,
-                    objective: outlinePage.objective,
-                    visualSuggestion: outlinePage.visualSuggestion,
-                  }
-                : {}),
-            },
-            notes: typeof s?.notes === 'string' ? s.notes : originalSlide?.notes,
-            order: idx + 1,
-            slideId,
-            svg,
-          };
-        }),
+                throw new PresentationPlanError(
+                  `Required visual ${visual.id} has no embedded, owned ${visual.kind} asset. Complete asset generation/reuse before composing; do not fabricate a placeholder.`,
+                );
+            }
+            if (
+              visualRequirements(intent).some((v) => v.required && v.kind === 'source-figure') &&
+              !resultingRefs.length
+            )
+              throw new PresentationPlanError(
+                'This page requires a provided source figure with citation; do not fabricate or redraw research results',
+              );
+            if (preservedRefs.some((ref) => !retiredRefs.has(ref) && !resultingRefs.includes(ref)))
+              throw new PresentationPlanError(
+                'The revision removed an image that should be preserved',
+              );
+            const previousAssetRefs = Array.isArray(originalSlide?.metadata?.generatedAssetRefs)
+              ? originalSlide.metadata.generatedAssetRefs.filter(
+                  (ref): ref is string => typeof ref === 'string',
+                )
+              : [];
+            const generatedAssetRefs = [...new Set([...previousAssetRefs, ...slideRefs])].filter(
+              (ref) => {
+                const href = presentationAssetHref(ref);
+                return resultingRefs.includes(href) || resultingRefs.includes(`${href}?raw=true`);
+              },
+            );
+            return {
+              metadata: {
+                ...originalSlide?.metadata,
+                ...s?.metadata,
+                generatedAssetRefs,
+                visualAssets,
+                visualRequirements: visualRequirements(intent),
+                contentBlocks: content.blocks,
+                ...(layoutRecovered ? { layoutRecovered: true } : {}),
+                ...(requestedStyle ? { style: requestedStyle } : {}),
+                ...(visualDirection && typeof visualDirection === 'object'
+                  ? { visualDirection }
+                  : {}),
+                title: slideTitle,
+                ...(outlinePage
+                  ? {
+                      outline: outlinePage.keyPoints,
+                      objective: outlinePage.objective,
+                      visualSuggestion: outlinePage.visualSuggestion,
+                    }
+                  : {}),
+              },
+              notes:
+                [
+                  typeof s?.notes === 'string'
+                    ? s.notes
+                    : (originalSlide?.notes ?? outlinePage?.speakerNotes),
+                  ...visualAssets
+                    .filter((asset) =>
+                      ['scientific-illustration', 'scientific-diagram', 'chart'].includes(
+                        asset.kind,
+                      ),
+                    )
+                    .map(
+                      (asset) =>
+                        `[科研插图 ${asset.visualId}] ${asset.origin === 'generated' ? 'AI生成定性示意，非实验观测或实测数据' : '复用素材，来源与科学语义需核实'}；${asset.ref}`,
+                    ),
+                  ...(intent?.formulas
+                    .filter((f) => f.placement === 'notes')
+                    .map((f) => `[备注公式 ${f.id}] ${f.latex}\n${f.explanation ?? ''}`) ?? []),
+                  ...(content.overflowNotes
+                    ? [`[画面放不下的讲解，字号未缩小]\n${content.overflowNotes}`]
+                    : []),
+                  ...(content.blocks.length
+                    ? [
+                        `[可编辑内容源]\n${content.blocks.map((block) => (block.kind === 'formula' ? `${block.id}: ${block.latex}` : `${block.id}: ${JSON.stringify(block.spec)}\n${JSON.stringify(block.provenance)}`)).join('\n')}`,
+                      ]
+                    : []),
+                ]
+                  .filter((note) => note !== undefined)
+                  .join('\n\n') || (typeof s?.notes === 'string' ? s.notes : undefined),
+              order: idx + 1,
+              slideId,
+              svg,
+            };
+          }),
+        ),
         sourceVersionIds: input.sourceVersionIds || [],
         title,
       };
+
+      if (contentIntents.length) {
+        const quality = inspectPresentationContent(fallbackPlan);
+        if (!quality.passed) throw new PresentationPlanError(JSON.stringify(quality.issues));
+      }
+
+      fallbackPlan.slides = await Promise.all(
+        fallbackPlan.slides.map(async (slide) => {
+          try {
+            return prepareLessonDraft(slide, input);
+          } catch (error) {
+            const stage = teachingStages.find((item) => item.slideId === slide.slideId);
+            const intent = contentIntents.find((item) => item.slideId === slide.slideId);
+            if (
+              !stage ||
+              !intent ||
+              stage.boardSpace !== 'right-third' ||
+              !/text would be clipped by the boardwork reserve/u.test(String(error)) ||
+              presentationImageRefs(slide.svg).length
+            )
+              throw error;
+            const recovered = await recoverSemanticSlideLayout({
+              aspectRatio,
+              boardSpace: stage.boardSpace,
+              intent,
+              rawBlocks: slide.metadata?.contentBlocks,
+              title: stage.title,
+              visibleContent: stage.visibleContent,
+            });
+            return prepareLessonDraft(
+              {
+                ...slide,
+                svg: recovered.svg,
+                metadata: {
+                  ...slide.metadata,
+                  contentBlocks: recovered.blocks,
+                  layoutRecovered: true,
+                },
+              },
+              input,
+            );
+          }
+        }),
+      );
 
       if (basePlan && selectedSlides) {
         const replacements = new Map(
@@ -564,6 +1085,9 @@ export class GLMPresentationPlanner implements PresentationPlanner {
         );
         return validatePresentationPlan({
           ...basePlan,
+          ...(contentIntents.length
+            ? { designSpec: { ...basePlan.designSpec, contentPolicyVersion: 1 } }
+            : {}),
           planId: fallbackPlan.planId,
           slides: basePlan.slides.map((slide) => replacements.get(slide.slideId) ?? slide),
         });
@@ -575,7 +1099,7 @@ export class GLMPresentationPlanner implements PresentationPlanner {
       parse: parsePlan,
       chat: this.chatPort,
       context: {
-        idempotencyKey: `${context.idempotencyKey || 'structured-json'}${context.pageSlideId ? `:${context.pageSlideId}` : ''}`,
+        idempotencyKey: `${context.idempotencyKey || 'structured-json'}${context.pageSlideId ? `:${context.pageSlideId}` : selectedSlides?.length === 1 ? `:${selectedSlides[0].slideId}` : ''}`,
         scope,
         signal: (context?.abortSignal ?? context?.signal) as AbortSignal | undefined,
         ...(trustedImages ? { trustedImages } : {}),
@@ -586,10 +1110,13 @@ export class GLMPresentationPlanner implements PresentationPlanner {
         messages: [
           {
             content: boundPresentationPromptText(
-              `${this.systemPrompt}\nRequired canvas: viewBox="0 0 960 ${canvasHeight}" for aspect ratio ${aspectRatio}.`,
+              `${this.systemPrompt}\nRequired canvas: viewBox="0 0 960 ${canvasHeight}" for aspect ratio ${aspectRatio}.${contentIntents.length ? `\nMANDATORY CONTENT CONTRACT (overrides source-template font sizes and density; add contentBlocks to each slide object when required by its compiled intent):\n${CONTENT_RENDERING_INSTRUCTIONS}\n${SEMANTIC_BLOCK_FORMAT}\nDo not invent report authors, laboratory affiliations or extra decorative text. Any title or body string longer than 16 characters must be at least 24px, all brief labels at least 16px. Reserve space for required semantic blocks before adding optional decorations.` : ''}`,
             ),
             role: 'system',
           },
+          ...(teachingStages.length
+            ? [{ role: 'system' as const, content: LESSON_RENDERING_INSTRUCTIONS }]
+            : []),
           {
             content: contentParts.map((part) =>
               part.type === 'text'
@@ -601,7 +1128,7 @@ export class GLMPresentationPlanner implements PresentationPlanner {
         ],
         model: this.chatPort.manifest.model,
         response_format: { type: 'json_object' },
-        temperature: 0.3,
+        temperature: contentIntents.length ? 0 : 0.3,
       },
     });
     return plan;

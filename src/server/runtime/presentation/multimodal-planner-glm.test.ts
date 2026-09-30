@@ -169,7 +169,9 @@ describe('GLMPresentationPlanner (C-106)', () => {
     const userMessage = capturedRequest.messages[1];
     expect(userMessage.content).toEqual([
       {
-        text: '主题：2026 商业规划\n详细需求：为高管汇报准备的商业计划书\n目标页数：2\n画幅比例：16:9\n主语言：zh-CN',
+        text: expect.stringContaining(
+          '主题：2026 商业规划\n详细需求：为高管汇报准备的商业计划书\n目标页数：2\n画幅比例：16:9\n主语言：zh-CN',
+        ),
         type: 'text',
       },
       {
@@ -458,15 +460,15 @@ describe('dynamic image revision and learned layout planning', () => {
     expect(JSON.stringify(vi.mocked(port.chat).mock.calls[0][0])).toContain('1024x1536');
   });
 
-  it('refuses silent image removal during a wording revision', async () => {
+  it('restores an image the model silently dropped during a wording revision', async () => {
     const port = makePort({ slides: [{ slideId: 'product', svg: slideSvg('Revised wording') }] });
-    await expect(
-      createGLMPresentationPlanner({ chatPort: port }).plan(jobInput, {
-        basePlan,
-        revision: { ...revision, content: 'Shorten the title only' },
-        scope: mockScope,
-      }),
-    ).rejects.toThrow('image that should be preserved');
+    const plan = await createGLMPresentationPlanner({ chatPort: port }).plan(jobInput, {
+      basePlan,
+      revision: { ...revision, content: 'Shorten the title only' },
+      scope: mockScope,
+    });
+    expect(plan.slides[1].svg).toContain('product-old');
+    expect(plan.slides[1].svg).toContain('Revised wording');
   });
 
   it('retains existing asset associations, title and speaker notes through a text-only asset preparation and revision', async () => {
@@ -822,16 +824,54 @@ describe('dynamic image revision and learned layout planning', () => {
     expect(original.slides[1].svg).toContain(embedded);
   });
 
-  it('maps returned pages by their identities when the model reorders them', async () => {
-    const port = makePort({ slides: [...basePlan.slides].reverse() });
+  it('revises a whole deck in bounded per-page requests', async () => {
+    const port = makePort({ slides: [basePlan.slides[0]] });
+    let page = 0;
+    vi.mocked(port.chat).mockImplementation(async () => ({
+      choices: [
+        {
+          index: 0,
+          message: {
+            content: JSON.stringify({ slides: [basePlan.slides[page++]] }),
+            role: 'assistant' as const,
+          },
+        },
+      ],
+      created: 1,
+      id: 'response',
+      model: 'test',
+    }));
+    const checkpoints: string[] = [];
     const updated = await createGLMPresentationPlanner({ chatPort: port }).plan(jobInput, {
       basePlan,
       revision: { ...revision, target: { type: 'deck' } },
       scope: mockScope,
+      onRevisionSlide: async (_plan: PresentationPlan, slideId: string) => {
+        checkpoints.push(slideId);
+      },
     });
     expect(updated.slides.map((slide) => slide.svg)).toEqual(
       basePlan.slides.map((slide) => slide.svg),
     );
+    expect(port.chat).toHaveBeenCalledTimes(3);
+    expect(checkpoints).toEqual(['intro', 'product', 'outro']);
+    expect(vi.mocked(port.chat).mock.calls.map((call) => call[1]?.idempotencyKey)).toEqual([
+      'structured-json:intro',
+      'structured-json:product',
+      'structured-json:outro',
+    ]);
+    for (const call of vi.mocked(port.chat).mock.calls)
+      expect(JSON.stringify(call[0].messages)).not.toContain(
+        '"slides":[{"order":1,"slideId":"intro"},{"order":2',
+      );
+    const resumePort = makePort({ slides: [basePlan.slides[2]] });
+    await createGLMPresentationPlanner({ chatPort: resumePort }).plan(jobInput, {
+      basePlan,
+      completedRevisionSlideIds: ['intro', 'product'],
+      revision: { ...revision, target: { type: 'deck' } },
+      scope: mockScope,
+    });
+    expect(resumePort.chat).toHaveBeenCalledTimes(1);
     const wrongPage = makePort({ slides: [{ slideId: 'outro', svg: slideSvg('Wrong page') }] });
     await expect(
       createGLMPresentationPlanner({ chatPort: wrongPage }).plan(jobInput, {
@@ -908,4 +948,16 @@ it('publishes the first real draft before asking the model to compose the next p
   expect(events).toEqual(['model-1', 'draft-slide-1', 'model-2', 'draft-slide-2']);
   expect(plan.slides.map((page) => page.slideId)).toEqual(['slide-1', 'slide-2']);
   expect(plan.slides[1].metadata).toMatchObject({ objective: 'Claim 2', outline: ['Point 2'] });
+  const resumed = await createGLMPresentationPlanner({ chatPort: chat }).plan(
+    {
+      notebookId: 'test',
+      sourceVersionIds: [],
+      title: 'Deck',
+      slideCount: 2,
+      options: { outline },
+    },
+    { scope: mockScope, resumeSlides: plan.slides },
+  );
+  expect(resumed.slides).toEqual(plan.slides);
+  expect(chat.chat).toHaveBeenCalledTimes(2);
 });

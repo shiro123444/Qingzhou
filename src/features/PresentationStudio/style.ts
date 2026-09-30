@@ -729,13 +729,6 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     background: ${cssVar.colorBgElevated};
     box-shadow: 0 8px 24px rgb(0 0 0 / 12%);
-
-    transition: opacity linear;
-
-    @media (prefers-reduced-motion: reduce) {
-      opacity: 1 !important;
-      transition: none;
-    }
   `,
   noticeSuccess: css`
     border-color: ${cssVar.colorSuccessBorder};
@@ -747,8 +740,6 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     border-color: ${cssVar.colorErrorBorder};
   `,
   noticeTitle: css`
-    padding-inline-end: 28px;
-
     font-size: 13px;
     font-weight: 600;
     line-height: 1.4;
@@ -764,18 +755,6 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     flex-wrap: wrap;
     gap: 8px;
     margin-block-start: 4px;
-  `,
-  noticeCountdown: css`
-    position: absolute;
-    inset-block-start: 8px;
-    inset-inline-end: 28px;
-
-    min-width: 16px;
-
-    font-size: 11px;
-    font-variant-numeric: tabular-nums;
-    line-height: 1;
-    color: ${cssVar.colorTextDescription};
   `,
   noticeTimer: css`
     position: absolute;

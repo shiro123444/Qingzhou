@@ -1,4 +1,6 @@
 import type { PresentationPlan } from '../../../../packages/runtime-contracts/src';
+import { assertPresentationPublishable } from './content-quality';
+import { lessonHandout } from './lesson';
 import { validatePresentationPlan } from './planner';
 import {
   createPresentationArtifactSnapshot,
@@ -183,6 +185,7 @@ export class InMemoryPresentationPlanWorker {
     let validated: PresentationPlan;
     try {
       validated = validatePresentationPlan(plan);
+      assertPresentationPublishable(validated);
     } catch (error) {
       try {
         publishWorkerEvent(
@@ -329,6 +332,22 @@ export class InMemoryPresentationPlanWorker {
         ? `${context.jobId}:${context.versionId}`
         : context.jobId;
       const allArtifacts: PresentationWorkerArtifact[] = [
+        ...(lessonHandout(validated)
+          ? [
+              {
+                artifactId: `${artifactPrefix}:lesson-handout`,
+                bytes: new TextEncoder().encode(lessonHandout(validated)!),
+                mimeType: 'text/markdown',
+                name: 'student-handout.md',
+                type: 'document',
+                metadata: {
+                  artifactRole: 'student-handout',
+                  versionId: context.versionId,
+                  excludesTeacherNotes: true,
+                },
+              },
+            ]
+          : []),
         ...cloned
           .filter((artifact) => artifact.type !== 'svg')
           .map((artifact, index) => ({

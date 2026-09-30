@@ -7,6 +7,7 @@ import { type ChatInputEditor } from '@/features/ChatInput';
 import { ChatList, ConversationProvider, MessageItem } from '@/features/Conversation';
 import { QingzhouPresentationScene } from '@/features/QingzhouBrand';
 import { ServerConfigStoreProvider } from '@/store/serverConfig/Provider';
+import type { LessonPlan } from '@/types/presentationLesson';
 
 import OutlineWorkspace, { type OutlineSlide } from './OutlineWorkspace';
 import {
@@ -583,7 +584,11 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
     );
 
     const handleStartCreate = useCallback(
-      async (confirmed?: { slides: OutlineSlide[]; versionId: string }) => {
+      async (confirmed?: {
+        slides: OutlineSlide[];
+        versionId: string;
+        lessonPlan?: LessonPlan;
+      }) => {
         const refSummary =
           selectedReferences.length > 0
             ? `\n参考材料：\n` +
@@ -628,6 +633,7 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
           language: selectedLanguage,
           notebookId: defaultNotebookId.trim() || 'studio',
           options: {
+            ...(confirmed?.lessonPlan ? { lessonPlan: confirmed.lessonPlan } : {}),
             audience: selectedAudience,
             outline: slidesToUse,
             availableAssetRefs: agentBrief.assets,
@@ -666,7 +672,7 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
     );
 
     const handleOutlineConfirm = useCallback(
-      (data: { slides: OutlineSlide[]; versionId: string }) => {
+      (data: { slides: OutlineSlide[]; versionId: string; lessonPlan?: LessonPlan }) => {
         setConfirmedSlides(data.slides);
         setOutlineVersionId(data.versionId);
         void handleStartCreate(data).catch((error) =>
@@ -731,8 +737,10 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
             if (step !== 'outline') return null;
             return (
               <OutlineWorkspace
+                audience={selectedAudience}
                 creating={creating}
                 initialSlides={agentOutline ?? []}
+                template={selectedTemplate}
                 onBack={() => setStep('intake')}
                 onConfirm={(data) => handleOutlineConfirm(data)}
                 onAiRewrite={(input) =>
@@ -743,6 +751,23 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
                     topic: selectedTopic,
                   })
                 }
+                onPlanLesson={async (
+                  teacherBrief,
+                  currentLessonPlan,
+                  teachingSelection,
+                  instruction,
+                ) => {
+                  const result = await agentClient.outline({
+                    brief: { ...agentBrief, topic: selectedTopic, teacherBrief },
+                    currentSlides: agentOutline,
+                    currentLessonPlan,
+                    instruction,
+                    teachingSelection,
+                  });
+                  if (!result.lessonPlan)
+                    throw new Error('Lesson provider did not return a teaching plan');
+                  return result.lessonPlan;
+                }}
               />
             );
           }
@@ -829,7 +854,10 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
         selectedLanguage,
         selectedTopic,
         agentOutline,
+        agentClient,
+        agentBrief,
         onOutlineAiRewrite,
+        selectedTemplate,
         handleOutlineConfirm,
         confirmedSlides.length,
         selectedReferences,
