@@ -154,7 +154,9 @@ docs/superpowers/
 
 # Local Scratch & Agent Cli artifacts
 scratch/
-.data/presentation/
+# Local runtime data (presentation storage, replays, export smoke artifacts) — never commit
+.data/
+.commandcode/
 .antigravity/
 .antigravitycli/
 image-*.png

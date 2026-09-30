@@ -115,7 +115,7 @@ cd packages/database && bunx vitest run --silent='passed-only' '[file]'
 
 - Prefer `vi.spyOn` over `vi.mock`
 - Tests must pass type check: `bun run type-check`
-- After 2 failed fix attempts, stop and ask for help
+- Fix until green. Never stop at an arbitrary attempt count, and never hand back a blocked task: each failed attempt must produce new evidence (narrowed repro, diagnostics, a different root cause) before you try again.
 
 ### i18n
 
