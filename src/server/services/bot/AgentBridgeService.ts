@@ -788,6 +788,9 @@ export class AgentBridgeService {
       // the synthetic applicationId shape — to decide which credential source
       // to read from.
       messengerInstallationKey: botContext?.messengerInstallationKey,
+      messengerPlatformUserId: botContext?.messengerInstallationKey
+        ? userMessage.author.userId
+        : undefined,
       platformThreadId: botContext?.platformThreadId,
       progressMessageId: progressMessage?.id,
       // Pass thread name only if it's user-set.

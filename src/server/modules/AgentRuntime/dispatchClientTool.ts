@@ -12,7 +12,9 @@ import type { IStreamEventManager } from './types';
 const log = debug('lobe-server:agent-runtime:dispatch-client-tool');
 
 interface DispatchContext {
+  assertStepLease?: () => void;
   operationId: string;
+  signal?: AbortSignal;
   streamManager: IStreamEventManager;
   /**
    * Per-call execution budget in milliseconds, normally produced by
@@ -50,8 +52,8 @@ const buildErrorResult = (
 
 /**
  * Dispatch a tool execution to the client via Agent Gateway WebSocket and
- * block-await the result on Redis. Never throws: any error path produces a
- * failed ClientToolExecutionResult so the agent loop can continue.
+ * block-await the result on Redis. Dispatch errors become failed tool results,
+ * but abort/lease loss must propagate so a stale worker cannot continue.
  *
  * The caller is expected to gate on `typeof streamManager.sendToolExecute ===
  * 'function'` and `chatToolPayload.executor === 'client'` before invoking.
@@ -62,6 +64,11 @@ export async function dispatchClientTool(
 ): Promise<ToolExecutionResultResponse> {
   const { operationId, streamManager } = ctx;
   const startedAt = Date.now();
+  const assertActive = () => {
+    ctx.signal?.throwIfAborted();
+    ctx.assertStepLease?.();
+  };
+  assertActive();
 
   if (typeof streamManager.sendToolExecute !== 'function') {
     return buildErrorResult(
@@ -87,7 +94,16 @@ export async function dispatchClientTool(
 
   const timeoutMs = clampTimeout(ctx.timeoutMs ?? GLOBAL_DEFAULT_TIMEOUT_MS);
 
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(ctx.signal?.reason);
+    ctx.signal?.addEventListener('abort', onAbort, { once: true });
+  });
+  // Observe cancellation even if the transport has not yet returned a promise.
+  void aborted.catch(() => {});
+
   try {
+    assertActive();
     log(
       '[%s] dispatching client tool %s/%s (toolCallId=%s, timeout=%dms)',
       operationId,
@@ -97,15 +113,23 @@ export async function dispatchClientTool(
       timeoutMs,
     );
 
-    await streamManager.sendToolExecute(operationId, {
-      apiName: chatToolPayload.apiName,
-      arguments: chatToolPayload.arguments,
-      executionTimeoutMs: timeoutMs,
-      identifier: chatToolPayload.identifier,
-      toolCallId: chatToolPayload.id,
-    });
+    await Promise.race([
+      streamManager.sendToolExecute(operationId, {
+        apiName: chatToolPayload.apiName,
+        arguments: chatToolPayload.arguments,
+        executionTimeoutMs: timeoutMs,
+        identifier: chatToolPayload.identifier,
+        toolCallId: chatToolPayload.id,
+      }),
+      aborted,
+    ]);
+    assertActive();
 
-    const result = await waiter.waitForResult(chatToolPayload.id, timeoutMs);
+    const result = await Promise.race([
+      waiter.waitForResult(chatToolPayload.id, timeoutMs),
+      aborted,
+    ]);
+    assertActive();
     const executionTime = Date.now() - startedAt;
 
     if (!result) {
@@ -120,10 +144,12 @@ export async function dispatchClientTool(
 
     return projectToExecutionResult(result, executionTime);
   } catch (error) {
+    assertActive();
     const executionTime = Date.now() - startedAt;
     log('[%s] client tool dispatch failed: %O', operationId, error);
     return buildErrorResult(executionTime, error);
   } finally {
+    if (onAbort) ctx.signal?.removeEventListener('abort', onAbort);
     blockingClient.disconnect();
   }
 }

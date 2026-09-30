@@ -9,6 +9,7 @@ export * from './aiInfra';
 export * from './apiKey';
 export * from './asyncTask';
 export * from './betterAuth';
+export * from './botDelivery';
 export * from './chatGroup';
 export * from './documentHistory';
 export * from './file';

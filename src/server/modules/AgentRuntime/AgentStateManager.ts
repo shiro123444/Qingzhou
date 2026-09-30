@@ -6,7 +6,19 @@ import {
 import debug from 'debug';
 import { type Redis } from 'ioredis';
 
+import { BOT_CALLBACK_INTENT_READY_SET, botCallbackIntentKey } from './callbackIntent';
 import { getAgentRuntimeRedisClient } from './redis';
+import {
+  assertStepLeaseOperation,
+  COMMIT_STEP_LEASE_SCRIPT,
+  createStepLease,
+  DEFAULT_STEP_LEASE_TTL_SECONDS,
+  RELEASE_STEP_LEASE_SCRIPT,
+  RENEW_STEP_LEASE_SCRIPT,
+  stepLeaseTtlMs,
+  withStepLeaseTimeout,
+} from './stepLease';
+import { type IAgentStateManager, type StepLease } from './types';
 
 const log = debug('lobe-server:agent-runtime:agent-state-manager');
 
@@ -29,7 +41,7 @@ export interface AgentOperationMetadata {
   userId?: string;
 }
 
-export class AgentStateManager {
+export class AgentStateManager implements IAgentStateManager {
   private redis: Redis;
   private readonly STATE_PREFIX = 'agent_runtime_state';
   private readonly STEPS_PREFIX = 'agent_runtime_steps';
@@ -404,34 +416,118 @@ export class AgentStateManager {
     return `agent_runtime_step_lock:${operationId}:${stepIndex}`;
   }
 
-  async tryClaimStep(
+  async acquireStepLease(
     operationId: string,
     stepIndex: number,
-    ttlSeconds: number = 35,
-  ): Promise<boolean> {
-    try {
-      const result = await this.redis.set(
-        this.stepLockKey(operationId, stepIndex),
-        Date.now().toString(),
-        'EX',
-        ttlSeconds,
-        'NX',
-      );
-
-      return result === 'OK';
-    } catch (error) {
-      // Fail-open: on Redis error, allow execution to proceed
-      console.error('Failed to acquire step lock:', error);
-      return true;
-    }
+    ttlSeconds: number = DEFAULT_STEP_LEASE_TTL_SECONDS,
+  ): Promise<StepLease | null> {
+    const ttlMs = stepLeaseTtlMs(ttlSeconds);
+    const lease = createStepLease(operationId, stepIndex);
+    const result = await withStepLeaseTimeout('acquire', () =>
+      this.redis.set(this.stepLockKey(operationId, stepIndex), lease.ownerToken, 'PX', ttlMs, 'NX'),
+    );
+    return result === 'OK' ? lease : null;
   }
 
-  async releaseStepLock(operationId: string, stepIndex: number): Promise<void> {
-    try {
-      await this.redis.del(this.stepLockKey(operationId, stepIndex));
-    } catch (error) {
-      console.error('Failed to release step lock:', error);
-    }
+  async renewStepLease(
+    lease: StepLease,
+    ttlSeconds: number = DEFAULT_STEP_LEASE_TTL_SECONDS,
+  ): Promise<boolean> {
+    const ttlMs = stepLeaseTtlMs(ttlSeconds);
+    return (
+      (await withStepLeaseTimeout('renew', () =>
+        this.redis.eval(
+          RENEW_STEP_LEASE_SCRIPT,
+          1,
+          this.stepLockKey(lease.operationId, lease.stepIndex),
+          lease.ownerToken,
+          ttlMs,
+        ),
+      )) === 1
+    );
+  }
+
+  async releaseStepLease(lease: StepLease): Promise<boolean> {
+    return (
+      (await withStepLeaseTimeout('release', () =>
+        this.redis.eval(
+          RELEASE_STEP_LEASE_SCRIPT,
+          1,
+          this.stepLockKey(lease.operationId, lease.stepIndex),
+          lease.ownerToken,
+        ),
+      )) === 1
+    );
+  }
+
+  async saveAgentStateWithLease(
+    operationId: string,
+    state: AgentState,
+    lease: StepLease,
+  ): Promise<boolean> {
+    return this.commitWithLease(operationId, state, lease);
+  }
+
+  async saveStepResultWithLease(
+    operationId: string,
+    stepResult: StepResult,
+    lease: StepLease,
+  ): Promise<boolean> {
+    if (stepResult.stepIndex !== lease.stepIndex) throw new TypeError('Step lease index mismatch');
+    return this.commitWithLease(operationId, stepResult.newState, lease, stepResult);
+  }
+
+  private async commitWithLease(
+    operationId: string,
+    state: AgentState,
+    lease: StepLease,
+    stepResult?: StepResult,
+  ): Promise<boolean> {
+    assertStepLeaseOperation(operationId, lease);
+    const stepData = stepResult
+      ? JSON.stringify({
+          context: stepResult.nextContext,
+          cost: state.cost?.total || 0,
+          executionTime: stepResult.executionTime,
+          status: state.status,
+          stepIndex: stepResult.stepIndex,
+          timestamp: Date.now(),
+        })
+      : '';
+    const serializedState = JSON.stringify(state);
+    const events = stepResult?.events?.length ? JSON.stringify(stepResult.events) : '';
+    const callbacks =
+      Array.isArray(state.metadata?._pendingBotCallbacks) &&
+      state.metadata._pendingBotCallbacks.length
+        ? JSON.stringify(state.metadata._pendingBotCallbacks)
+        : '';
+    return (
+      (await withStepLeaseTimeout('commit', () =>
+        this.redis.eval(
+          COMMIT_STEP_LEASE_SCRIPT,
+          7,
+          this.stepLockKey(operationId, lease.stepIndex),
+          `${this.STATE_PREFIX}:${operationId}`,
+          `${this.METADATA_PREFIX}:${operationId}`,
+          `${this.STEPS_PREFIX}:${operationId}`,
+          `${this.EVENTS_PREFIX}:${operationId}`,
+          botCallbackIntentKey(operationId, lease.stepIndex),
+          BOT_CALLBACK_INTENT_READY_SET,
+          lease.ownerToken,
+          this.DEFAULT_TTL,
+          serializedState,
+          new Date().toISOString(),
+          state.status,
+          state.cost?.total || 0,
+          state.stepCount,
+          stepData,
+          events,
+          lease.stepIndex,
+          stepResult ? 1 : 0,
+          callbacks,
+        ),
+      )) === 1
+    );
   }
 
   /**

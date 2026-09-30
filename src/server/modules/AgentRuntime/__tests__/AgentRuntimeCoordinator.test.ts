@@ -19,6 +19,11 @@ describe('AgentRuntimeCoordinator', () => {
     vi.clearAllMocks();
 
     mockStateManager = {
+      acquireStepLease: vi.fn(),
+      renewStepLease: vi.fn(),
+      releaseStepLease: vi.fn(),
+      saveAgentStateWithLease: vi.fn(),
+      saveStepResultWithLease: vi.fn(),
       cleanupExpiredOperations: vi.fn(),
       createOperationMetadata: vi.fn(),
       deleteAgentOperation: vi.fn(),
@@ -393,6 +398,70 @@ describe('AgentRuntimeCoordinator', () => {
 
       expect(mockStateManager.getExecutionHistory).toHaveBeenCalledWith(operationId, limit);
       expect(result).toBe(expectedHistory);
+    });
+  });
+  describe('owned step lease coordination', () => {
+    const lease = { operationId: 'op', ownerToken: 'owner', stepIndex: 1 };
+    const state = { status: 'done', stepCount: 2 } as any;
+    const result = { executionTime: 10, newState: state, stepIndex: 1 };
+
+    it('delegates acquisition, renewal and release without dropping the token', async () => {
+      mockStateManager.acquireStepLease.mockResolvedValue(lease);
+      mockStateManager.renewStepLease.mockResolvedValue(true);
+      mockStateManager.releaseStepLease.mockResolvedValue(false);
+      expect(await coordinator.acquireStepLease('op', 1, 35)).toBe(lease);
+      expect(mockStateManager.acquireStepLease).toHaveBeenCalledWith('op', 1, 35);
+      expect(await coordinator.renewStepLease(lease, 35)).toBe(true);
+      expect(mockStateManager.renewStepLease).toHaveBeenCalledWith(lease, 35);
+      expect(await coordinator.releaseStepLease(lease)).toBe(false);
+      expect(mockStateManager.releaseStepLease).toHaveBeenCalledWith(lease);
+    });
+
+    it.each(['state', 'result'])(
+      'emits a terminal event only after a successful fenced %s commit',
+      async (kind) => {
+        mockStateManager.loadAgentState.mockResolvedValue({ status: 'running', stepCount: 1 });
+        mockStateManager.saveAgentStateWithLease.mockResolvedValue(true);
+        mockStateManager.saveStepResultWithLease.mockResolvedValue(true);
+        expect(
+          await (kind === 'state'
+            ? coordinator.saveAgentStateWithLease('op', state, lease)
+            : coordinator.saveStepResultWithLease('op', result, lease)),
+        ).toBe(true);
+        expect(mockStreamManager.publishAgentRuntimeEnd).toHaveBeenCalledWith(
+          'op',
+          2,
+          state,
+          'done',
+        );
+        expect(mockStateManager.saveAgentState).not.toHaveBeenCalled();
+        expect(mockStateManager.saveStepResult).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['state', 'result'])(
+      'does not publish terminal events after rejected %s commit',
+      async (kind) => {
+        mockStateManager.loadAgentState.mockResolvedValue({ status: 'running', stepCount: 1 });
+        mockStateManager.saveAgentStateWithLease.mockResolvedValue(false);
+        mockStateManager.saveStepResultWithLease.mockResolvedValue(false);
+        expect(
+          await (kind === 'state'
+            ? coordinator.saveAgentStateWithLease('op', state, lease)
+            : coordinator.saveStepResultWithLease('op', result, lease)),
+        ).toBe(false);
+        expect(mockStreamManager.publishAgentRuntimeEnd).not.toHaveBeenCalled();
+      },
+    );
+
+    it('propagates backend errors without unfenced fallback or publishing', async () => {
+      const error = new Error('backend unavailable');
+      mockStateManager.acquireStepLease.mockRejectedValue(error);
+      await expect(coordinator.acquireStepLease('op', 1)).rejects.toBe(error);
+      mockStateManager.saveAgentStateWithLease.mockRejectedValue(error);
+      await expect(coordinator.saveAgentStateWithLease('op', state, lease)).rejects.toBe(error);
+      expect(mockStateManager.saveAgentState).not.toHaveBeenCalled();
+      expect(mockStreamManager.publishAgentRuntimeEnd).not.toHaveBeenCalled();
     });
   });
 });

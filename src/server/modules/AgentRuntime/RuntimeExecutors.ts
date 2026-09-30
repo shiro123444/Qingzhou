@@ -28,7 +28,6 @@ import {
   ToolResolver,
 } from '@lobechat/context-engine';
 import { parse } from '@lobechat/conversation-flow';
-import { consumeStreamUntilDone } from '@lobechat/model-runtime';
 import { chainCompressContext } from '@lobechat/prompts';
 import { type ChatToolPayload, type MessageToolCall, type UIChatMessage } from '@lobechat/types';
 import { sanitizeToolCallArguments, serializePartsForStorage } from '@lobechat/utils';
@@ -130,18 +129,76 @@ const buildPostProcessUrl = (ctx: Pick<RuntimeExecutorContext, 'serverDB' | 'use
 const shouldRetryLLM = (kind: LLMErrorKind, attempt: number, maxRetries: number) =>
   kind === 'retry' && attempt <= maxRetries;
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+// Local fencing cannot roll back external effects already dispatched. It prevents
+// subsequent calls, retries and result writes once this worker loses ownership.
+const assertStepActive = (ctx: Pick<RuntimeExecutorContext, 'assertStepLease' | 'signal'>) => {
+  ctx.signal?.throwIfAborted();
+  ctx.assertStepLease?.();
+};
+
+// Keep legacy standalone callers' argument count unchanged when no lease is supplied.
+const hookLeaseGuardArgs = (ctx: RuntimeExecutorContext): [(() => void)?] =>
+  ctx.signal || ctx.assertStepLease ? [() => assertStepActive(ctx)] : [];
+
+const sleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve, reject) => {
+    signal?.throwIfAborted();
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      reject(signal?.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+
+// Keep cancellation scoped to runtime executors, rather than changing shared
+// model-runtime stream consumption semantics. Cancel also settles a pending read.
+const consumeStepStream = async (response: Response, ctx: RuntimeExecutorContext) => {
+  if (!response.body) {
+    assertStepActive(ctx);
+    return;
+  }
+  const reader = response.body.getReader();
+  let complete = false;
+  const cancel = () => {
+    void reader.cancel(ctx.signal?.reason).catch(() => {});
+  };
+  ctx.signal?.addEventListener('abort', cancel, { once: true });
+  try {
+    assertStepActive(ctx);
+    while (true) {
+      assertStepActive(ctx);
+      const { done } = await reader.read();
+      assertStepActive(ctx);
+      if (done) {
+        complete = true;
+        break;
+      }
+    }
+  } finally {
+    ctx.signal?.removeEventListener('abort', cancel);
+    if (!complete) cancel();
+    reader.releaseLock();
+  }
+};
 
 const getLLMRetryDelayMs = (attempt: number) =>
   Math.min(LLM_RETRY_BASE_DELAY_MS * 2 ** Math.max(attempt - 1, 0), LLM_RETRY_MAX_DELAY_MS);
 
 const isOperationInterrupted = async (ctx: RuntimeExecutorContext) => {
+  assertStepActive(ctx);
   if (!ctx.loadAgentState) return false;
 
   try {
     const latestState = await ctx.loadAgentState(ctx.operationId);
+    assertStepActive(ctx);
     return latestState?.status === 'interrupted';
   } catch (error) {
+    assertStepActive(ctx);
     console.error('[RuntimeExecutors] Failed to load operation state for retry guard:', error);
     return false;
   }
@@ -150,6 +207,7 @@ const isOperationInterrupted = async (ctx: RuntimeExecutorContext) => {
 const executeToolWithRetry = async (
   execute: () => Promise<ToolExecutionResultResponse>,
   params: {
+    assertStepLease: () => void;
     isInterrupted?: () => Promise<boolean>;
     maxRetries: number;
     operationLogId: string;
@@ -159,7 +217,9 @@ const executeToolWithRetry = async (
   const maxAttempts = params.maxRetries + 1;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    params.assertStepLease();
     const result = await execute();
+    params.assertStepLease();
 
     if (result.success) return { attempts: attempt, result };
 
@@ -207,6 +267,8 @@ const buildToolDiscoveryConfig = (operationToolSet: OperationToolSet, enabledToo
 
 export interface RuntimeExecutorContext {
   agentConfig?: any;
+  /** Synchronous fence: checks local lease deadline and ownership loss. */
+  assertStepLease?: () => void;
   botPlatformContext?: BotPlatformContext;
   discordContext?: any;
   evalContext?: EvalContext;
@@ -215,6 +277,7 @@ export interface RuntimeExecutorContext {
   messageModel: MessageModel;
   operationId: string;
   serverDB: LobeChatDatabase;
+  signal?: AbortSignal;
   stepIndex: number;
   stream?: boolean;
   streamManager: IStreamEventManager;
@@ -232,6 +295,7 @@ export const createRuntimeExecutors = (
    * Integrates Agent Runtime and stream event publishing
    */
   call_llm: async (instruction, state) => {
+    assertStepActive(ctx);
     const { payload } = instruction as Extract<AgentInstruction, { type: 'call_llm' }>;
     const llmPayload = payload as CallLLMPayload;
     const { operationId, stepIndex, streamManager } = ctx;
@@ -319,14 +383,18 @@ export const createRuntimeExecutors = (
     // save cost, and surface a typed error the frontend can act on instead of
     // a raw SQL error.
     if (parentId) {
+      assertStepActive(ctx);
       const parentExists = await ctx.messageModel.findById(parentId);
+      assertStepActive(ctx);
       if (!parentExists) {
         const error = createConversationParentMissingError(parentId);
+        assertStepActive(ctx);
         await streamManager.publishStreamEvent(operationId, {
           data: formatErrorEventData(error, 'parent_message_preflight'),
           stepIndex,
           type: 'error',
         });
+        assertStepActive(ctx);
         throw error;
       }
     }
@@ -342,6 +410,7 @@ export const createRuntimeExecutors = (
       log(`${stagePrefix} Using existing assistant message: %s`, existingAssistantMessageId);
     } else {
       // Create new assistant message (legacy behavior)
+      assertStepActive(ctx);
       assistantMessageItem = await ctx.messageModel.create({
         agentId: state.metadata!.agentId!,
         content: '',
@@ -352,11 +421,13 @@ export const createRuntimeExecutors = (
         threadId: state.metadata?.threadId,
         topicId: state.metadata?.topicId,
       });
+      assertStepActive(ctx);
       log(`${stagePrefix} Created new assistant message: %s`, assistantMessageItem.id);
     }
 
     // Publish stream start event
     const stepLabel = (instruction as any).stepLabel;
+    assertStepActive(ctx);
     await streamManager.publishStreamEvent(operationId, {
       data: {
         assistantMessage: assistantMessageItem,
@@ -367,6 +438,7 @@ export const createRuntimeExecutors = (
       stepIndex,
       type: 'stream_start',
     });
+    assertStepActive(ctx);
 
     try {
       type ContentPart = { text: string; type: 'text' } | { image: string; type: 'image' };
@@ -376,7 +448,9 @@ export const createRuntimeExecutors = (
       const agentConfig = ctx.agentConfig;
       let processedMessages;
       if (agentConfig) {
+        assertStepActive(ctx);
         const { LOBE_DEFAULT_MODEL_LIST } = await import('model-bank');
+        assertStepActive(ctx);
 
         // Extract <refer_topic> tags from messages and fetch summaries.
         // Skip if messages already contain injected topic_reference_context
@@ -391,11 +465,18 @@ export const createRuntimeExecutors = (
         if (!alreadyHasTopicRefs && ctx.serverDB && ctx.userId) {
           const topicModel = new TopicModel(ctx.serverDB, ctx.userId);
           const messageModel = new MessageModelClass(ctx.serverDB, ctx.userId);
+          assertStepActive(ctx);
           topicReferences = await resolveTopicReferences(
             llmPayload.messages as Array<{ content: string | unknown }>,
-            async (topicId) => topicModel.findById(topicId),
             async (topicId) => {
+              assertStepActive(ctx);
+              return topicModel.findById(topicId);
+            },
+            async (topicId) => {
+              assertStepActive(ctx);
+
               const topic = await topicModel.findById(topicId);
+              assertStepActive(ctx);
               return messageModel.query(
                 {
                   agentId: topic?.agentId ?? undefined,
@@ -406,6 +487,7 @@ export const createRuntimeExecutors = (
               );
             },
           );
+          assertStepActive(ctx);
         }
 
         // Fetch agent documents for context injection
@@ -414,7 +496,9 @@ export const createRuntimeExecutors = (
         if (agentId && ctx.serverDB && ctx.userId) {
           try {
             const agentDocService = new AgentDocumentsService(ctx.serverDB, ctx.userId);
+            assertStepActive(ctx);
             const docs = await agentDocService.getAgentDocuments(agentId);
+            assertStepActive(ctx);
             if (docs.length > 0) {
               agentDocuments = docs.map((doc) => ({
                 content: doc.content,
@@ -433,6 +517,7 @@ export const createRuntimeExecutors = (
               log('Resolved %d agent documents for agent %s', agentDocuments.length, agentId);
             }
           } catch (error) {
+            assertStepActive(ctx);
             log('Failed to resolve agent documents for agent %s: %O', agentId, error);
           }
         }
@@ -456,33 +541,45 @@ export const createRuntimeExecutors = (
 
         if (isOnboardingAgent && !alreadyHasOnboardingContext && ctx.serverDB && ctx.userId) {
           try {
+            assertStepActive(ctx);
             const { formatWebOnboardingStateMessage } =
               await import('@lobechat/builtin-tool-web-onboarding/utils');
+            assertStepActive(ctx);
+
             const { UserPersonaModel } = await import('@/database/models/userMemory/persona');
+            assertStepActive(ctx);
             const onboardingService = new OnboardingService(ctx.serverDB, ctx.userId);
             const docService = new AgentDocumentsService(ctx.serverDB, ctx.userId);
             const personaModel = new UserPersonaModel(ctx.serverDB, ctx.userId);
 
+            assertStepActive(ctx);
             const [onboardingState, soulDoc, persona, userInfo] = await Promise.all([
               onboardingService.getState(),
               onboardingService
                 .getInboxAgentId()
-                .then((inboxAgentId) =>
-                  inboxAgentId ? docService.getDocumentByFilename(inboxAgentId, 'SOUL.md') : null,
-                )
+                .then((inboxAgentId) => {
+                  assertStepActive(ctx);
+                  return inboxAgentId
+                    ? docService.getDocumentByFilename(inboxAgentId, 'SOUL.md')
+                    : null;
+                })
                 .catch((error) => {
+                  assertStepActive(ctx);
                   log('Failed to fetch SOUL.md for onboarding context: %O', error);
                   return null;
                 }),
               personaModel.getLatestPersonaDocument().catch((error) => {
+                assertStepActive(ctx);
                 log('Failed to fetch user persona for onboarding context: %O', error);
                 return null;
               }),
               onboardingService.getInitialUserInfo().catch((error) => {
+                assertStepActive(ctx);
                 log('Failed to fetch initial user info for onboarding context: %O', error);
                 return undefined;
               }),
             ]);
+            assertStepActive(ctx);
 
             onboardingContext = {
               discoveryUserMessageCount: onboardingState.discoveryUserMessageCount,
@@ -494,6 +591,7 @@ export const createRuntimeExecutors = (
             };
             log('Built onboarding context for agent %s, phase: %s', agentId, onboardingState.phase);
           } catch (error) {
+            assertStepActive(ctx);
             log('Failed to build onboarding context: %O', error);
           }
         }
@@ -521,9 +619,12 @@ export const createRuntimeExecutors = (
         if (lobehubSkillTopicId && ctx.serverDB && ctx.userId) {
           try {
             const topicModelForLobehub = new TopicModel(ctx.serverDB, ctx.userId);
+            assertStepActive(ctx);
             const topicRecord = await topicModelForLobehub.findById(lobehubSkillTopicId);
+            assertStepActive(ctx);
             lobehubSkillTopicTitle = topicRecord?.title ?? '';
           } catch (error) {
+            assertStepActive(ctx);
             log('Failed to load topic title for lobehub skill placeholders: %O', error);
           }
         }
@@ -547,10 +648,13 @@ export const createRuntimeExecutors = (
         let serverLanguage = '';
         if (ctx.serverDB && ctx.userId) {
           try {
+            assertStepActive(ctx);
             const userInfo = await UserModel.getInfoForAIGeneration(ctx.serverDB, ctx.userId);
+            assertStepActive(ctx);
             serverUsername = userInfo.userName;
             serverLanguage = userInfo.responseLanguage;
           } catch (error) {
+            assertStepActive(ctx);
             log('Failed to fetch user info for {{username}}/{{language}} substitution: %O', error);
           }
         }
@@ -569,9 +673,13 @@ export const createRuntimeExecutors = (
         let credsListStr = '';
         if (isCredsEnabled && ctx.userId) {
           try {
+            assertStepActive(ctx);
             const { MarketService } = await import('@/server/services/market');
+            assertStepActive(ctx);
             const marketService = new MarketService({ userInfo: { userId: ctx.userId } });
+            assertStepActive(ctx);
             const credsResult = await marketService.market.creds.list();
+            assertStepActive(ctx);
             const userCreds = (credsResult as any)?.data ?? [];
             credsListStr = generateCredsList(
               userCreds.map(
@@ -585,6 +693,7 @@ export const createRuntimeExecutors = (
             );
             log('Fetched %d creds for {{CREDS_LIST}} substitution', userCreds.length);
           } catch (error) {
+            assertStepActive(ctx);
             log('Failed to fetch creds for {{CREDS_LIST}} substitution: %O', error);
           }
         }
@@ -674,7 +783,9 @@ export const createRuntimeExecutors = (
           ...(onboardingContext && { onboardingContext }),
         };
 
+        assertStepActive(ctx);
         processedMessages = await serverMessagesEngine(contextEngineInput);
+        assertStepActive(ctx);
 
         // Emit context engine event for tracing
         // Omit large/redundant fields to reduce snapshot size:
@@ -699,7 +810,9 @@ export const createRuntimeExecutors = (
       }
 
       // Initialize ModelRuntime (read user's keyVaults from database)
+      assertStepActive(ctx);
       const modelRuntime = await initModelRuntimeFromDB(ctx.serverDB, ctx.userId!, provider);
+      assertStepActive(ctx);
 
       // Construct ChatStreamPayload
       const stream = ctx.stream ?? true;
@@ -714,6 +827,7 @@ export const createRuntimeExecutors = (
       let reasoningBufferTimer: NodeJS.Timeout | null = null;
 
       const flushTextBuffer = async () => {
+        assertStepActive(ctx);
         const delta = textBuffer;
         textBuffer = '';
 
@@ -727,10 +841,12 @@ export const createRuntimeExecutors = (
           });
 
           const publishStart = Date.now();
+          assertStepActive(ctx);
           await streamManager.publishStreamChunk(operationId, stepIndex, {
             chunkType: 'text',
             content: delta,
           });
+          assertStepActive(ctx);
           timing(
             '[%s] flushTextBuffer published at %d, took %dms, length: %d',
             operationLogId,
@@ -742,6 +858,7 @@ export const createRuntimeExecutors = (
       };
 
       const flushReasoningBuffer = async () => {
+        assertStepActive(ctx);
         const delta = reasoningBuffer;
 
         reasoningBuffer = '';
@@ -755,10 +872,12 @@ export const createRuntimeExecutors = (
           });
 
           const publishStart = Date.now();
+          assertStepActive(ctx);
           await streamManager.publishStreamChunk(operationId, stepIndex, {
             chunkType: 'reasoning',
             reasoning: delta,
           });
+          assertStepActive(ctx);
           timing(
             '[%s] flushReasoningBuffer published at %d, took %dms, length: %d',
             operationLogId,
@@ -781,6 +900,9 @@ export const createRuntimeExecutors = (
         let currentStepUsage: any = undefined;
         let currentStepFinishReason: string | undefined = undefined;
         let streamError: any = undefined;
+        let bufferError: unknown;
+        let attemptActive = true;
+        const pendingFlushes: Promise<void>[] = [];
         const contentParts: ContentPart[] = [];
         const reasoningParts: ContentPart[] = [];
         const hasContentImages = false;
@@ -789,6 +911,7 @@ export const createRuntimeExecutors = (
         reasoningBuffer = '';
 
         const clearAttemptBuffers = () => {
+          attemptActive = false;
           if (textBufferTimer) {
             clearTimeout(textBufferTimer);
             textBufferTimer = null;
@@ -803,6 +926,15 @@ export const createRuntimeExecutors = (
           reasoningBuffer = '';
         };
 
+        const scheduleFlush = (flush: () => Promise<void>) => {
+          // Timers must never leave an unobserved rejected promise behind.
+          const pending = flush().catch((error) => {
+            bufferError = error;
+          });
+          pendingFlushes.push(pending);
+        };
+        ctx.signal?.addEventListener('abort', clearAttemptBuffers, { once: true });
+
         try {
           log(
             `${stagePrefix} calling model-runtime chat (attempt %d/%d, model: %s, messages: %d, tools: %d)`,
@@ -814,9 +946,13 @@ export const createRuntimeExecutors = (
           );
 
           // Call model-runtime chat
+          assertStepActive(ctx);
           const response = await modelRuntime.chat(chatPayload, {
+            signal: ctx.signal,
             callback: {
               onCompletion: async (data) => {
+                assertStepActive(ctx);
+                if (!attemptActive) return;
                 // Capture usage (may or may not include cost)
                 if (data.usage) {
                   currentStepUsage = data.usage;
@@ -829,15 +965,21 @@ export const createRuntimeExecutors = (
                 }
               },
               onGrounding: async (groundingData) => {
+                assertStepActive(ctx);
+                if (!attemptActive) return;
                 log(`[${operationLogId}][grounding] %O`, groundingData);
                 grounding = groundingData;
 
+                assertStepActive(ctx);
                 await streamManager.publishStreamChunk(operationId, stepIndex, {
                   chunkType: 'grounding',
                   grounding: groundingData,
                 });
+                assertStepActive(ctx);
               },
               onText: async (text) => {
+                assertStepActive(ctx);
+                if (!attemptActive) return;
                 timing(
                   '[%s] onText received chunk at %d, length: %d',
                   operationLogId,
@@ -850,13 +992,15 @@ export const createRuntimeExecutors = (
 
                 // If no timer exists, create one
                 if (!textBufferTimer) {
-                  textBufferTimer = setTimeout(async () => {
-                    await flushTextBuffer();
+                  textBufferTimer = setTimeout(() => {
                     textBufferTimer = null;
+                    scheduleFlush(flushTextBuffer);
                   }, BUFFER_INTERVAL);
                 }
               },
               onThinking: async (reasoning) => {
+                assertStepActive(ctx);
+                if (!attemptActive) return;
                 timing(
                   '[%s] onThinking received chunk at %d, length: %d',
                   operationLogId,
@@ -870,13 +1014,15 @@ export const createRuntimeExecutors = (
 
                 // If no timer exists, create one
                 if (!reasoningBufferTimer) {
-                  reasoningBufferTimer = setTimeout(async () => {
-                    await flushReasoningBuffer();
+                  reasoningBufferTimer = setTimeout(() => {
                     reasoningBufferTimer = null;
+                    scheduleFlush(flushReasoningBuffer);
                   }, BUFFER_INTERVAL);
                 }
               },
               onToolsCalling: async ({ toolsCalling: raw }) => {
+                assertStepActive(ctx);
+                if (!attemptActive) return;
                 const resolvedCalls = new ToolNameResolver().resolve(raw, resolved.manifestMap);
                 // Attach source (origin) and executor (dispatch target) for routing.
                 // `arguments` are kept RAW here on purpose so the tool executor can
@@ -897,15 +1043,21 @@ export const createRuntimeExecutors = (
 
                 // If textBuffer exists, flush it first
                 if (!!textBuffer) {
+                  assertStepActive(ctx);
                   await flushTextBuffer();
+                  assertStepActive(ctx);
                 }
 
+                assertStepActive(ctx);
                 await streamManager.publishStreamChunk(operationId, stepIndex, {
                   chunkType: 'tools_calling',
                   toolsCalling: payload,
                 });
+                assertStepActive(ctx);
               },
               onError: async (errorData) => {
+                assertStepActive(ctx);
+                if (!attemptActive) return;
                 streamError = errorData;
                 console.error(`[${operationLogId}][stream_error]`, errorData);
               },
@@ -918,8 +1070,17 @@ export const createRuntimeExecutors = (
             user: ctx.userId,
           });
 
-          // Consume stream to ensure all callbacks complete execution
-          await consumeStreamUntilDone(response);
+          // The consumer owns cancellation/cleanup even if chat resolved after abort.
+          await consumeStepStream(response, ctx);
+          // Stop scheduling before draining in-flight flushes and the final buffers.
+          attemptActive = false;
+          if (textBufferTimer) clearTimeout(textBufferTimer);
+          if (reasoningBufferTimer) clearTimeout(reasoningBufferTimer);
+          textBufferTimer = null;
+          reasoningBufferTimer = null;
+          await Promise.all(pendingFlushes);
+          assertStepActive(ctx);
+          if (bufferError) throw bufferError;
 
           // If a stream error was captured via onError callback, throw to propagate the error
           if (streamError) {
@@ -936,8 +1097,12 @@ export const createRuntimeExecutors = (
             throw streamExecutionError;
           }
 
+          assertStepActive(ctx);
           await flushTextBuffer();
+          assertStepActive(ctx);
+
           await flushReasoningBuffer();
+          assertStepActive(ctx);
           clearAttemptBuffers();
 
           log(
@@ -976,6 +1141,7 @@ export const createRuntimeExecutors = (
           });
 
           // Publish stream end event
+          assertStepActive(ctx);
           await streamManager.publishStreamEvent(operationId, {
             data: {
               finalContent: content,
@@ -989,6 +1155,7 @@ export const createRuntimeExecutors = (
             stepIndex,
             type: 'stream_end',
           });
+          assertStepActive(ctx);
 
           log('[%s:%d] call_llm completed', operationId, stepIndex);
 
@@ -1032,6 +1199,7 @@ export const createRuntimeExecutors = (
                   }))
                 : undefined;
 
+            assertStepActive(ctx);
             await ctx.messageModel.update(assistantMessageItem.id, {
               content: finalContent,
               imageList: imageList.length > 0 ? imageList : undefined,
@@ -1040,7 +1208,9 @@ export const createRuntimeExecutors = (
               search: grounding,
               tools: persistedTools,
             });
+            assertStepActive(ctx);
           } catch (error) {
+            assertStepActive(ctx);
             console.error('[call_llm] Failed to update message:', error);
           }
 
@@ -1117,10 +1287,13 @@ export const createRuntimeExecutors = (
             },
           };
         } catch (error) {
+          assertStepActive(ctx);
           clearAttemptBuffers();
 
           const classified = classifyLLMError(error);
+          assertStepActive(ctx);
           const interrupted = await isOperationInterrupted(ctx);
+          assertStepActive(ctx);
 
           if (!interrupted && shouldRetryLLM(classified.kind, attempt, LLM_MAX_RETRIES)) {
             const delayMs = getLLMRetryDelayMs(attempt);
@@ -1134,13 +1307,16 @@ export const createRuntimeExecutors = (
               delayMs,
             );
 
+            assertStepActive(ctx);
             await streamManager.publishStreamEvent(operationId, {
               data: { attempt: attempt + 1, delayMs, maxAttempts },
               stepIndex,
               type: 'stream_retry',
             });
+            assertStepActive(ctx);
 
-            await sleep(delayMs);
+            await sleep(delayMs, ctx.signal);
+            assertStepActive(ctx);
 
             if (await isOperationInterrupted(ctx)) {
               throw error;
@@ -1150,17 +1326,23 @@ export const createRuntimeExecutors = (
           }
 
           throw error;
+        } finally {
+          clearAttemptBuffers();
+          ctx.signal?.removeEventListener('abort', clearAttemptBuffers);
         }
       }
 
       throw new Error('LLM execution retry loop exited unexpectedly');
     } catch (error) {
+      assertStepActive(ctx);
       // Publish error event
+      assertStepActive(ctx);
       await streamManager.publishStreamEvent(operationId, {
         data: formatErrorEventData(error, 'llm_execution'),
         stepIndex,
         type: 'error',
       });
+      assertStepActive(ctx);
 
       console.error(
         `[StreamingLLMExecutor][${operationId}:${stepIndex}] LLM execution failed:`,
@@ -1171,6 +1353,7 @@ export const createRuntimeExecutors = (
   },
 
   compress_context: async (instruction, state) => {
+    assertStepActive(ctx);
     const { payload } = instruction as AgentInstructionCompressContext;
     const { messages, currentTokenCount } = payload;
     const { operationId, stepIndex } = ctx;
@@ -1211,6 +1394,7 @@ export const createRuntimeExecutors = (
     }
 
     if (ctx.hookDispatcher) {
+      assertStepActive(ctx);
       ctx.hookDispatcher
         .dispatch(
           operationId,
@@ -1223,11 +1407,13 @@ export const createRuntimeExecutors = (
             userId: ctx.userId,
           },
           state.metadata?._hooks,
+          ...hookLeaseGuardArgs(ctx),
         )
         .catch(() => {});
     }
 
     try {
+      assertStepActive(ctx);
       const dbMessages = await ctx.messageModel.query(
         {
           agentId: state.metadata?.agentId,
@@ -1236,6 +1422,7 @@ export const createRuntimeExecutors = (
         },
         { postProcessUrl: buildPostProcessUrl(ctx) },
       );
+      assertStepActive(ctx);
 
       const messageIds = dbMessages
         .filter(
@@ -1270,11 +1457,13 @@ export const createRuntimeExecutors = (
 
       const latestAssistantMessage = dbMessages.findLast((message) => message.role === 'assistant');
       const messageService = new MessageService(ctx.serverDB, ctx.userId);
+      assertStepActive(ctx);
       const compressionResult = await messageService.createCompressionGroup(topicId, messageIds, {
         agentId: state.metadata?.agentId,
         threadId: state.metadata?.threadId,
         topicId,
       });
+      assertStepActive(ctx);
 
       const compressionModel =
         newState.modelRuntimeConfig?.compressionModel || newState.modelRuntimeConfig;
@@ -1302,16 +1491,19 @@ export const createRuntimeExecutors = (
       }
 
       const compressionPayload = chainCompressContext(compressionResult.messagesToSummarize);
+      assertStepActive(ctx);
       const compressionRuntime = await initModelRuntimeFromDB(
         ctx.serverDB,
         ctx.userId,
         compressionModel.provider,
       );
+      assertStepActive(ctx);
 
       let summaryContent = '';
       let summaryUsage: any;
       let summaryError: any;
 
+      assertStepActive(ctx);
       const compressionResponse = await compressionRuntime.chat(
         {
           messages: compressionPayload.messages!,
@@ -1321,20 +1513,25 @@ export const createRuntimeExecutors = (
         {
           callback: {
             onCompletion: async (data) => {
+              assertStepActive(ctx);
               if (data.usage) summaryUsage = data.usage;
             },
             onError: async (errorData) => {
+              assertStepActive(ctx);
               summaryError = errorData;
             },
             onText: async (text) => {
+              assertStepActive(ctx);
               summaryContent += text;
             },
           },
+          signal: ctx.signal,
           user: ctx.userId,
         },
       );
 
-      await consumeStreamUntilDone(compressionResponse);
+      await consumeStepStream(compressionResponse, ctx);
+      assertStepActive(ctx);
 
       if (summaryError) {
         throw new Error(
@@ -1344,6 +1541,7 @@ export const createRuntimeExecutors = (
         );
       }
 
+      assertStepActive(ctx);
       const finalCompression = await messageService.finalizeCompression(
         compressionResult.messageGroupId,
         summaryContent,
@@ -1353,6 +1551,7 @@ export const createRuntimeExecutors = (
           topicId,
         },
       );
+      assertStepActive(ctx);
 
       const compressedMessagesBase =
         finalCompression.messages || compressionResult.messagesToSummarize;
@@ -1394,6 +1593,7 @@ export const createRuntimeExecutors = (
       });
 
       if (ctx.hookDispatcher) {
+        assertStepActive(ctx);
         ctx.hookDispatcher
           .dispatch(
             operationId,
@@ -1408,6 +1608,7 @@ export const createRuntimeExecutors = (
               userId: ctx.userId,
             },
             state.metadata?._hooks,
+            ...hookLeaseGuardArgs(ctx),
           )
           .catch(() => {});
       }
@@ -1431,6 +1632,7 @@ export const createRuntimeExecutors = (
         },
       };
     } catch (error) {
+      assertStepActive(ctx);
       log(
         `${stagePrefix} Compression failed. originalTokens=%d error=%O`,
         currentTokenCount,
@@ -1438,6 +1640,7 @@ export const createRuntimeExecutors = (
       );
 
       if (ctx.hookDispatcher) {
+        assertStepActive(ctx);
         ctx.hookDispatcher
           .dispatch(
             operationId,
@@ -1450,6 +1653,7 @@ export const createRuntimeExecutors = (
               userId: ctx.userId,
             },
             state.metadata?._hooks,
+            ...hookLeaseGuardArgs(ctx),
           )
           .catch(() => {});
       }
@@ -1481,6 +1685,7 @@ export const createRuntimeExecutors = (
    * Tool execution
    */
   call_tool: async (instruction, state) => {
+    assertStepActive(ctx);
     const { payload } = instruction as Extract<AgentInstruction, { type: 'call_tool' }>;
     const { operationId, stepIndex, streamManager, toolExecutionService } = ctx;
     const events: AgentEvent[] = [];
@@ -1489,11 +1694,13 @@ export const createRuntimeExecutors = (
     log(`[${operationLogId}] payload: %O`, payload);
 
     // Publish tool execution start event
+    assertStepActive(ctx);
     await streamManager.publishStreamEvent(operationId, {
       data: payload,
       stepIndex,
       type: 'tool_start',
     });
+    assertStepActive(ctx);
 
     // payload is { parentMessageId, toolCalling: ChatToolPayload }
     const chatToolPayload: ChatToolPayload = payload.toolCalling;
@@ -1508,7 +1715,9 @@ export const createRuntimeExecutors = (
         typeof chatToolPayload.arguments === 'string'
           ? JSON.parse(chatToolPayload.arguments)
           : (chatToolPayload.arguments ?? {});
-    } catch {}
+    } catch {
+      assertStepActive(ctx);
+    }
 
     try {
       // Check if this is a client-side function tool — pause instead of executing
@@ -1520,10 +1729,12 @@ export const createRuntimeExecutors = (
         log(`[${operationLogId}] Client function tool detected: ${toolName}, pausing for client`);
 
         // Publish tool call info so streaming can emit function_call events
+        assertStepActive(ctx);
         await streamManager.publishStreamChunk(operationId, stepIndex, {
           chunkType: 'tools_calling',
           toolsCalling: [chatToolPayload] as any,
         });
+        assertStepActive(ctx);
 
         const newState = structuredClone(state);
         newState.lastModified = new Date().toISOString();
@@ -1572,9 +1783,12 @@ export const createRuntimeExecutors = (
         typeof streamManager.sendToolExecute === 'function';
 
       let toolCallMocked = false;
+      assertStepActive(ctx);
       const hookResult = ctx.hookDispatcher
         ? await (async () => {
+            assertStepActive(ctx);
             // 1. dispatch for observation (webhook in production, local handler logging)
+            assertStepActive(ctx);
             ctx
               .hookDispatcher!.dispatch(
                 operationId,
@@ -1589,18 +1803,24 @@ export const createRuntimeExecutors = (
                   userId: ctx.userId,
                 },
                 state.metadata?._hooks,
+                ...hookLeaseGuardArgs(ctx),
               )
               .catch(() => {});
             // 2. dispatchBeforeToolCall for mock support (local-only)
-            return ctx.hookDispatcher!.dispatchBeforeToolCall(operationId, {
-              apiName: chatToolPayload.apiName,
-              args: parsedArgs,
-              callIndex,
-              identifier: chatToolPayload.identifier,
-              stepIndex,
-            });
+            return ctx.hookDispatcher!.dispatchBeforeToolCall(
+              operationId,
+              {
+                apiName: chatToolPayload.apiName,
+                args: parsedArgs,
+                callIndex,
+                identifier: chatToolPayload.identifier,
+                stepIndex,
+              },
+              ...hookLeaseGuardArgs(ctx),
+            );
           })()
         : null;
+      assertStepActive(ctx);
 
       let execution: { result: ToolExecutionResultResponse; attempts: number };
       if (isDeviceToolIdentifier(chatToolPayload.identifier) && !hookResult?.isMocked) {
@@ -1612,6 +1832,7 @@ export const createRuntimeExecutors = (
         const policy = state.metadata?.deviceAccessPolicy as
           | { canUseDevice: boolean; reason: DeviceAccessReason }
           | undefined;
+        assertStepActive(ctx);
         logDeviceToolAudit({
           apiName: chatToolPayload.apiName,
           botContext: state.metadata?.botContext,
@@ -1639,11 +1860,15 @@ export const createRuntimeExecutors = (
           args: parsedArgs,
           manifest: effectiveManifestMap[chatToolPayload.identifier],
         });
+        assertStepActive(ctx);
         const dispatchResult = await dispatchClientTool(chatToolPayload, {
+          assertStepLease: ctx.assertStepLease,
+          signal: ctx.signal,
           operationId,
           streamManager,
           timeoutMs,
         });
+        assertStepActive(ctx);
         execution = { attempts: 1, result: dispatchResult };
       } else {
         // Inject source from sourceMap so BuiltinToolsExecutor can route
@@ -1654,9 +1879,11 @@ export const createRuntimeExecutors = (
 
         // Execute tool using ToolExecutionService
         log(`[${operationLogId}] Executing tool ${toolName} ...`);
+        assertStepActive(ctx);
         execution = await executeToolWithRetry(
           () =>
             toolExecutionService.executeTool(chatToolPayload, {
+              assertStepLease: ctx.assertStepLease,
               activeDeviceId: state.metadata?.activeDeviceId,
               agentId: state.metadata?.agentId,
               documentId: state.metadata?.documentId,
@@ -1666,6 +1893,7 @@ export const createRuntimeExecutors = (
               operationId,
               scope: state.metadata?.scope,
               serverDB: ctx.serverDB,
+              signal: ctx.signal,
               taskId: state.metadata?.taskId,
               threadId: state.metadata?.threadId,
               toolCallId: chatToolPayload.id,
@@ -1675,18 +1903,21 @@ export const createRuntimeExecutors = (
               userId: ctx.userId,
             }),
           {
+            assertStepLease: () => assertStepActive(ctx),
             isInterrupted: () => isOperationInterrupted(ctx),
             maxRetries: TOOL_MAX_RETRIES,
             operationLogId,
             toolName,
           },
         );
+        assertStepActive(ctx);
       }
 
       const executionResult = execution.result;
       const executionTime = executionResult.executionTime;
       const isSuccess = executionResult.success;
       if (ctx.hookDispatcher) {
+        assertStepActive(ctx);
         ctx.hookDispatcher
           .dispatch(
             operationId,
@@ -1705,6 +1936,7 @@ export const createRuntimeExecutors = (
               userId: ctx.userId,
             },
             state.metadata?._hooks,
+            ...hookLeaseGuardArgs(ctx),
           )
           .catch(() => {});
       }
@@ -1714,6 +1946,7 @@ export const createRuntimeExecutors = (
       );
 
       // Publish tool execution result event
+      assertStepActive(ctx);
       await streamManager.publishStreamEvent(operationId, {
         data: {
           executionTime,
@@ -1727,6 +1960,7 @@ export const createRuntimeExecutors = (
         stepIndex,
         type: 'tool_end',
       });
+      assertStepActive(ctx);
 
       // Finally persist to database. In resumption mode (skipCreateToolMessage),
       // the pending tool message already exists from request_human_approve, so
@@ -1736,12 +1970,14 @@ export const createRuntimeExecutors = (
       try {
         if (payload.skipCreateToolMessage) {
           toolMessageId = payload.parentMessageId;
+          assertStepActive(ctx);
           await ctx.messageModel.updateToolMessage(toolMessageId, {
             content: executionResult.content,
             metadata: { toolExecutionTimeMs: executionTime },
             pluginError: executionResult.error,
             pluginState: executionResult.state,
           });
+          assertStepActive(ctx);
           log(
             '[%s:%d] Updated existing tool message %s (skipCreateToolMessage)',
             operationId,
@@ -1749,6 +1985,7 @@ export const createRuntimeExecutors = (
             toolMessageId,
           );
         } else {
+          assertStepActive(ctx);
           const toolMessage = await ctx.messageModel.create({
             agentId: state.metadata!.agentId!,
             content: executionResult.content,
@@ -1762,9 +1999,11 @@ export const createRuntimeExecutors = (
             tool_call_id: chatToolPayload.id,
             topicId: state.metadata?.topicId,
           });
+          assertStepActive(ctx);
           toolMessageId = toolMessage.id;
         }
       } catch (error) {
+        assertStepActive(ctx);
         console.error('[StreamingToolExecutor] Failed to persist tool message: %O', error);
         // Normalize BEFORE publishing so clients (which treat `error` stream
         // events as terminal and surface `event.data.error` directly) see the
@@ -1774,11 +2013,13 @@ export const createRuntimeExecutors = (
           : error instanceof Error
             ? error
             : new Error(String(error));
+        assertStepActive(ctx);
         await streamManager.publishStreamEvent(operationId, {
           data: formatErrorEventData(fatal, 'tool_message_persist'),
           stepIndex,
           type: 'error',
         });
+        assertStepActive(ctx);
         // Mark so the outer catch (which normally converts tool-exec errors
         // into event records and returns the unchanged state) re-throws.
         throw markPersistFatal(fatal);
@@ -1883,12 +2124,14 @@ export const createRuntimeExecutors = (
         },
       };
     } catch (error) {
+      assertStepActive(ctx);
       // Persist-level failures (parent FK violation etc.) must propagate so
       // the step fails — otherwise the swallow-and-continue path keeps
       // running the agent on a broken conversation chain. See LOBE-7158.
       if (isPersistFatal(error)) throw error;
 
       if (ctx.hookDispatcher) {
+        assertStepActive(ctx);
         ctx.hookDispatcher
           .dispatch(
             operationId,
@@ -1904,16 +2147,19 @@ export const createRuntimeExecutors = (
               userId: ctx.userId,
             },
             state.metadata?._hooks,
+            ...hookLeaseGuardArgs(ctx),
           )
           .catch(() => {});
       }
 
       // Publish tool execution error event
+      assertStepActive(ctx);
       await streamManager.publishStreamEvent(operationId, {
         data: formatErrorEventData(error, 'tool_execution'),
         stepIndex,
         type: 'error',
       });
+      assertStepActive(ctx);
 
       events.push({ error, type: 'error' });
 
@@ -1934,6 +2180,7 @@ export const createRuntimeExecutors = (
    * Executes multiple tools concurrently and refreshes messages from database after completion
    */
   call_tools_batch: async (instruction, state) => {
+    assertStepActive(ctx);
     const { payload } = instruction as Extract<AgentInstruction, { type: 'call_tools_batch' }>;
     const { parentMessageId, toolsCalling } = payload;
     const { operationId, stepIndex, streamManager, toolExecutionService } = ctx;
@@ -1963,10 +2210,12 @@ export const createRuntimeExecutors = (
         `[${operationLogId}][call_tools_batch] All ${clientTools.length} tools are client-side, pausing`,
       );
 
+      assertStepActive(ctx);
       await streamManager.publishStreamChunk(operationId, stepIndex, {
         chunkType: 'tools_calling',
         toolsCalling: clientTools as any,
       });
+      assertStepActive(ctx);
 
       const newState = structuredClone(state);
       newState.lastModified = new Date().toISOString();
@@ -1997,16 +2246,20 @@ export const createRuntimeExecutors = (
 
     // Execute server tools concurrently (skip client tools in mixed batch)
     const toolsToExecute = serverTools.length > 0 ? serverTools : toolsCalling;
+    assertStepActive(ctx);
     await Promise.all(
       toolsToExecute.map(async (chatToolPayload: ChatToolPayload) => {
+        assertStepActive(ctx);
         const toolName = `${chatToolPayload.identifier}/${chatToolPayload.apiName}`;
 
         // Publish tool execution start event
+        assertStepActive(ctx);
         await streamManager.publishStreamEvent(operationId, {
           data: { parentMessageId, toolCalling: chatToolPayload },
           stepIndex,
           type: 'tool_start',
         });
+        assertStepActive(ctx);
 
         const batchToolName = `${chatToolPayload.identifier}/${chatToolPayload.apiName}`;
         const batchExistingStats = state.usage?.tools?.byTool?.find(
@@ -2019,7 +2272,9 @@ export const createRuntimeExecutors = (
             typeof chatToolPayload.arguments === 'string'
               ? JSON.parse(chatToolPayload.arguments)
               : (chatToolPayload.arguments ?? {});
-        } catch {}
+        } catch {
+          assertStepActive(ctx);
+        }
 
         try {
           log(`[${operationLogId}] Executing tool ${toolName} ...`);
@@ -2040,8 +2295,11 @@ export const createRuntimeExecutors = (
             typeof streamManager.sendToolExecute === 'function';
 
           let batchToolCallMocked = false;
+          assertStepActive(ctx);
           const batchHookResult = ctx.hookDispatcher
             ? await (async () => {
+                assertStepActive(ctx);
+
                 ctx
                   .hookDispatcher!.dispatch(
                     operationId,
@@ -2056,22 +2314,29 @@ export const createRuntimeExecutors = (
                       userId: ctx.userId,
                     },
                     state.metadata?._hooks,
+                    ...hookLeaseGuardArgs(ctx),
                   )
                   .catch(() => {});
-                return ctx.hookDispatcher!.dispatchBeforeToolCall(operationId, {
-                  apiName: chatToolPayload.apiName,
-                  args: batchParsedArgs,
-                  callIndex: batchCallIndex,
-                  identifier: chatToolPayload.identifier,
-                  stepIndex,
-                });
+                return ctx.hookDispatcher!.dispatchBeforeToolCall(
+                  operationId,
+                  {
+                    apiName: chatToolPayload.apiName,
+                    args: batchParsedArgs,
+                    callIndex: batchCallIndex,
+                    identifier: chatToolPayload.identifier,
+                    stepIndex,
+                  },
+                  ...hookLeaseGuardArgs(ctx),
+                );
               })()
             : null;
+          assertStepActive(ctx);
 
           if (isDeviceToolIdentifier(chatToolPayload.identifier) && !batchHookResult?.isMocked) {
             const policy = state.metadata?.deviceAccessPolicy as
               | { canUseDevice: boolean; reason: DeviceAccessReason }
               | undefined;
+            assertStepActive(ctx);
             logDeviceToolAudit({
               apiName: chatToolPayload.apiName,
               botContext: state.metadata?.botContext,
@@ -2100,11 +2365,15 @@ export const createRuntimeExecutors = (
               args: batchParsedArgs,
               manifest: batchManifestMap[chatToolPayload.identifier],
             });
+            assertStepActive(ctx);
             const dispatchResult = await dispatchClientTool(chatToolPayload, {
+              assertStepLease: ctx.assertStepLease,
+              signal: ctx.signal,
               operationId,
               streamManager,
               timeoutMs,
             });
+            assertStepActive(ctx);
             execution = { attempts: 1, result: dispatchResult };
           } else {
             // Inject source from sourceMap so BuiltinToolsExecutor can route
@@ -2116,9 +2385,11 @@ export const createRuntimeExecutors = (
               chatToolPayload.source = batchToolSource;
             }
 
+            assertStepActive(ctx);
             execution = await executeToolWithRetry(
               () =>
                 toolExecutionService.executeTool(chatToolPayload, {
+                  assertStepLease: ctx.assertStepLease,
                   activeDeviceId: state.metadata?.activeDeviceId,
                   agentId: state.metadata?.agentId,
                   documentId: state.metadata?.documentId,
@@ -2128,6 +2399,7 @@ export const createRuntimeExecutors = (
                   operationId,
                   scope: state.metadata?.scope,
                   serverDB: ctx.serverDB,
+                  signal: ctx.signal,
                   taskId: state.metadata?.taskId,
                   threadId: state.metadata?.threadId,
                   toolCallId: chatToolPayload.id,
@@ -2137,18 +2409,21 @@ export const createRuntimeExecutors = (
                   userId: ctx.userId,
                 }),
               {
+                assertStepLease: () => assertStepActive(ctx),
                 isInterrupted: () => isOperationInterrupted(ctx),
                 maxRetries: TOOL_MAX_RETRIES,
                 operationLogId,
                 toolName,
               },
             );
+            assertStepActive(ctx);
           }
 
           const executionResult = execution.result;
           const executionTime = executionResult.executionTime;
           const isSuccess = executionResult.success;
           if (ctx.hookDispatcher) {
+            assertStepActive(ctx);
             ctx.hookDispatcher
               .dispatch(
                 operationId,
@@ -2167,6 +2442,7 @@ export const createRuntimeExecutors = (
                   userId: ctx.userId,
                 },
                 state.metadata?._hooks,
+                ...hookLeaseGuardArgs(ctx),
               )
               .catch(() => {});
           }
@@ -2175,6 +2451,7 @@ export const createRuntimeExecutors = (
           );
 
           // Publish tool execution result event
+          assertStepActive(ctx);
           await streamManager.publishStreamEvent(operationId, {
             data: {
               executionTime,
@@ -2188,9 +2465,11 @@ export const createRuntimeExecutors = (
             stepIndex,
             type: 'tool_end',
           });
+          assertStepActive(ctx);
 
           // Create tool message in database
           try {
+            assertStepActive(ctx);
             const toolMessage = await ctx.messageModel.create({
               agentId: state.metadata!.agentId!,
               content: executionResult.content,
@@ -2204,9 +2483,11 @@ export const createRuntimeExecutors = (
               tool_call_id: chatToolPayload.id,
               topicId: state.metadata?.topicId,
             });
+            assertStepActive(ctx);
             toolMessageIds.push(toolMessage.id);
             log(`[${operationLogId}] Created tool message ${toolMessage.id} for ${toolName}`);
           } catch (error) {
+            assertStepActive(ctx);
             console.error(
               `[${operationLogId}] Failed to create tool message for ${toolName}:`,
               error,
@@ -2220,11 +2501,13 @@ export const createRuntimeExecutors = (
               : error instanceof Error
                 ? error
                 : new Error(String(error));
+            assertStepActive(ctx);
             await streamManager.publishStreamEvent(operationId, {
               data: formatErrorEventData(fatal, 'tool_message_persist'),
               stepIndex,
               type: 'error',
             });
+            assertStepActive(ctx);
             // Marker so the outer catch (which normally just records
             // per-tool exec errors) knows to propagate this one.
             throw markPersistFatal(fatal);
@@ -2250,6 +2533,7 @@ export const createRuntimeExecutors = (
             toolName,
           };
         } catch (error) {
+          assertStepActive(ctx);
           // Persist-level failures (e.g. parent FK violations) must propagate
           // so the whole batch short-circuits. Without this the fallback to
           // the already-deleted parent triggers another FK on the next step.
@@ -2258,6 +2542,7 @@ export const createRuntimeExecutors = (
           }
 
           if (ctx.hookDispatcher) {
+            assertStepActive(ctx);
             ctx.hookDispatcher
               .dispatch(
                 operationId,
@@ -2273,6 +2558,7 @@ export const createRuntimeExecutors = (
                   userId: ctx.userId,
                 },
                 state.metadata?._hooks,
+                ...hookLeaseGuardArgs(ctx),
               )
               .catch(() => {});
           }
@@ -2280,16 +2566,19 @@ export const createRuntimeExecutors = (
           console.error(`[${operationLogId}] Tool execution failed for ${toolName}:`, error);
 
           // Publish error event
+          assertStepActive(ctx);
           await streamManager.publishStreamEvent(operationId, {
             data: formatErrorEventData(error, 'tool_execution'),
             stepIndex,
             type: 'error',
           });
+          assertStepActive(ctx);
 
           events.push({ error, type: 'error' });
         }
       }),
     );
+    assertStepActive(ctx);
 
     log(
       `[${operationLogId}][call_tools_batch] All tools executed, created ${toolMessageIds.length} tool messages`,
@@ -2351,6 +2640,7 @@ export const createRuntimeExecutors = (
     //
     // postProcessUrl resolves S3 keys in imageList/videoList/fileList to absolute URLs;
     // without it the next LLM call sees raw keys and providers reject them.
+    assertStepActive(ctx);
     const latestMessages = await ctx.messageModel.query(
       {
         agentId: state.metadata?.agentId,
@@ -2359,6 +2649,7 @@ export const createRuntimeExecutors = (
       },
       { postProcessUrl: buildPostProcessUrl(ctx) },
     );
+    assertStepActive(ctx);
 
     // Use conversation-flow parse to resolve branching into linear flat list
     // parse() handles assistantGroup, compare, supervisor, etc. virtual message types
@@ -2378,10 +2669,12 @@ export const createRuntimeExecutors = (
         `[${operationLogId}][call_tools_batch] Mixed batch: ${serverTools.length} server tools done, pausing for ${clientTools.length} client tools`,
       );
 
+      assertStepActive(ctx);
       await streamManager.publishStreamChunk(operationId, stepIndex, {
         chunkType: 'tools_calling',
         toolsCalling: clientTools as any,
       });
+      assertStepActive(ctx);
 
       newState.status = 'interrupted';
       newState.interruption = {
@@ -2430,6 +2723,7 @@ export const createRuntimeExecutors = (
    * Complete runtime execution
    */
   finish: async (instruction, state) => {
+    assertStepActive(ctx);
     const { reason, reasonDetail } = instruction as Extract<AgentInstruction, { type: 'finish' }>;
     const { operationId, stepIndex, streamManager } = ctx;
 
@@ -2439,13 +2733,17 @@ export const createRuntimeExecutors = (
     if (ctx.topicId && ctx.userId) {
       try {
         const topicModel = new TopicModel(ctx.serverDB, ctx.userId);
+        assertStepActive(ctx);
         await topicModel.updateMetadata(ctx.topicId, { runningOperation: null });
+        assertStepActive(ctx);
       } catch (e) {
+        assertStepActive(ctx);
         log('[%s] Failed to clear runningOperation metadata: %O', operationId, e);
       }
     }
 
     // Publish execution complete event
+    assertStepActive(ctx);
     await streamManager.publishStreamEvent(operationId, {
       data: {
         finalState: { ...state, status: 'done' },
@@ -2456,6 +2754,7 @@ export const createRuntimeExecutors = (
       stepIndex,
       type: 'step_complete',
     });
+    assertStepActive(ctx);
 
     const newState = structuredClone(state);
     newState.lastModified = new Date().toISOString();
@@ -2486,6 +2785,7 @@ export const createRuntimeExecutors = (
    *   message map without waiting for `agent_runtime_end`.
    */
   request_human_approve: async (instruction, state) => {
+    assertStepActive(ctx);
     const { pendingToolsCalling, skipCreateToolMessage } = instruction as Extract<
       AgentInstruction,
       { type: 'request_human_approve' }
@@ -2495,6 +2795,7 @@ export const createRuntimeExecutors = (
     log('[%s:%d] Requesting human approval for %O', operationId, stepIndex, pendingToolsCalling);
 
     // Publish human approval request event
+    assertStepActive(ctx);
     await streamManager.publishStreamEvent(operationId, {
       data: {
         pendingToolsCalling,
@@ -2504,8 +2805,10 @@ export const createRuntimeExecutors = (
       stepIndex,
       type: 'step_start',
     });
+    assertStepActive(ctx);
 
     if (ctx.hookDispatcher) {
+      assertStepActive(ctx);
       ctx.hookDispatcher
         .dispatch(
           operationId,
@@ -2520,6 +2823,7 @@ export const createRuntimeExecutors = (
             userId: ctx.userId,
           },
           state.metadata?._hooks,
+          ...hookLeaseGuardArgs(ctx),
         )
         .catch(() => {});
     }
@@ -2538,11 +2842,13 @@ export const createRuntimeExecutors = (
       // tool_call_id so we can still ship the mapping to the client.
       log('[%s:%d] Resuming with existing tool messages', operationId, stepIndex);
       try {
+        assertStepActive(ctx);
         const dbMessages = await ctx.messageModel.query({
           agentId: state.metadata?.agentId,
           threadId: state.metadata?.threadId,
           topicId: state.metadata?.topicId,
         });
+        assertStepActive(ctx);
         for (const toolPayload of pendingToolsCalling) {
           const existing = dbMessages.find(
             (m: any) => m.role === 'tool' && m.tool_call_id === toolPayload.id,
@@ -2552,6 +2858,7 @@ export const createRuntimeExecutors = (
           }
         }
       } catch (error) {
+        assertStepActive(ctx);
         console.error(
           '[%s:%d] Failed to look up existing tool messages: %O',
           operationId,
@@ -2570,16 +2877,19 @@ export const createRuntimeExecutors = (
 
       if (!parentAssistantId) {
         try {
+          assertStepActive(ctx);
           const dbMessages = await ctx.messageModel.query({
             agentId: state.metadata?.agentId,
             threadId: state.metadata?.threadId,
             topicId: state.metadata?.topicId,
           });
+          assertStepActive(ctx);
           parentAssistantId = dbMessages
             .slice()
             .reverse()
             .find((m: any) => m.role === 'assistant')?.id;
         } catch (error) {
+          assertStepActive(ctx);
           console.error(
             '[%s:%d] Failed to query DB for parent assistant: %O',
             operationId,
@@ -2598,6 +2908,7 @@ export const createRuntimeExecutors = (
       for (const toolPayload of pendingToolsCalling) {
         const toolName = `${toolPayload.identifier}/${toolPayload.apiName}`;
         try {
+          assertStepActive(ctx);
           const toolMessage = await ctx.messageModel.create({
             agentId: state.metadata!.agentId!,
             content: '',
@@ -2609,6 +2920,7 @@ export const createRuntimeExecutors = (
             tool_call_id: toolPayload.id,
             topicId: state.metadata?.topicId,
           });
+          assertStepActive(ctx);
 
           toolMessageIds[toolPayload.id] = toolMessage.id;
 
@@ -2626,6 +2938,7 @@ export const createRuntimeExecutors = (
             toolName,
           );
         } catch (error) {
+          assertStepActive(ctx);
           console.error(
             '[%s:%d] Failed to create pending tool message for %s: %O',
             operationId,
@@ -2640,11 +2953,13 @@ export const createRuntimeExecutors = (
 
     // Notify frontend to display approval UI through streaming system.
     // `toolMessageIds` is a new optional field; legacy consumers ignore it.
+    assertStepActive(ctx);
     await streamManager.publishStreamChunk(operationId, stepIndex, {
       chunkType: 'tools_calling',
       toolMessageIds,
       toolsCalling: pendingToolsCalling as any,
     } as any);
+    assertStepActive(ctx);
 
     const events: AgentEvent[] = [
       {
@@ -2674,6 +2989,7 @@ export const createRuntimeExecutors = (
    * Create tool messages with 'aborted' intervention status for canceled tool calls
    */
   resolve_aborted_tools: async (instruction, state) => {
+    assertStepActive(ctx);
     const { payload } = instruction as Extract<AgentInstruction, { type: 'resolve_aborted_tools' }>;
     const { parentMessageId, toolsCalling } = payload;
     const { operationId, stepIndex, streamManager } = ctx;
@@ -2682,6 +2998,7 @@ export const createRuntimeExecutors = (
     log('[%s:%d] Resolving %d aborted tools', operationId, stepIndex, toolsCalling.length);
 
     // Publish tool cancellation event
+    assertStepActive(ctx);
     await streamManager.publishStreamEvent(operationId, {
       data: {
         parentMessageId,
@@ -2691,6 +3008,7 @@ export const createRuntimeExecutors = (
       stepIndex,
       type: 'step_start',
     });
+    assertStepActive(ctx);
 
     const newState = structuredClone(state);
 
@@ -2700,6 +3018,7 @@ export const createRuntimeExecutors = (
       log('[%s:%d] Creating aborted tool message for %s', operationId, stepIndex, toolName);
 
       try {
+        assertStepActive(ctx);
         const toolMessage = await ctx.messageModel.create({
           agentId: state.metadata!.agentId!,
           content: 'Tool execution was aborted by user.',
@@ -2711,6 +3030,7 @@ export const createRuntimeExecutors = (
           tool_call_id: toolPayload.id,
           topicId: state.metadata?.topicId,
         });
+        assertStepActive(ctx);
 
         log(
           '[%s:%d] Created aborted tool message: %s for %s',
@@ -2727,6 +3047,7 @@ export const createRuntimeExecutors = (
           tool_call_id: toolPayload.id,
         });
       } catch (error) {
+        assertStepActive(ctx);
         console.error(
           '[resolve_aborted_tools] Failed to create aborted tool message for %s: %O',
           toolName,
@@ -2739,11 +3060,13 @@ export const createRuntimeExecutors = (
           : error instanceof Error
             ? error
             : new Error(String(error));
+        assertStepActive(ctx);
         await streamManager.publishStreamEvent(operationId, {
           data: formatErrorEventData(fatal, 'tool_message_persist'),
           stepIndex,
           type: 'error',
         });
+        assertStepActive(ctx);
         throw fatal;
       }
     }
@@ -2755,6 +3078,7 @@ export const createRuntimeExecutors = (
     newState.status = 'done';
 
     // Publish completion event
+    assertStepActive(ctx);
     await streamManager.publishStreamEvent(operationId, {
       data: {
         finalState: newState,
@@ -2765,6 +3089,7 @@ export const createRuntimeExecutors = (
       stepIndex,
       type: 'step_complete',
     });
+    assertStepActive(ctx);
 
     events.push({
       finalState: newState,

@@ -5,6 +5,9 @@ import { getModelPropertyWithFallback } from '@lobechat/model-runtime';
 import type * as ModelBankModule from 'model-bank';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { appEnv } from '@/envs/app';
+import { StepLeaseBackendError, StepLeaseLostError } from '@/server/modules/AgentRuntime/stepLease';
+
 import { AgentRuntimeService } from './AgentRuntimeService';
 import { hookDispatcher } from './hooks';
 import {
@@ -186,7 +189,7 @@ describe('AgentRuntimeService', () => {
     it('should initialize with default base URL', () => {
       delete process.env.AGENT_RUNTIME_BASE_URL;
       const newService = new AgentRuntimeService(mockDb, mockUserId);
-      expect((newService as any).baseURL).toBe('http://localhost:3210/api/agent');
+      expect((newService as any).baseURL).toBe(`${appEnv.APP_URL.replace(/\/$/, '')}/api/agent`);
     });
 
     it('should initialize with custom base URL from environment', () => {
@@ -466,6 +469,207 @@ describe('AgentRuntimeService', () => {
       );
     });
 
+    it('fails closed before execution when lease acquisition is unavailable', async () => {
+      const failure = new StepLeaseBackendError('acquire', new Error('offline'));
+      mockCoordinator.acquireStepLease.mockRejectedValueOnce(failure);
+      const create = vi.spyOn(service as any, 'createAgentRuntime');
+      await expect(service.executeStep(mockParams)).rejects.toBe(failure);
+      expect(create).not.toHaveBeenCalled();
+      expect(mockCoordinator.saveAgentStateWithLease).not.toHaveBeenCalled();
+      expect(mockCoordinator.releaseStepLease).not.toHaveBeenCalled();
+    });
+
+    it('renews a slow step beyond the old 35 second TTL and excludes a competing worker', async () => {
+      vi.useFakeTimers();
+      try {
+        let resolveStep!: (value: any) => void;
+        const runtime = {
+          dispose: vi.fn(),
+          step: vi.fn(
+            () =>
+              new Promise((resolve) => {
+                resolveStep = resolve;
+              }),
+          ),
+        };
+        vi.spyOn(service as any, 'createAgentRuntime').mockResolvedValue({ runtime });
+        const execution = service.executeStep(mockParams);
+        await vi.waitFor(() => expect(runtime.step).toHaveBeenCalledOnce());
+        await vi.advanceTimersByTimeAsync(90_000);
+        expect(
+          await mockCoordinator.acquireStepLease(mockParams.operationId, mockParams.stepIndex),
+        ).toBeNull();
+        expect(mockCoordinator.renewStepLease.mock.calls.length).toBeGreaterThan(8);
+        resolveStep({ events: [], newState: { ...mockState, status: 'done', stepCount: 2 } });
+        expect((await execution).success).toBe(true);
+        expect(mockCoordinator.releaseStepLease).toHaveBeenCalledOnce();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('rejects a late runtime result after losing renewal without saving or notifying', async () => {
+      vi.useFakeTimers();
+      try {
+        let resolveStep!: (value: any) => void;
+        let signal!: AbortSignal;
+        const runtime = {
+          dispose: vi.fn(),
+          step: vi.fn(
+            () =>
+              new Promise((resolve) => {
+                resolveStep = resolve;
+              }),
+          ),
+        };
+        vi.spyOn(service as any, 'createAgentRuntime').mockImplementation(async (options: any) => {
+          signal = options.signal;
+          return { runtime };
+        });
+        const execution = service.executeStep(mockParams);
+        const rejected = expect(execution).rejects.toBeInstanceOf(StepLeaseLostError);
+        await vi.waitFor(() => expect(runtime.step).toHaveBeenCalledOnce());
+        mockCoordinator.renewStepLease.mockResolvedValueOnce(false);
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(signal.aborted).toBe(true);
+        resolveStep({ events: [], newState: { ...mockState, status: 'done', stepCount: 2 } });
+        await rejected;
+        expect(mockCoordinator.saveStepResultWithLease).not.toHaveBeenCalled();
+        expect(mockCoordinator.saveAgentStateWithLease).not.toHaveBeenCalled();
+        expect(mockQueueService.scheduleMessage).not.toHaveBeenCalled();
+        expect(runtime.dispose).toHaveBeenCalledOnce();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('never falls back to an unfenced error save when the canonical commit loses ownership', async () => {
+      const runtime = {
+        dispose: vi.fn(),
+        step: vi.fn().mockResolvedValue({
+          events: [],
+          newState: { ...mockState, status: 'done', stepCount: 2 },
+        }),
+      };
+      vi.spyOn(service as any, 'createAgentRuntime').mockResolvedValue({ runtime });
+      mockCoordinator.saveStepResultWithLease.mockResolvedValueOnce(false);
+      await expect(service.executeStep(mockParams)).rejects.toBeInstanceOf(StepLeaseLostError);
+      expect(mockCoordinator.saveAgentStateWithLease).not.toHaveBeenCalled();
+      expect(mockCoordinator.saveAgentState).not.toHaveBeenCalled();
+      expect(mockQueueService.scheduleMessage).not.toHaveBeenCalled();
+    });
+
+    it('never emits completion when persisting the execution error loses ownership', async () => {
+      const runtime = {
+        dispose: vi.fn(),
+        step: vi.fn().mockRejectedValue(new Error('tool failed')),
+      };
+      vi.spyOn(service as any, 'createAgentRuntime').mockResolvedValue({ runtime });
+      const complete = vi.spyOn((service as any).completionLifecycle, 'dispatchHooks');
+      mockCoordinator.saveAgentStateWithLease.mockResolvedValueOnce(false);
+      await expect(service.executeStep(mockParams)).rejects.toBeInstanceOf(StepLeaseLostError);
+      expect(complete).not.toHaveBeenCalled();
+    });
+
+    it('recovers a committed continuation after queue failure without rerunning the tool', async () => {
+      mockCoordinator.loadAgentState.mockRestore();
+      await mockCoordinator.saveAgentState(mockParams.operationId, { ...mockState, metadata: {} });
+      const runtime = {
+        dispose: vi.fn(),
+        step: vi.fn().mockResolvedValue({
+          events: [],
+          newState: { ...mockState, status: 'running', stepCount: 2, metadata: {} },
+          nextContext: mockParams.context,
+        }),
+      };
+      vi.spyOn(service as any, 'createAgentRuntime').mockResolvedValue({ runtime });
+      mockQueueService.scheduleMessage
+        .mockRejectedValueOnce(new Error('queue unavailable'))
+        .mockRejectedValueOnce(new Error('queue still unavailable'))
+        .mockResolvedValueOnce('retried-message');
+      await expect(service.executeStep(mockParams)).rejects.toThrow('queue unavailable');
+      const committed = await mockCoordinator.loadAgentState(mockParams.operationId);
+      expect(committed).toMatchObject({
+        status: 'running',
+        stepCount: 2,
+        metadata: {
+          _pendingNextStep: {
+            operationId: mockParams.operationId,
+            stepIndex: 2,
+            context: mockParams.context,
+          },
+        },
+      });
+      expect(mockCoordinator.saveAgentStateWithLease).not.toHaveBeenCalled();
+      await expect(service.executeStep(mockParams)).rejects.toThrow('queue still unavailable');
+      expect(await mockCoordinator.loadAgentState(mockParams.operationId)).toMatchObject({
+        status: 'running',
+        stepCount: 2,
+      });
+      expect(mockCoordinator.saveAgentStateWithLease).not.toHaveBeenCalled();
+      const recovered = await service.executeStep(mockParams);
+      expect(recovered).toMatchObject({ success: true, nextStepScheduled: true });
+      expect(runtime.step).toHaveBeenCalledOnce();
+      expect(mockQueueService.scheduleMessage).toHaveBeenCalledTimes(3);
+      expect(mockCoordinator.saveStepResultWithLease).toHaveBeenCalledOnce();
+    });
+
+    it('preserves a committed terminal state if its stream-end notification fails', async () => {
+      mockCoordinator.loadAgentState.mockRestore();
+      await mockCoordinator.saveAgentState(mockParams.operationId, { ...mockState, metadata: {} });
+      const runtime = {
+        dispose: vi.fn(),
+        step: vi.fn().mockResolvedValue({
+          events: [],
+          newState: { ...mockState, metadata: {}, status: 'done', stepCount: 2 },
+        }),
+      };
+      vi.spyOn(service as any, 'createAgentRuntime').mockResolvedValue({ runtime });
+      mockStreamManager.publishAgentRuntimeEnd.mockRejectedValueOnce(
+        new Error('stream unavailable'),
+      );
+      const result = await service.executeStep(mockParams);
+      expect(result.success).toBe(true);
+      expect(await mockCoordinator.loadAgentState(mockParams.operationId)).toMatchObject({
+        status: 'done',
+        stepCount: 2,
+      });
+      expect(mockCoordinator.saveAgentStateWithLease).not.toHaveBeenCalled();
+      expect(runtime.step).toHaveBeenCalledOnce();
+    });
+
+    it('surfaces hook delivery failures separately from a successful committed execution', async () => {
+      const runtime = {
+        dispose: vi.fn(),
+        step: vi.fn().mockResolvedValue({
+          events: [],
+          newState: { ...mockState, status: 'done', stepCount: 2 },
+        }),
+      };
+      vi.spyOn(service as any, 'createAgentRuntime').mockResolvedValue({ runtime });
+      const failure = {
+        code: 'QSTASH_TOKEN_MISSING' as const,
+        delivery: 'qstash' as const,
+        hookId: 'completion',
+        hookType: 'onComplete' as const,
+        operationId: mockParams.operationId,
+      };
+      const dispatch = vi
+        .spyOn(hookDispatcher, 'dispatch')
+        .mockResolvedValue({ success: false, failures: [failure] });
+      try {
+        const result = await service.executeStep(mockParams);
+        expect(result.success).toBe(true);
+        expect(result.state.status).toBe('done');
+        expect(result.hookDeliveryFailures).toContainEqual(failure);
+        expect(mockCoordinator.saveAgentStateWithLease).not.toHaveBeenCalled();
+      } finally {
+        dispatch.mockRestore();
+      }
+    });
+
     it('should execute step successfully', async () => {
       const mockStepResult = {
         newState: { ...mockState, stepCount: 2, status: 'running' },
@@ -485,6 +689,7 @@ describe('AgentRuntimeService', () => {
       expect(mockRuntime.dispose).toHaveBeenCalledTimes(1);
 
       expect(result).toEqual({
+        hookDeliveryFailures: [],
         success: true,
         state: mockStepResult.newState,
         stepResult: expect.objectContaining(mockStepResult),
@@ -507,7 +712,7 @@ describe('AgentRuntimeService', () => {
         },
       });
 
-      expect(mockCoordinator.saveStepResult).toHaveBeenCalled();
+      expect(mockCoordinator.saveStepResultWithLease).toHaveBeenCalled();
       expect(mockQueueService.scheduleMessage).toHaveBeenCalled();
     });
 
@@ -523,9 +728,12 @@ describe('AgentRuntimeService', () => {
       vi.spyOn(service as any, 'createAgentRuntime').mockResolvedValue({ runtime });
       await expect(service.executeStep(mockParams)).rejects.toBe(failure);
       expect(runtime.dispose).toHaveBeenCalledTimes(1);
-      expect(mockCoordinator.releaseStepLock).toHaveBeenCalledWith(
-        mockParams.operationId,
-        mockParams.stepIndex,
+      expect(mockCoordinator.releaseStepLease).toHaveBeenCalledWith(
+        expect.objectContaining({
+          operationId: mockParams.operationId,
+          stepIndex: mockParams.stepIndex,
+          ownerToken: expect.any(String),
+        }),
       );
     });
 
@@ -568,7 +776,9 @@ describe('AgentRuntimeService', () => {
       };
       vi.spyOn(service as any, 'createAgentRuntime').mockReturnValue({ runtime: mockRuntime });
 
-      const dispatchSpy = vi.spyOn(hookDispatcher, 'dispatch').mockResolvedValue(undefined);
+      const dispatchSpy = vi
+        .spyOn(hookDispatcher, 'dispatch')
+        .mockResolvedValue({ success: true, failures: [] });
 
       await expect(service.executeStep(mockParams)).rejects.toThrow('Runtime error');
 
@@ -588,6 +798,7 @@ describe('AgentRuntimeService', () => {
           }),
         }),
         undefined,
+        expect.any(Function),
       );
 
       dispatchSpy.mockRestore();
@@ -606,7 +817,9 @@ describe('AgentRuntimeService', () => {
       };
       vi.spyOn(service as any, 'createAgentRuntime').mockReturnValue({ runtime: mockRuntime });
 
-      const dispatchSpy = vi.spyOn(hookDispatcher, 'dispatch').mockResolvedValue(undefined);
+      const dispatchSpy = vi
+        .spyOn(hookDispatcher, 'dispatch')
+        .mockResolvedValue({ success: true, failures: [] });
 
       await expect(service.executeStep(mockParams)).rejects.toEqual(llmError);
 
@@ -626,9 +839,36 @@ describe('AgentRuntimeService', () => {
           }),
         }),
         undefined,
+        expect.any(Function),
       );
 
       dispatchSpy.mockRestore();
+    });
+
+    it('preserves the last known operation if the error-path reload fails', async () => {
+      const known = {
+        ...mockState,
+        metadata: { topicId: 'known-topic', _hooks: [] },
+        messages: [{ id: 'existing-message', role: 'user', content: 'keep me' }],
+      };
+      mockCoordinator.loadAgentState
+        .mockResolvedValueOnce(known)
+        .mockRejectedValueOnce(new Error('read unavailable'));
+      const runtime = {
+        dispose: vi.fn(),
+        step: vi.fn().mockRejectedValue(new Error('tool failed')),
+      };
+      vi.spyOn(service as any, 'createAgentRuntime').mockResolvedValue({ runtime });
+      await expect(service.executeStep(mockParams)).rejects.toThrow('tool failed');
+      expect(mockCoordinator.saveAgentStateWithLease).toHaveBeenCalledWith(
+        mockParams.operationId,
+        expect.objectContaining({
+          status: 'error',
+          messages: known.messages,
+          metadata: expect.objectContaining({ topicId: 'known-topic', _hooks: [] }),
+        }),
+        expect.objectContaining({ ownerToken: expect.any(String) }),
+      );
     });
 
     it('should save error state to coordinator for later retrieval (inMemory mode fix)', async () => {
@@ -640,7 +880,7 @@ describe('AgentRuntimeService', () => {
       vi.spyOn(service as any, 'createAgentRuntime').mockReturnValue({ runtime: mockRuntime });
 
       // Spy on coordinator.saveAgentState to verify it's called with error state
-      const saveStateSpy = vi.spyOn((service as any).coordinator, 'saveAgentState');
+      const saveStateSpy = vi.spyOn((service as any).coordinator, 'saveAgentStateWithLease');
 
       await expect(service.executeStep(mockParams)).rejects.toThrow('Test error for inMemory mode');
 
@@ -654,6 +894,7 @@ describe('AgentRuntimeService', () => {
           }),
           status: 'error',
         }),
+        expect.objectContaining({ ownerToken: expect.any(String) }),
       );
     });
 
@@ -720,11 +961,12 @@ describe('AgentRuntimeService', () => {
       expect(result.state).toEqual(expect.objectContaining({ status: 'interrupted' }));
       expect(result.nextStepScheduled).toBe(false);
       // saveStepResult should be called with interrupted state
-      expect(mockCoordinator.saveStepResult).toHaveBeenCalledWith(
+      expect(mockCoordinator.saveStepResultWithLease).toHaveBeenCalledWith(
         'test-operation-1',
         expect.objectContaining({
           newState: expect.objectContaining({ status: 'interrupted' }),
         }),
+        expect.objectContaining({ ownerToken: expect.any(String) }),
       );
     });
   });
@@ -775,7 +1017,9 @@ describe('AgentRuntimeService', () => {
     });
 
     it('should extract tool output from data field for single tool_result', async () => {
-      const dispatchSpy = vi.spyOn(hookDispatcher, 'dispatch').mockResolvedValue(undefined);
+      const dispatchSpy = vi
+        .spyOn(hookDispatcher, 'dispatch')
+        .mockResolvedValue({ success: true, failures: [] });
 
       const mockStepResult = {
         newState: { ...mockState, stepCount: 2, status: 'running' },
@@ -819,13 +1063,16 @@ describe('AgentRuntimeService', () => {
           ],
         }),
         undefined,
+        expect.any(Function),
       );
 
       dispatchSpy.mockRestore();
     });
 
     it('should extract tool output from data field for tools_batch_result', async () => {
-      const dispatchSpy = vi.spyOn(hookDispatcher, 'dispatch').mockResolvedValue(undefined);
+      const dispatchSpy = vi
+        .spyOn(hookDispatcher, 'dispatch')
+        .mockResolvedValue({ success: true, failures: [] });
 
       const mockStepResult = {
         newState: { ...mockState, stepCount: 2, status: 'running' },
@@ -887,13 +1134,16 @@ describe('AgentRuntimeService', () => {
           ],
         }),
         undefined,
+        expect.any(Function),
       );
 
       dispatchSpy.mockRestore();
     });
 
     it('should handle tool result with undefined data', async () => {
-      const dispatchSpy = vi.spyOn(hookDispatcher, 'dispatch').mockResolvedValue(undefined);
+      const dispatchSpy = vi
+        .spyOn(hookDispatcher, 'dispatch')
+        .mockResolvedValue({ success: true, failures: [] });
 
       const mockStepResult = {
         newState: { ...mockState, stepCount: 2, status: 'running' },
@@ -935,6 +1185,7 @@ describe('AgentRuntimeService', () => {
           ],
         }),
         undefined,
+        expect.any(Function),
       );
 
       dispatchSpy.mockRestore();

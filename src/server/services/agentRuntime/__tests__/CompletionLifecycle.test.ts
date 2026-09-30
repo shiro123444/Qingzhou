@@ -1,7 +1,11 @@
 // @vitest-environment node
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import { StepLeaseLostError } from '@/server/modules/AgentRuntime/stepLease';
 
 import { CompletionLifecycle } from '../CompletionLifecycle';
+import { hookDispatcher } from '../hooks';
+import type { HookDispatchFailure } from '../hooks/HookDispatcher';
 
 const buildLifecycle = () => new CompletionLifecycle({} as any, 'user-1');
 
@@ -92,5 +96,72 @@ describe('CompletionLifecycle.extractErrorMessage', () => {
     expect(result).not.toBe('[object Object]');
     expect(typeof result).toBe('string');
     expect(result).toBe('Budget exceeded');
+  });
+});
+
+describe('CompletionLifecycle.dispatchHooks result', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('returns successful delivery and unregisters terminal hooks', async () => {
+    const lifecycle = buildLifecycle();
+    vi.spyOn(lifecycle as any, 'persistCompletion').mockResolvedValue(undefined);
+    vi.spyOn(hookDispatcher, 'dispatch').mockResolvedValue({ success: true, failures: [] });
+    const unregister = vi.spyOn(hookDispatcher, 'unregister');
+
+    await expect(lifecycle.dispatchHooks('op-success', { metadata: {} }, 'done')).resolves.toEqual({
+      success: true,
+      failures: [],
+    });
+    expect(unregister).toHaveBeenCalledWith('op-success');
+  });
+
+  it('does not dispatch or unregister hooks if the lease is lost during completion persistence', async () => {
+    const lifecycle = buildLifecycle();
+    let held = true;
+    vi.spyOn(lifecycle as any, 'persistCompletion').mockImplementation(async () => {
+      held = false;
+    });
+    const dispatch = vi.spyOn(hookDispatcher, 'dispatch');
+    const unregister = vi.spyOn(hookDispatcher, 'unregister');
+    const assertStepLease = () => {
+      if (!held) throw new StepLeaseLostError();
+    };
+
+    await expect(
+      lifecycle.dispatchHooks('op-lost', { metadata: {} }, 'done', assertStepLease),
+    ).rejects.toBeInstanceOf(StepLeaseLostError);
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(unregister).not.toHaveBeenCalled();
+  });
+
+  it('returns completion and error delivery failures without changing the terminal state', async () => {
+    const lifecycle = buildLifecycle();
+    vi.spyOn(lifecycle as any, 'persistCompletion').mockResolvedValue(undefined);
+    const completionFailure: HookDispatchFailure = {
+      code: 'QSTASH_PUBLISH_FAILED',
+      delivery: 'qstash',
+      hookId: 'completion',
+      hookType: 'onComplete',
+      operationId: 'op-failed',
+    };
+    const errorFailure: HookDispatchFailure = {
+      ...completionFailure,
+      hookId: 'error',
+      hookType: 'onError',
+    };
+    const dispatch = vi
+      .spyOn(hookDispatcher, 'dispatch')
+      .mockResolvedValueOnce({ success: false, failures: [completionFailure] })
+      .mockResolvedValueOnce({ success: false, failures: [errorFailure] });
+    const unregister = vi.spyOn(hookDispatcher, 'unregister');
+    const state = { metadata: {}, status: 'error', stepCount: 2 };
+
+    await expect(lifecycle.dispatchHooks('op-failed', state, 'error')).resolves.toEqual({
+      success: false,
+      failures: [completionFailure, errorFailure],
+    });
+    expect(state).toEqual({ metadata: {}, status: 'error', stepCount: 2 });
+    expect(dispatch.mock.calls.map(([, type]) => type)).toEqual(['onComplete', 'onError']);
+    expect(unregister).toHaveBeenCalledWith('op-failed');
   });
 });

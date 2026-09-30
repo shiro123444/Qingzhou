@@ -20,6 +20,7 @@ import { WechatApiClient } from './api';
 import { WechatFormatConverter } from './format-converter';
 import type { WechatAdapterConfig, WechatRawMessage, WechatThreadId } from './types';
 import { MessageItemType, MessageState, MessageType } from './types';
+import { readWebhookBody, WebhookBodyError } from './webhook-body';
 
 /**
  * Extract text content from a WechatRawMessage's item_list.
@@ -315,6 +316,7 @@ async function downloadImageItemFromRaw(
 export class WechatAdapter implements Adapter<WechatThreadId, WechatRawMessage> {
   readonly name = 'wechat';
   private readonly api: WechatApiClient;
+  private readonly authenticateWebhook?: WechatAdapterConfig['authenticateWebhook'];
   private readonly formatConverter: WechatFormatConverter;
   private _userName: string;
   private _botUserId?: string;
@@ -337,6 +339,7 @@ export class WechatAdapter implements Adapter<WechatThreadId, WechatRawMessage> 
 
   constructor(config: WechatAdapterConfig & { userName?: string }) {
     this.api = new WechatApiClient(config.botToken, config.botId);
+    this.authenticateWebhook = config.authenticateWebhook;
     this.formatConverter = new WechatFormatConverter();
     this._userName = config.userName || 'wechat-bot';
     this._botUserId = config.botId;
@@ -355,7 +358,24 @@ export class WechatAdapter implements Adapter<WechatThreadId, WechatRawMessage> 
   // ------------------------------------------------------------------
 
   async handleWebhook(request: Request, options?: WebhookOptions): Promise<Response> {
-    const bodyText = await request.text();
+    if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+    // iLink delivers by polling, not public webhooks. A token/header supplied by
+    // the caller must never enable a bypass of this server-owned authenticator.
+    if (!this.authenticateWebhook) return new Response('Unauthorized', { status: 401 });
+    try {
+      const rejection = await this.authenticateWebhook(request);
+      if (rejection) return rejection;
+    } catch {
+      return new Response('Webhook authentication unavailable', { status: 503 });
+    }
+    let bodyText: string;
+    try {
+      bodyText = await readWebhookBody(request);
+    } catch (error) {
+      return new Response(error instanceof WebhookBodyError ? error.message : 'Invalid body', {
+        status: error instanceof WebhookBodyError ? error.status : 400,
+      });
+    }
 
     let msg: WechatRawMessage;
     try {
@@ -363,6 +383,15 @@ export class WechatAdapter implements Adapter<WechatThreadId, WechatRawMessage> 
     } catch {
       return new Response('Invalid JSON', { status: 400 });
     }
+
+    if (
+      !msg ||
+      typeof msg.from_user_id !== 'string' ||
+      !msg.from_user_id.trim() ||
+      !Array.isArray(msg.item_list) ||
+      msg.item_list.some((item) => !item || typeof item !== 'object')
+    )
+      return new Response('Invalid message', { status: 400 });
 
     // Skip bot's own messages and non-finished messages
     if (msg.message_type === MessageType.BOT) {

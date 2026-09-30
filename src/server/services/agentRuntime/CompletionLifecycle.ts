@@ -11,6 +11,7 @@ import { emitAgentSignalSourceEvent } from '@/server/services/agentSignal';
 import { toAgentSignalTraceEvents } from '@/server/services/agentSignal/observability/traceEvents';
 
 import { hookDispatcher } from './hooks';
+import type { HookDispatchFailure, HookDispatchResult } from './hooks/HookDispatcher';
 
 const log = debug('lobe-server:completion-lifecycle');
 
@@ -233,18 +234,43 @@ export class CompletionLifecycle {
    * back onto the assistant message row so the frontend can render it.
    * Fire-and-forget; always unregisters the operation from the dispatcher.
    */
-  async dispatchHooks(operationId: string, state: any, reason: string): Promise<void> {
+  async dispatchHooks(
+    operationId: string,
+    state: any,
+    reason: string,
+    assertStepLease?: () => void,
+  ): Promise<HookDispatchResult> {
+    const failures: HookDispatchFailure[] = [];
+    const guard: [(() => void)?] = assertStepLease ? [assertStepLease] : [];
     try {
+      assertStepLease?.();
       const { event, metadata } = this.buildLifecycleEvent(operationId, state, reason);
 
       // Finalize the agent_operations row before user hooks fire so
       // downstream consumers see the row in its terminal shape.
       await this.persistCompletion(operationId, state, reason);
+      assertStepLease?.();
 
-      await hookDispatcher.dispatch(operationId, 'onComplete', event, metadata._hooks);
+      const completion = await hookDispatcher.dispatch(
+        operationId,
+        'onComplete',
+        event,
+        metadata._hooks,
+        ...guard,
+      );
+      failures.push(...(completion?.failures ?? []));
+      assertStepLease?.();
 
       if (reason === 'error') {
-        await hookDispatcher.dispatch(operationId, 'onError', event, metadata._hooks);
+        const onError = await hookDispatcher.dispatch(
+          operationId,
+          'onError',
+          event,
+          metadata._hooks,
+          ...guard,
+        );
+        failures.push(...(onError?.failures ?? []));
+        assertStepLease?.();
 
         const assistantMessageId = metadata?.assistantMessageId;
         if (assistantMessageId && state?.error) {
@@ -266,14 +292,29 @@ export class CompletionLifecycle {
           }
         }
       }
-    } catch (error) {
-      log('[%s] Hook dispatch error (non-fatal): %O', operationId, error);
+    } catch {
+      assertStepLease?.();
+      log('[%s] Hook dispatch error (non-fatal)', operationId);
+      failures.push({
+        code: 'LOCAL_HANDLER_FAILED',
+        delivery: 'local',
+        hookId: 'completion-lifecycle',
+        hookType: 'onComplete',
+        operationId,
+      });
     } finally {
-      hookDispatcher.unregister(operationId);
+      // A stale worker must not remove hooks still needed by the current owner.
+      try {
+        assertStepLease?.();
+        hookDispatcher.unregister(operationId);
+      } catch {
+        // Lease loss propagates above; cleanup is deliberately skipped.
+      }
     }
+    return { failures, success: failures.length === 0 };
   }
 
-  private buildLifecycleEvent(operationId: string, state: any, reason: string) {
+  buildLifecycleEvent(operationId: string, state: any, reason: string) {
     const metadata = state?.metadata || {};
     const lastAssistantContent = state?.messages
       ?.slice()

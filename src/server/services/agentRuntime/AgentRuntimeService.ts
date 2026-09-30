@@ -19,18 +19,26 @@ import { type AgentRuntimeCoordinatorOptions } from '@/server/modules/AgentRunti
 import { AgentRuntimeCoordinator, createStreamEventManager } from '@/server/modules/AgentRuntime';
 import { type RuntimeExecutorContext } from '@/server/modules/AgentRuntime/RuntimeExecutors';
 import { createRuntimeExecutors } from '@/server/modules/AgentRuntime/RuntimeExecutors';
+import {
+  startStepLeaseRenewal,
+  StepLeaseBackendError,
+  StepLeaseLostError,
+} from '@/server/modules/AgentRuntime/stepLease';
 import { type IStreamEventManager } from '@/server/modules/AgentRuntime/types';
 import { emitAgentSignalSourceEvent } from '@/server/services/agentSignal';
 import { toAgentSignalTraceEvents } from '@/server/services/agentSignal/observability/traceEvents';
 import { mcpService } from '@/server/services/mcp';
 import { QueueService } from '@/server/services/queue';
 import { LocalQueueServiceImpl } from '@/server/services/queue/impls';
+import { type QueueMessage } from '@/server/services/queue/types';
 import { ToolExecutionService } from '@/server/services/toolExecution';
 import { BuiltinToolsExecutor } from '@/server/services/toolExecution/builtin';
 
 import { isAbortError, throwIfAborted } from './abort';
 import { CompletionLifecycle } from './CompletionLifecycle';
 import { hookDispatcher } from './hooks';
+import type { HookDispatchFailure } from './hooks/HookDispatcher';
+import { collectBotCallbackIntents } from './hooks/payload';
 import { HumanInterventionHandler } from './HumanInterventionHandler';
 import { OperationTraceRecorder } from './OperationTraceRecorder';
 import { buildStepPresentation, formatTokenCount } from './stepPresentation';
@@ -476,8 +484,9 @@ export class AgentRuntimeService {
     } = params;
 
     // ===== Distributed lock: prevent duplicate execution from QStash retries =====
-    const claimed = await this.coordinator.tryClaimStep(operationId, stepIndex, 35);
-    if (!claimed) {
+    const leaseStartedAt = Date.now();
+    const lease = await this.coordinator.acquireStepLease(operationId, stepIndex, 35);
+    if (!lease) {
       log(
         '[%s][%d] Step lock conflict — another instance is executing this step, returning locked',
         operationId,
@@ -491,6 +500,18 @@ export class AgentRuntimeService {
       };
     }
 
+    const renewal = startStepLeaseRenewal({
+      lease,
+      renew: (currentLease, ttl) => this.coordinator.renewStepLease(currentLease, ttl),
+      startedAt: leaseStartedAt,
+    });
+    const assertHeld = renewal.assertHeld;
+    const hookDeliveryFailures: HookDispatchFailure[] = [];
+    // Once committed, notification/queue failures must not rewrite a successful
+    // tool result as an execution error or repeat that tool on a queue retry.
+    let authoritativeCommitted = false;
+    let lastKnownState: AgentState | undefined;
+
     // Hoisted so the error-path snapshot finalize can record an
     // approximate startedAt for the failing step. The inner `startAt` at the
     // runtime.step() call site stays as the authoritative start for the
@@ -499,6 +520,7 @@ export class AgentRuntimeService {
     let stepRuntime: AgentRuntime | undefined;
 
     try {
+      assertHeld();
       log('[%s][%d] Start step executing...', operationId, stepIndex);
 
       // Publish step start event
@@ -510,32 +532,54 @@ export class AgentRuntimeService {
 
       // Get operation state and metadata
       const agentState = await this.coordinator.loadAgentState(operationId);
+      assertHeld();
 
       if (!agentState) {
         throw new Error(`Agent state not found for operation ${operationId}`);
       }
 
+      lastKnownState = agentState;
       agentState.metadata = {
         ...agentState.metadata,
         externalRetryCount,
       };
 
-      // Layer 2 defense: catch extremely delayed retries that arrive after lock TTL expired
+      // Delayed retries resume a committed continuation, never the completed tool.
       if (agentState.stepCount > stepIndex) {
-        log(
-          '[%s][%d] Step already completed (stepCount=%d), skipping',
-          operationId,
-          stepIndex,
-          agentState.stepCount,
-        );
+        authoritativeCommitted = true;
+        const pending = agentState.metadata?._pendingNextStep as QueueMessage | undefined;
+        let nextStepScheduled = false;
+        if (
+          agentState.status !== 'done' &&
+          agentState.status !== 'error' &&
+          agentState.status !== 'interrupted' &&
+          agentState.status !== 'waiting_for_human' &&
+          agentState.stepCount === stepIndex + 1 &&
+          pending?.stepIndex === agentState.stepCount &&
+          pending.operationId === operationId &&
+          this.queueService
+        ) {
+          await renewal.renewNow();
+          await this.queueService.scheduleMessage({ ...pending, endpoint: `${this.baseURL}/run` });
+          nextStepScheduled = true;
+        } else if (['done', 'error', 'interrupted'].includes(agentState.status)) {
+          await renewal.renewNow();
+          const result = await this.completionLifecycle.dispatchHooks(
+            operationId,
+            agentState,
+            this.determineCompletionReason(agentState),
+            assertHeld,
+          );
+          hookDeliveryFailures.push(...(result?.failures ?? []));
+        }
         return {
-          nextStepScheduled: false,
+          hookDeliveryFailures,
+          nextStepScheduled,
           state: agentState,
           stepResult: null,
           success: true,
         };
       }
-
       // Early exit: skip step if operation is already in a terminal state
       // This prevents executing expensive LLM/tool calls after timeout or interruption
       if (
@@ -543,6 +587,7 @@ export class AgentRuntimeService {
         agentState.status === 'done' ||
         agentState.status === 'error'
       ) {
+        authoritativeCommitted = true;
         log(
           '[%s][%d] Skipping step — operation already in terminal state: %s',
           operationId,
@@ -555,9 +600,17 @@ export class AgentRuntimeService {
         await this.completionLifecycle.emitSignalEvents(operationId, agentState, reason);
 
         // Dispatch completion hooks so consumers (e.g., bot local-mode promise) can finalize
-        await this.completionLifecycle.dispatchHooks(operationId, agentState, reason);
+        await renewal.renewNow();
+        const completionDelivery = await this.completionLifecycle.dispatchHooks(
+          operationId,
+          agentState,
+          reason,
+          assertHeld,
+        );
+        hookDeliveryFailures.push(...(completionDelivery?.failures ?? []));
 
         return {
+          hookDeliveryFailures,
           nextStepScheduled: false,
           state: agentState,
           stepResult: null,
@@ -567,8 +620,13 @@ export class AgentRuntimeService {
 
       let beforeStepSignalEvents: Array<{ [key: string]: unknown; type: string }> = [];
 
+      if (agentState.stepCount < stepIndex) {
+        return { locked: true, nextStepScheduled: false, state: agentState, success: false };
+      }
+
       // Dispatch beforeStep hooks
       try {
+        await renewal.renewNow();
         const beforeStepMetadata = agentState?.metadata || {};
         const beforeStepSignalEmission = await emitAgentSignalSourceEvent(
           {
@@ -591,7 +649,8 @@ export class AgentRuntimeService {
           { ignoreError: true },
         );
         beforeStepSignalEvents = toAgentSignalSnapshotEvents(beforeStepSignalEmission);
-        await hookDispatcher.dispatch(
+        assertHeld();
+        const delivery = await hookDispatcher.dispatch(
           operationId,
           'beforeStep',
           {
@@ -603,8 +662,11 @@ export class AgentRuntimeService {
             userId: beforeStepMetadata?.userId || this.userId,
           },
           beforeStepMetadata._hooks,
+          assertHeld,
         );
+        hookDeliveryFailures.push(...(delivery?.failures ?? []));
       } catch (hookError) {
+        assertHeld();
         log('[%s] beforeStep hook dispatch error: %O', operationId, hookError);
       }
 
@@ -615,14 +677,18 @@ export class AgentRuntimeService {
         metadata: agentState?.metadata,
         operationId,
         stepIndex,
+        signal: renewal.signal,
+        assertStepLease: assertHeld,
       });
       stepRuntime = runtime;
+      assertHeld();
 
       // Handle human intervention
       let currentContext = context;
       let currentState = agentState;
 
       if (humanInput || approvedToolCall || rejectionReason) {
+        await renewal.renewNow();
         const interventionResult = await this.humanIntervention.process(currentState, {
           approvedToolCall,
           humanInput,
@@ -652,8 +718,10 @@ export class AgentRuntimeService {
       }
 
       // Execute step
+      await renewal.renewNow();
       const startAt = Date.now();
       const stepResult = await runtime.step(currentState, currentContext);
+      assertHeld();
 
       // Check if the operation was interrupted while the step was executing
       // (e.g., user clicked abort during a long LLM call)
@@ -664,18 +732,139 @@ export class AgentRuntimeService {
         log('[%s][%d] Operation was interrupted during step execution', operationId, stepIndex);
       }
 
-      // Save state, coordinator will handle event sending automatically
-      await this.coordinator.saveStepResult(operationId, {
-        ...stepResult,
-        executionTime: Date.now() - startAt,
-        stepIndex, // placeholder
-      });
-
-      // Decide whether to schedule next step
       const shouldContinue = this.shouldContinueExecution(
         stepResult.newState,
         stepResult.nextContext,
       );
+      const { presentation: stepPresentationData, summary: stepSummary } = buildStepPresentation(
+        stepResult,
+        Date.now() - startAt,
+      );
+      const toolsCalling = stepPresentationData.toolsCalling;
+      const content = stepPresentationData.content;
+      const previousTracking = stepResult.newState.metadata?._stepTracking || {};
+      if (
+        stepResult.newState.metadata?._hooks?.some(
+          (hook: { type: string }) => hook.type === 'afterStep',
+        )
+      ) {
+        stepResult.newState.metadata._stepTracking = {
+          lastLLMContent: content
+            ? content.slice(0, 1800) + (content.length > 1800 ? '...' : '')
+            : previousTracking.lastLLMContent,
+          lastToolsCalling: toolsCalling || previousTracking.lastToolsCalling,
+          totalToolCalls: (previousTracking.totalToolCalls ?? 0) + (toolsCalling?.length ?? 0),
+        };
+      }
+      const pendingNextStep: QueueMessage | undefined =
+        this.queueService && shouldContinue && stepResult.nextContext
+          ? {
+              context: stepResult.nextContext,
+              delay: this.calculateStepDelay(stepResult),
+              endpoint: `${this.baseURL}/run`,
+              operationId,
+              priority: this.calculatePriority(stepResult),
+              retries:
+                typeof stepResult.newState.metadata?.queueRetries === 'number'
+                  ? stepResult.newState.metadata.queueRetries
+                  : undefined,
+              retryDelay:
+                typeof stepResult.newState.metadata?.queueRetryDelay === 'string'
+                  ? stepResult.newState.metadata.queueRetryDelay
+                  : undefined,
+              stepIndex: stepIndex + 1,
+            }
+          : undefined;
+      stepResult.newState.metadata = {
+        ...stepResult.newState.metadata,
+        _pendingNextStep: pendingNextStep,
+      };
+      const metadata = stepResult.newState.metadata || {};
+      const tracking = previousTracking;
+      const elapsedMs = stepResult.newState.createdAt
+        ? Date.now() - new Date(stepResult.newState.createdAt).getTime()
+        : undefined;
+      const stepLabel = metadata._stepLabel;
+      const afterStepHookEvent = {
+        agentId: metadata?.agentId || '',
+        content,
+        elapsedMs,
+        executionTimeMs: stepPresentationData.executionTimeMs,
+        finalState: stepResult.newState,
+        ...(stepLabel && { stepLabel }),
+        lastLLMContent: tracking.lastLLMContent,
+        lastToolsCalling: tracking.lastToolsCalling,
+        operationId,
+        reasoning: stepPresentationData.reasoning,
+        shouldContinue,
+        status: stepResult.newState?.status,
+        stepCost: stepPresentationData.stepCost,
+        stepIndex,
+        stepType: stepPresentationData.stepType,
+        steps: stepResult.newState?.stepCount || 0,
+        thinking: stepPresentationData.thinking,
+        toolCalls: stepResult.newState?.usage?.tools?.totalCalls,
+        toolsCalling: stepPresentationData.toolsCalling,
+        toolsResult: stepPresentationData.toolsResult,
+        topicId: metadata?.topicId,
+        totalCost: stepPresentationData.totalCost,
+        totalInputTokens: stepPresentationData.totalInputTokens,
+        totalOutputTokens: stepPresentationData.totalOutputTokens,
+        totalSteps: stepPresentationData.totalSteps,
+        totalTokens: stepPresentationData.totalTokens,
+        totalToolCalls: (tracking.totalToolCalls ?? 0) + (toolsCalling?.length ?? 0),
+        userId: metadata?.userId || this.userId,
+      };
+      const pendingCallbacks = collectBotCallbackIntents(
+        operationId,
+        'afterStep',
+        afterStepHookEvent,
+        metadata._hooks,
+      );
+      if (!shouldContinue) {
+        const completion = this.completionLifecycle.buildLifecycleEvent(
+          operationId,
+          stepResult.newState,
+          this.determineCompletionReason(stepResult.newState),
+        );
+        pendingCallbacks.push(
+          ...collectBotCallbackIntents(
+            operationId,
+            'onComplete',
+            completion.event,
+            completion.metadata._hooks,
+          ),
+        );
+        if (completion.event.reason === 'error')
+          pendingCallbacks.push(
+            ...collectBotCallbackIntents(
+              operationId,
+              'onError',
+              completion.event,
+              completion.metadata._hooks,
+            ),
+          );
+      }
+      // The Lua state commit also writes a durable Redis->SQL handoff record.
+      // A crash or SQL outage after commit can no longer silently drop these bot callbacks.
+      // This is a wire-JSON snapshot, not an object clone: normalize Dates/undefined just like transport.
+      const callbacksWire = JSON.stringify(pendingCallbacks);
+      stepResult.newState.metadata._pendingBotCallbacks = JSON.parse(callbacksWire);
+      await renewal.renewNow();
+      if (
+        !(await this.coordinator.saveStepResultWithLease(
+          operationId,
+          {
+            ...stepResult,
+            executionTime: Date.now() - startAt,
+            stepIndex,
+          },
+          lease,
+        ))
+      )
+        throw new StepLeaseLostError();
+      authoritativeCommitted = true;
+      assertHeld();
       let nextStepScheduled = false;
 
       // Publish step complete event
@@ -689,12 +878,6 @@ export class AgentRuntimeService {
         type: 'step_complete',
       });
 
-      // Build enhanced step completion log & presentation data
-      const { presentation: stepPresentationData, summary: stepSummary } = buildStepPresentation(
-        stepResult,
-        Date.now() - startAt,
-      );
-
       const { usage } = stepResult.newState;
       log(
         '[%s][%d] completed %s | total: %s tokens / $%s | llm×%d | tools×%d',
@@ -707,20 +890,11 @@ export class AgentRuntimeService {
         usage?.tools?.totalCalls ?? 0,
       );
 
-      const toolsCalling = stepPresentationData.toolsCalling;
-      const content = stepPresentationData.content;
-
       let afterStepSignalEvents: Array<{ [key: string]: unknown; type: string }> = [];
 
       // Dispatch afterStep hooks (enriched with step presentation + tracking data)
       try {
-        const metadata = stepResult.newState?.metadata || {};
-        const tracking = metadata._stepTracking || {};
-        const elapsedMs = stepResult.newState?.createdAt
-          ? Date.now() - new Date(stepResult.newState.createdAt).getTime()
-          : undefined;
-        const stepLabel = metadata?._stepLabel;
-
+        await renewal.renewNow();
         afterStepSignalEvents = toAgentSignalSnapshotEvents(
           await emitAgentSignalSourceEvent(
             {
@@ -744,45 +918,21 @@ export class AgentRuntimeService {
           ),
         );
 
-        await hookDispatcher.dispatch(
+        assertHeld();
+        const delivery = await hookDispatcher.dispatch(
           operationId,
           'afterStep',
-          {
-            agentId: metadata?.agentId || '',
-            content,
-            elapsedMs,
-            executionTimeMs: stepPresentationData.executionTimeMs,
-            finalState: stepResult.newState,
-            ...(stepLabel && { stepLabel }),
-            lastLLMContent: tracking.lastLLMContent,
-            lastToolsCalling: tracking.lastToolsCalling,
-            operationId,
-            reasoning: stepPresentationData.reasoning,
-            shouldContinue,
-            status: stepResult.newState?.status,
-            stepCost: stepPresentationData.stepCost,
-            stepIndex,
-            stepType: stepPresentationData.stepType,
-            steps: stepResult.newState?.stepCount || 0,
-            thinking: stepPresentationData.thinking,
-            toolCalls: stepResult.newState?.usage?.tools?.totalCalls,
-            toolsCalling: stepPresentationData.toolsCalling,
-            toolsResult: stepPresentationData.toolsResult,
-            topicId: metadata?.topicId,
-            totalCost: stepPresentationData.totalCost,
-            totalInputTokens: stepPresentationData.totalInputTokens,
-            totalOutputTokens: stepPresentationData.totalOutputTokens,
-            totalSteps: stepPresentationData.totalSteps,
-            totalTokens: stepPresentationData.totalTokens,
-            totalToolCalls: (tracking.totalToolCalls ?? 0) + (toolsCalling?.length ?? 0),
-            userId: metadata?.userId || this.userId,
-          },
+          afterStepHookEvent,
           metadata._hooks,
+          assertHeld,
         );
+        hookDeliveryFailures.push(...(delivery?.failures ?? []));
       } catch (hookError) {
+        assertHeld();
         log('[%s] afterStep hook dispatch error: %O', operationId, hookError);
       }
 
+      assertHeld();
       await this.traceRecorder.appendStep(operationId, {
         afterStepSignalEvents,
         agentState,
@@ -795,60 +945,15 @@ export class AgentRuntimeService {
         stepResult,
       });
 
-      // Update step tracking in state metadata for afterStep hooks (cross-step accumulator)
-      const hasAfterStepHooks = stepResult.newState.metadata?._hooks?.some(
-        (h: { type: string }) => h.type === 'afterStep',
-      );
-      if (hasAfterStepHooks && stepResult.newState.metadata) {
-        const prevTracking = stepResult.newState.metadata._stepTracking || {};
-        const newTotalToolCalls = (prevTracking.totalToolCalls ?? 0) + (toolsCalling?.length ?? 0);
-
-        // Truncate content to 1800 chars to keep state small
-        const truncatedContent = content
-          ? content.length > 1800
-            ? content.slice(0, 1800) + '...'
-            : content
-          : prevTracking.lastLLMContent;
-
-        const updatedTracking = {
-          lastLLMContent: truncatedContent,
-          lastToolsCalling: toolsCalling || prevTracking.lastToolsCalling,
-          totalToolCalls: newTotalToolCalls,
-        };
-
-        // Persist tracking state for next step
-        stepResult.newState.metadata._stepTracking = updatedTracking;
-        await this.coordinator.saveAgentState(operationId, stepResult.newState);
-      }
-
-      if (shouldContinue && stepResult.nextContext && this.queueService) {
-        const nextStepIndex = stepIndex + 1;
-        const delay = this.calculateStepDelay(stepResult);
-        const priority = this.calculatePriority(stepResult);
-
-        await this.queueService.scheduleMessage({
-          context: stepResult.nextContext,
-          delay,
-          endpoint: `${this.baseURL}/run`,
-          operationId,
-          priority,
-          retryDelay:
-            typeof stepResult.newState.metadata?.queueRetryDelay === 'string'
-              ? stepResult.newState.metadata.queueRetryDelay
-              : undefined,
-          retries:
-            typeof stepResult.newState.metadata?.queueRetries === 'number'
-              ? stepResult.newState.metadata.queueRetries
-              : undefined,
-          stepIndex: nextStepIndex,
-        });
+      if (pendingNextStep && this.queueService) {
+        await renewal.renewNow();
+        await this.queueService.scheduleMessage(pendingNextStep);
         nextStepScheduled = true;
-
-        log('[%s][%d] Scheduled next step %d', operationId, stepIndex, nextStepIndex);
       }
 
       // Check if operation is complete
       if (!shouldContinue) {
+        await renewal.renewNow();
         const reason = this.determineCompletionReason(stepResult.newState);
 
         const completionSignalEvents = await this.completionLifecycle.emitSignalEvents(
@@ -858,7 +963,14 @@ export class AgentRuntimeService {
         );
 
         // Dispatch completion hooks
-        await this.completionLifecycle.dispatchHooks(operationId, stepResult.newState, reason);
+        assertHeld();
+        const delivery = await this.completionLifecycle.dispatchHooks(
+          operationId,
+          stepResult.newState,
+          reason,
+          assertHeld,
+        );
+        hookDeliveryFailures.push(...(delivery?.failures ?? []));
 
         // Finalize tracing snapshot. The error catch below uses the same
         // recorder so propagated failures still write the canonical S3
@@ -883,18 +995,32 @@ export class AgentRuntimeService {
       }
 
       return {
+        hookDeliveryFailures,
         nextStepScheduled,
         state: stepResult.newState,
         stepResult,
         success: true,
       };
     } catch (error) {
+      // Never let a stale worker write error state or emit completion over its successor.
+      assertHeld();
+      if (error instanceof StepLeaseLostError || error instanceof StepLeaseBackendError)
+        throw error;
+      if (authoritativeCommitted) {
+        log(
+          '[%s][%d] Post-commit work failed; committed state is preserved',
+          operationId,
+          stepIndex,
+        );
+        throw error;
+      }
+      await renewal.renewNow();
       log('Step %d failed for operation %s: %O', stepIndex, operationId, error);
       const formattedError = formatErrorForState(error);
 
-      // Build error state — try loading current state from coordinator, but if that
-      // also fails (e.g. Redis ECONNRESET), fall back to a minimal error state so
-      // that completion callbacks and webhooks can still fire.
+      // Preserve the last known operation on a failed error-path reload; never
+      // erase messages/hook metadata by replacing an existing operation with a
+      // fabricated minimal state. The actual write still requires its lease.
       let finalStateWithError: any;
       try {
         await this.streamManager.publishStreamEvent(operationId, {
@@ -916,7 +1042,8 @@ export class AgentRuntimeService {
       }
 
       try {
-        const errorState = await this.coordinator.loadAgentState(operationId);
+        const errorState = (await this.coordinator.loadAgentState(operationId)) ?? lastKnownState;
+        if (!errorState) throw error;
         finalStateWithError = {
           ...errorState!,
           error: formattedError,
@@ -929,25 +1056,57 @@ export class AgentRuntimeService {
         };
       } catch (loadError) {
         log('[%s] Failed to load error state (infra may be down): %O', operationId, loadError);
-        // Fallback: construct a minimal error state so callbacks still receive useful info
+        if (!lastKnownState) throw error;
         finalStateWithError = {
+          ...lastKnownState,
           error: formattedError,
-          metadata: { externalRetryCount },
+          metadata: { ...lastKnownState.metadata, externalRetryCount },
           status: 'error' as const,
-          stepCount: stepIndex,
         };
       }
 
-      try {
-        await this.coordinator.saveAgentState(operationId, finalStateWithError);
-      } catch (saveError) {
-        log('[%s] Failed to save error state (infra may be down): %O', operationId, saveError);
+      const errorCompletion = this.completionLifecycle.buildLifecycleEvent(
+        operationId,
+        finalStateWithError,
+        'error',
+      );
+      finalStateWithError.metadata = {
+        ...finalStateWithError.metadata,
+        _pendingBotCallbacks: [
+          ...collectBotCallbackIntents(
+            operationId,
+            'onComplete',
+            errorCompletion.event,
+            errorCompletion.metadata._hooks,
+          ),
+          ...collectBotCallbackIntents(
+            operationId,
+            'onError',
+            errorCompletion.event,
+            errorCompletion.metadata._hooks,
+          ),
+        ],
+      };
+      const errorCallbacksWire = JSON.stringify(finalStateWithError.metadata._pendingBotCallbacks);
+      finalStateWithError.metadata._pendingBotCallbacks = JSON.parse(errorCallbacksWire);
+      await renewal.renewNow();
+      if (
+        !(await this.coordinator.saveAgentStateWithLease(operationId, finalStateWithError, lease))
+      ) {
+        throw new StepLeaseLostError();
       }
+      assertHeld();
 
       await this.completionLifecycle.emitSignalEvents(operationId, finalStateWithError, 'error');
 
       // Dispatch onComplete + onError hooks
-      await this.completionLifecycle.dispatchHooks(operationId, finalStateWithError, 'error');
+      assertHeld();
+      await this.completionLifecycle.dispatchHooks(
+        operationId,
+        finalStateWithError,
+        'error',
+        assertHeld,
+      );
 
       // Finalize the partial snapshot into the canonical S3 path so the
       // failed op is observable in the same place as a successful run.
@@ -974,13 +1133,17 @@ export class AgentRuntimeService {
 
       throw error;
     } finally {
-      // Release lock so legitimate retries or next operations can proceed.
-      // If Vercel force-kills the process, this won't execute — the lock
-      // auto-expires after TTL (35s), allowing QStash retries to self-heal.
+      // Stop renewal and compare-and-delete only this owner's token. Cleanup
+      // failure must not replace the actual execution/lease-loss error.
+      await renewal.stop();
       try {
         await stepRuntime?.dispose();
       } finally {
-        await this.coordinator.releaseStepLock(operationId, stepIndex);
+        try {
+          await this.coordinator.releaseStepLease(lease);
+        } catch {
+          log('[%s][%d] Lease cleanup failed; token will expire', operationId, stepIndex);
+        }
       }
     }
   }
@@ -1328,10 +1491,14 @@ export class AgentRuntimeService {
     metadata,
     operationId,
     stepIndex,
+    signal,
+    assertStepLease,
   }: {
     metadata?: any;
     operationId: string;
     stepIndex: number;
+    signal?: AbortSignal;
+    assertStepLease?: () => void;
   }) {
     const contextWindowTokens =
       metadata?.modelRuntimeConfig?.model && metadata?.modelRuntimeConfig?.provider
@@ -1361,6 +1528,8 @@ export class AgentRuntimeService {
 
     // Create streaming executor context
     const executorContext: RuntimeExecutorContext = {
+      signal,
+      assertStepLease,
       agentConfig: metadata?.agentConfig,
       botPlatformContext: metadata?.botPlatformContext,
       discordContext: metadata?.discordContext,

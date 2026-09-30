@@ -49,7 +49,11 @@ describe('WechatAdapter', () => {
 
   beforeEach(() => {
     vi.resetAllMocks();
-    adapter = new WechatAdapter({ botId: 'bot_123', botToken: 'tok' });
+    adapter = new WechatAdapter({
+      authenticateWebhook: async () => {},
+      botId: 'bot_123',
+      botToken: 'tok',
+    });
     adapter.initialize(mockChat as any);
   });
 

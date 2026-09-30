@@ -4,11 +4,25 @@ import { type AgentState } from '@lobechat/agent-runtime';
 import { type AgentOperationMetadata, type StepResult } from './AgentStateManager';
 import { type StreamChunkData, type StreamEvent } from './StreamEventManager';
 
+/** Opaque per-acquisition ownership; never reconstruct or reuse after release. */
+export interface StepLease {
+  readonly operationId: string;
+  readonly ownerToken: string;
+  readonly stepIndex: number;
+}
+
 /**
  * Agent State Manager Interface
  * Abstract interface for state persistence, supports Redis and in-memory implementations
  */
 export interface IAgentStateManager {
+  /** null means contention; backend failures reject (fail closed). */
+  acquireStepLease: (
+    operationId: string,
+    stepIndex: number,
+    ttlSeconds?: number,
+  ) => Promise<StepLease | null>;
+
   /**
    * Clean up expired operation data
    */
@@ -66,26 +80,33 @@ export interface IAgentStateManager {
    */
   loadAgentState: (operationId: string) => Promise<AgentState | null>;
 
-  /**
-   * Release the step execution lock.
-   */
-  releaseStepLock: (operationId: string, stepIndex: number) => Promise<void>;
+  releaseStepLease: (lease: StepLease) => Promise<boolean>;
+  /** false means ownership expired or changed; backend failures reject. */
+  renewStepLease: (lease: StepLease, ttlSeconds?: number) => Promise<boolean>;
 
   /**
    * Save Agent state
    */
   saveAgentState: (operationId: string, state: AgentState) => Promise<void>;
 
+  /** Atomic ownership check and state/metadata commit; false means lease lost. */
+  saveAgentStateWithLease: (
+    operationId: string,
+    state: AgentState,
+    lease: StepLease,
+  ) => Promise<boolean>;
+
   /**
    * Save step execution result
    */
   saveStepResult: (operationId: string, stepResult: StepResult) => Promise<void>;
 
-  /**
-   * Atomically try to claim a step for execution (distributed lock).
-   * Returns true if the lock was acquired, false if another execution already holds it.
-   */
-  tryClaimStep: (operationId: string, stepIndex: number, ttlSeconds?: number) => Promise<boolean>;
+  /** Also fences step history and events; does not fence external side effects. */
+  saveStepResultWithLease: (
+    operationId: string,
+    stepResult: StepResult,
+    lease: StepLease,
+  ) => Promise<boolean>;
 }
 
 /**

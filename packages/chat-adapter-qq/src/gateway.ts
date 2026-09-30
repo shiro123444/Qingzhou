@@ -7,6 +7,8 @@ import type {
 } from './types';
 import { QQ_INTENTS, QQ_WS_OP_CODES } from './types';
 
+export type QQGatewayForwarder = (url: string, body: string) => Promise<Response>;
+
 export type GatewayLogger = (...args: any[]) => void;
 
 // Default no-op logger
@@ -35,6 +37,8 @@ export interface QQGatewayOptions {
   abortSignal?: AbortSignal;
   /** Duration in ms before the connection auto-closes (caller restarts) */
   durationMs?: number;
+  /** Authenticated transport supplied by the server; no unsigned fetch fallback. */
+  forwarder: QQGatewayForwarder;
   /** Bitmask of intents to subscribe to */
   intents?: number;
   /** Optional logger function (defaults to no-op) */
@@ -53,6 +57,7 @@ export interface QQGatewayOptions {
  */
 export class QQGatewayConnection {
   private readonly api: QQApiClient;
+  private readonly forwarder: QQGatewayForwarder;
   private readonly intents: number;
   private readonly log: GatewayLogger;
   private readonly shard: [number, number];
@@ -73,6 +78,9 @@ export class QQGatewayConnection {
   private hasConnected = false;
 
   constructor(api: QQApiClient, options: QQGatewayOptions) {
+    if (typeof options.forwarder !== 'function')
+      throw new Error('Authenticated QQ forwarder required');
+    this.forwarder = options.forwarder;
     this.api = api;
     this.intents = options.intents ?? DEFAULT_INTENTS;
     this.log = options.log ?? noop;
@@ -416,7 +424,7 @@ export class QQGatewayConnection {
 
   // ---------- Event Forwarding ----------
 
-  private forwardEvent(payload: QQGatewayPayload): void {
+  private async forwardEvent(payload: QQGatewayPayload): Promise<void> {
     // Construct a webhook-compatible payload:
     // The handleWebhook() expects { op: 0, t: eventType, d: eventData, id, s }
     const webhookPayload = {
@@ -427,14 +435,12 @@ export class QQGatewayConnection {
       t: payload.t,
     };
 
-    fetch(this.webhookUrl, {
-      body: JSON.stringify(webhookPayload),
-      headers: { 'Content-Type': 'application/json' },
-      method: 'POST',
-      signal: AbortSignal.timeout(30_000),
-    }).catch((err) => {
+    try {
+      const response = await this.forwarder(this.webhookUrl, JSON.stringify(webhookPayload));
+      if (!response.ok) throw new Error(`QQ forwarding rejected: HTTP ${response.status}`);
+    } catch (err) {
       this.log('Failed to forward event %s to webhook: %O', payload.t, err);
-    });
+    }
   }
 
   // ---------- Reconnection ----------

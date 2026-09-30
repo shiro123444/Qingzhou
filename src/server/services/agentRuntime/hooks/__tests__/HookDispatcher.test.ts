@@ -1,3 +1,4 @@
+import { Client } from '@upstash/qstash';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { HookDispatcher } from '../HookDispatcher';
@@ -30,6 +31,8 @@ describe('HookDispatcher', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   });
 
   describe('register', () => {
@@ -106,9 +109,18 @@ describe('HookDispatcher', () => {
       dispatcher.register(operationId, [{ handler, id: 'failing-hook', type: 'onComplete' }]);
 
       // Should not throw
-      await expect(
-        dispatcher.dispatch(operationId, 'onComplete', makeEvent()),
-      ).resolves.toBeUndefined();
+      await expect(dispatcher.dispatch(operationId, 'onComplete', makeEvent())).resolves.toEqual({
+        failures: [
+          {
+            code: 'LOCAL_HANDLER_FAILED',
+            delivery: 'local',
+            hookId: 'failing-hook',
+            hookType: 'onComplete',
+            operationId,
+          },
+        ],
+        success: false,
+      });
     });
 
     it('should call remaining hooks even if one fails', async () => {
@@ -127,9 +139,10 @@ describe('HookDispatcher', () => {
     });
 
     it('should handle no registered hooks gracefully', async () => {
-      await expect(
-        dispatcher.dispatch('unknown_op', 'onComplete', makeEvent()),
-      ).resolves.toBeUndefined();
+      await expect(dispatcher.dispatch('unknown_op', 'onComplete', makeEvent())).resolves.toEqual({
+        failures: [],
+        success: true,
+      });
     });
   });
 
@@ -137,7 +150,8 @@ describe('HookDispatcher', () => {
     beforeEach(() => {
       vi.mocked(isQueueAgentRuntimeEnabled).mockReturnValue(true);
       // Mock global fetch
-      global.fetch = vi.fn().mockResolvedValue({ status: 200 });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200 }));
+      vi.spyOn(console, 'error').mockImplementation(() => {});
     });
 
     afterEach(() => {
@@ -224,10 +238,127 @@ describe('HookDispatcher', () => {
         errorMessage: 'Public error',
         hookId: 'projected-hook',
         hookType: 'onError',
+        operationId,
         reason: 'error',
         taskId: 'task_123',
         topicId: 'topic_123',
       });
+    });
+
+    it('keeps control fields authoritative despite body overrides and event projection', async () => {
+      const result = await dispatcher.dispatch(
+        operationId,
+        'onComplete',
+        makeEvent({ operationId: 'wrong-event' }),
+        [
+          {
+            id: 'trusted-hook',
+            type: 'onComplete',
+            webhook: {
+              body: {
+                operationId: 'wrong-body',
+                hookId: 'wrong-hook',
+                hookType: 'onError',
+                custom: true,
+              },
+              eventFields: [],
+              url: 'https://example.com/hook',
+            },
+          },
+        ],
+      );
+      expect(result).toEqual({ failures: [], success: true });
+      expect(JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string)).toEqual({
+        operationId,
+        hookId: 'trusted-hook',
+        hookType: 'onComplete',
+        custom: true,
+      });
+    });
+
+    it('returns and records production failures without throwing or skipping remaining hooks', async () => {
+      const readBody = vi.fn();
+      vi.mocked(fetch).mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        text: readBody,
+      } as unknown as Response);
+      const result = await dispatcher.dispatch(operationId, 'onComplete', makeEvent(), [
+        { id: 'failed', type: 'onComplete', webhook: { url: 'https://example.com/private-token' } },
+        { id: 'healthy', type: 'onComplete', webhook: { url: 'https://example.com/other' } },
+      ]);
+      expect(result).toEqual({
+        failures: [
+          {
+            code: 'HTTP_ERROR',
+            delivery: 'fetch',
+            hookId: 'failed',
+            hookType: 'onComplete',
+            operationId,
+            status: 503,
+          },
+        ],
+        success: false,
+      });
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(console.error).toHaveBeenCalledWith(
+        '[HookDispatcher] Webhook delivery failed',
+        result.failures[0],
+      );
+      expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain('private-token');
+      expect(readBody).not.toHaveBeenCalled();
+    });
+
+    it('reports missing QStash credentials without falling back to fetch', async () => {
+      vi.stubEnv('QSTASH_TOKEN', '');
+      const result = await dispatcher.dispatch(operationId, 'onComplete', makeEvent(), [
+        {
+          id: 'qstash',
+          type: 'onComplete',
+          webhook: { delivery: 'qstash', url: '/api/bot-callback' },
+        },
+      ]);
+      expect(result.success).toBe(false);
+      expect(result.failures[0]).toMatchObject({
+        code: 'QSTASH_TOKEN_MISSING',
+        delivery: 'qstash',
+      });
+      expect(fetch).not.toHaveBeenCalled();
+      expect(console.error).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports QStash publication rejection safely without unsigned fallback', async () => {
+      vi.stubEnv('QSTASH_TOKEN', 'fake-token');
+      vi.spyOn(Client.prototype, 'publishJSON').mockRejectedValue(
+        new Error('secret-url secret-response'),
+      );
+      const result = await dispatcher.dispatch(operationId, 'onComplete', makeEvent(), [
+        {
+          id: 'qstash',
+          type: 'onComplete',
+          webhook: { delivery: 'qstash', url: 'https://example.com/secret-url' },
+        },
+      ]);
+      expect(result.success).toBe(false);
+      expect(result.failures[0]).toMatchObject({
+        code: 'QSTASH_PUBLISH_FAILED',
+        delivery: 'qstash',
+      });
+      expect(fetch).not.toHaveBeenCalled();
+      expect(JSON.stringify([result, vi.mocked(console.error).mock.calls])).not.toContain(
+        'secret-',
+      );
+    });
+
+    it('sanitizes network errors in returned failures and production logs', async () => {
+      vi.mocked(fetch).mockRejectedValue(new Error('secret URL or response'));
+      const result = await dispatcher.dispatch(operationId, 'onComplete', makeEvent(), [
+        { id: 'network', type: 'onComplete', webhook: { url: 'https://example.com/secret-url' } },
+      ]);
+      expect(result.success).toBe(false);
+      expect(result.failures[0].code).toBe('FETCH_FAILED');
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify([result, vi.mocked(console.error).mock.calls])).not.toContain('secret');
     });
 
     it('should not call local handler in production mode', async () => {
@@ -257,6 +388,139 @@ describe('HookDispatcher', () => {
 
       expect(global.fetch).not.toHaveBeenCalled();
     });
+  });
+
+  describe('per-hook lease fencing', () => {
+    it.each([false, true])(
+      'rejects at entry without invoking hooks (queue=%s)',
+      async (queueMode) => {
+        vi.mocked(isQueueAgentRuntimeEnabled).mockReturnValue(queueMode);
+        const handler = vi.fn();
+        vi.stubGlobal('fetch', vi.fn());
+        dispatcher.register(operationId, [
+          {
+            handler,
+            id: 'first',
+            type: 'onComplete',
+            webhook: { url: 'https://example.com/hook' },
+          },
+        ]);
+        const leaseError = new Error('lease lost');
+
+        await expect(
+          dispatcher.dispatch(operationId, 'onComplete', makeEvent(), undefined, () => {
+            throw leaseError;
+          }),
+        ).rejects.toBe(leaseError);
+
+        expect(handler).not.toHaveBeenCalled();
+        expect(fetch).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['resolve', 'reject'])(
+      'does not invoke a second local hook after loss during first hook %s',
+      async (outcome) => {
+        let held = true;
+        const leaseError = new Error('lease lost');
+        const first = vi.fn(async () => {
+          held = false;
+          if (outcome === 'reject') throw new Error('handler failed');
+        });
+        const second = vi.fn();
+        dispatcher.register(operationId, [
+          { handler: first, id: 'first', type: 'onComplete' },
+          { handler: second, id: 'second', type: 'onComplete' },
+        ]);
+        const assertStepLease = () => {
+          if (!held) throw leaseError;
+        };
+
+        await expect(
+          dispatcher.dispatch(operationId, 'onComplete', makeEvent(), undefined, assertStepLease),
+        ).rejects.toBe(leaseError);
+
+        expect(first).toHaveBeenCalledOnce();
+        expect(second).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['resolve', 'reject'])(
+      'does not send a second webhook after loss during first fetch %s',
+      async (outcome) => {
+        vi.mocked(isQueueAgentRuntimeEnabled).mockReturnValue(true);
+        let held = true;
+        const leaseError = new Error('lease lost');
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async () => {
+            held = false;
+            if (outcome === 'reject') throw new Error('fetch failed');
+            return { ok: true, status: 200 };
+          }),
+        );
+        const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const assertStepLease = () => {
+          if (!held) throw leaseError;
+        };
+
+        await expect(
+          dispatcher.dispatch(
+            operationId,
+            'onComplete',
+            makeEvent(),
+            [
+              { id: 'first', type: 'onComplete', webhook: { url: 'https://example.com/first' } },
+              { id: 'second', type: 'onComplete', webhook: { url: 'https://example.com/second' } },
+            ],
+            assertStepLease,
+          ),
+        ).rejects.toBe(leaseError);
+
+        expect(fetch).toHaveBeenCalledOnce();
+        expect(errorLog).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  describe('beforeToolCall lease fencing', () => {
+    const toolEvent = { apiName: 'run', args: {}, callIndex: 0, identifier: 'tool', stepIndex: 0 };
+
+    it('checks ownership even when no mock hooks are registered', async () => {
+      const leaseError = new Error('lease lost');
+      await expect(
+        dispatcher.dispatchBeforeToolCall(operationId, toolEvent, () => {
+          throw leaseError;
+        }),
+      ).rejects.toBe(leaseError);
+    });
+
+    it.each(['resolve', 'reject'])(
+      'does not return a mock or start another handler after first handler %s loses ownership',
+      async (outcome) => {
+        let held = true;
+        const leaseError = new Error('lease lost');
+        const first = vi.fn(async (event: any) => {
+          event.mock({ content: 'already mocked' });
+          held = false;
+          if (outcome === 'reject') throw new Error('handler failed');
+        });
+        const second = vi.fn();
+        dispatcher.register(operationId, [
+          { handler: first, id: 'first', type: 'beforeToolCall' },
+          { handler: second, id: 'second', type: 'beforeToolCall' },
+        ]);
+        const assertStepLease = () => {
+          if (!held) throw leaseError;
+        };
+
+        await expect(
+          dispatcher.dispatchBeforeToolCall(operationId, toolEvent, assertStepLease),
+        ).rejects.toBe(leaseError);
+        expect(first).toHaveBeenCalledOnce();
+        expect(second).not.toHaveBeenCalled();
+      },
+    );
   });
 
   describe('getSerializedHooks', () => {
@@ -874,7 +1138,7 @@ describe('HookDispatcher', () => {
   });
 
   describe('hooks safety guarantees', () => {
-    it('all observation hooks should not affect execution flow (handler errors are swallowed)', async () => {
+    it('all observation hook failures are returned without rejecting the execution flow', async () => {
       const observationTypes = [
         'afterToolCall',
         'onToolCallError',
@@ -893,10 +1157,21 @@ describe('HookDispatcher', () => {
         const throwingHandler = vi.fn().mockRejectedValue(new Error(`${type} hook crashed`));
         dispatcher.register(operationId, [{ handler: throwingHandler, id: `crash-${type}`, type }]);
 
-        // Should never throw — errors are swallowed
+        // Should never throw — failures are separate from successful tool execution
         await expect(
           dispatcher.dispatch(operationId, type, makeEvent(), undefined),
-        ).resolves.toBeUndefined();
+        ).resolves.toEqual({
+          failures: [
+            {
+              code: 'LOCAL_HANDLER_FAILED',
+              delivery: 'local',
+              hookId: `crash-${type}`,
+              hookType: type,
+              operationId,
+            },
+          ],
+          success: false,
+        });
       }
     });
 
@@ -939,7 +1214,8 @@ describe('HookDispatcher', () => {
 
     it('observation hooks should work in production mode via serializedHooks', async () => {
       vi.mocked(isQueueAgentRuntimeEnabled).mockReturnValue(true);
-      global.fetch = vi.fn().mockResolvedValue({ status: 200 });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200 }));
+      vi.spyOn(console, 'error').mockImplementation(() => {});
 
       dispatcher.register(operationId, [
         {

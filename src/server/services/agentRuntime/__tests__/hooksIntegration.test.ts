@@ -9,7 +9,7 @@
  * This catches payload format regressions that unit tests miss because
  * they mock the dispatch layer.
  */
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { AgentRuntimeService } from '../AgentRuntimeService';
 import { hookDispatcher } from '../hooks';
@@ -25,10 +25,18 @@ vi.mock('@/server/modules/AgentRuntime', () => ({
     createAgentOperation: vi.fn(),
     getOperationMetadata: vi.fn(),
     loadAgentState: vi.fn(),
-    releaseStepLock: vi.fn().mockResolvedValue(undefined),
+    releaseStepLease: vi.fn().mockResolvedValue(true),
+    renewStepLease: vi.fn().mockResolvedValue(true),
     saveAgentState: vi.fn(),
-    saveStepResult: vi.fn(),
-    tryClaimStep: vi.fn().mockResolvedValue(true),
+    saveAgentStateWithLease: vi.fn().mockResolvedValue(true),
+    saveStepResultWithLease: vi.fn().mockResolvedValue(true),
+    acquireStepLease: vi
+      .fn()
+      .mockImplementation(async (operationId: string, stepIndex: number) => ({
+        operationId,
+        stepIndex,
+        ownerToken: 'test-owner',
+      })),
   })),
   createStreamEventManager: vi.fn(() => ({
     cleanupOperation: vi.fn(),
@@ -60,6 +68,10 @@ vi.mock('@/server/services/toolExecution/builtin', () => ({
 vi.mock('@lobechat/builtin-tools/dynamicInterventionAudits', () => ({
   dynamicInterventionAudits: [],
 }));
+
+afterEach(() => {
+  if (vi.isMockFunction(hookDispatcher.dispatch)) vi.mocked(hookDispatcher.dispatch).mockRestore();
+});
 
 describe('Hooks integration — afterStep event carries step presentation data', () => {
   const createService = () => new AgentRuntimeService({} as any, 'user-1', { queueService: null });
@@ -131,6 +143,7 @@ describe('Hooks integration — afterStep event carries step presentation data',
       .spyOn(hookDispatcher, 'dispatch')
       .mockImplementation(async (_opId, type, event) => {
         if (type === 'afterStep') capturedEvents.push(event as AgentHookEvent);
+        return { success: true, failures: [] };
       });
 
     await service.executeStep({
@@ -165,6 +178,27 @@ describe('Hooks integration — afterStep event carries step presentation data',
     // ── Full state available for local mode consumers ──
     expect(event.finalState).toBeDefined();
     expect(event.finalState.status).toBe('running');
+
+    expect(coordinator.saveStepResultWithLease).toHaveBeenCalledOnce();
+    expect(coordinator.saveStepResultWithLease).toHaveBeenCalledWith(
+      'op-1',
+      expect.objectContaining({
+        newState: expect.objectContaining({
+          metadata: expect.objectContaining({
+            _stepTracking: expect.objectContaining({
+              lastLLMContent: 'Let me search for that.',
+              totalToolCalls: 0,
+            }),
+            // queueService:null means no durable queue continuation is created.
+            _pendingNextStep: undefined,
+          }),
+        }),
+        stepIndex: 0,
+      }),
+      { operationId: 'op-1', stepIndex: 0, ownerToken: 'test-owner' },
+    );
+    expect(coordinator.saveAgentState).not.toHaveBeenCalled();
+    expect(coordinator.saveAgentStateWithLease).not.toHaveBeenCalled();
 
     dispatchSpy.mockRestore();
   });
@@ -227,6 +261,7 @@ describe('Hooks integration — afterStep event carries step presentation data',
       .spyOn(hookDispatcher, 'dispatch')
       .mockImplementation(async (_opId, type, event) => {
         if (type === 'afterStep') capturedEvents.push(event as AgentHookEvent);
+        return { success: true, failures: [] };
       });
 
     await service.executeStep({
@@ -282,6 +317,7 @@ describe('Hooks integration — onComplete event for early-terminal states', () 
       .spyOn(hookDispatcher, 'dispatch')
       .mockImplementation(async (_opId, type, event) => {
         if (type === 'onComplete') capturedEvents.push(event as AgentHookEvent);
+        return { success: true, failures: [] };
       });
 
     await service.executeStep({
@@ -352,6 +388,7 @@ describe('Hooks integration — afterStep event is compatible with renderStepPro
       .spyOn(hookDispatcher, 'dispatch')
       .mockImplementation(async (_opId, type, event) => {
         if (type === 'afterStep') capturedEvents.push(event as AgentHookEvent);
+        return { success: true, failures: [] };
       });
 
     await service.executeStep({

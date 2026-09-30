@@ -1,45 +1,42 @@
-import { createPrivateKey, sign } from 'node:crypto';
+import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 
-/**
- * PKCS8 DER prefix for Ed25519 private keys.
- *
- * ASN.1 structure:
- *   SEQUENCE {
- *     INTEGER 0 (version)
- *     SEQUENCE { OID 1.3.101.112 (Ed25519) }
- *     OCTET STRING { OCTET STRING { <32-byte seed> } }
- *   }
- */
 const ED25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
 
-/**
- * Sign the webhook verification response using Ed25519.
- *
- * QQ Bot webhook verification requires:
- * 1. Repeat the clientSecret until >= 32 bytes, then truncate to 32 as the seed
- * 2. Create an Ed25519 private key from the seed
- * 3. Sign the concatenated message (eventTs + plainToken)
- * 4. Return the signature as a hex string
- */
+function privateKeyFromSecret(clientSecret: string) {
+  const secret = Buffer.from(clientSecret, 'utf8');
+  if (!secret.length) throw new Error('QQ client secret must not be empty');
+  const seed = Buffer.alloc(32);
+  for (let i = 0; i < seed.length; i++) seed[i] = secret[i % secret.length];
+  return createPrivateKey({
+    format: 'der',
+    key: Buffer.concat([ED25519_PKCS8_PREFIX, seed]),
+    type: 'pkcs8',
+  });
+}
+
+/** QQ signs event_ts + plain_token for URL registration. Validate challenge data before calling. */
 export function signWebhookResponse(
   eventTs: string,
   plainToken: string,
   clientSecret: string,
 ): string {
-  // QQ requires: repeat the secret string until length >= 32, then truncate to 32 bytes
-  let seedStr = clientSecret;
-  while (seedStr.length < 32) {
-    seedStr = seedStr.repeat(2);
-  }
-  const seed = Buffer.from(seedStr.slice(0, 32), 'utf8');
+  return sign(null, Buffer.from(eventTs + plainToken), privateKeyFromSecret(clientSecret)).toString(
+    'hex',
+  );
+}
 
-  // Build PKCS8 DER key — Node.js derives the public key from the seed automatically
-  const pkcs8Der = Buffer.concat([ED25519_PKCS8_PREFIX, seed]);
-  const privateKey = createPrivateKey({ format: 'der', key: pkcs8Der, type: 'pkcs8' });
-
-  // Sign the message
-  const message = Buffer.from(eventTs + plainToken);
-  const signature = sign(null, message, privateKey);
-
-  return signature.toString('hex');
+/** Verify the exact incoming bytes, never a parsed/re-serialized JSON body. */
+export function verifyWebhookSignature(
+  timestamp: string,
+  body: Uint8Array,
+  signature: string,
+  clientSecret: string,
+): boolean {
+  if (!/^[\da-f]{128}$/i.test(signature)) return false;
+  return verify(
+    null,
+    Buffer.concat([Buffer.from(timestamp), body]),
+    createPublicKey(privateKeyFromSecret(clientSecret)),
+    Buffer.from(signature, 'hex'),
+  );
 }

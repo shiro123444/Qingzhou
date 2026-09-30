@@ -6,13 +6,20 @@ export interface LarkAdapterConfig {
   appId: string;
   /** Lark app secret */
   appSecret: string;
-  /** AES decrypt key for encrypted events (optional) */
+  /**
+   * Trusted internal gateway authentication. A rejection/throw never falls back to native auth.
+   * Must not consume the request body; read a clone if needed.
+   */
+  authenticateWebhook?: (request: Request) => Promise<Response | void>;
+  /** Atomic shared replay claim. Required for cross-process durability; otherwise bounded local TTL cache. */
+  claimWebhookReplay?: (key: string, ttlSeconds: number) => Promise<boolean>;
+  /** Required to authenticate external events; also decrypts AES-encrypted payloads. */
   encryptKey?: string;
   /** 'lark' (international) or 'feishu' (China) — determines API base URL */
   platform?: 'lark' | 'feishu';
   /** Bot display name override */
   userName?: string;
-  /** Verification token for webhook event validation (optional — skip verification when unset) */
+  /** Optional additional token check; also permits token-only URL verification, never event dispatch */
   verificationToken?: string;
 }
 

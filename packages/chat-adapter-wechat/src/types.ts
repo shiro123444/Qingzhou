@@ -1,4 +1,6 @@
 export interface WechatAdapterConfig {
+  /** Required for HTTP delivery: server-owned authentication of polling-gateway forwards. */
+  authenticateWebhook?: (request: Request) => Promise<Response | void>;
   /** Bot's iLink user ID (from QR login) */
   botId?: string;
   /** Bot token obtained from iLink QR code authentication */

@@ -1,3 +1,5 @@
+import { createHash, randomBytes } from 'node:crypto';
+
 import type { MockInstance } from 'vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -35,6 +37,7 @@ function makeWebhookPayload(message: LarkMessageBody, sender = makeSender()) {
   return {
     event: { message, sender },
     header: {
+      app_id: 'cli_test',
       event_type: 'im.message.receive_v1',
       token: 'verify_tok',
     },
@@ -42,9 +45,19 @@ function makeWebhookPayload(message: LarkMessageBody, sender = makeSender()) {
 }
 
 function makeRequest(body: unknown): Request {
+  const raw = JSON.stringify(body);
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const nonce = randomBytes(16).toString('hex');
   return new Request('http://localhost/webhook', {
-    body: JSON.stringify(body),
-    headers: { 'Content-Type': 'application/json' },
+    body: raw,
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Lark-Request-Nonce': nonce,
+      'X-Lark-Request-Timestamp': timestamp,
+      'X-Lark-Signature': createHash('sha256')
+        .update(timestamp + nonce + 'encrypt_test' + raw)
+        .digest('hex'),
+    },
     method: 'POST',
   });
 }
@@ -70,6 +83,7 @@ describe('LarkAdapter', () => {
     adapter = new LarkAdapter({
       appId: 'cli_test',
       appSecret: 'secret_test',
+      encryptKey: 'encrypt_test',
       platform: 'lark',
       verificationToken: 'verify_tok',
     });
@@ -190,7 +204,7 @@ describe('LarkAdapter', () => {
     it('should respond to url_verification challenge', async () => {
       const body = { challenge: 'challenge_123', token: 'verify_tok', type: 'url_verification' };
       const res = await adapter.handleWebhook(makeRequest(body));
-      const data = await res.json();
+      const data = (await res.json()) as { challenge: string };
       expect(data.challenge).toBe('challenge_123');
     });
 

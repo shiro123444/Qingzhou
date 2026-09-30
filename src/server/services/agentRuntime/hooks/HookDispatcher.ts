@@ -1,95 +1,36 @@
 import debug from 'debug';
-import urlJoin from 'url-join';
 
+import { BOT_CALLBACK_PATH } from '@/server/services/bot/deliveryEnvelope';
+import { enqueueBotOutbox } from '@/server/services/bot/deliveryStore';
 import { isQueueAgentRuntimeEnabled } from '@/server/services/queue/impls';
 
+import { buildWebhookPayload } from './payload';
 import type {
   AgentHook,
   AgentHookEvent,
   AgentHookType,
-  AgentHookWebhook,
   AnyHookEvent,
   SerializedHook,
   ToolCallHookEvent,
 } from './types';
+import type { WebhookFailureCode } from './webhookDelivery';
+import { deliverWebhook, WebhookDeliveryError } from './webhookDelivery';
 
 const log = debug('lobe-server:hook-dispatcher');
 
-/**
- * Delivers a webhook via HTTP POST (fetch or QStash)
- */
-async function deliverWebhook(
-  webhook: AgentHookWebhook,
-  payload: Record<string, unknown>,
-): Promise<void> {
-  const { url, delivery = 'fetch' } = webhook;
-
-  // Resolve URL: relative paths joined with INTERNAL_APP_URL or APP_URL
-  const resolvedUrl = url.startsWith('http')
-    ? url
-    : urlJoin(process.env.INTERNAL_APP_URL || process.env.APP_URL || '', url);
-
-  if (delivery === 'qstash') {
-    try {
-      const { Client } = await import('@upstash/qstash');
-      const qstashToken = process.env.QSTASH_TOKEN;
-      if (!qstashToken) {
-        log('QStash token not available, falling back to fetch delivery');
-        await fetchDeliver(resolvedUrl, payload);
-        return;
-      }
-      const client = new Client({ token: qstashToken });
-      await client.publishJSON({
-        body: payload,
-        headers: {
-          ...(process.env.VERCEL_AUTOMATION_BYPASS_SECRET && {
-            'x-vercel-protection-bypass': process.env.VERCEL_AUTOMATION_BYPASS_SECRET,
-          }),
-        },
-        url: resolvedUrl,
-      });
-      log('Webhook delivered via QStash: %s', url);
-    } catch (error) {
-      log('QStash delivery failed, falling back to fetch: %O', error);
-      await fetchDeliver(resolvedUrl, payload);
-    }
-  } else {
-    await fetchDeliver(resolvedUrl, payload);
-  }
+export interface HookDispatchFailure {
+  code: WebhookFailureCode | 'LOCAL_HANDLER_FAILED';
+  delivery: 'fetch' | 'qstash' | 'local' | 'sql-outbox';
+  hookId: string;
+  hookType: AgentHookType;
+  operationId: string;
+  status?: number;
 }
 
-async function fetchDeliver(url: string, payload: Record<string, unknown>): Promise<void> {
-  try {
-    const res = await fetch(url, {
-      body: JSON.stringify(payload),
-      headers: { 'Content-Type': 'application/json' },
-      method: 'POST',
-    });
-    log('Webhook delivered via fetch: %s (status: %d)', url, res.status);
-  } catch (error) {
-    log('Webhook fetch delivery failed: %s %O', url, error);
-    // Hook errors should not affect main flow
-  }
-}
-
-function buildWebhookPayload(
-  event: AnyHookEvent,
-  eventFields?: (keyof AgentHookEvent)[],
-): Record<string, unknown> {
-  if (eventFields) {
-    const payload: Record<string, unknown> = {};
-    for (const field of eventFields) {
-      if (field === 'finalState') continue;
-      if (field in event) payload[field] = event[field as keyof AnyHookEvent];
-    }
-    return payload;
-  }
-
-  const payload = { ...event };
-  if ('finalState' in payload) {
-    delete (payload as { finalState?: unknown }).finalState;
-  }
-  return payload;
+export interface HookDispatchResult {
+  failures: HookDispatchFailure[];
+  /** Success means handler completion or durable/transport acceptance, not final platform delivery. */
+  success: boolean;
 }
 
 /**
@@ -110,14 +51,20 @@ export class HookDispatcher {
    * Dispatch hooks for a given event type
    *
    * In local mode: calls handler functions from memory
-   * In production mode: delivers webhooks from serialized config
+   * In production mode: delivers webhooks from serialized config.
+   * Delivery failures are returned separately, never thrown into the successful tool execution path.
+   * Lease assertion failures propagate immediately to fence subsequent hook side effects.
+   * Built-in bot callbacks enter a durable outbox; custom webhook failures are not automatically replayed.
    */
   async dispatch(
     operationId: string,
     type: AgentHookType,
     event: AnyHookEvent,
     serializedHooks?: SerializedHook[],
-  ): Promise<void> {
+    assertStepLease?: () => void,
+  ): Promise<HookDispatchResult> {
+    assertStepLease?.();
+    const failures: HookDispatchFailure[] = [];
     const isQueueMode = isQueueAgentRuntimeEnabled();
 
     if (!isQueueMode) {
@@ -125,13 +72,24 @@ export class HookDispatcher {
       const hooks = this.hooks.get(operationId)?.filter((h) => h.type === type) || [];
 
       for (const hook of hooks) {
+        assertStepLease?.();
         try {
           log('[%s][%s] Dispatching local hook: %s', operationId, type, hook.id);
           await hook.handler(event as AgentHookEvent);
         } catch (error) {
+          assertStepLease?.();
           log('[%s][%s] Hook error (non-fatal): %s %O', operationId, type, hook.id, error);
-          // Hook errors should NOT affect main execution flow
+          failures.push({
+            code: 'LOCAL_HANDLER_FAILED',
+            delivery: 'local',
+            hookId: hook.id,
+            hookType: type,
+            operationId,
+          });
+          // Hook failures must not turn a successful tool step into a retry.
         }
+        // Keep assertions outside the hook catch: ownership loss is not a delivery failure.
+        assertStepLease?.();
       }
     } else {
       // Production mode: deliver via webhooks
@@ -141,32 +99,67 @@ export class HookDispatcher {
         [];
 
       for (const hook of webhookHooks) {
+        assertStepLease?.();
         try {
-          log(
-            '[%s][%s] Delivering webhook hook: %s → %s',
-            operationId,
-            type,
-            hook.id,
-            hook.webhook.url,
-          );
+          log('[%s][%s] Delivering webhook hook: %s', operationId, type, hook.id);
           const webhookPayload = buildWebhookPayload(event, hook.webhook.eventFields);
-          await deliverWebhook(hook.webhook, {
+          const payload: Record<string, unknown> = {
             ...webhookPayload,
+            ...hook.webhook.body,
+            operationId,
             hookId: hook.id,
             hookType: type,
-            ...hook.webhook.body,
-          });
+          };
+          if (hook.webhook.url === BOT_CALLBACK_PATH) {
+            // Internal callbacks enter SQL, not a self-HTTP request or QStash fallback.
+            const prepared = (event as AgentHookEvent).finalState?.metadata?._pendingBotCallbacks;
+            const frozen = Array.isArray(prepared)
+              ? prepared.find(
+                  (entry) =>
+                    entry?.operationId === operationId &&
+                    entry?.hookId === hook.id &&
+                    entry?.hookType === type &&
+                    entry?.userId === event.userId &&
+                    entry?.applicationId === payload.applicationId &&
+                    entry?.platformThreadId === payload.platformThreadId &&
+                    entry?.messengerInstallationKey === payload.messengerInstallationKey &&
+                    entry?.type === payload.type,
+                )
+              : undefined;
+            await enqueueBotOutbox(
+              frozen ?? { ...payload, userId: event.userId },
+              assertStepLease,
+            ).catch(() => {
+              throw new WebhookDeliveryError('OUTBOX_PERSIST_FAILED');
+            });
+          } else {
+            await deliverWebhook(hook.webhook, payload, assertStepLease);
+          }
         } catch (error) {
-          log(
-            '[%s][%s] Webhook delivery error (non-fatal): %s %O',
+          assertStepLease?.();
+          const failure: HookDispatchFailure = {
+            code: error instanceof WebhookDeliveryError ? error.code : 'WEBHOOK_FAILED',
+            delivery:
+              hook.webhook.url === BOT_CALLBACK_PATH
+                ? 'sql-outbox'
+                : (hook.webhook.delivery ?? 'fetch'),
+            hookId: hook.id,
+            hookType: type,
             operationId,
-            type,
-            hook.id,
-            error,
-          );
+            ...(error instanceof WebhookDeliveryError && error.status !== undefined
+              ? { status: error.status }
+              : {}),
+          };
+          failures.push(failure);
+          // Always observable even when callers ignore the result or debug logging is disabled.
+          // Do not include URLs, response bodies, credentials, or raw provider errors.
+          console.error('[HookDispatcher] Webhook delivery failed', failure);
         }
+        assertStepLease?.();
       }
     }
+
+    return { failures, success: failures.length === 0 };
   }
 
   /**
@@ -176,7 +169,9 @@ export class HookDispatcher {
   async dispatchBeforeToolCall(
     operationId: string,
     event: Omit<ToolCallHookEvent, 'mock' | 'operationId'>,
+    assertStepLease?: () => void,
   ): Promise<{ content: string; isMocked: true } | null> {
+    assertStepLease?.();
     const hooks = this.hooks.get(operationId)?.filter((h) => h.type === 'beforeToolCall') || [];
     if (hooks.length === 0) return null;
 
@@ -201,12 +196,15 @@ export class HookDispatcher {
     };
 
     for (const hook of hooks) {
+      assertStepLease?.();
       try {
         log('[%s][beforeToolCall] Dispatching: %s', operationId, hook.id);
         await hook.handler(toolCallEvent as any);
       } catch (error) {
+        assertStepLease?.();
         log('[%s][beforeToolCall] Hook error (non-fatal): %s %O', operationId, hook.id, error);
       }
+      assertStepLease?.();
     }
 
     return isMocked ? { content: mockedContent, isMocked: true } : null;

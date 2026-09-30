@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 
 import { botCallback } from './handlers/botCallback';
+import { botDeliveryCron } from './handlers/botDeliveryCron';
 import { execAgent } from './handlers/execAgent';
 import { finalizeAbandoned } from './handlers/finalizeAbandoned';
 import { gatewayCallback } from './handlers/gatewayCallback';
@@ -26,6 +27,18 @@ import { serviceTokenAuth } from './middlewares/serviceTokenAuth';
  * and add the corresponding handler here.
  */
 const app = new Hono().basePath('/api/agent');
+
+// Persistent callback worker; schedule independently of incoming chat traffic.
+app.get(
+  '/delivery/cron',
+  bearerSecretAuth(() => process.env.CRON_SECRET),
+  botDeliveryCron,
+);
+app.post(
+  '/delivery/cron',
+  bearerSecretAuth(() => process.env.CRON_SECRET),
+  botDeliveryCron,
+);
 
 // POST /api/agent — start a new agent operation (QStash sig OR API key)
 app.post('/', qstashOrApiKeyAuth(), execAgent);

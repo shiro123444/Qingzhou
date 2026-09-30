@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { getMessageGatewayClient } from '@/server/services/gateway/MessageGatewayClient';
+import { isQueueAgentRuntimeEnabled } from '@/server/services/queue/impls';
+
+import { AgentBridgeService } from '../AgentBridgeService';
 import type { BotCallbackBody } from '../BotCallbackService';
 import { BotCallbackService } from '../BotCallbackService';
+import { CALLBACK_LEASE_MS, CallbackDeliverySession } from '../callbackLedger';
 
 // ==================== Hoisted mocks ====================
 
@@ -70,6 +75,10 @@ const mockMessengerBinderCreateClient = vi.hoisted(() =>
 const mockMessengerCreateBinder = vi.hoisted(() =>
   vi.fn().mockImplementation(() => ({ createClient: mockMessengerBinderCreateClient })),
 );
+
+vi.mock('@/server/services/queue/impls', () => ({
+  isQueueAgentRuntimeEnabled: vi.fn().mockReturnValue(false),
+}));
 
 // ==================== vi.mock ====================
 
@@ -157,6 +166,7 @@ vi.mock('../platforms', async (importOriginal) => {
           name: platform,
           id: platform,
           schema: [],
+          supportsMessageEdit: platform !== 'qq',
         };
       }),
     },
@@ -183,9 +193,13 @@ function setupCredentials(credentials = FAKE_CREDENTIALS, extra?: Record<string,
   mockDecrypt.mockResolvedValue({ plaintext: credentials });
 }
 
+let operationCounter = 0;
+
 function makeBody(overrides: Partial<BotCallbackBody> = {}): BotCallbackBody {
   return {
     applicationId: 'app-123',
+    operationId: `test-op-${++operationCounter}`,
+    stepIndex: 0,
     platformThreadId: 'discord:guild:channel-id',
     progressMessageId: 'progress-msg-1',
     type: 'step',
@@ -207,6 +221,8 @@ describe('BotCallbackService', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    (getMessageGatewayClient() as any).isEnabled = false;
+    vi.mocked(isQueueAgentRuntimeEnabled).mockReturnValue(false);
     service = new BotCallbackService(FAKE_DB);
     setupCredentials();
 
@@ -495,7 +511,7 @@ describe('BotCallbackService', () => {
       expect(mockTriggerTyping).toHaveBeenCalledTimes(1);
     });
 
-    it('should not throw when edit message fails during step', async () => {
+    it('should report unknown delivery when edit message fails during step', async () => {
       mockEditMessage.mockRejectedValueOnce(new Error('API error'));
 
       const body = makeBody({
@@ -506,7 +522,9 @@ describe('BotCallbackService', () => {
       });
 
       // Should not throw - error is logged but swallowed
-      await expect(service.handleCallback(body)).resolves.toBeUndefined();
+      await expect(service.handleCallback(body)).rejects.toMatchObject({
+        status: 'unknown_delivery',
+      });
     });
   });
 
@@ -533,15 +551,18 @@ describe('BotCallbackService', () => {
       );
     });
 
-    it('should render generic failure message when operationId is missing', async () => {
+    it('should reject a callback without operationId', async () => {
       const body = makeBody({
+        operationId: undefined,
         reason: 'error',
         type: 'completion',
       });
 
-      await service.handleCallback(body);
+      await expect(service.handleCallback(body)).rejects.toMatchObject({
+        status: 'invalid_callback',
+      });
 
-      expect(mockEditMessage).toHaveBeenCalledWith('progress-msg-1', '**Agent Execution Failed**');
+      expect(mockEditMessage).not.toHaveBeenCalled();
     });
 
     it('should render stopped message when reason is interrupted', async () => {
@@ -602,7 +623,7 @@ describe('BotCallbackService', () => {
       );
     });
 
-    it('should not throw when editing completion message fails', async () => {
+    it('should report unknown delivery when editing completion message fails', async () => {
       mockEditMessage.mockRejectedValueOnce(new Error('Edit failed'));
 
       const body = makeBody({
@@ -611,10 +632,12 @@ describe('BotCallbackService', () => {
         type: 'completion',
       });
 
-      await expect(service.handleCallback(body)).resolves.toBeUndefined();
+      await expect(service.handleCallback(body)).rejects.toMatchObject({
+        status: 'unknown_delivery',
+      });
     });
 
-    it('should fall back to createMessage when editMessage fails on completion', async () => {
+    it('should not append createMessage when edit outcome is unknown', async () => {
       mockEditMessage.mockRejectedValueOnce(
         new Error("Telegram API editMessageText failed: 400 Bad Request: can't parse entities"),
       );
@@ -625,16 +648,14 @@ describe('BotCallbackService', () => {
         type: 'completion',
       });
 
-      await service.handleCallback(body);
-
+      await expect(service.handleCallback(body)).rejects.toMatchObject({
+        status: 'unknown_delivery',
+      });
       expect(mockEditMessage).toHaveBeenCalledTimes(1);
-      // Reply must reach the user via createMessage fallback
-      expect(mockCreateMessage).toHaveBeenCalledWith(
-        expect.stringContaining('The actual answer the user needs.'),
-      );
+      expect(mockCreateMessage).not.toHaveBeenCalled();
     });
 
-    it('should fall back to createMessage when error-state edit fails', async () => {
+    it('should preserve unknown error-state edit without fallback', async () => {
       mockEditMessage.mockRejectedValueOnce(new Error('message to edit not found'));
 
       const body = makeBody({
@@ -643,9 +664,10 @@ describe('BotCallbackService', () => {
         type: 'completion',
       });
 
-      await service.handleCallback(body);
-
-      expect(mockCreateMessage).toHaveBeenCalledWith(expect.stringContaining('op-fallback-1'));
+      await expect(service.handleCallback(body)).rejects.toMatchObject({
+        status: 'unknown_delivery',
+      });
+      expect(mockCreateMessage).not.toHaveBeenCalled();
     });
 
     it('should skip send when lastAssistantContent is whitespace-only', async () => {
@@ -664,11 +686,11 @@ describe('BotCallbackService', () => {
       expect(mockCreateMessage).not.toHaveBeenCalled();
     });
 
-    it('should still send subsequent chunks when one chunk fails mid-stream', async () => {
+    it('should stop and retain partial chunks on unknown delivery', async () => {
       // Default 1800-char limit -> long content splits into multiple chunks.
       const longContent = 'A'.repeat(2000) + '\n\n' + 'B'.repeat(2000) + '\n\n' + 'C'.repeat(2000);
 
-      // First follow-up chunk rejects; remaining chunks should still be attempted.
+      // First follow-up chunk is ambiguous; do not send it or later chunks on retry.
       mockCreateMessage.mockRejectedValueOnce(
         new Error('Telegram API sendMessage failed: 429 Too Many Requests'),
       );
@@ -679,15 +701,17 @@ describe('BotCallbackService', () => {
         type: 'completion',
       });
 
-      await service.handleCallback(body);
-
+      await expect(service.handleCallback(body)).rejects.toMatchObject({
+        status: 'unknown_delivery',
+      });
+      await expect(service.handleCallback(body)).rejects.toMatchObject({
+        status: 'unknown_delivery',
+      });
       expect(mockEditMessage).toHaveBeenCalledTimes(1);
-      // The loop must keep going past the rejected chunk — at least 2 createMessage
-      // calls are expected (one rejected, one or more after it).
-      expect(mockCreateMessage.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(mockCreateMessage).toHaveBeenCalledTimes(1);
     });
 
-    it('should not throw when sending interrupted message fails', async () => {
+    it('should report unknown delivery when sending interrupted message fails', async () => {
       mockCreateMessage.mockRejectedValueOnce(new Error('Send failed'));
 
       const body = makeBody({
@@ -695,7 +719,322 @@ describe('BotCallbackService', () => {
         type: 'completion',
       });
 
-      await expect(service.handleCallback(body)).resolves.toBeUndefined();
+      await expect(service.handleCallback(body)).rejects.toMatchObject({
+        status: 'unknown_delivery',
+      });
+    });
+  });
+
+  describe('delivery ledger ordering', () => {
+    it('skips a human-approval pause without poisoning resumed steps or the eventual final reply', async () => {
+      const pause = makeBody({
+        type: 'completion',
+        reason: 'waiting_for_human',
+        lastAssistantContent: 'awaiting approval',
+      });
+      const begin = vi.spyOn(CallbackDeliverySession, 'begin');
+      try {
+        await expect(service.handleCallback(pause)).resolves.toEqual({ status: 'skipped' });
+        expect(begin).not.toHaveBeenCalled();
+        expect(mockFindByPlatformAndAppId).not.toHaveBeenCalled();
+        expect(mockEditMessage).not.toHaveBeenCalled();
+        expect(mockCreateMessage).not.toHaveBeenCalled();
+        expect(AgentBridgeService.clearActiveThread).not.toHaveBeenCalled();
+        expect(getMessageGatewayClient().stopTyping).not.toHaveBeenCalled();
+        await expect(
+          service.handleCallback({
+            ...pause,
+            type: 'step',
+            reason: undefined,
+            stepIndex: 2,
+            shouldContinue: true,
+            stepType: 'call_tool',
+          }),
+        ).resolves.toEqual({ status: 'delivered' });
+        expect(mockEditMessage).toHaveBeenCalledTimes(1);
+        const completion = { ...pause, reason: 'completed', lastAssistantContent: 'final answer' };
+        await expect(service.handleCallback(completion)).resolves.toEqual({ status: 'delivered' });
+        await expect(service.handleCallback(completion)).resolves.toEqual({ status: 'skipped' });
+        expect(mockEditMessage).toHaveBeenCalledTimes(2);
+        expect(mockEditMessage).toHaveBeenLastCalledWith('progress-msg-1', 'final answer');
+        expect(AgentBridgeService.clearActiveThread).toHaveBeenCalledTimes(1);
+      } finally {
+        begin.mockRestore();
+      }
+    });
+
+    it('permits terminal redispatch with new duration and hook identity after pre-send credential failure', async () => {
+      const body = makeBody({
+        type: 'completion',
+        duration: 100,
+        hookId: 'original-hook',
+        lastAssistantContent: 'answer',
+      });
+      mockFindByPlatformAndAppId.mockRejectedValueOnce(new Error('temporary database failure'));
+      await expect(service.handleCallback(body)).rejects.toThrow('temporary database failure');
+      await expect(
+        service.handleCallback({
+          ...body,
+          duration: 200,
+          hookId: 'redispatch-hook',
+          hookType: 'onComplete',
+        }),
+      ).resolves.toEqual({ status: 'delivered' });
+      expect(mockEditMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('freezes rendered duration after the first chunk and refuses mixed content on partial retries', async () => {
+      const makeClient = () => ({
+        getMessenger: mockGetMessenger,
+        formatReply: (text: string, stats: { elapsedMs?: number }) =>
+          `${text} duration=${stats.elapsedMs}`,
+      });
+      mockCreateBot.mockImplementationOnce(makeClient).mockImplementationOnce(makeClient);
+      const body = makeBody({
+        type: 'completion',
+        duration: 100,
+        lastAssistantContent: 'A'.repeat(2000),
+      });
+      const originalEffect = CallbackDeliverySession.prototype.effect;
+      let interrupt = true;
+      const effect = vi
+        .spyOn(CallbackDeliverySession.prototype, 'effect')
+        .mockImplementation(async function (this: CallbackDeliverySession, id, send) {
+          if (id === 'chunk:1' && interrupt) {
+            interrupt = false;
+            throw new Error('worker stopped before dispatch');
+          }
+          return originalEffect.call(this, id, send);
+        });
+      try {
+        await expect(service.handleCallback(body)).rejects.toThrow(
+          'worker stopped before dispatch',
+        );
+        expect(mockEditMessage).toHaveBeenCalledTimes(1);
+        expect(mockCreateMessage).not.toHaveBeenCalled();
+        await expect(
+          service.handleCallback({ ...body, lastAssistantContent: 'different content' }),
+        ).rejects.toMatchObject({ status: 'payload_conflict' });
+        await expect(
+          service.handleCallback({ ...body, duration: 999, hookId: 'redispatch' }),
+        ).resolves.toEqual({ status: 'delivered' });
+        expect(mockEditMessage).toHaveBeenCalledTimes(1);
+        expect(mockCreateMessage).toHaveBeenCalledWith(expect.stringContaining('duration=100'));
+        expect(mockCreateMessage).not.toHaveBeenCalledWith(expect.stringContaining('duration=999'));
+      } finally {
+        effect.mockRestore();
+      }
+    });
+
+    it('delivers an independent final message after an ambiguous progress edit without retrying either', async () => {
+      const step = makeBody({ shouldContinue: true, stepType: 'call_tool' });
+      mockEditMessage.mockRejectedValueOnce(new Error('progress edit timed out'));
+      await expect(service.handleCallback(step)).rejects.toMatchObject({
+        status: 'unknown_delivery',
+      });
+      await expect(service.handleCallback({ ...step, stepIndex: 1 })).rejects.toMatchObject({
+        status: 'unknown_delivery',
+      });
+      const completion = {
+        ...step,
+        type: 'completion' as const,
+        lastAssistantContent: 'final answer',
+      };
+      await expect(service.handleCallback(completion)).resolves.toEqual({ status: 'delivered' });
+      await expect(service.handleCallback(completion)).resolves.toEqual({ status: 'skipped' });
+      expect(mockEditMessage).toHaveBeenCalledTimes(1);
+      expect(mockCreateMessage).toHaveBeenCalledTimes(1);
+      expect(mockCreateMessage).toHaveBeenCalledWith('final answer');
+    });
+
+    it('does not retry an uncertain final create after an uncertain progress edit', async () => {
+      const step = makeBody({ shouldContinue: true, stepType: 'call_tool' });
+      mockEditMessage.mockRejectedValueOnce(new Error('progress timeout'));
+      await expect(service.handleCallback(step)).rejects.toMatchObject({
+        status: 'unknown_delivery',
+      });
+      mockCreateMessage.mockRejectedValueOnce(new Error('final create timeout'));
+      const completion = { ...step, type: 'completion' as const, lastAssistantContent: 'answer' };
+      await expect(service.handleCallback(completion)).rejects.toMatchObject({
+        status: 'unknown_delivery',
+      });
+      await expect(service.handleCallback(completion)).rejects.toMatchObject({
+        status: 'unknown_delivery',
+      });
+      expect(mockEditMessage).toHaveBeenCalledTimes(1);
+      expect(mockCreateMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('a late progress response cannot overwrite completion ledger ownership or resend the final reply', async () => {
+      vi.useFakeTimers();
+      try {
+        let finishProgress!: () => void;
+        let notifyStarted!: () => void;
+        const started = new Promise<void>((resolve) => {
+          notifyStarted = resolve;
+        });
+        mockEditMessage.mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              finishProgress = resolve;
+              notifyStarted();
+            }),
+        );
+        const step = makeBody({ shouldContinue: true, stepType: 'call_tool' });
+        const oldWorker = service.handleCallback(step);
+        await started;
+        // Simulate a suspended worker: lease expires without its heartbeat running.
+        vi.setSystemTime(Date.now() + CALLBACK_LEASE_MS + 1);
+        const completion = {
+          ...step,
+          type: 'completion' as const,
+          lastAssistantContent: 'final answer',
+        };
+        await expect(new BotCallbackService(FAKE_DB).handleCallback(completion)).resolves.toEqual({
+          status: 'delivered',
+        });
+        finishProgress();
+        await expect(oldWorker).rejects.toMatchObject({ status: 'lease_lost' });
+        await expect(service.handleCallback(completion)).resolves.toEqual({ status: 'skipped' });
+        expect(mockCreateMessage).toHaveBeenCalledTimes(1);
+        expect(mockEditMessage).toHaveBeenCalledTimes(1);
+        expect(mockTriggerTyping).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('still delivers final content when gateway stopTyping fails', async () => {
+      const gateway = getMessageGatewayClient();
+      (gateway as any).isEnabled = true;
+      vi.mocked(gateway.stopTyping).mockRejectedValueOnce(new Error('network secret'));
+      const body = makeBody({ type: 'completion', lastAssistantContent: 'final answer' });
+      await expect(service.handleCallback(body)).resolves.toEqual({ status: 'delivered' });
+      expect(mockEditMessage).toHaveBeenCalledWith('progress-msg-1', 'final answer');
+      await expect(service.handleCallback(body)).resolves.toEqual({ status: 'skipped' });
+      expect(mockEditMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not let failed step typing poison the later final reply', async () => {
+      const body = makeBody({ shouldContinue: true, stepType: 'call_tool' });
+      mockTriggerTyping.mockRejectedValueOnce(new Error('typing failed'));
+      await expect(service.handleCallback(body)).resolves.toEqual({ status: 'delivered' });
+      await expect(
+        service.handleCallback({
+          ...body,
+          type: 'completion',
+          lastAssistantContent: 'final answer',
+        }),
+      ).resolves.toEqual({ status: 'delivered' });
+      expect(mockEditMessage).toHaveBeenLastCalledWith('progress-msg-1', 'final answer');
+    });
+
+    it('does not let failed step reactions poison the later final reply', async () => {
+      const body = makeBody({ shouldContinue: true, userMessageId: 'user', stepType: 'call_tool' });
+      mockReplaceReaction.mockRejectedValueOnce(new Error('reaction failed'));
+      await expect(service.handleCallback(body)).resolves.toEqual({ status: 'delivered' });
+      await expect(
+        service.handleCallback({
+          ...body,
+          type: 'completion',
+          lastAssistantContent: 'final answer',
+        }),
+      ).resolves.toEqual({ status: 'delivered' });
+      expect(mockEditMessage).toHaveBeenLastCalledWith('progress-msg-1', 'final answer');
+    });
+
+    it('does not turn a title rename failure into a failed final delivery', async () => {
+      mockFindById.mockResolvedValueOnce({ title: '' });
+      mockGenerateTopicTitle.mockResolvedValueOnce('title');
+      mockUpdateThreadName.mockRejectedValueOnce(new Error('rename failed'));
+      const body = makeBody({
+        type: 'completion',
+        lastAssistantContent: 'answer',
+        userId: 'user',
+        topicId: 'topic',
+        userPrompt: 'prompt',
+      });
+      await expect(service.handleCallback(body)).resolves.toEqual({ status: 'delivered' });
+      await expect(service.handleCallback(body)).resolves.toEqual({ status: 'skipped' });
+      expect(mockEditMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('fails closed in queue mode without Redis before loading credentials or sending', async () => {
+      vi.mocked(isQueueAgentRuntimeEnabled).mockReturnValue(true);
+      await expect(
+        service.handleCallback(makeBody({ type: 'completion', lastAssistantContent: 'done' })),
+      ).rejects.toMatchObject({ status: 'backend_unavailable' });
+      expect(mockFindByPlatformAndAppId).not.toHaveBeenCalled();
+      expect(mockCreateMessage).not.toHaveBeenCalled();
+    });
+
+    it('uses create once on a non-edit platform, never probes edit or duplicates completion', async () => {
+      const body = makeBody({
+        type: 'completion',
+        platformThreadId: 'qq:thread',
+        lastAssistantContent: 'done',
+      });
+      await service.handleCallback(body);
+      await service.handleCallback(body);
+      expect(mockEditMessage).not.toHaveBeenCalled();
+      expect(mockCreateMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('skips duplicate completion even if reason or hookId changes', async () => {
+      const body = makeBody({ type: 'completion', lastAssistantContent: 'done' });
+      await service.handleCallback(body);
+      expect(
+        await new BotCallbackService(FAKE_DB).handleCallback({
+          ...body,
+          reason: 'error',
+          hookId: 'other',
+        }),
+      ).toEqual({ status: 'skipped' });
+      expect(mockEditMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('ignores late steps after completion, including progress, reactions and typing', async () => {
+      const body = makeBody({ type: 'completion', lastAssistantContent: 'done' });
+      await service.handleCallback(body);
+      vi.clearAllMocks();
+      expect(
+        await service.handleCallback({
+          ...body,
+          type: 'step',
+          stepIndex: 99,
+          shouldContinue: true,
+          userMessageId: 'user',
+        }),
+      ).toEqual({ status: 'skipped' });
+      expect(mockFindByPlatformAndAppId).not.toHaveBeenCalled();
+      expect(mockEditMessage).not.toHaveBeenCalled();
+      expect(mockReplaceReaction).not.toHaveBeenCalled();
+      expect(mockTriggerTyping).not.toHaveBeenCalled();
+    });
+
+    it('isolates identical operation/thread IDs across applications and users', async () => {
+      const body = makeBody({ type: 'completion', lastAssistantContent: 'done', userId: 'u1' });
+      await service.handleCallback(body);
+      await service.handleCallback({ ...body, applicationId: 'other-app' });
+      await service.handleCallback({ ...body, userId: 'u2' });
+      expect(mockEditMessage).toHaveBeenCalledTimes(3);
+    });
+
+    it('does not send duplicates on non-edit platforms after ambiguous create', async () => {
+      const body = makeBody({
+        type: 'completion',
+        progressMessageId: undefined,
+        lastAssistantContent: 'done',
+      });
+      mockCreateMessage.mockRejectedValueOnce(new Error('connection reset after send'));
+      await expect(service.handleCallback(body)).rejects.toMatchObject({
+        status: 'unknown_delivery',
+      });
+      await expect(new BotCallbackService(FAKE_DB).handleCallback(body)).rejects.toMatchObject({
+        status: 'unknown_delivery',
+      });
+      expect(mockCreateMessage).toHaveBeenCalledTimes(1);
+      expect(mockEditMessage).not.toHaveBeenCalled();
     });
   });
 
@@ -795,7 +1134,7 @@ describe('BotCallbackService', () => {
       expect(mockRemoveReaction).toHaveBeenCalledWith('telegram:chat-456:789', '👀');
     });
 
-    it('should not throw when reaction removal fails', async () => {
+    it('should preserve delivered message status when best-effort reaction removal fails', async () => {
       mockRemoveReaction.mockRejectedValueOnce(new Error('Reaction not found'));
 
       const body = makeBody({
@@ -805,7 +1144,9 @@ describe('BotCallbackService', () => {
         userMessageId: 'user-msg-1',
       });
 
-      await expect(service.handleCallback(body)).resolves.toBeUndefined();
+      await expect(service.handleCallback(body)).resolves.toEqual({
+        status: 'delivered',
+      });
     });
   });
 

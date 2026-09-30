@@ -5,6 +5,11 @@ import debug from 'debug';
 
 import type { AttachmentSource } from '@/server/services/aiAgent/ingestAttachment';
 import {
+  claimWebhookReplay,
+  createGatewayAuthenticator,
+  signGatewayRequest,
+} from '@/server/services/bot/security/gatewayAuth';
+import {
   BOT_RUNTIME_STATUSES,
   getRuntimeStatusErrorMessage,
   updateBotRuntimeStatus,
@@ -153,6 +158,11 @@ class QQGatewayClient implements PlatformClient {
 
       const adapter = createQQAdapter({
         appId: this.config.applicationId,
+        authenticateWebhook: createGatewayAuthenticator({
+          applicationId: this.applicationId,
+          platform: this.id,
+          secret: this.config.credentials.appSecret,
+        }),
         clientSecret: this.config.credentials.appSecret,
       });
 
@@ -185,6 +195,18 @@ class QQGatewayClient implements PlatformClient {
         durationMs,
         this.abort.signal,
         webhookUrl,
+        async (url, body) =>
+          fetch(url, {
+            ...signGatewayRequest({
+              applicationId: this.applicationId,
+              body,
+              platform: this.id,
+              secret: this.config.credentials.appSecret,
+              url,
+            }),
+            redirect: 'error',
+            signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(30_000)]),
+          }),
       );
 
       if (!options) {
@@ -255,6 +277,11 @@ class QQGatewayClient implements PlatformClient {
     return {
       qq: createQQAdapter({
         appId: this.config.applicationId,
+        authenticateWebhook: createGatewayAuthenticator({
+          applicationId: this.applicationId,
+          platform: this.id,
+          secret: this.config.credentials.appSecret,
+        }),
         clientSecret: this.config.credentials.appSecret,
       }),
     };
@@ -355,6 +382,7 @@ class QQWebhookClient implements PlatformClient {
     return {
       qq: createQQAdapter({
         appId: this.config.applicationId,
+        claimWebhookReplay,
         clientSecret: this.config.credentials.appSecret,
       }),
     };

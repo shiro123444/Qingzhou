@@ -1,9 +1,10 @@
 import { type AgentState } from '@lobechat/agent-runtime';
-import { consumeStreamUntilDone } from '@lobechat/model-runtime';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as ContextEngineering from '@/server/modules/Mecha/ContextEngineering';
 import { initModelRuntimeFromDB } from '@/server/modules/ModelRuntime';
+import { HookDispatcher } from '@/server/services/agentRuntime/hooks/HookDispatcher';
+import * as QueueImpls from '@/server/services/queue/impls';
 
 import { createRuntimeExecutors, type RuntimeExecutorContext } from '../RuntimeExecutors';
 
@@ -146,6 +147,322 @@ describe('RuntimeExecutors', () => {
       messages,
     },
     type: 'compress_context' as const,
+  });
+
+  describe('step lease fencing', () => {
+    const makeState = (): AgentState => ({
+      cost: createMockCost(),
+      createdAt: new Date().toISOString(),
+      lastModified: new Date().toISOString(),
+      maxSteps: 100,
+      messages: [],
+      metadata: { agentId: 'agent-123', topicId: 'topic-123' },
+      modelRuntimeConfig: { model: 'gpt-4', provider: 'openai' },
+      operationId: 'op-123',
+      status: 'running',
+      stepCount: 0,
+      toolManifestMap: {},
+      usage: createMockUsage(),
+    });
+    const tool = (id = 'tool-1') => ({
+      apiName: 'search',
+      arguments: '{}',
+      id,
+      identifier: 'web-browsing',
+      type: 'default' as const,
+    });
+    const llmInstruction = {
+      payload: {
+        assistantMessageId: 'assistant-existing',
+        messages: [{ content: 'Hello', role: 'user' }],
+        model: 'gpt-4',
+        provider: 'openai',
+      },
+      type: 'call_llm' as const,
+    };
+    const toolInstruction = {
+      payload: { parentMessageId: 'assistant-existing', toolCalling: tool() },
+      type: 'call_tool' as const,
+    };
+
+    it.each([
+      'call_llm',
+      'compress_context',
+      'call_tool',
+      'call_tools_batch',
+      'finish',
+      'request_human_approve',
+      'resolve_aborted_tools',
+    ] as const)('rejects a lost lease before %s starts', async (type) => {
+      const lost = new Error('step lease lost');
+      const executors = createRuntimeExecutors({
+        ...ctx,
+        assertStepLease: () => {
+          throw lost;
+        },
+      });
+      await expect(executors[type]!({ type } as any, makeState())).rejects.toBe(lost);
+      expect(mockMessageModel.create).not.toHaveBeenCalled();
+      expect(mockMessageModel.update).not.toHaveBeenCalled();
+      expect(mockToolExecutionService.executeTool).not.toHaveBeenCalled();
+      expect(mockStreamManager.publishStreamEvent).not.toHaveBeenCalled();
+    });
+
+    it('passes abort to chat and does not turn cancellation into a retry or persisted result', async () => {
+      const controller = new AbortController();
+      const lost = new Error('lease lost during chat');
+      const chat = vi.fn(async (_payload, options) => {
+        expect(options.signal).toBe(controller.signal);
+        controller.abort(lost);
+        throw new Error('network timeout');
+      });
+      vi.mocked(initModelRuntimeFromDB).mockResolvedValueOnce({ chat } as any);
+      const executors = createRuntimeExecutors({ ...ctx, signal: controller.signal });
+      await expect(executors.call_llm!(llmInstruction as any, makeState())).rejects.toBe(lost);
+      expect(chat).toHaveBeenCalledTimes(1);
+      expect(mockMessageModel.update).not.toHaveBeenCalled();
+      expect(
+        mockStreamManager.publishStreamEvent.mock.calls.map(([, event]: any) => event.type),
+      ).toEqual(['stream_start']);
+    });
+
+    it('cancels a pending stream read, clears buffers, and releases its reader on abort', async () => {
+      vi.useFakeTimers();
+      const controller = new AbortController();
+      const lost = new Error('lease lost during stream');
+      const cancel = vi.fn();
+      const body = new ReadableStream({ cancel });
+      let streamStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        streamStarted = resolve;
+      });
+      const chat = vi.fn(async (_payload, options) => {
+        await options.callback.onText('buffered text');
+        await options.callback.onThinking('buffered reasoning');
+        streamStarted();
+        return new Response(body);
+      });
+      vi.mocked(initModelRuntimeFromDB).mockResolvedValueOnce({ chat } as any);
+      const executors = createRuntimeExecutors({ ...ctx, signal: controller.signal });
+      try {
+        const result = executors.call_llm!(llmInstruction as any, makeState());
+        const rejected = expect(result).rejects.toBe(lost);
+        await started;
+        await vi.advanceTimersByTimeAsync(0);
+        expect(body.locked).toBe(true);
+        controller.abort(lost);
+        await rejected;
+        await vi.runAllTimersAsync();
+        expect(cancel).toHaveBeenCalled();
+        expect(body.locked).toBe(false);
+        expect(mockStreamManager.publishStreamChunk).not.toHaveBeenCalled();
+        expect(mockMessageModel.update).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('observes timer fence failures without unhandled rejections or stale chunks', async () => {
+      vi.useFakeTimers();
+      let leaseLost = false;
+      const lost = new Error('local lease expired');
+      let streamController!: ReadableStreamDefaultController;
+      const body = new ReadableStream({
+        start(controller) {
+          streamController = controller;
+        },
+      });
+      let streamStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        streamStarted = resolve;
+      });
+      const chat = vi.fn(async (_payload, options) => {
+        await options.callback.onText('buffered');
+        await options.callback.onThinking('reasoning');
+        streamStarted();
+        return new Response(body);
+      });
+      vi.mocked(initModelRuntimeFromDB).mockResolvedValueOnce({ chat } as any);
+      const executors = createRuntimeExecutors({
+        ...ctx,
+        assertStepLease: () => {
+          if (leaseLost) throw lost;
+        },
+      });
+      try {
+        const result = executors.call_llm!(llmInstruction as any, makeState());
+        const rejected = expect(result).rejects.toBe(lost);
+        await started;
+        await vi.advanceTimersByTimeAsync(0);
+        leaseLost = true;
+        await vi.advanceTimersByTimeAsync(60);
+        streamController.close();
+        await rejected;
+        expect(mockStreamManager.publishStreamChunk).not.toHaveBeenCalled();
+        expect(mockMessageModel.update).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('stops LLM retries if the lease is lost during backoff', async () => {
+      vi.useFakeTimers();
+      const controller = new AbortController();
+      const lost = new Error('lease lost during backoff');
+      const chat = vi.fn().mockRejectedValue(new Error('network timeout'));
+      vi.mocked(initModelRuntimeFromDB).mockResolvedValueOnce({ chat } as any);
+      let retryStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        retryStarted = resolve;
+      });
+      mockStreamManager.publishStreamEvent.mockImplementation(async (_id: string, event: any) => {
+        if (event.type === 'stream_retry') retryStarted();
+      });
+      const executors = createRuntimeExecutors({ ...ctx, signal: controller.signal });
+      try {
+        const result = executors.call_llm!(llmInstruction as any, makeState());
+        const rejected = expect(result).rejects.toBe(lost);
+        await started;
+        await Promise.resolve();
+        controller.abort(lost);
+        await rejected;
+        await vi.runAllTimersAsync();
+        expect(chat).toHaveBeenCalledTimes(1);
+        expect(mockMessageModel.update).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([true, false])(
+      'does not persist tool results or retry after losing ownership (success=%s)',
+      async (success) => {
+        let leaseLost = false;
+        const lost = new Error('tool lease lost');
+        mockToolExecutionService.executeTool.mockImplementationOnce(async () => {
+          leaseLost = true;
+          return {
+            content: 'external effect already happened',
+            error: { kind: 'retry' },
+            executionTime: 1,
+            success,
+          };
+        });
+        const executors = createRuntimeExecutors({
+          ...ctx,
+          assertStepLease: () => {
+            if (leaseLost) throw lost;
+          },
+        });
+        await expect(executors.call_tool!(toolInstruction, makeState())).rejects.toBe(lost);
+        expect(mockToolExecutionService.executeTool).toHaveBeenCalledTimes(1);
+        expect(mockMessageModel.create).not.toHaveBeenCalled();
+        expect(
+          mockStreamManager.publishStreamEvent.mock.calls.map(([, event]: any) => event.type),
+        ).toEqual(['tool_start']);
+      },
+    );
+
+    it('does not normalize a thrown tool error after abort', async () => {
+      const controller = new AbortController();
+      const lost = new Error('tool cancelled');
+      mockToolExecutionService.executeTool.mockImplementationOnce(
+        async (_payload: unknown, context: { signal?: AbortSignal }) => {
+          expect(context.signal).toBe(controller.signal);
+          controller.abort(lost);
+          throw new Error('transport failed');
+        },
+      );
+      const executors = createRuntimeExecutors({ ...ctx, signal: controller.signal });
+      await expect(executors.call_tool!(toolInstruction, makeState())).rejects.toBe(lost);
+      expect(mockMessageModel.create).not.toHaveBeenCalled();
+      expect(mockToolExecutionService.executeTool).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not start remaining parallel tools or write completed results after lease loss', async () => {
+      let leaseLost = false;
+      const lost = new Error('batch lease lost');
+      mockToolExecutionService.executeTool.mockImplementationOnce(async () => {
+        leaseLost = true;
+        return { content: 'first effect', executionTime: 1, success: true };
+      });
+      const executors = createRuntimeExecutors({
+        ...ctx,
+        assertStepLease: () => {
+          if (leaseLost) throw lost;
+        },
+      });
+      await expect(
+        executors.call_tools_batch!(
+          {
+            payload: {
+              parentMessageId: 'assistant-existing',
+              toolsCalling: [tool('one'), tool('two'), tool('three')],
+            },
+            type: 'call_tools_batch',
+          },
+          makeState(),
+        ),
+      ).rejects.toBe(lost);
+      expect(mockToolExecutionService.executeTool).toHaveBeenCalledTimes(1);
+      expect(mockMessageModel.create).not.toHaveBeenCalled();
+      expect(mockMessageModel.query).not.toHaveBeenCalled();
+      expect(
+        mockStreamManager.publishStreamEvent.mock.calls.some(
+          ([, event]: any) => event.type === 'tool_end',
+        ),
+      ).toBe(false);
+    });
+
+    it('checks ownership again before persisting the completed LLM result', async () => {
+      let leaseLost = false;
+      const lost = new Error('lease lost before persistence');
+      const chat = vi.fn(async (_payload, options) => {
+        await options.callback.onText('completed answer');
+        return new Response('done');
+      });
+      vi.mocked(initModelRuntimeFromDB).mockResolvedValueOnce({ chat } as any);
+      mockStreamManager.publishStreamEvent.mockImplementation(async (_id: string, event: any) => {
+        if (event.type === 'stream_end') leaseLost = true;
+      });
+      const executors = createRuntimeExecutors({
+        ...ctx,
+        assertStepLease: () => {
+          if (leaseLost) throw lost;
+        },
+      });
+      await expect(executors.call_llm!(llmInstruction as any, makeState())).rejects.toBe(lost);
+      expect(chat).toHaveBeenCalledTimes(1);
+      expect(mockMessageModel.update).not.toHaveBeenCalled();
+    });
+
+    it('does not finalize compression after losing the lease in its LLM call', async () => {
+      const controller = new AbortController();
+      const lost = new Error('compression lease lost');
+      const chat = vi.fn(async (_payload, options) => {
+        expect(options.signal).toBe(controller.signal);
+        await options.callback.onText('summary');
+        controller.abort(lost);
+        return new Response('done');
+      });
+      vi.mocked(initModelRuntimeFromDB).mockResolvedValueOnce({ chat } as any);
+      const executors = createRuntimeExecutors({ ...ctx, signal: controller.signal });
+      const messages = [{ content: 'history', id: 'old', role: 'assistant' }];
+      mockMessageModel.query.mockResolvedValueOnce(messages);
+      mockCreateCompressionGroup.mockResolvedValueOnce({
+        messageGroupId: 'group-123',
+        messagesToSummarize: messages,
+        success: true,
+      });
+      await expect(
+        executors.compress_context!(createCompressContextInstruction(messages), makeState()),
+      ).rejects.toBe(lost);
+      expect(mockFinalizeCompression).not.toHaveBeenCalled();
+      expect(chat).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('call_llm executor', () => {
@@ -3224,7 +3541,7 @@ describe('RuntimeExecutors', () => {
   });
 
   // Regression: stream errors silently produce empty llm_result
-  // Uses real consumeStreamUntilDone + createCallbacksTransformer to test the full stream pipeline.
+  // Uses the local abortable stream consumer + real createCallbacksTransformer.
   // Only the lowest-level chat() return is mocked to simulate provider error responses.
   describe('stream error detection in call_llm', () => {
     const createMockState = (overrides?: Partial<AgentState>): AgentState => ({
@@ -3250,22 +3567,12 @@ describe('RuntimeExecutors', () => {
       ...overrides,
     });
 
-    afterEach(() => {
-      // Restore default mock for other tests
-      vi.mocked(consumeStreamUntilDone).mockResolvedValue(undefined);
-    });
-
     it('should retry and eventually throw when LLM stream contains error events from provider', async () => {
       vi.useFakeTimers();
 
       // Import real implementations directly from source (bypassing the @lobechat/model-runtime mock)
-      const { consumeStreamUntilDone: realConsume } =
-        await import('../../../../../packages/model-runtime/src/utils/consumeStream');
       const { createCallbacksTransformer } =
         await import('../../../../../packages/model-runtime/src/core/streams/protocol');
-
-      // Use real consumeStreamUntilDone so the stream is actually consumed
-      vi.mocked(consumeStreamUntilDone).mockImplementation(realConsume);
 
       const errorPayload = {
         body: { message: 'rate limit exceeded' },
@@ -3609,6 +3916,87 @@ describe('RuntimeExecutors', () => {
     });
 
     describe('call_tool hooks', () => {
+      it.each(['call_tool', 'call_tools_batch'] as const)(
+        '%s fences subsequent local hooks and real tools after lease loss during the first hook',
+        async (type) => {
+          const queueMode = vi
+            .spyOn(QueueImpls, 'isQueueAgentRuntimeEnabled')
+            .mockReturnValue(false);
+          const dispatcher = new HookDispatcher();
+          const controller = new AbortController();
+          const lost = new Error('lease lost while awaiting first local hook');
+          let releaseHook!: () => void;
+          const gate = new Promise<void>((resolve) => {
+            releaseHook = resolve;
+          });
+          let hooksEntered!: () => void;
+          const entered = new Promise<void>((resolve) => {
+            hooksEntered = resolve;
+          });
+          let started = 0;
+          const firstHook = vi.fn(async () => {
+            // Observation and mock-support dispatch both reach the first local hook.
+            if (++started === 2) hooksEntered();
+            await gate;
+            controller.abort(lost);
+          });
+          const secondHook = vi.fn(async () => {});
+          dispatcher.register(ctx.operationId, [
+            { handler: firstHook, id: 'first', type: 'beforeToolCall' },
+            { handler: secondHook, id: 'second', type: 'beforeToolCall' },
+          ]);
+          const dispatch = vi.spyOn(dispatcher, 'dispatch');
+          const dispatchBeforeToolCall = vi.spyOn(dispatcher, 'dispatchBeforeToolCall');
+          const executors = createRuntimeExecutors({
+            ...ctx,
+            hookDispatcher: dispatcher,
+            signal: controller.signal,
+          });
+          const instruction =
+            type === 'call_tool'
+              ? createToolInstruction()
+              : {
+                  payload: {
+                    parentMessageId: 'parent-msg',
+                    toolsCalling: [createToolInstruction().payload.toolCalling],
+                  },
+                  type,
+                };
+          try {
+            const result = executors[type]!(instruction, createToolState());
+            const rejected = expect(result).rejects.toBe(lost);
+            await entered;
+            expect(mockToolExecutionService.executeTool).not.toHaveBeenCalled();
+            releaseHook();
+            await rejected;
+            expect(firstHook).toHaveBeenCalledTimes(2);
+            expect(secondHook).not.toHaveBeenCalled();
+            expect(dispatch).toHaveBeenCalledWith(
+              ctx.operationId,
+              'beforeToolCall',
+              expect.any(Object),
+              undefined,
+              expect.any(Function),
+            );
+            expect(dispatchBeforeToolCall).toHaveBeenCalledWith(
+              ctx.operationId,
+              expect.any(Object),
+              expect.any(Function),
+            );
+            expect(mockToolExecutionService.executeTool).not.toHaveBeenCalled();
+            expect(mockMessageModel.create).not.toHaveBeenCalled();
+            expect(
+              mockStreamManager.publishStreamEvent.mock.calls.some(
+                ([, event]: any) => event.type === 'tool_end',
+              ),
+            ).toBe(false);
+          } finally {
+            releaseHook();
+            queueMode.mockRestore();
+          }
+        },
+      );
+
       it('should dispatch beforeToolCall and afterToolCall hooks', async () => {
         const mockDispatcher = {
           dispatch: vi.fn().mockResolvedValue(undefined),

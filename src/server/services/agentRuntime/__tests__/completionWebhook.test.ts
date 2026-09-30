@@ -1,12 +1,14 @@
 import { type AgentRuntimeContext } from '@lobechat/agent-runtime';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   InMemoryAgentStateManager,
   InMemoryStreamEventManager,
 } from '@/server/modules/AgentRuntime';
+import * as queueImplementations from '@/server/services/queue/impls';
 
 import { AgentRuntimeService } from '../AgentRuntimeService';
+import { hookDispatcher } from '../hooks';
 
 // Mock database models
 vi.mock('@/database/models/message', () => ({
@@ -89,6 +91,10 @@ describe('AgentRuntimeService - Completion Hooks via createOperation', () => {
       queueService: null,
       streamEventManager,
     });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   describe('createOperation persists hooks in metadata', () => {
@@ -232,7 +238,7 @@ describe('AgentRuntimeService - Completion Hooks via createOperation', () => {
       expect(state?.metadata?._hooks).toBeUndefined();
     });
 
-    it('should not throw when webhook fetch fails', async () => {
+    it('returns observable delivery failure without throwing when webhook fetch fails', async () => {
       const operationId = 'hook-fail-1';
       const webhookUrl = 'https://example.com/failing-webhook';
 
@@ -241,9 +247,42 @@ describe('AgentRuntimeService - Completion Hooks via createOperation', () => {
 
       await createOperationWithHook(operationId, webhookUrl, { runId: 'run-1' });
 
-      // Verify the hook is stored -- the hook dispatch catches errors internally
       const state = await stateManager.loadAgentState(operationId);
-      expect(state?.metadata?._hooks?.[0]?.webhook?.url).toBe(webhookUrl);
+      vi.spyOn(queueImplementations, 'isQueueAgentRuntimeEnabled').mockReturnValue(true);
+      const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const result = await hookDispatcher.dispatch(
+        operationId,
+        'onComplete',
+        {
+          agentId: 'test-agent',
+          operationId,
+          reason: 'done',
+          status: 'done',
+          userId,
+        },
+        state?.metadata?._hooks,
+      );
+
+      expect(result).toEqual({
+        success: false,
+        failures: [
+          {
+            code: 'FETCH_FAILED',
+            delivery: 'fetch',
+            hookId: 'test-completion',
+            hookType: 'onComplete',
+            operationId,
+          },
+        ],
+      });
+      expect(fetchSpy).toHaveBeenCalledOnce();
+      expect(errorLog).toHaveBeenCalledWith(
+        '[HookDispatcher] Webhook delivery failed',
+        result.failures[0],
+      );
+      expect(JSON.stringify(errorLog.mock.calls)).not.toContain(webhookUrl);
+      vi.mocked(queueImplementations.isQueueAgentRuntimeEnabled).mockRestore();
+      errorLog.mockRestore();
     });
   });
 

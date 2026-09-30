@@ -10,6 +10,10 @@ import debug from 'debug';
 
 import type { AttachmentSource } from '@/server/services/aiAgent/ingestAttachment';
 import {
+  claimWebhookReplay,
+  createGatewayAuthenticator,
+} from '@/server/services/bot/security/gatewayAuth';
+import {
   BOT_RUNTIME_STATUSES,
   getRuntimeStatusErrorMessage,
   updateBotRuntimeStatus,
@@ -201,6 +205,7 @@ class FeishuWebhookClient implements PlatformClient {
       [this.config.platform]: createLarkAdapter({
         appId: this.config.applicationId,
         appSecret: this.config.credentials.appSecret,
+        claimWebhookReplay,
         encryptKey: this.config.credentials.encryptKey,
         platform: this.domain,
         verificationToken: this.config.credentials.verificationToken,
@@ -293,9 +298,12 @@ class FeishuWSClientImpl implements PlatformClient {
       const adapter = createLarkAdapter({
         appId: this.config.applicationId,
         appSecret: this.config.credentials.appSecret,
-        encryptKey: this.config.credentials.encryptKey,
+        authenticateWebhook: createGatewayAuthenticator({
+          applicationId: this.config.applicationId,
+          platform: this.domain,
+          secret: this.config.credentials.appSecret,
+        }),
         platform: this.domain,
-        verificationToken: this.config.credentials.verificationToken,
       });
 
       const { Chat, ConsoleLogger } = await import('chat');
@@ -323,7 +331,6 @@ class FeishuWSClientImpl implements PlatformClient {
         appId: this.config.applicationId,
         appSecret: this.config.credentials.appSecret,
         domain: this.domain,
-        verificationToken: this.config.credentials.verificationToken,
         webhookUrl,
       });
 
@@ -397,9 +404,12 @@ class FeishuWSClientImpl implements PlatformClient {
       [this.config.platform]: createLarkAdapter({
         appId: this.config.applicationId,
         appSecret: this.config.credentials.appSecret,
-        encryptKey: this.config.credentials.encryptKey,
+        authenticateWebhook: createGatewayAuthenticator({
+          applicationId: this.config.applicationId,
+          platform: this.domain,
+          secret: this.config.credentials.appSecret,
+        }),
         platform: this.domain,
-        verificationToken: this.config.credentials.verificationToken,
       }),
     };
   }
@@ -446,7 +456,7 @@ export class FeishuClientFactory extends ClientFactory {
 
   async validateCredentials(
     credentials: Record<string, string>,
-    _settings?: Record<string, unknown>,
+    settings?: Record<string, unknown>,
     applicationId?: string,
     platform?: string,
   ): Promise<ValidationResult> {
@@ -455,6 +465,14 @@ export class FeishuClientFactory extends ClientFactory {
     if (!applicationId) errors.push({ field: 'applicationId', message: 'App ID is required' });
     if (!credentials.appSecret)
       errors.push({ field: 'appSecret', message: 'App Secret is required' });
+
+    if (settings?.connectionMode !== 'websocket' && !credentials.encryptKey?.trim()) {
+      errors.push({
+        field: 'encryptKey',
+        message:
+          'Encrypt Key is required in webhook mode to verify signed events and prevent replay. WebSocket mode does not require it.',
+      });
+    }
 
     if (errors.length > 0) return { errors, valid: false };
 

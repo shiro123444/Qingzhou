@@ -16,9 +16,9 @@ import type {
 import { Message, parseMarkdown } from 'chat';
 
 import { QQApiClient } from './api';
-import { signWebhookResponse } from './crypto';
+import { signWebhookResponse, verifyWebhookSignature } from './crypto';
 import { QQFormatConverter } from './format-converter';
-import { QQGatewayConnection } from './gateway';
+import { QQGatewayConnection, type QQGatewayForwarder } from './gateway';
 import type {
   QQAdapterConfig,
   QQAttachment,
@@ -28,11 +28,13 @@ import type {
   QQWebhookPayload,
 } from './types';
 import { QQ_EVENT_TYPES, QQ_OP_CODES } from './types';
+import { claimReplay, isFreshTimestamp, readWebhookBody } from './webhook-security';
 
 export class QQAdapter implements Adapter<QQThreadId, QQRawMessage> {
   readonly name = 'qq';
   private readonly api: QQApiClient;
   private readonly clientSecret: string;
+  private readonly config: QQAdapterConfig;
   private readonly formatConverter: QQFormatConverter;
   private _userName: string;
   private _botUserId?: string;
@@ -48,6 +50,8 @@ export class QQAdapter implements Adapter<QQThreadId, QQRawMessage> {
   }
 
   constructor(config: QQAdapterConfig & { userName?: string }) {
+    if (!config.appId || !config.clientSecret) throw new Error('QQ credentials are required');
+    this.config = config;
     this.api = new QQApiClient(config.appId, config.clientSecret);
     this.clientSecret = config.clientSecret;
     this.formatConverter = new QQFormatConverter();
@@ -81,30 +85,78 @@ export class QQAdapter implements Adapter<QQThreadId, QQRawMessage> {
   // ------------------------------------------------------------------
 
   async handleWebhook(request: Request, options?: WebhookOptions): Promise<Response> {
-    const bodyText = await request.text();
+    if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
 
+    // The configured mode is exclusive. Never fall back to native auth after internal auth fails.
+    if (this.config.authenticateWebhook) {
+      try {
+        const rejection = await this.config.authenticateWebhook(request);
+        if (rejection instanceof Response) return rejection;
+      } catch {
+        return new Response('Authentication unavailable', { status: 503 });
+      }
+    }
+
+    const body = await readWebhookBody(request);
+    if (body instanceof Response) return body;
     let payload: QQWebhookPayload;
     try {
-      payload = JSON.parse(bodyText);
+      payload = JSON.parse(body.toString('utf8'));
+      if (!payload || typeof payload !== 'object' || !payload.d || typeof payload.d !== 'object') {
+        return new Response('Invalid payload', { status: 400 });
+      }
     } catch {
       return new Response('Invalid JSON', { status: 400 });
     }
 
-    // Handle webhook verification (op: 13)
-    if (payload.op === QQ_OP_CODES.VERIFY) {
-      const verifyData = payload.d as { event_ts: string; plain_token: string };
-      if (verifyData.plain_token && verifyData.event_ts) {
-        const signature = signWebhookResponse(
-          verifyData.event_ts,
-          verifyData.plain_token,
-          this.clientSecret,
-        );
-        return Response.json({
-          plain_token: verifyData.plain_token,
-          signature,
-        });
+    if (
+      !this.config.authenticateWebhook &&
+      request.headers.get('X-Bot-Appid') !== this.config.appId
+    ) {
+      return new Response('Unauthorized', { status: 401 });
+    }
+
+    // The unsigned registration exception applies only when BOTH signature headers are absent.
+    // A partial/bad signature must not downgrade an authenticated challenge to unsigned.
+    const unsignedChallenge =
+      payload.op === QQ_OP_CODES.VERIFY &&
+      !request.headers.has('X-Signature-Timestamp') &&
+      !request.headers.has('X-Signature-Ed25519');
+    if (!this.config.authenticateWebhook && !unsignedChallenge) {
+      const timestamp = request.headers.get('X-Signature-Timestamp');
+      const signature = request.headers.get('X-Signature-Ed25519') ?? '';
+      if (
+        !isFreshTimestamp(timestamp) ||
+        !verifyWebhookSignature(timestamp, body, signature, this.clientSecret)
+      ) {
+        return new Response('Unauthorized', { status: 401 });
       }
-      return new Response('Missing verification data', { status: 400 });
+      try {
+        if (
+          !(await claimReplay(this.config.appId, timestamp, body, this.config.claimWebhookReplay))
+        ) {
+          return new Response('Replay rejected', { status: 409 });
+        }
+      } catch {
+        return new Response('Replay protection unavailable', { status: 503 });
+      }
+    }
+
+    // QQ URL registration can be unsigned. Restrict the signing domain to opaque tokens:
+    // in particular JSON event bodies must NEVER be accepted as plain_token (signing oracle).
+    if (payload.op === QQ_OP_CODES.VERIFY) {
+      const { event_ts: eventTs, plain_token: plainToken } = payload.d;
+      if (
+        !isFreshTimestamp(eventTs) ||
+        typeof plainToken !== 'string' ||
+        !/^[\w-]{16,128}$/.test(plainToken)
+      ) {
+        return new Response('Invalid verification data', { status: 400 });
+      }
+      return Response.json({
+        plain_token: plainToken,
+        signature: signWebhookResponse(eventTs, plainToken, this.clientSecret),
+      });
     }
 
     // Handle dispatch events (op: 0)
@@ -196,10 +248,12 @@ export class QQAdapter implements Adapter<QQThreadId, QQRawMessage> {
     durationMs: number,
     abortSignal: AbortSignal,
     webhookUrl: string,
+    forwarder: QQGatewayForwarder,
   ): Promise<void> {
     const gateway = new QQGatewayConnection(this.api, {
       abortSignal,
       durationMs,
+      forwarder,
       log: (msg: string, ...rest: any[]) => this.logger.info(msg, ...rest),
       webhookUrl,
     });

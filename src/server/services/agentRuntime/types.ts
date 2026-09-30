@@ -11,6 +11,7 @@ import type { ChatTopicBotContext, UserInterventionConfig } from '@lobechat/type
 import { type ServerUserMemoryConfig } from '@/server/modules/Mecha/ContextEngineering/types';
 import type { DeviceAccessReason } from '@/server/services/aiAgent/deviceAccessPolicy';
 
+import type { HookDispatchFailure } from './hooks/HookDispatcher';
 import { type AgentHook } from './hooks/types';
 
 // ==================== Operation Tool Set ====================
@@ -135,6 +136,8 @@ export interface AgentExecutionParams {
 }
 
 export interface AgentExecutionResult {
+  /** Notification delivery failures do not turn a committed tool step into an execution failure. */
+  hookDeliveryFailures?: HookDispatchFailure[];
   /**
    * When true, the step was already being executed by another instance (lock conflict).
    * The caller should return 429 to force QStash to retry later.

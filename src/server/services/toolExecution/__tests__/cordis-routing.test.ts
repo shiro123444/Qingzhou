@@ -54,3 +54,41 @@ describe('server native tool entry', () => {
     expect(dispose).toHaveBeenCalledOnce();
   });
 });
+
+describe('native tool step cancellation', () => {
+  it('does not start a tool when its owner is already cancelled', async () => {
+    const execute = vi.fn();
+    const service = new ToolExecutionService({
+      builtinToolsExecutor: { execute },
+      mcpService: { callTool: vi.fn() },
+    });
+    const controller = new AbortController();
+    const lost = new Error('lease lost');
+    controller.abort(lost);
+    await expect(
+      service.executeTool(payload, { toolManifestMap: {}, signal: controller.signal }),
+    ).rejects.toBe(lost);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    'does not normalize cancellation into an ordinary result (tool throws=%s)',
+    async (throws) => {
+      const controller = new AbortController();
+      const lost = new Error('lease lost');
+      const execute = vi.fn(async () => {
+        controller.abort(lost);
+        if (throws) throw new Error('adapter error');
+        return { content: 'already sent', success: true };
+      });
+      const service = new ToolExecutionService({
+        builtinToolsExecutor: { execute },
+        mcpService: { callTool: vi.fn() },
+      });
+      await expect(
+        service.executeTool(payload, { toolManifestMap: {}, signal: controller.signal }),
+      ).rejects.toBe(lost);
+      expect(execute).toHaveBeenCalledOnce();
+    },
+  );
+});

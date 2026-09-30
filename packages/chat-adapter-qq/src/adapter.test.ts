@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createQQAdapter, QQAdapter } from './adapter';
+import { signWebhookResponse } from './crypto';
 import type { QQAttachment, QQRawMessage, QQWebhookPayload } from './types';
 import { QQ_EVENT_TYPES, QQ_OP_CODES } from './types';
 
@@ -32,10 +33,26 @@ function makeWebhookPayload(eventType: string, data: Record<string, any>): QQWeb
   };
 }
 
+let requestId = 0;
 function makeRequest(body: unknown): Request {
-  return new Request('http://localhost/webhook', {
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  body = { ...(body as object), id: `event_${++requestId}` };
+  return new Request(`http://localhost/webhook/${++requestId}`, {
     body: JSON.stringify(body),
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Bot-Appid': 'test_app',
+      ...((body as QQWebhookPayload).op === QQ_OP_CODES.VERIFY
+        ? {}
+        : {
+            'X-Signature-Timestamp': timestamp,
+            'X-Signature-Ed25519': signWebhookResponse(
+              timestamp,
+              JSON.stringify(body),
+              'test_secret',
+            ),
+          }),
+    },
     method: 'POST',
   });
 }
@@ -73,6 +90,7 @@ describe('QQAdapter', () => {
     adapter = new QQAdapter({ appId: 'test_app', clientSecret: 'test_secret' });
     // Mock API to avoid real network calls
     vi.spyOn((adapter as any).api, 'getAccessToken').mockResolvedValue('mock_token');
+    vi.spyOn((adapter as any).api, 'getBotInfo').mockResolvedValue({});
     adapter.initialize(mockChat as any);
   });
 
@@ -157,14 +175,14 @@ describe('QQAdapter', () => {
     it('should handle webhook verification (op: 13)', async () => {
       vi.spyOn(await import('./crypto'), 'signWebhookResponse').mockReturnValue('mock_sig');
       const body: QQWebhookPayload = {
-        d: { event_ts: '12345', plain_token: 'tok' },
+        d: { event_ts: String(Math.floor(Date.now() / 1000)), plain_token: 'Arq0D5A61EgUu4OxUvOp' },
         id: 'v1',
         op: QQ_OP_CODES.VERIFY,
         t: undefined as any,
       };
       const res = await adapter.handleWebhook(makeRequest(body));
-      const data = await res.json();
-      expect(data.plain_token).toBe('tok');
+      const data = (await res.json()) as { plain_token: string; signature: string };
+      expect(data.plain_token).toBe('Arq0D5A61EgUu4OxUvOp');
       expect(data.signature).toBe('mock_sig');
     });
 

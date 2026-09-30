@@ -23,12 +23,13 @@ import { aiChatRouter } from './aiChat';
 import { aiModelRouter } from './aiModel';
 import { aiProviderRouter } from './aiProvider';
 import { apiKeyRouter } from './apiKey';
+import { botDeliveryRouter } from './botDelivery';
 import { botMessageRouter } from './botMessage';
 import { briefRouter } from './brief';
 import { changelogRouter } from './changelog';
 import { chunkRouter } from './chunk';
-import { communityAnalyticsRouter } from './communityAnalytics';
 import { comfyuiRouter } from './comfyui';
+import { communityAnalyticsRouter } from './communityAnalytics';
 import { configRouter } from './config';
 import { deviceRouter } from './device';
 import { documentRouter } from './document';
@@ -73,6 +74,7 @@ export const lambdaRouter = router({
   agentBotProvider: agentBotProviderRouter,
   agentNotify: agentNotifyRouter,
   botMessage: botMessageRouter,
+  botDelivery: botDeliveryRouter,
   agentDocument: agentDocumentRouter,
   agentEval: agentEvalRouter,
   agentEvalExternal: agentEvalExternalRouter,

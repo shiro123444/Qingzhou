@@ -11,6 +11,10 @@ import debug from 'debug';
 
 import type { AttachmentSource } from '@/server/services/aiAgent/ingestAttachment';
 import {
+  createGatewayAuthenticator,
+  signGatewayRequest,
+} from '@/server/services/bot/security/gatewayAuth';
+import {
   BOT_RUNTIME_STATUSES,
   getRuntimeStatusErrorMessage,
   updateBotRuntimeStatus,
@@ -190,12 +194,12 @@ class WechatGatewayClient implements PlatformClient {
         // Reset retry delay on success
         retryDelay = 1000;
 
-        // Update cursor
+        await this.processUpdates(response.msgs, webhookUrl);
+
+        // Do not skip this batch when authenticated forwarding is rejected.
         if (response.get_updates_buf) {
           cursor = response.get_updates_buf;
         }
-
-        await this.processUpdates(response.msgs, webhookUrl);
       } catch (err: any) {
         if (this.abort.signal.aborted) break;
 
@@ -273,19 +277,18 @@ class WechatGatewayClient implements PlatformClient {
    * Forward a polled message to the webhook endpoint for Chat SDK processing.
    */
   private async forwardToWebhook(webhookUrl: string, msg: WechatRawMessage): Promise<void> {
-    try {
-      log('WechatBot appId=%s forwarding msg from %s', this.applicationId, msg.from_user_id);
-      const response = await fetch(webhookUrl, {
+    const response = await fetch(webhookUrl, {
+      ...signGatewayRequest({
+        applicationId: this.applicationId,
         body: JSON.stringify(msg),
-        headers: { 'Content-Type': 'application/json' },
-        method: 'POST',
-      });
-
-      if (!response.ok) {
-        log('WechatBot appId=%s webhook forward failed: %d', this.applicationId, response.status);
-      }
-    } catch (err) {
-      log('WechatBot appId=%s webhook forward error: %O', this.applicationId, err);
+        platform: this.id,
+        secret: getWechatBotToken(this.config.credentials),
+        url: webhookUrl,
+      }),
+      signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(30_000)]),
+    });
+    if (!response.ok) {
+      throw new Error(`Wechat gateway delivery failed (HTTP ${response.status})`);
     }
   }
 
@@ -319,6 +322,11 @@ class WechatGatewayClient implements PlatformClient {
   createAdapter(): Record<string, any> {
     return {
       wechat: createWechatAdapter({
+        authenticateWebhook: createGatewayAuthenticator({
+          applicationId: this.applicationId,
+          platform: this.id,
+          secret: getWechatBotToken(this.config.credentials),
+        }),
         botId: this.config.credentials.botId,
         botToken: this.config.credentials.botToken,
       }),

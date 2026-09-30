@@ -32,10 +32,14 @@ export type {
  * Webhook delivery configuration for production mode
  */
 export interface AgentHookWebhook {
-  /** Custom data merged into webhook payload */
+  /** Custom data merged into webhook payload; operationId, hookId and hookType cannot be overridden. */
   body?: Record<string, unknown>;
 
-  /** Delivery method: 'fetch' (plain HTTP) or 'qstash' (guaranteed delivery). Default: 'qstash' */
+  /**
+   * 'fetch': one bounded HTTP attempt (default).
+   * 'qstash': authenticated publication; provider delivery begins only after acceptance.
+   * Failed publication never falls back to fetch. No durable outbox/replay is provided here.
+   */
   delivery?: 'fetch' | 'qstash';
 
   /** Event fields to include in the webhook payload. Defaults to all serializable event fields. */

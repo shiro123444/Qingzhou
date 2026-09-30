@@ -59,6 +59,11 @@ const normalizeExecutionError = (error: unknown, fallbackMessage: string) => {
   return { code: normalized.code, kind: normalized.kind, message };
 };
 
+const assertExecutionAllowed = (context: ToolExecutionContext): void => {
+  context.assertStepLease?.();
+  context.signal?.throwIfAborted();
+};
+
 export class ToolExecutionService {
   private builtinToolsExecutor: Pick<BuiltinToolsExecutor, 'execute'>;
   private mcpService: Pick<MCPService, 'callTool'>;
@@ -72,6 +77,7 @@ export class ToolExecutionService {
     payload: ChatToolPayload,
     context: ToolExecutionContext,
   ): Promise<ToolExecutionResultResponse> {
+    assertExecutionAllowed(context);
     const { identifier, apiName, type } = payload;
 
     log('Executing tool: %s:%s (type: %s)', identifier, apiName, type);
@@ -82,6 +88,7 @@ export class ToolExecutionService {
         {
           name: canonicalToolName(identifier, apiName),
           execute: async (input) => {
+            assertExecutionAllowed(context);
             const resolvedPayload = {
               ...payload,
               arguments: typeof input === 'string' ? input : JSON.stringify(input ?? {}),
@@ -95,6 +102,7 @@ export class ToolExecutionService {
         payload.arguments,
       );
 
+      assertExecutionAllowed(context);
       const executionTime = Date.now() - startTime;
 
       // Truncate result content to prevent context overflow
@@ -131,6 +139,7 @@ export class ToolExecutionService {
 
       // Handle MCP and other types (default, standalone, markdown, mcp)
     } catch (error) {
+      assertExecutionAllowed(context);
       const executionTime = Date.now() - startTime;
       log('Error executing tool %s:%s: %O', identifier, apiName, error);
       const errorMessage = (error as Error).message;

@@ -16,6 +16,8 @@ export interface ToolExecutionContext {
   activeDeviceId?: string;
   /** Agent ID executing the tool call */
   agentId?: string;
+  /** Server-owned deadline/ownership check, never accepted from a wire payload. */
+  assertStepLease?: () => void;
   /** Current page document ID for page-scoped conversations */
   documentId?: string | null;
   /** Current group ID for group chat context */
@@ -36,6 +38,8 @@ export interface ToolExecutionContext {
   scope?: string | null;
   /** Server database for LobeHub Skills execution */
   serverDB?: LobeChatDatabase;
+  /** Cancellation of the owning runtime step. Executors may opt into aborting in-flight I/O. */
+  signal?: AbortSignal;
   /** Task ID when executing within the Task system */
   taskId?: string;
   /** Current thread ID for thread-scoped conversations */

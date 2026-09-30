@@ -93,7 +93,8 @@ describe('FeishuWSConnection', () => {
         'http://localhost:3000/api/agent/webhooks/feishu/test_app',
         expect.objectContaining({
           body: expect.any(String),
-          headers: { 'Content-Type': 'application/json' },
+          headers: expect.objectContaining({ 'Content-Type': 'application/json' }),
+          redirect: 'error',
           method: 'POST',
         }),
       );

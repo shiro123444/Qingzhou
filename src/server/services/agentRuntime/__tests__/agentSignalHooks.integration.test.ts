@@ -1,6 +1,8 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from 'vitest';
 
+import type { HookDispatchFailure } from '../hooks/HookDispatcher';
+
 interface AgentSignalRedisTestGlobal {
   __agentSignalRedisClient?: typeof mockRedis | null;
 }
@@ -25,10 +27,18 @@ vi.mock('@/server/modules/AgentRuntime', () => ({
     createAgentOperation: vi.fn(),
     getOperationMetadata: vi.fn(),
     loadAgentState: vi.fn(),
-    releaseStepLock: vi.fn().mockResolvedValue(undefined),
+    releaseStepLease: vi.fn().mockResolvedValue(true),
+    renewStepLease: vi.fn().mockResolvedValue(true),
     saveAgentState: vi.fn(),
-    saveStepResult: vi.fn(),
-    tryClaimStep: vi.fn().mockResolvedValue(true),
+    saveAgentStateWithLease: vi.fn().mockResolvedValue(true),
+    saveStepResultWithLease: vi.fn().mockResolvedValue(true),
+    acquireStepLease: vi
+      .fn()
+      .mockImplementation(async (operationId: string, stepIndex: number) => ({
+        operationId,
+        stepIndex,
+        ownerToken: 'test-owner',
+      })),
   })),
   createStreamEventManager: vi.fn(() => ({
     cleanupOperation: vi.fn(),
@@ -271,9 +281,20 @@ describe('AgentRuntimeService Agent Signal hook integration', () => {
     };
 
     const { hookDispatcher } = await import('../hooks');
+    const failure: HookDispatchFailure = {
+      code: 'QSTASH_PUBLISH_FAILED',
+      delivery: 'qstash',
+      hookId: 'completion',
+      hookType: 'onComplete',
+      operationId: 'op-1',
+    };
     const dispatchSpy = vi
       .spyOn(hookDispatcher, 'dispatch')
-      .mockRejectedValueOnce(new Error('hook boom'));
+      .mockImplementation(async (_operationId, type) =>
+        type === 'onComplete'
+          ? { success: false, failures: [failure] }
+          : { success: true, failures: [] },
+      );
 
     const { AgentRuntimeService } = await import('../AgentRuntimeService');
     const service = new AgentRuntimeService({} as any, 'user-1', {
@@ -287,7 +308,13 @@ describe('AgentRuntimeService Agent Signal hook integration', () => {
       lastModified: new Date().toISOString(),
       messages: [{ content: 'hello', role: 'user' }],
       metadata: {
-        _hooks: ['serialized-hook'],
+        _hooks: [
+          {
+            id: 'completion',
+            type: 'onComplete',
+            webhook: { delivery: 'qstash', url: '/callback' },
+          },
+        ],
         agentId: 'agent-1',
         topicId: 'topic-1',
         userId: 'user-1',
@@ -306,7 +333,13 @@ describe('AgentRuntimeService Agent Signal hook integration', () => {
           newState: {
             createdAt: new Date().toISOString(),
             metadata: {
-              _hooks: ['serialized-hook'],
+              _hooks: [
+                {
+                  id: 'completion',
+                  type: 'onComplete',
+                  webhook: { delivery: 'qstash', url: '/callback' },
+                },
+              ],
               agentId: 'agent-1',
               topicId: 'topic-1',
               userId: 'user-1',
@@ -324,12 +357,20 @@ describe('AgentRuntimeService Agent Signal hook integration', () => {
       },
     });
 
-    await service.executeStep({
+    const result = await service.executeStep({
       context: { phase: 'user_input' } as any,
       operationId: 'op-1',
       stepIndex: 0,
     });
 
+    expect(result).toMatchObject({
+      success: true,
+      state: { status: 'done' },
+      hookDeliveryFailures: [failure],
+    });
+    expect(coordinator.saveStepResultWithLease).toHaveBeenCalledOnce();
+    expect(coordinator.saveAgentStateWithLease).not.toHaveBeenCalled();
+    expect(coordinator.saveAgentState).not.toHaveBeenCalled();
     expect(dispatchSpy).toHaveBeenCalled();
     expect(savedSnapshot.steps[0].events).toEqual(
       expect.arrayContaining([
@@ -339,5 +380,6 @@ describe('AgentRuntimeService Agent Signal hook integration', () => {
         }),
       ]),
     );
+    dispatchSpy.mockRestore();
   });
 });

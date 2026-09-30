@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { AgentRuntimeService } from '../AgentRuntimeService';
 import { hookDispatcher } from '../hooks';
@@ -13,11 +13,19 @@ vi.mock('@/server/modules/AgentRuntime', () => ({
   AgentRuntimeCoordinator: vi.fn().mockImplementation(() => ({
     loadAgentState: vi.fn(),
     saveAgentState: vi.fn(),
-    saveStepResult: vi.fn(),
+    saveAgentStateWithLease: vi.fn().mockResolvedValue(true),
+    saveStepResultWithLease: vi.fn().mockResolvedValue(true),
     createAgentOperation: vi.fn(),
     getOperationMetadata: vi.fn(),
-    tryClaimStep: vi.fn().mockResolvedValue(true),
-    releaseStepLock: vi.fn().mockResolvedValue(undefined),
+    acquireStepLease: vi
+      .fn()
+      .mockImplementation(async (operationId: string, stepIndex: number) => ({
+        operationId,
+        stepIndex,
+        ownerToken: 'test-owner',
+      })),
+    releaseStepLease: vi.fn().mockResolvedValue(true),
+    renewStepLease: vi.fn().mockResolvedValue(true),
   })),
   createStreamEventManager: vi.fn(() => ({
     publishStreamEvent: vi.fn(),
@@ -38,6 +46,7 @@ vi.mock('@/server/services/queue', () => ({
 }));
 vi.mock('@/server/services/queue/impls', () => ({
   LocalQueueServiceImpl: class {},
+  isQueueAgentRuntimeEnabled: vi.fn().mockReturnValue(false),
 }));
 vi.mock('@/server/services/toolExecution', () => ({
   ToolExecutionService: vi.fn().mockImplementation(() => ({})),
@@ -48,6 +57,12 @@ vi.mock('@/server/services/toolExecution/builtin', () => ({
 vi.mock('@lobechat/builtin-tools/dynamicInterventionAudits', () => ({
   dynamicInterventionAudits: [],
 }));
+
+afterEach(() => {
+  if (vi.isMockFunction(hookDispatcher.dispatch)) vi.mocked(hookDispatcher.dispatch).mockRestore();
+  if (vi.isMockFunction(hookDispatcher.unregister))
+    vi.mocked(hookDispatcher.unregister).mockRestore();
+});
 
 describe('AgentRuntimeService.executeStep - early exit on terminal state', () => {
   const createService = () => {
@@ -92,7 +107,9 @@ describe('AgentRuntimeService.executeStep - early exit on terminal state', () =>
       lastModified: new Date().toISOString(),
     });
 
-    const dispatchSpy = vi.spyOn(hookDispatcher, 'dispatch').mockResolvedValue(undefined);
+    const dispatchSpy = vi
+      .spyOn(hookDispatcher, 'dispatch')
+      .mockResolvedValue({ success: true, failures: [] });
 
     await service.executeStep({
       operationId: 'op-123',
@@ -108,6 +125,7 @@ describe('AgentRuntimeService.executeStep - early exit on terminal state', () =>
         reason: 'interrupted',
       }),
       undefined,
+      expect.any(Function),
     );
 
     dispatchSpy.mockRestore();
@@ -123,7 +141,9 @@ describe('AgentRuntimeService.executeStep - early exit on terminal state', () =>
       lastModified: new Date().toISOString(),
     });
 
-    const dispatchSpy = vi.spyOn(hookDispatcher, 'dispatch').mockResolvedValue(undefined);
+    const dispatchSpy = vi
+      .spyOn(hookDispatcher, 'dispatch')
+      .mockResolvedValue({ success: true, failures: [] });
 
     await service.executeStep({
       operationId: 'op-456',
@@ -139,6 +159,7 @@ describe('AgentRuntimeService.executeStep - early exit on terminal state', () =>
         reason: 'done',
       }),
       undefined,
+      expect.any(Function),
     );
 
     dispatchSpy.mockRestore();
@@ -154,7 +175,9 @@ describe('AgentRuntimeService.executeStep - early exit on terminal state', () =>
       lastModified: new Date().toISOString(),
     });
 
-    const dispatchSpy = vi.spyOn(hookDispatcher, 'dispatch').mockResolvedValue(undefined);
+    const dispatchSpy = vi
+      .spyOn(hookDispatcher, 'dispatch')
+      .mockResolvedValue({ success: true, failures: [] });
     const unregisterSpy = vi.spyOn(hookDispatcher, 'unregister');
 
     await service.executeStep({
@@ -170,28 +193,45 @@ describe('AgentRuntimeService.executeStep - early exit on terminal state', () =>
     unregisterSpy.mockRestore();
   });
 
+  it('rejects a future step while a running operation has not committed its predecessor', async () => {
+    const service = createService();
+    const coordinator = (service as any).coordinator;
+    coordinator.loadAgentState.mockResolvedValue({ status: 'running', stepCount: 5, metadata: {} });
+    const runtimeFactory = vi.spyOn(service as any, 'createAgentRuntime');
+
+    const result = await service.executeStep({ operationId: 'op-future', stepIndex: 6 });
+
+    expect(result).toMatchObject({ locked: true, success: false, nextStepScheduled: false });
+    expect(runtimeFactory).not.toHaveBeenCalled();
+    expect(coordinator.saveStepResultWithLease).not.toHaveBeenCalled();
+    expect(coordinator.saveAgentStateWithLease).not.toHaveBeenCalled();
+  });
+
   it('should NOT skip step when operation status is "running"', async () => {
     const service = createService();
 
     const coordinator = (service as any).coordinator;
     coordinator.loadAgentState = vi.fn().mockResolvedValue({
       status: 'running',
-      stepCount: 5,
+      stepCount: 6,
       lastModified: new Date().toISOString(),
       metadata: {},
     });
 
-    // The step will attempt to proceed (and fail due to mocked deps),
-    // but the key assertion is that it does NOT take the early-exit path
-    const result = await service.executeStep({
-      operationId: 'op-running',
-      stepIndex: 6,
-      context: { phase: 'user_input' } as any,
+    const runtimeStep = vi.fn().mockRejectedValue(new Error('runtime step failed'));
+    vi.spyOn(service as any, 'createAgentRuntime').mockResolvedValue({
+      runtime: { dispose: vi.fn(), step: runtimeStep },
     });
 
-    // If early exit was taken, stepResult would be null.
-    // Since it proceeded past the guard, stepResult will be a real object (with error).
-    expect(result.stepResult).not.toBeNull();
+    await expect(
+      service.executeStep({
+        operationId: 'op-running',
+        stepIndex: 6,
+        context: { phase: 'user_input' } as any,
+      }),
+    ).rejects.toThrow('runtime step failed');
+
+    expect(runtimeStep).toHaveBeenCalledOnce();
   });
 });
 
@@ -201,10 +241,10 @@ describe('AgentRuntimeService.executeStep - step idempotency (distributed lock)'
     return service;
   };
 
-  it('should return locked=true when tryClaimStep returns false', async () => {
+  it('should return locked=true when acquireStepLease returns null', async () => {
     const service = createService();
     const coordinator = (service as any).coordinator;
-    coordinator.tryClaimStep = vi.fn().mockResolvedValue(false);
+    coordinator.acquireStepLease = vi.fn().mockResolvedValue(null);
 
     const result = await service.executeStep({
       operationId: 'op-locked',
@@ -221,7 +261,13 @@ describe('AgentRuntimeService.executeStep - step idempotency (distributed lock)'
   it('should skip execution when stepCount > stepIndex (delayed retry after lock TTL)', async () => {
     const service = createService();
     const coordinator = (service as any).coordinator;
-    coordinator.tryClaimStep = vi.fn().mockResolvedValue(true);
+    coordinator.acquireStepLease = vi
+      .fn()
+      .mockImplementation(async (operationId: string, stepIndex: number) => ({
+        operationId,
+        stepIndex,
+        ownerToken: 'test-owner',
+      }));
     coordinator.loadAgentState = vi.fn().mockResolvedValue({
       status: 'running',
       stepCount: 10,
@@ -237,13 +283,23 @@ describe('AgentRuntimeService.executeStep - step idempotency (distributed lock)'
     expect(result.stepResult).toBeNull();
     expect(result.nextStepScheduled).toBe(false);
     // Lock should still be released
-    expect(coordinator.releaseStepLock).toHaveBeenCalledWith('op-stale', 8);
+    expect(coordinator.releaseStepLease).toHaveBeenCalledWith({
+      operationId: 'op-stale',
+      stepIndex: 8,
+      ownerToken: 'test-owner',
+    });
   });
 
   it('should release lock after successful execution', async () => {
     const service = createService();
     const coordinator = (service as any).coordinator;
-    coordinator.tryClaimStep = vi.fn().mockResolvedValue(true);
+    coordinator.acquireStepLease = vi
+      .fn()
+      .mockImplementation(async (operationId: string, stepIndex: number) => ({
+        operationId,
+        stepIndex,
+        ownerToken: 'test-owner',
+      }));
     coordinator.loadAgentState = vi.fn().mockResolvedValue({
       status: 'done',
       stepCount: 5,
@@ -255,72 +311,102 @@ describe('AgentRuntimeService.executeStep - step idempotency (distributed lock)'
       stepIndex: 6,
     });
 
-    expect(coordinator.releaseStepLock).toHaveBeenCalledWith('op-done', 6);
+    expect(coordinator.releaseStepLease).toHaveBeenCalledWith({
+      operationId: 'op-done',
+      stepIndex: 6,
+      ownerToken: 'test-owner',
+    });
   });
 
   it('should release lock even when step execution encounters an error', async () => {
     const service = createService();
     const coordinator = (service as any).coordinator;
-    coordinator.tryClaimStep = vi.fn().mockResolvedValue(true);
+    coordinator.acquireStepLease = vi
+      .fn()
+      .mockImplementation(async (operationId: string, stepIndex: number) => ({
+        operationId,
+        stepIndex,
+        ownerToken: 'test-owner',
+      }));
     coordinator.loadAgentState = vi.fn().mockResolvedValue({
       status: 'running',
-      stepCount: 5,
+      stepCount: 6,
       lastModified: new Date().toISOString(),
       metadata: {},
     });
 
-    // executeStep will hit an error internally (mocked deps are incomplete)
-    // but the catch block handles it and returns error state instead of throwing
-    const result = await service.executeStep({
+    vi.spyOn(service as any, 'createAgentRuntime').mockResolvedValue({
+      runtime: { dispose: vi.fn(), step: vi.fn().mockRejectedValue(new Error('runtime failed')) },
+    });
+    await expect(
+      service.executeStep({
+        operationId: 'op-error',
+        stepIndex: 6,
+        context: { phase: 'user_input' } as any,
+      }),
+    ).rejects.toThrow('runtime failed');
+
+    expect(coordinator.saveAgentStateWithLease).toHaveBeenCalledWith(
+      'op-error',
+      expect.objectContaining({ status: 'error' }),
+      { operationId: 'op-error', stepIndex: 6, ownerToken: 'test-owner' },
+    );
+    // Lock must still be released via finally block
+    expect(coordinator.releaseStepLease).toHaveBeenCalledWith({
       operationId: 'op-error',
       stepIndex: 6,
-      context: { phase: 'user_input' } as any,
+      ownerToken: 'test-owner',
     });
-
-    expect(result.state.status).toBe('error');
-    // Lock must still be released via finally block
-    expect(coordinator.releaseStepLock).toHaveBeenCalledWith('op-error', 6);
   });
 
-  it('should NOT release lock when tryClaimStep returns false', async () => {
+  it('should NOT release lock when acquireStepLease returns null', async () => {
     const service = createService();
     const coordinator = (service as any).coordinator;
-    coordinator.tryClaimStep = vi.fn().mockResolvedValue(false);
+    coordinator.acquireStepLease = vi.fn().mockResolvedValue(null);
 
     await service.executeStep({
       operationId: 'op-no-release',
       stepIndex: 3,
     });
 
-    expect(coordinator.releaseStepLock).not.toHaveBeenCalled();
+    expect(coordinator.releaseStepLease).not.toHaveBeenCalled();
   });
 
-  it('should call tryClaimStep with correct arguments', async () => {
+  it('should call acquireStepLease with correct arguments', async () => {
     const service = createService();
     const coordinator = (service as any).coordinator;
-    coordinator.tryClaimStep = vi.fn().mockResolvedValue(false);
+    coordinator.acquireStepLease = vi.fn().mockResolvedValue(null);
 
     await service.executeStep({
       operationId: 'op-args',
       stepIndex: 42,
     });
 
-    expect(coordinator.tryClaimStep).toHaveBeenCalledWith('op-args', 42, 35);
+    expect(coordinator.acquireStepLease).toHaveBeenCalledWith('op-args', 42, 35);
   });
 });
 
 describe('AgentRuntimeService.executeStep - Redis failure in error handler', () => {
   const createService = () => {
     const service = new AgentRuntimeService({} as any, 'user-1', { queueService: null });
+    vi.spyOn(service as any, 'createAgentRuntime').mockResolvedValue({
+      runtime: { dispose: vi.fn(), step: vi.fn().mockRejectedValue(new Error('runtime failed')) },
+    });
     return service;
   };
 
-  it('should still dispatch onComplete hooks when Redis fails in catch block (ECONNRESET scenario)', async () => {
+  it('does not dispatch completion when fenced error-state persistence fails', async () => {
     const service = createService();
     const coordinator = (service as any).coordinator;
     const streamManager = (service as any).streamManager;
 
-    coordinator.tryClaimStep = vi.fn().mockResolvedValue(true);
+    coordinator.acquireStepLease = vi
+      .fn()
+      .mockImplementation(async (operationId: string, stepIndex: number) => ({
+        operationId,
+        stepIndex,
+        ownerToken: 'test-owner',
+      }));
 
     // First loadAgentState call succeeds (returns running state to enter step execution)
     // Second call in catch block fails (Redis ECONNRESET)
@@ -330,7 +416,7 @@ describe('AgentRuntimeService.executeStep - Redis failure in error handler', () 
       if (loadCallCount === 1) {
         return Promise.resolve({
           status: 'running',
-          stepCount: 5,
+          stepCount: 6,
           lastModified: new Date().toISOString(),
           metadata: {},
         });
@@ -348,11 +434,13 @@ describe('AgentRuntimeService.executeStep - Redis failure in error handler', () 
     });
 
     // saveAgentState fails (Redis is down)
-    coordinator.saveAgentState = vi.fn().mockRejectedValue(new Error('Redis ECONNRESET'));
+    coordinator.saveAgentStateWithLease = vi.fn().mockRejectedValue(new Error('Redis ECONNRESET'));
 
-    const dispatchSpy = vi.spyOn(hookDispatcher, 'dispatch').mockResolvedValue(undefined);
+    const dispatchSpy = vi
+      .spyOn(hookDispatcher, 'dispatch')
+      .mockResolvedValue({ success: true, failures: [] });
 
-    // executeStep re-throws the original error after running hooks
+    // A failed fenced write must stop completion and expose the persistence error
     await expect(
       service.executeStep({
         operationId: 'op-redis-fail',
@@ -361,26 +449,29 @@ describe('AgentRuntimeService.executeStep - Redis failure in error handler', () 
       }),
     ).rejects.toThrow();
 
-    // onComplete hooks MUST be dispatched even when Redis is completely down
-    expect(dispatchSpy).toHaveBeenCalledWith(
+    expect(dispatchSpy.mock.calls.map(([, type]) => type)).not.toContain('onComplete');
+    expect(coordinator.saveAgentStateWithLease).toHaveBeenCalledWith(
       'op-redis-fail',
-      'onComplete',
-      expect.objectContaining({
-        operationId: 'op-redis-fail',
-        reason: 'error',
-      }),
-      undefined,
+      expect.objectContaining({ status: 'error', stepCount: 6 }),
+      { operationId: 'op-redis-fail', stepIndex: 6, ownerToken: 'test-owner' },
     );
+    expect(coordinator.saveAgentState).not.toHaveBeenCalled();
 
     dispatchSpy.mockRestore();
   });
 
-  it('should still dispatch onError hooks when Redis fails in catch block', async () => {
+  it('does not dispatch onError when fenced error-state persistence fails', async () => {
     const service = createService();
     const coordinator = (service as any).coordinator;
     const streamManager = (service as any).streamManager;
 
-    coordinator.tryClaimStep = vi.fn().mockResolvedValue(true);
+    coordinator.acquireStepLease = vi
+      .fn()
+      .mockImplementation(async (operationId: string, stepIndex: number) => ({
+        operationId,
+        stepIndex,
+        ownerToken: 'test-owner',
+      }));
 
     let loadCallCount = 0;
     coordinator.loadAgentState = vi.fn().mockImplementation(() => {
@@ -388,7 +479,7 @@ describe('AgentRuntimeService.executeStep - Redis failure in error handler', () 
       if (loadCallCount === 1) {
         return Promise.resolve({
           status: 'running',
-          stepCount: 5,
+          stepCount: 6,
           lastModified: new Date().toISOString(),
           metadata: {},
         });
@@ -404,11 +495,13 @@ describe('AgentRuntimeService.executeStep - Redis failure in error handler', () 
       return Promise.reject(new Error('Redis ECONNRESET'));
     });
 
-    coordinator.saveAgentState = vi.fn().mockRejectedValue(new Error('Redis ECONNRESET'));
+    coordinator.saveAgentStateWithLease = vi.fn().mockRejectedValue(new Error('Redis ECONNRESET'));
 
-    const dispatchSpy = vi.spyOn(hookDispatcher, 'dispatch').mockResolvedValue(undefined);
+    const dispatchSpy = vi
+      .spyOn(hookDispatcher, 'dispatch')
+      .mockResolvedValue({ success: true, failures: [] });
 
-    // executeStep re-throws the original error after running hooks
+    // A failed fenced write must stop completion and expose the persistence error
     await expect(
       service.executeStep({
         operationId: 'op-redis-webhook',
@@ -417,16 +510,10 @@ describe('AgentRuntimeService.executeStep - Redis failure in error handler', () 
       }),
     ).rejects.toThrow();
 
-    // Both onComplete and onError hooks MUST be dispatched when reason is error
-    expect(dispatchSpy).toHaveBeenCalledWith(
-      'op-redis-webhook',
-      'onError',
-      expect.objectContaining({
-        operationId: 'op-redis-webhook',
-        reason: 'error',
-      }),
-      undefined,
-    );
+    expect(dispatchSpy.mock.calls.map(([, type]) => type)).not.toContain('onComplete');
+    expect(dispatchSpy.mock.calls.map(([, type]) => type)).not.toContain('onError');
+    expect(coordinator.saveAgentStateWithLease).toHaveBeenCalledOnce();
+    expect(coordinator.saveAgentState).not.toHaveBeenCalled();
 
     dispatchSpy.mockRestore();
   });
@@ -436,7 +523,13 @@ describe('AgentRuntimeService.executeStep - Redis failure in error handler', () 
     const coordinator = (service as any).coordinator;
     const streamManager = (service as any).streamManager;
 
-    coordinator.tryClaimStep = vi.fn().mockResolvedValue(true);
+    coordinator.acquireStepLease = vi
+      .fn()
+      .mockImplementation(async (operationId: string, stepIndex: number) => ({
+        operationId,
+        stepIndex,
+        ownerToken: 'test-owner',
+      }));
 
     let loadCallCount = 0;
     coordinator.loadAgentState = vi.fn().mockImplementation(() => {
@@ -444,7 +537,7 @@ describe('AgentRuntimeService.executeStep - Redis failure in error handler', () 
       if (loadCallCount === 1) {
         return Promise.resolve({
           status: 'running',
-          stepCount: 5,
+          stepCount: 6,
           lastModified: new Date().toISOString(),
           metadata: {},
         });
@@ -459,7 +552,7 @@ describe('AgentRuntimeService.executeStep - Redis failure in error handler', () 
       return Promise.reject(new Error('Redis ECONNRESET'));
     });
 
-    coordinator.saveAgentState = vi.fn().mockResolvedValue(undefined);
+    coordinator.saveAgentStateWithLease = vi.fn().mockResolvedValue(true);
 
     await expect(
       service.executeStep({
@@ -469,12 +562,13 @@ describe('AgentRuntimeService.executeStep - Redis failure in error handler', () 
       }),
     ).rejects.toThrow();
 
-    expect(coordinator.saveAgentState).toHaveBeenCalledWith(
+    expect(coordinator.saveAgentStateWithLease).toHaveBeenCalledWith(
       'op-fallback-step-count',
       expect.objectContaining({
         status: 'error',
         stepCount: 6,
       }),
+      { operationId: 'op-fallback-step-count', stepIndex: 6, ownerToken: 'test-owner' },
     );
   });
 
@@ -483,7 +577,13 @@ describe('AgentRuntimeService.executeStep - Redis failure in error handler', () 
     const coordinator = (service as any).coordinator;
     const streamManager = (service as any).streamManager;
 
-    coordinator.tryClaimStep = vi.fn().mockResolvedValue(true);
+    coordinator.acquireStepLease = vi
+      .fn()
+      .mockImplementation(async (operationId: string, stepIndex: number) => ({
+        operationId,
+        stepIndex,
+        ownerToken: 'test-owner',
+      }));
 
     let loadCallCount = 0;
     coordinator.loadAgentState = vi.fn().mockImplementation(() => {
@@ -491,7 +591,7 @@ describe('AgentRuntimeService.executeStep - Redis failure in error handler', () 
       if (loadCallCount === 1) {
         return Promise.resolve({
           status: 'running',
-          stepCount: 5,
+          stepCount: 7,
           lastModified: new Date().toISOString(),
           metadata: {},
         });
@@ -506,7 +606,7 @@ describe('AgentRuntimeService.executeStep - Redis failure in error handler', () 
       return Promise.reject(new Error('Redis ECONNRESET'));
     });
 
-    coordinator.saveAgentState = vi.fn().mockResolvedValue(undefined);
+    coordinator.saveAgentStateWithLease = vi.fn().mockResolvedValue(true);
 
     await expect(
       service.executeStep({
@@ -516,25 +616,32 @@ describe('AgentRuntimeService.executeStep - Redis failure in error handler', () 
       }),
     ).rejects.toThrow();
 
-    expect(coordinator.saveAgentState).toHaveBeenCalledWith(
+    expect(coordinator.saveAgentStateWithLease).toHaveBeenCalledWith(
       'op-null-step-count',
       expect.objectContaining({
         status: 'error',
         stepCount: 7,
       }),
+      { operationId: 'op-null-step-count', stepIndex: 7, ownerToken: 'test-owner' },
     );
   });
 
-  it('should preserve loaded state metadata when only saveAgentState fails', async () => {
+  it('preserves metadata in the fenced write attempt without completing on write failure', async () => {
     const service = createService();
     const coordinator = (service as any).coordinator;
     const streamManager = (service as any).streamManager;
 
-    coordinator.tryClaimStep = vi.fn().mockResolvedValue(true);
+    coordinator.acquireStepLease = vi
+      .fn()
+      .mockImplementation(async (operationId: string, stepIndex: number) => ({
+        operationId,
+        stepIndex,
+        ownerToken: 'test-owner',
+      }));
 
     const stateWithHooks = {
       status: 'running',
-      stepCount: 5,
+      stepCount: 6,
       lastModified: new Date().toISOString(),
       metadata: {
         _hooks: [
@@ -551,7 +658,9 @@ describe('AgentRuntimeService.executeStep - Redis failure in error handler', () 
     coordinator.loadAgentState = vi.fn().mockResolvedValue(stateWithHooks);
 
     // saveAgentState fails (write-only Redis failure)
-    coordinator.saveAgentState = vi.fn().mockRejectedValue(new Error('Redis write failed'));
+    coordinator.saveAgentStateWithLease = vi
+      .fn()
+      .mockRejectedValue(new Error('Redis write failed'));
 
     // publishStreamEvent: first call succeeds, subsequent fail
     let publishCallCount = 0;
@@ -561,7 +670,9 @@ describe('AgentRuntimeService.executeStep - Redis failure in error handler', () 
       return Promise.reject(new Error('Redis ECONNRESET'));
     });
 
-    const dispatchSpy = vi.spyOn(hookDispatcher, 'dispatch').mockResolvedValue(undefined);
+    const dispatchSpy = vi
+      .spyOn(hookDispatcher, 'dispatch')
+      .mockResolvedValue({ success: true, failures: [] });
 
     await expect(
       service.executeStep({
@@ -571,27 +682,16 @@ describe('AgentRuntimeService.executeStep - Redis failure in error handler', () 
       }),
     ).rejects.toThrow();
 
-    // onComplete hooks must be dispatched with the full state including metadata
-    expect(dispatchSpy).toHaveBeenCalledWith(
+    expect(coordinator.saveAgentStateWithLease).toHaveBeenCalledWith(
       'op-save-fail',
-      'onComplete',
       expect.objectContaining({
-        operationId: 'op-save-fail',
-        reason: 'error',
-        finalState: expect.objectContaining({
-          metadata: expect.objectContaining({
-            _hooks: expect.arrayContaining([
-              expect.objectContaining({
-                id: 'test-hook',
-                webhook: { url: 'https://example.com/webhook' },
-              }),
-            ]),
-          }),
-          status: 'error',
-        }),
+        status: 'error',
+        metadata: expect.objectContaining({ _hooks: stateWithHooks.metadata._hooks }),
       }),
-      expect.anything(),
+      { operationId: 'op-save-fail', stepIndex: 6, ownerToken: 'test-owner' },
     );
+    expect(dispatchSpy.mock.calls.map(([, type]) => type)).not.toContain('onComplete');
+    expect(coordinator.saveAgentState).not.toHaveBeenCalled();
 
     dispatchSpy.mockRestore();
   });
@@ -632,8 +732,14 @@ describe('AgentRuntimeService.executeStep - error-path snapshot finalize (LOBE-8
     const coordinator = (service as any).coordinator;
     const streamManager = (service as any).streamManager;
 
-    coordinator.tryClaimStep = vi.fn().mockResolvedValue(true);
-    coordinator.releaseStepLock = vi.fn().mockResolvedValue(undefined);
+    coordinator.acquireStepLease = vi
+      .fn()
+      .mockImplementation(async (operationId: string, stepIndex: number) => ({
+        operationId,
+        stepIndex,
+        ownerToken: 'test-owner',
+      }));
+    coordinator.releaseStepLease = vi.fn().mockResolvedValue(true);
     streamManager.publishStreamEvent = vi.fn().mockResolvedValue(undefined);
 
     // First load returns a running state to enter step execution; second
@@ -645,7 +751,7 @@ describe('AgentRuntimeService.executeStep - error-path snapshot finalize (LOBE-8
       status: 'running',
       stepCount: 1,
     });
-    coordinator.saveAgentState = vi.fn().mockResolvedValue(undefined);
+    coordinator.saveAgentStateWithLease = vi.fn().mockResolvedValue(true);
 
     // Force the runtime.step path to throw — simulates markPersistFatal
     // bubbling up from RuntimeExecutors.
@@ -658,7 +764,9 @@ describe('AgentRuntimeService.executeStep - error-path snapshot finalize (LOBE-8
       },
     });
 
-    const dispatchSpy = vi.spyOn(hookDispatcher, 'dispatch').mockResolvedValue(undefined);
+    const dispatchSpy = vi
+      .spyOn(hookDispatcher, 'dispatch')
+      .mockResolvedValue({ success: true, failures: [] });
 
     await expect(
       service.executeStep({
@@ -712,8 +820,14 @@ describe('AgentRuntimeService.executeStep - error-path snapshot finalize (LOBE-8
     const coordinator = (service as any).coordinator;
     const streamManager = (service as any).streamManager;
 
-    coordinator.tryClaimStep = vi.fn().mockResolvedValue(true);
-    coordinator.releaseStepLock = vi.fn().mockResolvedValue(undefined);
+    coordinator.acquireStepLease = vi
+      .fn()
+      .mockImplementation(async (operationId: string, stepIndex: number) => ({
+        operationId,
+        stepIndex,
+        ownerToken: 'test-owner',
+      }));
+    coordinator.releaseStepLease = vi.fn().mockResolvedValue(true);
     streamManager.publishStreamEvent = vi.fn().mockResolvedValue(undefined);
     coordinator.loadAgentState = vi.fn().mockResolvedValue({
       lastModified: new Date().toISOString(),
@@ -721,7 +835,7 @@ describe('AgentRuntimeService.executeStep - error-path snapshot finalize (LOBE-8
       status: 'running',
       stepCount: 0,
     });
-    coordinator.saveAgentState = vi.fn().mockResolvedValue(undefined);
+    coordinator.saveAgentStateWithLease = vi.fn().mockResolvedValue(true);
 
     vi.spyOn(service as any, 'createAgentRuntime').mockResolvedValue({
       runtime: {
@@ -729,7 +843,9 @@ describe('AgentRuntimeService.executeStep - error-path snapshot finalize (LOBE-8
         step: vi.fn().mockRejectedValue(new Error('boom')),
       },
     });
-    const dispatchSpy = vi.spyOn(hookDispatcher, 'dispatch').mockResolvedValue(undefined);
+    const dispatchSpy = vi
+      .spyOn(hookDispatcher, 'dispatch')
+      .mockResolvedValue({ success: true, failures: [] });
 
     await expect(
       service.executeStep({
@@ -782,8 +898,14 @@ describe('AgentRuntimeService.executeStep - error-path snapshot finalize (LOBE-8
     const coordinator = (service as any).coordinator;
     const streamManager = (service as any).streamManager;
 
-    coordinator.tryClaimStep = vi.fn().mockResolvedValue(true);
-    coordinator.releaseStepLock = vi.fn().mockResolvedValue(undefined);
+    coordinator.acquireStepLease = vi
+      .fn()
+      .mockImplementation(async (operationId: string, stepIndex: number) => ({
+        operationId,
+        stepIndex,
+        ownerToken: 'test-owner',
+      }));
+    coordinator.releaseStepLease = vi.fn().mockResolvedValue(true);
     streamManager.publishStreamEvent = vi.fn().mockResolvedValue(undefined);
     coordinator.loadAgentState = vi.fn().mockResolvedValue({
       lastModified: new Date().toISOString(),
@@ -791,7 +913,7 @@ describe('AgentRuntimeService.executeStep - error-path snapshot finalize (LOBE-8
       status: 'running',
       stepCount: 1,
     });
-    coordinator.saveAgentState = vi.fn().mockResolvedValue(undefined);
+    coordinator.saveAgentStateWithLease = vi.fn().mockResolvedValue(true);
 
     vi.spyOn(service as any, 'createAgentRuntime').mockResolvedValue({
       runtime: {
@@ -799,7 +921,9 @@ describe('AgentRuntimeService.executeStep - error-path snapshot finalize (LOBE-8
         step: vi.fn().mockRejectedValue(new Error('boom')),
       },
     });
-    const dispatchSpy = vi.spyOn(hookDispatcher, 'dispatch').mockResolvedValue(undefined);
+    const dispatchSpy = vi
+      .spyOn(hookDispatcher, 'dispatch')
+      .mockResolvedValue({ success: true, failures: [] });
 
     await expect(
       service.executeStep({
@@ -864,8 +988,14 @@ describe('AgentRuntimeService.executeStep - error-path snapshot finalize (LOBE-8
     const coordinator = (service as any).coordinator;
     const streamManager = (service as any).streamManager;
 
-    coordinator.tryClaimStep = vi.fn().mockResolvedValue(true);
-    coordinator.releaseStepLock = vi.fn().mockResolvedValue(undefined);
+    coordinator.acquireStepLease = vi
+      .fn()
+      .mockImplementation(async (operationId: string, stepIndex: number) => ({
+        operationId,
+        stepIndex,
+        ownerToken: 'test-owner',
+      }));
+    coordinator.releaseStepLease = vi.fn().mockResolvedValue(true);
     streamManager.publishStreamEvent = vi.fn().mockResolvedValue(undefined);
     // stepCount=1 so the layer-2 early-exit guard (stepCount > stepIndex) does
     // not skip this attempt — we want the catch path to run.
@@ -875,7 +1005,7 @@ describe('AgentRuntimeService.executeStep - error-path snapshot finalize (LOBE-8
       status: 'running',
       stepCount: 1,
     });
-    coordinator.saveAgentState = vi.fn().mockResolvedValue(undefined);
+    coordinator.saveAgentStateWithLease = vi.fn().mockResolvedValue(true);
 
     vi.spyOn(service as any, 'createAgentRuntime').mockResolvedValue({
       runtime: {
@@ -883,7 +1013,9 @@ describe('AgentRuntimeService.executeStep - error-path snapshot finalize (LOBE-8
         step: vi.fn().mockRejectedValue(new Error('queue down')),
       },
     });
-    const dispatchSpy = vi.spyOn(hookDispatcher, 'dispatch').mockResolvedValue(undefined);
+    const dispatchSpy = vi
+      .spyOn(hookDispatcher, 'dispatch')
+      .mockResolvedValue({ success: true, failures: [] });
 
     await expect(
       service.executeStep({
