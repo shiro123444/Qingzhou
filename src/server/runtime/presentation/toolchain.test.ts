@@ -1,3 +1,5 @@
+import { resolve } from 'node:path';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import type {
@@ -26,13 +28,23 @@ const options = (runner: PresentationRunner) => ({
 describe('C-53 ppt-master toolchain', () => {
   it('builds explicit argv and parses quality reports', async () => {
     const { runner, spawn } = makeRunner();
-    const toolchain = new PptMasterToolchain(options(runner));
+    const toolchain = new PptMasterToolchain({
+      ...options(runner),
+      qualityArgs: ['--canonical-authoring', '--stage', 'final', '--json'],
+    });
     await expect(toolchain.qualityCheck('/tmp/workspaces/job-1')).resolves.toEqual({
       passed: true,
     });
     expect(spawn).toHaveBeenCalledWith(
       expect.objectContaining({
-        args: [' /opt/ppt-master/svg_quality_checker.py'.trim(), '/tmp/workspaces/job-1'],
+        args: [
+          resolve('/opt/ppt-master/svg_quality_checker.py'),
+          resolve('/tmp/workspaces/job-1'),
+          '--canonical-authoring',
+          '--stage',
+          'final',
+          '--json',
+        ],
         shell: false,
       }),
     );
@@ -49,8 +61,8 @@ describe('C-53 ppt-master toolchain', () => {
     expect(spawn).toHaveBeenCalledWith(
       expect.objectContaining({
         args: [
-          '/opt/ppt-master/svg_to_pptx.py',
-          '/tmp/workspaces/job-1',
+          resolve('/opt/ppt-master/svg_to_pptx.py'),
+          resolve('/tmp/workspaces/job-1'),
           '--output',
           'exports/presentation.pptx',
           '--animation',

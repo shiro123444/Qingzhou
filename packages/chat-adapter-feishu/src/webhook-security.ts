@@ -170,6 +170,10 @@ export async function authenticateLarkWebhook(
     return new Response('Invalid webhook application', { status: 401 });
   }
 
+  // The SQL inbox owns replay deduplication when durable receipt is installed.
+  // Claiming a nonce first would prevent an identical authenticated retry after a 503.
+  if (config.persistVerifiedWebhook) return body;
+
   // Hash the nonce and timestamp with unambiguous framing; include trusted tenant scope.
   const replayId = createHash('sha256')
     .update(JSON.stringify([timestamp, nonce]))

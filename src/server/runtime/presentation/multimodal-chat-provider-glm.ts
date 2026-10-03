@@ -559,11 +559,19 @@ export class GLMMultimodalChatAdapter implements GLMMultimodalChatPort {
       throw payloadInvalid('Multimodal chat response must be an object');
     }
 
-    if (!Array.isArray(parsedBody.choices) || parsedBody.choices.length === 0) {
+    // Some OpenAI-compatible gateways wrap successful non-streaming completions.
+    // Unwrap only an explicit success envelope; an error or arbitrary nested data
+    // must still fail the same response validation below.
+    const body =
+      parsedBody.success === true && isRecord(parsedBody.data) && !parsedBody.choices
+        ? parsedBody.data
+        : parsedBody;
+
+    if (!Array.isArray(body.choices) || body.choices.length === 0) {
       throw payloadInvalid('Multimodal chat response choices must be a non-empty array');
     }
 
-    const choices: GLMChatChoice[] = parsedBody.choices.map((c, idx) => {
+    const choices: GLMChatChoice[] = body.choices.map((c, idx) => {
       if (!isRecord(c) || !isRecord(c.message)) {
         throw payloadInvalid(`Multimodal chat response choices[${idx}] has invalid message`);
       }
@@ -588,24 +596,19 @@ export class GLMMultimodalChatAdapter implements GLMMultimodalChatPort {
 
     const result: GLMChatResult = Object.freeze({
       choices: Object.freeze(choices),
-      created:
-        typeof parsedBody.created === 'number' ? parsedBody.created : Math.floor(this.now() / 1000),
-      id: typeof parsedBody.id === 'string' ? parsedBody.id : `chatcmpl-${this.now()}`,
-      model: typeof parsedBody.model === 'string' ? parsedBody.model : resolvedModel,
-      usage: isRecord(parsedBody.usage)
+      created: typeof body.created === 'number' ? body.created : Math.floor(this.now() / 1000),
+      id: typeof body.id === 'string' ? body.id : `chatcmpl-${this.now()}`,
+      model: typeof body.model === 'string' ? body.model : resolvedModel,
+      usage: isRecord(body.usage)
         ? {
             completion_tokens:
-              typeof parsedBody.usage.completion_tokens === 'number'
-                ? parsedBody.usage.completion_tokens
+              typeof body.usage.completion_tokens === 'number'
+                ? body.usage.completion_tokens
                 : undefined,
             prompt_tokens:
-              typeof parsedBody.usage.prompt_tokens === 'number'
-                ? parsedBody.usage.prompt_tokens
-                : undefined,
+              typeof body.usage.prompt_tokens === 'number' ? body.usage.prompt_tokens : undefined,
             total_tokens:
-              typeof parsedBody.usage.total_tokens === 'number'
-                ? parsedBody.usage.total_tokens
-                : undefined,
+              typeof body.usage.total_tokens === 'number' ? body.usage.total_tokens : undefined,
           }
         : undefined,
     });

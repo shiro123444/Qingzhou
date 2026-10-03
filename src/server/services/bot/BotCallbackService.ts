@@ -2,6 +2,7 @@ import debug from 'debug';
 
 import type { MessengerPlatform } from '@/config/messenger';
 import { AgentBotProviderModel } from '@/database/models/agentBotProvider';
+import { BotInboundModel } from '@/database/models/botInbound';
 import { MessengerAccountLinkModel } from '@/database/models/messengerAccountLink';
 import { TopicModel } from '@/database/models/topic';
 import { type LobeChatDatabase } from '@/database/type';
@@ -17,8 +18,11 @@ import { isQueueAgentRuntimeEnabled } from '@/server/services/queue/impls';
 import { SystemAgentService } from '@/server/services/systemAgent';
 
 import { AgentBridgeService } from './AgentBridgeService';
+import { BotArtifactService } from './BotArtifactService';
+import { BotInteractionService } from './BotInteractionService';
 import type { LedgerBackend } from './callbackLedger';
 import { CallbackDeliveryError, CallbackDeliverySession, callbackHash } from './callbackLedger';
+import { normalizeBotPausePayload } from './deliveryEnvelope';
 import type { BotReplyLocale, PlatformClient, PlatformMessenger, UsageStats } from './platforms';
 import {
   getBotReplyLocale,
@@ -35,6 +39,7 @@ import {
   renderStopped,
   splitMessage,
 } from './replyTemplate';
+import { botSessionKey } from './sessionScope';
 
 const log = debug('lobe-server:bot:callback');
 
@@ -72,6 +77,7 @@ export interface BotCallbackBody {
   reasoning?: string;
   shouldContinue?: boolean;
   stepIndex?: number;
+  steps?: number;
   stepType?: 'call_llm' | 'call_tool';
   thinking?: boolean;
   /** Thread name from the platform (e.g. Discord thread title) */
@@ -105,6 +111,9 @@ export class BotCallbackService {
   }
 
   async handleCallback(body: BotCallbackBody): Promise<{ status: 'delivered' | 'skipped' }> {
+    body = normalizeBotPausePayload(
+      body as unknown as Record<string, unknown>,
+    ) as unknown as BotCallbackBody;
     // onComplete also signals a non-terminal human-approval pause. This bot
     // receiver has no approval-card flow: afterStep owns progress, and the same
     // operation must remain open for resumed steps and its eventual final reply.
@@ -155,6 +164,7 @@ export class BotCallbackService {
       platform,
       platformThreadId,
       userId,
+      replyToMessageId: body.userMessageId,
     });
 
     const entry = platformRegistry.getPlatform(platform);
@@ -162,6 +172,16 @@ export class BotCallbackService {
     const replyLocale = getBotReplyLocale(platform);
 
     if (type === 'step') {
+      if (body.reason === 'waiting_for_human' && body.userId && body.operationId) {
+        const notice = await new BotInteractionService(this.db, body.userId).describe(
+          body.operationId,
+        );
+        if (notice) {
+          const plan = await delivery.plan({ notice });
+          await delivery.effect('interaction-notice', () => messenger.createMessage(plan.notice));
+        }
+        return;
+      }
       if (canEdit && progressMessageId && settings.displayToolCalls === true) {
         await this.handleStep(body, messenger, progressMessageId, client, replyLocale, delivery);
       }
@@ -178,6 +198,18 @@ export class BotCallbackService {
         );
       }
     } else if (type === 'completion') {
+      if (body.userId && body.operationId) {
+        const key = botSessionKey(body.userId, {
+          platform,
+          applicationId,
+          platformThreadId,
+          messengerInstallationKey,
+        });
+        await new BotInboundModel(this.db).releaseSession(body.userId, key, {
+          operationId: body.operationId,
+        });
+        AgentBridgeService.clearActiveThread(key);
+      }
       // Stop typing on the gateway
       await delivery.bestEffort('gateway-stop', () =>
         this.stopGatewayTyping(connectionId, platformThreadId),
@@ -199,7 +231,7 @@ export class BotCallbackService {
       // Clear the active thread tracker so the thread can accept new messages.
       // In queue mode, the bridge handler's finally block skips this cleanup
       // to keep the thread marked active while the agent runs on the job queue.
-      AgentBridgeService.clearActiveThread(platformThreadId);
+      if (!body.userId) AgentBridgeService.clearActiveThread(platformThreadId);
       await this.summarizeTopicTitle(body, messenger, delivery);
     }
   }
@@ -211,6 +243,7 @@ export class BotCallbackService {
     platform: string;
     platformThreadId: string;
     userId?: string;
+    replyToMessageId?: string;
   }): Promise<{
     charLimit?: number;
     connectionId: string;
@@ -272,6 +305,7 @@ export class BotCallbackService {
     const charLimit = (settings.charLimit as number) || undefined;
 
     const client = entry.clientFactory.createClient(config, {
+      replyToMessageId: params.replyToMessageId,
       redisClient: getAgentRuntimeRedisClient() as any,
     });
     const messenger = client.getMessenger(platformThreadId);
@@ -450,12 +484,16 @@ export class BotCallbackService {
     // `!lastAssistantContent` lets whitespace-only strings ("\n", "  ") through;
     // those collapse to empty text downstream and get rejected by Telegram as
     // "message text is empty", silently losing the reply. Trim before testing.
-    if (!lastAssistantContent?.trim()) {
+    const artifacts =
+      messenger.prepareFile && body.userId && body.operationId
+        ? await new BotArtifactService(this.db, body.userId).list(body.operationId)
+        : [];
+    if (!lastAssistantContent?.trim() && !artifacts.length) {
       log('handleCompletion: no lastAssistantContent, skipping');
       return;
     }
 
-    const msgBody = renderFinalReply(lastAssistantContent);
+    const msgBody = renderFinalReply(lastAssistantContent ?? '');
 
     const stats: UsageStats = {
       elapsedMs: body.duration,
@@ -469,21 +507,34 @@ export class BotCallbackService {
     const finalText = client.formatReply?.(formattedBody, stats) ?? formattedBody;
     const chunks = splitMessage(finalText, charLimit);
 
-    const plan = await delivery.plan({ canEdit, chunks, progressMessageId });
-    if (plan.chunks.length === 0) {
+    const plan = await delivery.plan({ canEdit, chunks, progressMessageId, artifacts });
+    if (plan.chunks.length === 0 && !plan.artifacts?.length) {
       log('handleCompletion: all chunks empty after formatting, skipping send');
       return;
     }
 
-    await this.deliverFirstChunk(
-      messenger,
-      plan.progressMessageId,
-      plan.chunks[0],
-      plan.canEdit,
-      delivery,
-    );
+    if (plan.chunks.length)
+      await this.deliverFirstChunk(
+        messenger,
+        plan.progressMessageId,
+        plan.chunks[0],
+        plan.canEdit,
+        delivery,
+      );
     for (let i = 1; i < plan.chunks.length; i++) {
       await delivery.effect(`chunk:${i}`, () => messenger.createMessage(plan.chunks[i]));
+    }
+    for (const fileId of plan.artifacts ?? []) {
+      if (delivery.hasDeliveredEffect(`file:${fileId}`)) continue;
+      if (!messenger.prepareFile || !body.userId)
+        throw new Error('File reply transport unavailable');
+      const file = await new BotArtifactService(this.db, body.userId).read(fileId);
+      // CDN upload is not a user-visible send. Failures here remain safely retryable.
+      const send = await messenger.prepareFile({
+        ...file,
+        deliveryId: callbackHash([body.operationId, fileId]),
+      });
+      await delivery.effect(`file:${fileId}`, send);
     }
   }
 

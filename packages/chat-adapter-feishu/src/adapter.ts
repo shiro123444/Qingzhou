@@ -17,7 +17,13 @@ import { Message, parseMarkdown } from 'chat';
 
 import { LarkApiClient } from './api';
 import { LarkFormatConverter } from './format-converter';
-import type { LarkAdapterConfig, LarkMessageBody, LarkRawMessage, LarkThreadId } from './types';
+import type {
+  LarkAdapterConfig,
+  LarkMessageBody,
+  LarkRawMessage,
+  LarkThreadId,
+  LarkWebhookPayload,
+} from './types';
 import { authenticateLarkWebhook } from './webhook-security';
 
 type WarnFn = (message: string, ...args: unknown[]) => void;
@@ -325,6 +331,15 @@ export class LarkAdapter implements Adapter<LarkThreadId, LarkRawMessage> {
     const body = await authenticateLarkWebhook(request, this.webhookConfig);
     if (body instanceof Response) return body;
 
+    return this.dispatchVerifiedWebhook(body, options, true);
+  }
+
+  /** Replay an authenticated receipt without reusing an expired platform signature. */
+  async dispatchVerifiedWebhook(
+    body: LarkWebhookPayload,
+    options?: WebhookOptions,
+    persist = false,
+  ): Promise<Response> {
     // Only handle message events
     const eventType = body.header?.event_type;
     if (eventType !== 'im.message.receive_v1') {
@@ -389,11 +404,23 @@ export class LarkAdapter implements Adapter<LarkThreadId, LarkRawMessage> {
       platform: this.platform,
     });
 
+    if (persist && this.webhookConfig.persistVerifiedWebhook) {
+      const eventId = body.header?.event_id || message.message_id;
+      if (!eventId) return new Response('Missing event ID', { status: 400 });
+      try {
+        await this.webhookConfig.persistVerifiedWebhook(body, eventId, threadId);
+        return Response.json({ accepted: true }, { status: 202 });
+      } catch {
+        return new Response('Durable receipt unavailable', { status: 503 });
+      }
+    }
+
     // Create message lazily via factory
     const messageFactory = () => this.parseRawEvent(message, sender, threadId, messageText);
 
     // Delegate to Chat SDK pipeline
-    this.chat.processMessage(this, threadId, messageFactory, options);
+    const task = this.chat.processMessage(this, threadId, messageFactory, options);
+    if (!persist) await task;
 
     return Response.json({ ok: true });
   }

@@ -317,6 +317,7 @@ export class WechatAdapter implements Adapter<WechatThreadId, WechatRawMessage> 
   readonly name = 'wechat';
   private readonly api: WechatApiClient;
   private readonly authenticateWebhook?: WechatAdapterConfig['authenticateWebhook'];
+  private readonly persistVerifiedWebhook?: WechatAdapterConfig['persistVerifiedWebhook'];
   private readonly formatConverter: WechatFormatConverter;
   private _userName: string;
   private _botUserId?: string;
@@ -340,6 +341,7 @@ export class WechatAdapter implements Adapter<WechatThreadId, WechatRawMessage> 
   constructor(config: WechatAdapterConfig & { userName?: string }) {
     this.api = new WechatApiClient(config.botToken, config.botId);
     this.authenticateWebhook = config.authenticateWebhook;
+    this.persistVerifiedWebhook = config.persistVerifiedWebhook;
     this.formatConverter = new WechatFormatConverter();
     this._userName = config.userName || 'wechat-bot';
     this._botUserId = config.botId;
@@ -393,6 +395,15 @@ export class WechatAdapter implements Adapter<WechatThreadId, WechatRawMessage> 
     )
       return new Response('Invalid message', { status: 400 });
 
+    return this.dispatchVerifiedWebhook(msg, options, true);
+  }
+
+  /** In-process replay of an authenticated database receipt. Never exposed as an HTTP route. */
+  async dispatchVerifiedWebhook(
+    msg: WechatRawMessage,
+    options?: WebhookOptions,
+    persist = false,
+  ): Promise<Response> {
     // Skip bot's own messages and non-finished messages
     if (msg.message_type === MessageType.BOT) {
       return Response.json({ ok: true });
@@ -417,8 +428,19 @@ export class WechatAdapter implements Adapter<WechatThreadId, WechatRawMessage> 
     const threadId = this.encodeThreadId({ id: msg.from_user_id, type: 'single' });
     this.contextTokens.set(threadId, msg.context_token);
 
+    if (persist && this.persistVerifiedWebhook) {
+      if (!msg.message_id) return new Response('Missing message ID', { status: 400 });
+      try {
+        await this.persistVerifiedWebhook(msg, String(msg.message_id), threadId);
+        return Response.json({ accepted: true }, { status: 202 });
+      } catch {
+        return new Response('Durable receipt unavailable', { status: 503 });
+      }
+    }
+
     const messageFactory = async () => this.parseRawEvent(msg, threadId, text);
-    this.chat.processMessage(this, threadId, messageFactory, options);
+    const task = this.chat.processMessage(this, threadId, messageFactory, options);
+    if (!persist) await task;
 
     return Response.json({ ok: true });
   }

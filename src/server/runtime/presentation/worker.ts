@@ -2,6 +2,7 @@ import type { PresentationPlan } from '../../../../packages/runtime-contracts/sr
 import { assertPresentationPublishable } from './content-quality';
 import { lessonHandout } from './lesson';
 import { validatePresentationPlan } from './planner';
+import { pptMasterProjectLock } from './ppt-master-project';
 import {
   createPresentationArtifactSnapshot,
   createPresentationJobSnapshot,
@@ -60,9 +61,7 @@ export interface PresentationWorkerResult {
 }
 
 export type PresentationWorkerErrorCode =
-  | 'PRESENTATION_QUALITY_FAILED'
-  | 'PRESENTATION_WORKER_CANCELLED'
-  | 'PRESENTATION_WORKER_FAILED';
+  'PRESENTATION_QUALITY_FAILED' | 'PRESENTATION_WORKER_CANCELLED' | 'PRESENTATION_WORKER_FAILED';
 
 export class PresentationWorkerError extends Error {
   constructor(
@@ -262,6 +261,7 @@ export class InMemoryPresentationPlanWorker {
         'design_spec.json',
         JSON.stringify(cloneValue(validated.designSpec ?? {})),
       );
+      await workspace.write('spec_lock.md', pptMasterProjectLock(validated));
       throwIfAborted(context.abortSignal);
       let qualityReport: PresentationQualityReport;
       try {

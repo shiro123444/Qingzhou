@@ -1,4 +1,4 @@
-import { createDecipheriv } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 
 import type {
   BaseInfo,
@@ -31,7 +31,7 @@ const BASE_INFO: BaseInfo = { channel_version: CHANNEL_VERSION };
  * Generate a random X-WECHAT-UIN header value as required by the iLink API.
  */
 function randomUin(): string {
-  const uint32 = Math.floor(Math.random() * 0xffff_ffff);
+  const uint32 = Math.floor(Math.random() * 0xFFFF_FFFF);
   return btoa(String(uint32));
 }
 
@@ -151,6 +151,106 @@ export class WechatApiClient {
     }
 
     return lastResponse;
+  }
+
+  /** Upload bytes before committing the user-visible file message. Never logs CDN keys. */
+  async uploadFile(toUserId: string, bytes: Buffer, filename: string): Promise<MessageItem> {
+    if (!bytes.length || bytes.length > 25 * 1024 * 1024)
+      throw new Error('WeChat files must contain 1 byte to 25 MiB');
+    // eslint-disable-next-line no-control-regex -- Reject control characters in attachment filenames.
+    if (!filename.trim() || filename.length > 200 || /[\x00-\x1F/\\]/u.test(filename))
+      throw new Error('Invalid WeChat filename');
+    const key = randomBytes(16);
+    const filekey = randomBytes(16).toString('hex');
+    const md5 = createHash('md5').update(bytes).digest('hex');
+    const cipher = createCipheriv('aes-128-ecb', key, null);
+    const encrypted = Buffer.concat([cipher.update(bytes), cipher.final()]);
+    const response = await fetch(`${this.baseUrl}/ilink/bot/getuploadurl`, {
+      method: 'POST',
+      headers: buildHeaders(this.botToken),
+      body: JSON.stringify({
+        base_info: BASE_INFO,
+        filekey,
+        media_type: 3,
+        to_user_id: toUserId,
+        rawsize: bytes.length,
+        rawfilemd5: md5,
+        filesize: encrypted.length,
+        no_need_thumb: true,
+        aeskey: key.toString('hex'),
+      }),
+      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+    });
+    const upload = await parseResponse<{ upload_param?: string; upload_full_url?: string }>(
+      response,
+      'getuploadurl',
+    );
+    if (!upload.upload_full_url && !upload.upload_param)
+      throw new Error('WeChat returned no file upload URL');
+    const url = new URL(upload.upload_full_url || `${CDN_BASE_URL}/upload`);
+    if (
+      url.protocol !== 'https:' ||
+      !url.hostname.endsWith('.cdn.weixin.qq.com') ||
+      url.username ||
+      url.password
+    )
+      throw new Error('WeChat returned an unsupported CDN upload host');
+    if (!upload.upload_full_url) {
+      url.searchParams.set('encrypted_query_param', upload.upload_param!);
+      url.searchParams.set('filekey', filekey);
+    }
+    const uploaded = await fetch(url.toString(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: new Uint8Array(encrypted),
+      redirect: 'error',
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!uploaded.ok) throw new Error(`WeChat CDN upload failed: HTTP ${uploaded.status}`);
+    const param = uploaded.headers.get('x-encrypted-param');
+    if (!param) throw new Error('WeChat CDN returned no encrypted file reference');
+    return {
+      type: MessageItemType.FILE,
+      file_item: {
+        file_name: filename,
+        len: String(bytes.length),
+        md5,
+        media: {
+          encrypt_query_param: param,
+          aes_key: Buffer.from(key.toString('hex')).toString('base64'),
+          encrypt_type: 1,
+        },
+      },
+    };
+  }
+
+  async sendFile(
+    toUserId: string,
+    item: MessageItem,
+    contextToken: string,
+    clientId: string,
+  ): Promise<WechatSendMessageResponse> {
+    if (!contextToken) throw new Error('WeChat file replies require a conversation context token');
+    if (item.type !== MessageItemType.FILE || !item.file_item?.media)
+      throw new Error('Expected an uploaded WeChat file');
+    const response = await fetch(`${this.baseUrl}/ilink/bot/sendmessage`, {
+      method: 'POST',
+      headers: buildHeaders(this.botToken),
+      body: JSON.stringify({
+        base_info: BASE_INFO,
+        msg: {
+          client_id: clientId,
+          context_token: contextToken,
+          from_user_id: '',
+          item_list: [item],
+          message_state: MessageState.FINISH,
+          message_type: MessageType.BOT,
+          to_user_id: toUserId,
+        },
+      }),
+      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+    });
+    return parseResponse<WechatSendMessageResponse>(response, 'sendfile');
   }
 
   /**

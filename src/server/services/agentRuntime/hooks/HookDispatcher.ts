@@ -1,6 +1,9 @@
 import debug from 'debug';
 
-import { BOT_CALLBACK_PATH } from '@/server/services/bot/deliveryEnvelope';
+import {
+  BOT_CALLBACK_PATH,
+  normalizeBotPausePayload,
+} from '@/server/services/bot/deliveryEnvelope';
 import { enqueueBotOutbox } from '@/server/services/bot/deliveryStore';
 import { isQueueAgentRuntimeEnabled } from '@/server/services/queue/impls';
 
@@ -17,6 +20,26 @@ import type { WebhookFailureCode } from './webhookDelivery';
 import { deliverWebhook, WebhookDeliveryError } from './webhookDelivery';
 
 const log = debug('lobe-server:hook-dispatcher');
+
+function frozenBotPayload(event: AnyHookEvent, payload: Record<string, unknown>) {
+  payload = normalizeBotPausePayload(payload);
+  const prepared = (event as AgentHookEvent).finalState?.metadata?._pendingBotCallbacks;
+  return (
+    (Array.isArray(prepared)
+      ? prepared.find(
+          (entry) =>
+            entry?.operationId === payload.operationId &&
+            entry?.hookId === payload.hookId &&
+            entry?.hookType === payload.hookType &&
+            entry?.userId === event.userId &&
+            entry?.applicationId === payload.applicationId &&
+            entry?.platformThreadId === payload.platformThreadId &&
+            entry?.messengerInstallationKey === payload.messengerInstallationKey &&
+            entry?.type === payload.type,
+        )
+      : undefined) ?? { ...payload, userId: event.userId }
+  );
+}
 
 export interface HookDispatchFailure {
   code: WebhookFailureCode | 'LOCAL_HANDLER_FAILED';
@@ -75,6 +98,32 @@ export class HookDispatcher {
         assertStepLease?.();
         try {
           log('[%s][%s] Dispatching local hook: %s', operationId, type, hook.id);
+          if (hook.webhook?.url === BOT_CALLBACK_PATH) {
+            const payload = {
+              ...buildWebhookPayload(event, hook.webhook.eventFields),
+              ...hook.webhook.body,
+              operationId,
+              hookId: hook.id,
+              hookType: type,
+              userId: event.userId,
+            };
+            try {
+              await enqueueBotOutbox(frozenBotPayload(event, payload), assertStepLease);
+            } catch {
+              assertStepLease?.();
+              const failure: HookDispatchFailure = {
+                code: 'OUTBOX_PERSIST_FAILED',
+                delivery: 'sql-outbox',
+                hookId: hook.id,
+                hookType: type,
+                operationId,
+              };
+              failures.push(failure);
+              console.error('[HookDispatcher] Durable local callback deferred', failure);
+              // The runtime's frozen pending intent is retried by the delivery worker.
+              // Finish local lifecycle cleanup without sending a second platform reply.
+            }
+          }
           await hook.handler(event as AgentHookEvent);
         } catch (error) {
           assertStepLease?.();
@@ -112,24 +161,7 @@ export class HookDispatcher {
           };
           if (hook.webhook.url === BOT_CALLBACK_PATH) {
             // Internal callbacks enter SQL, not a self-HTTP request or QStash fallback.
-            const prepared = (event as AgentHookEvent).finalState?.metadata?._pendingBotCallbacks;
-            const frozen = Array.isArray(prepared)
-              ? prepared.find(
-                  (entry) =>
-                    entry?.operationId === operationId &&
-                    entry?.hookId === hook.id &&
-                    entry?.hookType === type &&
-                    entry?.userId === event.userId &&
-                    entry?.applicationId === payload.applicationId &&
-                    entry?.platformThreadId === payload.platformThreadId &&
-                    entry?.messengerInstallationKey === payload.messengerInstallationKey &&
-                    entry?.type === payload.type,
-                )
-              : undefined;
-            await enqueueBotOutbox(
-              frozen ?? { ...payload, userId: event.userId },
-              assertStepLease,
-            ).catch(() => {
+            await enqueueBotOutbox(frozenBotPayload(event, payload), assertStepLease).catch(() => {
               throw new WebhookDeliveryError('OUTBOX_PERSIST_FAILED');
             });
           } else {

@@ -1,11 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { BotInboundModel } from '@/database/models/botInbound';
 import { getMessageGatewayClient } from '@/server/services/gateway/MessageGatewayClient';
 import { isQueueAgentRuntimeEnabled } from '@/server/services/queue/impls';
 
 import { AgentBridgeService } from '../AgentBridgeService';
+import { BotArtifactService } from '../BotArtifactService';
 import type { BotCallbackBody } from '../BotCallbackService';
 import { BotCallbackService } from '../BotCallbackService';
+import { BotInteractionService } from '../BotInteractionService';
 import { CALLBACK_LEASE_MS, CallbackDeliverySession } from '../callbackLedger';
 
 // ==================== Hoisted mocks ====================
@@ -186,6 +189,7 @@ function setupCredentials(credentials = FAKE_CREDENTIALS, extra?: Record<string,
   // `settings` via `extra`.
   mockFindByPlatformAndAppId.mockResolvedValue({
     credentials,
+    userId: 'user-1',
     settings: { displayToolCalls: true },
     ...extra,
   });
@@ -221,6 +225,7 @@ describe('BotCallbackService', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.spyOn(BotInboundModel.prototype, 'releaseSession').mockResolvedValue(undefined);
     (getMessageGatewayClient() as any).isEnabled = false;
     vi.mocked(isQueueAgentRuntimeEnabled).mockReturnValue(false);
     service = new BotCallbackService(FAKE_DB);
@@ -267,6 +272,110 @@ describe('BotCallbackService', () => {
   });
 
   // ==================== Platform detection ====================
+
+  describe('attachments and resumable interactions', () => {
+    afterEach(() => {
+      for (const method of [
+        BotArtifactService.prototype.list,
+        BotArtifactService.prototype.read,
+        BotInteractionService.prototype.describe,
+      ])
+        if (vi.isMockFunction(method)) method.mockRestore();
+    });
+    const fileId = '4da6ad13-2e08-430f-90f8-42c8c97f65b8';
+    function files() {
+      vi.spyOn(BotArtifactService.prototype, 'list').mockResolvedValue([fileId]);
+      const read = vi.spyOn(BotArtifactService.prototype, 'read').mockResolvedValue({
+        bytes: Buffer.from('svg'),
+        filename: 'formula.svg',
+        mimeType: 'image/svg+xml',
+      });
+      const send = vi.fn().mockResolvedValue(undefined);
+      const prepare = vi.fn().mockResolvedValue(send);
+      mockGetMessenger.mockImplementation(() => ({
+        createMessage: mockCreateMessage,
+        prepareFile: prepare,
+      }));
+      return { prepare, send, read };
+    }
+    it('retries an upload preparation failure without repeating the delivered text', async () => {
+      const { prepare, send } = files();
+      prepare.mockRejectedValueOnce(new Error('CDN unavailable before sending'));
+      const body = makeBody({
+        type: 'completion',
+        reason: 'done',
+        userId: 'user-1',
+        progressMessageId: undefined,
+        lastAssistantContent: 'Rendered',
+      });
+      await expect(service.handleCallback(body)).rejects.toThrow('CDN unavailable');
+      expect(send).not.toHaveBeenCalled();
+      await service.handleCallback(body);
+      expect(mockCreateMessage).toHaveBeenCalledTimes(1);
+      expect(send).toHaveBeenCalledTimes(1);
+      await service.handleCallback(body);
+      expect(prepare).toHaveBeenCalledTimes(2);
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+    it('does not retry a file send whose outcome is uncertain', async () => {
+      const { send } = files();
+      send.mockRejectedValueOnce(new Error('Connection lost after send'));
+      const body = makeBody({
+        type: 'completion',
+        reason: 'done',
+        userId: 'user-1',
+        progressMessageId: undefined,
+        lastAssistantContent: 'Rendered',
+      });
+      await expect(service.handleCallback(body)).rejects.toMatchObject({
+        status: 'unknown_delivery',
+      });
+      await expect(service.handleCallback(body)).rejects.toMatchObject({
+        status: 'unknown_delivery',
+      });
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(mockCreateMessage).toHaveBeenCalledTimes(1);
+    });
+    it('refuses to upload when the owned file can no longer be read', async () => {
+      const { read, prepare } = files();
+      read.mockRejectedValueOnce(new Error('Reply file is not owned by this account'));
+      await expect(
+        service.handleCallback(
+          makeBody({
+            type: 'completion',
+            reason: 'done',
+            userId: 'user-1',
+            progressMessageId: undefined,
+            lastAssistantContent: 'Rendered',
+          }),
+        ),
+      ).rejects.toThrow('not owned');
+      expect(prepare).not.toHaveBeenCalled();
+    });
+    it('delivers a pause notice without closing the execution or consuming the completion event', async () => {
+      vi.spyOn(BotInteractionService.prototype, 'describe').mockResolvedValue(
+        'Choose A or B; /answer token A',
+      );
+      const pause = makeBody({
+        type: 'completion',
+        reason: 'waiting_for_human',
+        steps: 3,
+        userId: 'user-1',
+        progressMessageId: undefined,
+      });
+      await service.handleCallback(pause);
+      expect(mockCreateMessage).toHaveBeenCalledExactlyOnceWith('Choose A or B; /answer token A');
+      expect(BotInboundModel.prototype.releaseSession).not.toHaveBeenCalled();
+      await service.handleCallback({
+        ...pause,
+        reason: 'done',
+        lastAssistantContent: 'Result: 391',
+        steps: 6,
+      });
+      expect(mockCreateMessage).toHaveBeenCalledTimes(2);
+      expect(BotInboundModel.prototype.releaseSession).toHaveBeenCalledTimes(1);
+    });
+  });
 
   describe('platform detection from platformThreadId', () => {
     it('should detect discord platform from platformThreadId prefix', async () => {
@@ -894,7 +1003,7 @@ describe('BotCallbackService', () => {
           status: 'delivered',
         });
         finishProgress();
-        await expect(oldWorker).rejects.toMatchObject({ status: 'lease_lost' });
+        await expect(oldWorker).rejects.toMatchObject({ status: 'unknown_delivery' });
         await expect(service.handleCallback(completion)).resolves.toEqual({ status: 'skipped' });
         expect(mockCreateMessage).toHaveBeenCalledTimes(1);
         expect(mockEditMessage).toHaveBeenCalledTimes(1);
@@ -944,6 +1053,7 @@ describe('BotCallbackService', () => {
     });
 
     it('does not turn a title rename failure into a failed final delivery', async () => {
+      setupCredentials(FAKE_CREDENTIALS, { userId: 'user' });
       mockFindById.mockResolvedValueOnce({ title: '' });
       mockGenerateTopicTitle.mockResolvedValueOnce('title');
       mockUpdateThreadName.mockRejectedValueOnce(new Error('rename failed'));
@@ -959,11 +1069,11 @@ describe('BotCallbackService', () => {
       expect(mockEditMessage).toHaveBeenCalledTimes(1);
     });
 
-    it('fails closed in queue mode without Redis before loading credentials or sending', async () => {
+    it('fails closed in queue mode when the callback owner is missing', async () => {
       vi.mocked(isQueueAgentRuntimeEnabled).mockReturnValue(true);
       await expect(
         service.handleCallback(makeBody({ type: 'completion', lastAssistantContent: 'done' })),
-      ).rejects.toMatchObject({ status: 'backend_unavailable' });
+      ).rejects.toMatchObject({ status: 'invalid_callback' });
       expect(mockFindByPlatformAndAppId).not.toHaveBeenCalled();
       expect(mockCreateMessage).not.toHaveBeenCalled();
     });
@@ -1013,9 +1123,11 @@ describe('BotCallbackService', () => {
     });
 
     it('isolates identical operation/thread IDs across applications and users', async () => {
+      setupCredentials(FAKE_CREDENTIALS, { userId: 'u1' });
       const body = makeBody({ type: 'completion', lastAssistantContent: 'done', userId: 'u1' });
       await service.handleCallback(body);
       await service.handleCallback({ ...body, applicationId: 'other-app' });
+      setupCredentials(FAKE_CREDENTIALS, { userId: 'u2' });
       await service.handleCallback({ ...body, userId: 'u2' });
       expect(mockEditMessage).toHaveBeenCalledTimes(3);
     });

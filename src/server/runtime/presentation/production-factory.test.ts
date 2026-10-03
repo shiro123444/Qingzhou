@@ -1,3 +1,5 @@
+import { resolve } from 'node:path';
+
 import sharp from 'sharp';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -147,7 +149,7 @@ describe('C-33 PptMaster presentation port production factory', () => {
         format: 'pptx',
         workspacePath: '/ws/export-1',
       }),
-    ).toContain('/ws/export-1/input.pptx');
+    ).toContain(resolve('/ws/export-1', 'input.pptx'));
 
     const binding = factory(baseScope());
     expect(binding.port).toBeDefined();

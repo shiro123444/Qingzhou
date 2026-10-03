@@ -1,7 +1,7 @@
 import { BotDeliveryModel } from '@/database/models/botDelivery';
 import { getServerDB } from '@/database/server';
 
-import { deliveryEnvelope } from './deliveryEnvelope';
+import { deliveryEnvelope, normalizeBotPausePayload } from './deliveryEnvelope';
 import { wakeBotDelivery } from './deliveryWake';
 import { boundedDeliveryIO } from './postgresCallbackLedger';
 
@@ -11,6 +11,7 @@ export async function enqueueBotOutbox(
   assertHeld?: () => void,
 ): Promise<void> {
   const envelope = deliveryEnvelope(payload);
+  payload = normalizeBotPausePayload(payload);
   if (payload.type === 'completion' && payload.reason === 'waiting_for_human') return;
   const db = await getServerDB();
   const receipt = await boundedDeliveryIO(() => {

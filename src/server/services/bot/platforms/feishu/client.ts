@@ -139,7 +139,10 @@ class FeishuWebhookClient implements PlatformClient {
   /** Lazy-cached LarkApiClient — keeps the tenant token cache hot across calls. */
   private _api?: LarkApiClient;
 
-  constructor(config: BotProviderConfig, _context: BotPlatformRuntimeContext) {
+  constructor(
+    config: BotProviderConfig,
+    private readonly context: BotPlatformRuntimeContext,
+  ) {
     this.config = config;
     this.id = config.platform;
     this.applicationId = config.applicationId;
@@ -203,6 +206,7 @@ class FeishuWebhookClient implements PlatformClient {
   createAdapter(): Record<string, any> {
     return {
       [this.config.platform]: createLarkAdapter({
+        persistVerifiedWebhook: this.context.persistVerifiedWebhook,
         appId: this.config.applicationId,
         appSecret: this.config.credentials.appSecret,
         claimWebhookReplay,
@@ -299,6 +303,7 @@ class FeishuWSClientImpl implements PlatformClient {
         appId: this.config.applicationId,
         appSecret: this.config.credentials.appSecret,
         authenticateWebhook: createGatewayAuthenticator({
+          durableReceipt: !!this.context.persistVerifiedWebhook,
           applicationId: this.config.applicationId,
           platform: this.domain,
           secret: this.config.credentials.appSecret,
@@ -402,9 +407,11 @@ class FeishuWSClientImpl implements PlatformClient {
   createAdapter(): Record<string, any> {
     return {
       [this.config.platform]: createLarkAdapter({
+        persistVerifiedWebhook: this.context.persistVerifiedWebhook,
         appId: this.config.applicationId,
         appSecret: this.config.credentials.appSecret,
         authenticateWebhook: createGatewayAuthenticator({
+          durableReceipt: !!this.context.persistVerifiedWebhook,
           applicationId: this.config.applicationId,
           platform: this.domain,
           secret: this.config.credentials.appSecret,

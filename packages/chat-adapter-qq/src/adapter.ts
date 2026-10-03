@@ -133,6 +133,7 @@ export class QQAdapter implements Adapter<QQThreadId, QQRawMessage> {
       }
       try {
         if (
+          !this.config.persistVerifiedWebhook &&
           !(await claimReplay(this.config.appId, timestamp, body, this.config.claimWebhookReplay))
         ) {
           return new Response('Replay rejected', { status: 409 });
@@ -159,6 +160,15 @@ export class QQAdapter implements Adapter<QQThreadId, QQRawMessage> {
       });
     }
 
+    return this.dispatchVerifiedWebhook(payload, options, true);
+  }
+
+  /** Replay only server-persisted, authenticated events; registration challenges never reach here. */
+  async dispatchVerifiedWebhook(
+    payload: QQWebhookPayload,
+    options?: WebhookOptions,
+    persist = false,
+  ): Promise<Response> {
     // Handle dispatch events (op: 0)
     if (payload.op !== QQ_OP_CODES.DISPATCH) {
       return Response.json({ ok: true });
@@ -169,6 +179,7 @@ export class QQAdapter implements Adapter<QQThreadId, QQRawMessage> {
 
     // Only handle message events
     if (!this.isMessageEvent(eventType)) {
+      this.logger?.info('Ignoring unsupported QQ dispatch event: %s', eventType);
       return Response.json({ ok: true });
     }
 
@@ -176,20 +187,34 @@ export class QQAdapter implements Adapter<QQThreadId, QQRawMessage> {
     const content = eventData.content;
     const hasAttachments = eventData.attachments && eventData.attachments.length > 0;
     if (!content?.trim() && !hasAttachments) {
+      this.logger?.info('Ignoring empty QQ message event: %s', eventType);
       return Response.json({ ok: true });
     }
 
     // Build thread ID based on event type
     const threadId = this.buildThreadId(eventType, eventData);
     if (!threadId) {
+      this.logger?.info('Ignoring QQ message event without a usable thread: %s', eventType);
       return Response.json({ ok: true });
+    }
+
+    if (persist && this.config.persistVerifiedWebhook) {
+      const eventId = payload.id || eventData.id;
+      if (!eventId) return new Response('Missing event ID', { status: 400 });
+      try {
+        await this.config.persistVerifiedWebhook(payload, eventId, threadId);
+        return Response.json({ accepted: true }, { status: 202 });
+      } catch {
+        return new Response('Durable receipt unavailable', { status: 503 });
+      }
     }
 
     // Create message via factory
     const messageFactory = () => this.parseRawEvent(eventData, threadId, eventType!);
 
     // Delegate to Chat SDK pipeline
-    this.chat.processMessage(this, threadId, messageFactory, options);
+    const task = this.chat.processMessage(this, threadId, messageFactory, options);
+    if (!persist) await task;
 
     return Response.json({ ok: true });
   }
@@ -198,6 +223,7 @@ export class QQAdapter implements Adapter<QQThreadId, QQRawMessage> {
     if (!eventType) return false;
     return (
       eventType === QQ_EVENT_TYPES.GROUP_AT_MESSAGE_CREATE ||
+      eventType === QQ_EVENT_TYPES.GROUP_MESSAGE_CREATE ||
       eventType === QQ_EVENT_TYPES.C2C_MESSAGE_CREATE ||
       eventType === QQ_EVENT_TYPES.AT_MESSAGE_CREATE ||
       eventType === QQ_EVENT_TYPES.DIRECT_MESSAGE_CREATE
@@ -212,9 +238,14 @@ export class QQAdapter implements Adapter<QQThreadId, QQRawMessage> {
         if (!data.group_openid) return null;
         return this.encodeThreadId({ id: data.group_openid, type: 'group' });
       }
+      case QQ_EVENT_TYPES.GROUP_MESSAGE_CREATE: {
+        if (!data.group_openid) return null;
+        return this.encodeThreadId({ id: data.group_openid, type: 'group' });
+      }
       case QQ_EVENT_TYPES.C2C_MESSAGE_CREATE: {
-        if (!data.author?.id) return null;
-        return this.encodeThreadId({ id: data.author.id, type: 'c2c' });
+        const authorId = this.resolveAuthorId(data.author);
+        if (!authorId) return null;
+        return this.encodeThreadId({ id: authorId, type: 'c2c' });
       }
       case QQ_EVENT_TYPES.AT_MESSAGE_CREATE: {
         if (!data.channel_id) return null;
@@ -349,6 +380,26 @@ export class QQAdapter implements Adapter<QQThreadId, QQRawMessage> {
   // Message parsing
   // ------------------------------------------------------------------
 
+  private resolveAuthorId(author?: QQRawMessage['author']): string | undefined {
+    return author?.id || author?.member_openid || author?.user_openid;
+  }
+
+  private detectBotMention(data: QQWebhookEventData): boolean {
+    // Full group events use OpenIDs that need not match /users/@me's numeric ID.
+    if (data.mentions?.some((mention) => mention.is_you === true)) return true;
+    const escapedName = this._userName.replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const hasDisplayNameMention = new RegExp(`(?<!\\w)@${escapedName}(?![\\w-])`, 'i').test(
+      data.content || '',
+    );
+    if (!this._botUserId) return hasDisplayNameMention;
+    return (
+      hasDisplayNameMention ||
+      data.mentions?.some((mention) => this.resolveAuthorId(mention) === this._botUserId) === true ||
+      data.content?.includes(`<@${this._botUserId}>`) === true ||
+      data.content?.includes(`<@!${this._botUserId}>`) === true
+    );
+  }
+
   parseMessage(raw: QQRawMessage): Message<QQRawMessage> {
     const cleanText = this.formatConverter.cleanMentions(raw.content || '');
     const formatted = parseMarkdown(cleanText);
@@ -363,7 +414,7 @@ export class QQAdapter implements Adapter<QQThreadId, QQRawMessage> {
         type: 'guild',
       });
     } else {
-      threadId = this.encodeThreadId({ id: raw.author.id, type: 'c2c' });
+      threadId = this.encodeThreadId({ id: this.resolveAuthorId(raw.author) || 'unknown', type: 'c2c' });
     }
 
     const attachments = this.mapQQAttachments(raw.attachments);
@@ -372,13 +423,14 @@ export class QQAdapter implements Adapter<QQThreadId, QQRawMessage> {
       attachments,
       author: {
         fullName: 'Unknown',
-        isBot: false,
-        isMe: false,
-        userId: raw.author.id,
+        isBot: raw.author.bot === true,
+        isMe: this.resolveAuthorId(raw.author) === this._botUserId,
+        userId: this.resolveAuthorId(raw.author) || 'unknown',
         userName: 'unknown',
       },
       formatted,
       id: raw.id,
+      isMention: this.detectBotMention(raw),
       metadata: {
         dateSent: new Date(raw.timestamp),
         edited: false,
@@ -392,14 +444,14 @@ export class QQAdapter implements Adapter<QQThreadId, QQRawMessage> {
   private async parseRawEvent(
     data: QQWebhookEventData,
     threadId: string,
-    _eventType: string,
+    eventType: string,
   ): Promise<Message<QQRawMessage>> {
     const content = data.content || '';
     const cleanText = this.formatConverter.cleanMentions(content);
     const formatted = parseMarkdown(cleanText);
 
-    const authorId = data.author?.id || 'unknown';
-    const isBot = false; // Webhook events are from users
+    const authorId = this.resolveAuthorId(data.author) || 'unknown';
+    const isBot = data.author?.bot === true;
 
     const author: Author = {
       fullName: authorId,
@@ -417,16 +469,29 @@ export class QQAdapter implements Adapter<QQThreadId, QQRawMessage> {
       group_openid: data.group_openid,
       guild_id: data.guild_id,
       id: data.id || '',
+      mentions: data.mentions,
       timestamp: data.timestamp || new Date().toISOString(),
     };
 
     const attachments = this.mapQQAttachments(data.attachments);
+
+    const isMention =
+      eventType === QQ_EVENT_TYPES.GROUP_AT_MESSAGE_CREATE ||
+      eventType === QQ_EVENT_TYPES.AT_MESSAGE_CREATE ||
+      this.detectBotMention(data);
+    this.logger?.info('QQ message routing: %o', {
+      authorIsBot: isBot,
+      eventType,
+      isMention,
+      hasSelfMentionMarker: data.mentions?.some((mention) => mention.is_you === true) === true,
+    });
 
     return new Message({
       attachments,
       author,
       formatted,
       id: data.id || '',
+      isMention,
       metadata: {
         dateSent: new Date(data.timestamp || Date.now()),
         edited: false,

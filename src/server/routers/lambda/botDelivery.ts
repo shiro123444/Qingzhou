@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import { AgentOperationModel } from '@/database/models/agentOperation';
 import { BotDeliveryConflict, BotDeliveryModel } from '@/database/models/botDelivery';
+import { BotInboundModel } from '@/database/models/botInbound';
 import { authedProcedure, router } from '@/libs/trpc/lambda';
 import { serverDatabase } from '@/libs/trpc/lambda/middleware';
 import { callbackScopeKey } from '@/server/services/bot/callbackLedger';
@@ -22,6 +23,40 @@ function safeError(error: unknown): never {
 
 /** All reads and writes use ctx.userId, never a user ID supplied by the caller. */
 export const botDeliveryRouter = router({
+  stats: procedure.query(async ({ ctx }) => {
+    try {
+      return await new BotDeliveryModel(ctx.serverDB).stats(ctx.userId);
+    } catch (error) {
+      return safeError(error);
+    }
+  }),
+  inbound: procedure.query(async ({ ctx }) => {
+    try {
+      return await new BotInboundModel(ctx.serverDB).list(ctx.userId);
+    } catch (error) {
+      return safeError(error);
+    }
+  }),
+  reconcileInbound: procedure
+    .input(
+      z.object({
+        id: scopeKey,
+        expectedUpdatedAt: z.string().datetime(),
+        resolution: z.enum(['processed', 'retry']),
+        note,
+        evidence,
+        acknowledgeDuplicateRisk: z.literal(true),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      try {
+        await new BotInboundModel(ctx.serverDB).reconcile(ctx.userId, input);
+        wakeBotDelivery(ctx.serverDB);
+        return { success: true };
+      } catch {
+        throw new TRPCError({ code: 'CONFLICT', message: 'inbound_reconciliation_conflict' });
+      }
+    }),
   importLegacy: procedure
     .input(
       z.object({

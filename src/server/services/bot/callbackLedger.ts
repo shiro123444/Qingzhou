@@ -30,6 +30,7 @@ export interface CallbackScope {
   messengerInstallationKey?: string;
   operationId?: string;
   platformThreadId: string;
+  reason?: string;
   stepIndex?: number;
   type: 'completion' | 'step';
   userId?: string;
@@ -259,7 +260,10 @@ export class CallbackDeliverySession {
     const owner = randomUUID();
     const state = await backend.acquire(key, owner);
     if (!state) throw new CallbackDeliveryError('busy');
-    const event = body.type === 'completion' ? 'completion' : `step:${body.stepIndex}`;
+    const event =
+      body.type === 'completion'
+        ? 'completion'
+        : `${body.reason === 'waiting_for_human' ? 'interaction' : 'step'}:${body.stepIndex}`;
     const session = new CallbackDeliverySession(backend, key, owner, state, event);
     try {
       if (
@@ -354,6 +358,10 @@ export class CallbackDeliverySession {
     return Object.entries(this.state.effects).some(
       ([id, status]) => isProgressEffect(id) && status === 'unknown_delivery',
     );
+  }
+
+  hasDeliveredEffect(id: string): boolean {
+    return this.state.effects[`${this.event}/${id}`] === 'delivered';
   }
 
   private hasMessageEffects(): boolean {

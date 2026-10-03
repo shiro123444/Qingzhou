@@ -963,8 +963,7 @@ export class PresentationGenerationPort implements PresentationPort {
   ): Promise<PresentationJobInput> {
     if (!this.options.contentCompiler) return input;
     const previous = input.options?.contentIntents as
-      | Awaited<ReturnType<PresentationContentCompiler['compile']>>
-      | undefined;
+      Awaited<ReturnType<PresentationContentCompiler['compile']>> | undefined;
     if (previous?.inputFingerprint === contentInputFingerprint(input)) return input;
     const canCompile = (await this.options.atomicRuntime?.catalog())?.some(
       (tool) => tool.name === 'presentation.content.compile',
@@ -975,8 +974,7 @@ export class PresentationGenerationPort implements PresentationPort {
         >('presentation.content.compile', { input }, { scope: this.scope, signal, jobId })
       : await this.options.contentCompiler.compile(input, { scope: this.scope, signal });
     const revision = input.options?.contentRevision as
-      | { target?: PresentationMessageInput['target'] }
-      | undefined;
+      { target?: PresentationMessageInput['target'] } | undefined;
     const target = revision?.target;
     const slides = compiled.slides.map((slide, index) =>
       target?.type === 'slide' && target.slideNumber !== index + 1
@@ -1003,8 +1001,7 @@ export class PresentationGenerationPort implements PresentationPort {
     if (!template.visual?.designProgram || !this.options.visualStoryboardPlanner) return input;
     if (!confirmedDeckLength(input)) return input;
     const existing = input.options?.visualStoryboard as
-      | Partial<PresentationVisualStoryboard>
-      | undefined;
+      Partial<PresentationVisualStoryboard> | undefined;
     if (
       existing?.templateId === template.templateId &&
       existing.versionId === template.versionId &&
@@ -1595,7 +1592,7 @@ export class PresentationGenerationPort implements PresentationPort {
       ...(await this.options.atomicRuntime.snapshot(this.scope)),
     };
   }
-  async executeOperation(name: string, input: unknown) {
+  async executeOperation(name: string, input: unknown, signal?: AbortSignal) {
     if (!this.options.atomicRuntime || !this.publicOperations.has(name))
       throw Object.assign(new Error('Operation not available through this presentation session'), {
         code: 'PRESENTATION_NOT_FOUND',
@@ -1603,6 +1600,7 @@ export class PresentationGenerationPort implements PresentationPort {
     return this.options.atomicRuntime.invoke(name, input, {
       scope: this.scope,
       services: { port: this },
+      signal,
     });
   }
 
@@ -1664,8 +1662,7 @@ export class PresentationGenerationPort implements PresentationPort {
           for (const id of pinnedCapabilityIds)
             if (typeof id === 'string') learnedCapabilityIds.add(id);
         const pinnedMemory = generationInput.options?.learnedCapabilities as
-          | { capsules?: Array<{ id?: unknown }> }
-          | undefined;
+          { capsules?: Array<{ id?: unknown }> } | undefined;
         for (const capsule of pinnedMemory?.capsules ?? [])
           if (typeof capsule.id === 'string') learnedCapabilityIds.add(capsule.id);
         let templateCapsules: CapabilityCapsule[] = [];

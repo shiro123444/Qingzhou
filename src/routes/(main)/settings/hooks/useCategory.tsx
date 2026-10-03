@@ -169,6 +169,7 @@ export const useCategory = () => {
         key: SettingsTabs.Messenger,
         label: t('tab.messenger'),
       },
+      { icon: MessageCircleIcon, key: SettingsTabs.BotDelivery, label: t('tab.botDelivery') },
     ].filter(Boolean) as CategoryItem[];
 
     groups.push({

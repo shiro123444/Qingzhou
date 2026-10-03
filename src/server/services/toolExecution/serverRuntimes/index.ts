@@ -25,6 +25,7 @@ import { selfFeedbackIntentRuntime } from './selfFeedbackIntent';
 import { skillManagementRuntime } from './skillManagement';
 import { skillsRuntime } from './skills';
 import { skillStoreRuntime } from './skillStore';
+import { systemCapabilitiesRuntime } from './systemCapabilities';
 import { taskRuntime } from './task';
 import { topicReferenceRuntime } from './topicReference';
 import type { ServerRuntimeFactory, ServerRuntimeRegistration } from './types';
@@ -64,6 +65,7 @@ registerRuntimes([
   remoteDeviceRuntime,
   briefRuntime,
   taskRuntime,
+  systemCapabilitiesRuntime,
   topicReferenceRuntime,
   userInteractionRuntime,
   credsRuntime,

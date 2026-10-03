@@ -763,6 +763,13 @@
       "when": 1779422400000,
       "tag": "0108_bot_delivery_queues",
       "breakpoints": true
+    },
+    {
+      "idx": 109,
+      "version": "7",
+      "when": 1779508800000,
+      "tag": "0109_bot_inbound_sessions",
+      "breakpoints": true
     }
   ],
   "version": "6"

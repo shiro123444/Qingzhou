@@ -79,6 +79,10 @@ import { HeterogeneousAgentService } from '@/server/services/heterogeneousAgent'
 import { KlavisService } from '@/server/services/klavis';
 import { MarketService } from '@/server/services/market';
 import { deviceProxy } from '@/server/services/toolExecution/deviceProxy';
+import {
+  SystemCapabilityIdentifier,
+  SystemCapabilityManifest,
+} from '@/server/services/toolExecution/systemCapabilityManifest';
 
 import { resolveDeviceAccessPolicy } from './deviceAccessPolicy';
 import { buildAllowedBuiltinTools, isDeviceToolIdentifier } from './deviceToolRegistry';
@@ -1031,7 +1035,11 @@ export class AiAgentService {
             : undefined;
 
       const toolsEngine = createServerAgentToolsEngine(toolsContext, {
-        additionalManifests: [...lobehubSkillManifests, ...klavisManifests],
+        additionalManifests: [
+          ...lobehubSkillManifests,
+          ...klavisManifests,
+          ...(agentPlugins.includes(SystemCapabilityIdentifier) ? [SystemCapabilityManifest] : []),
+        ],
         agentConfig: {
           chatConfig: agentConfig.chatConfig ?? undefined,
           plugins: agentPlugins,

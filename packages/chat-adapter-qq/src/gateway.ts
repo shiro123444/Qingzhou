@@ -425,6 +425,7 @@ export class QQGatewayConnection {
   // ---------- Event Forwarding ----------
 
   private async forwardEvent(payload: QQGatewayPayload): Promise<void> {
+    this.log('Forwarding dispatch event: type=%s seq=%s', payload.t, payload.s);
     // Construct a webhook-compatible payload:
     // The handleWebhook() expects { op: 0, t: eventType, d: eventData, id, s }
     const webhookPayload = {
@@ -437,6 +438,7 @@ export class QQGatewayConnection {
 
     try {
       const response = await this.forwarder(this.webhookUrl, JSON.stringify(webhookPayload));
+      this.log('Dispatch forwarding result: type=%s status=%d', payload.t, response.status);
       if (!response.ok) throw new Error(`QQ forwarding rejected: HTTP ${response.status}`);
     } catch (err) {
       this.log('Failed to forward event %s to webhook: %O', payload.t, err);

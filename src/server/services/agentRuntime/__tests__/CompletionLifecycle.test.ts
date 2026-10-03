@@ -102,6 +102,17 @@ describe('CompletionLifecycle.extractErrorMessage', () => {
 describe('CompletionLifecycle.dispatchHooks result', () => {
   afterEach(() => vi.restoreAllMocks());
 
+  it('retains hooks through a human pause and unregisters them after the eventual completion', async () => {
+    const lifecycle = buildLifecycle();
+    vi.spyOn(lifecycle as any, 'persistCompletion').mockResolvedValue(undefined);
+    vi.spyOn(hookDispatcher, 'dispatch').mockResolvedValue({ success: true, failures: [] });
+    const unregister = vi.spyOn(hookDispatcher, 'unregister');
+    await lifecycle.dispatchHooks('op-paused', { metadata: {}, stepCount: 3 }, 'waiting_for_human');
+    expect(unregister).not.toHaveBeenCalled();
+    await lifecycle.dispatchHooks('op-paused', { metadata: {}, stepCount: 6 }, 'done');
+    expect(unregister).toHaveBeenCalledWith('op-paused');
+  });
+
   it('returns successful delivery and unregisters terminal hooks', async () => {
     const lifecycle = buildLifecycle();
     vi.spyOn(lifecycle as any, 'persistCompletion').mockResolvedValue(undefined);

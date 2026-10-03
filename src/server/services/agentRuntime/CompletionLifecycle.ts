@@ -232,7 +232,7 @@ export class CompletionLifecycle {
    * Dispatch `onComplete` (and `onError` for `reason='error'`) hooks via
    * the global `hookDispatcher`. On the error path, also writes the error
    * back onto the assistant message row so the frontend can render it.
-   * Fire-and-forget; always unregisters the operation from the dispatcher.
+   * Fire-and-forget; retains hooks during a human pause and unregisters on terminal completion.
    */
   async dispatchHooks(
     operationId: string,
@@ -306,7 +306,7 @@ export class CompletionLifecycle {
       // A stale worker must not remove hooks still needed by the current owner.
       try {
         assertStepLease?.();
-        hookDispatcher.unregister(operationId);
+        if (reason !== 'waiting_for_human') hookDispatcher.unregister(operationId);
       } catch {
         // Lease loss propagates above; cleanup is deliberately skipped.
       }

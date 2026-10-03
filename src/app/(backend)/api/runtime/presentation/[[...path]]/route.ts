@@ -1,6 +1,3 @@
-import { createHash } from 'node:crypto';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import nodePath from 'node:path';
 
 import { eq } from 'drizzle-orm';
@@ -14,17 +11,12 @@ import {
   migratePresentationSessions,
   presentationAccountScope,
 } from '@/server/runtime/presentation/account-workspace';
-import { createPresentationArtifactAssetStoreBridge } from '@/server/runtime/presentation/asset-store';
 import { uploadPresentationAttachment } from '@/server/runtime/presentation/attachment-storage';
-import { FileCapabilityCapsuleStore } from '@/server/runtime/presentation/capability-memory';
 import type { PresentationRuntimeComposition } from '@/server/runtime/presentation/composition';
 import { createPresentationContextServices } from '@/server/runtime/presentation/context-services';
 import { createPresentationContextRuntime } from '@/server/runtime/presentation/context-tools';
 import { conversationStream } from '@/server/runtime/presentation/conversation-stream';
-import {
-  createPresentationRouteJournalBindings,
-  ScopedPresentationJobEventJournalCache,
-} from '@/server/runtime/presentation/event-journal-cache';
+import { getDefaultPresentationComposition } from '@/server/runtime/presentation/default-composition';
 import {
   createScopedPresentationPortCache,
   getPresentationPortFactory,
@@ -33,7 +25,6 @@ import {
   presentationPortFactoryFromScopeCache,
   type PresentationPortScopeCacheBinding,
 } from '@/server/runtime/presentation/factory';
-import { FilePresentationStorage } from '@/server/runtime/presentation/file-storage';
 import type { PresentationGenerationCapability } from '@/server/runtime/presentation/generation-capability';
 import {
   handlePresentationGenerationRequest,
@@ -43,38 +34,23 @@ import {
   handlePresentationRequest,
   matchPresentationRoute,
 } from '@/server/runtime/presentation/handler';
-import { createPresentationImageGenerationEventPublisher } from '@/server/runtime/presentation/image-event-bridge';
 import type { ImageGenerationCapability } from '@/server/runtime/presentation/image-generation-capability';
-import { createImageGenerationCapability } from '@/server/runtime/presentation/image-generation-capability';
 import { handleImageGenerationRequest } from '@/server/runtime/presentation/image-generation-handler';
 import { type PresentationJobEventJournalPort } from '@/server/runtime/presentation/job-event-journal';
-import { createResilientMultimodalChatPort } from '@/server/runtime/presentation/multimodal-chat-fallback';
 import type { PresentationPipelineContext } from '@/server/runtime/presentation/pipeline';
 import type { ProductionProviderReadiness } from '@/server/runtime/presentation/production-command';
 import { PRODUCTION_PRESENTATION_ENV_KEYS } from '@/server/runtime/presentation/production-config';
 import {
   createPptMasterProcessRunnerFactory,
   createPptMasterProductionPresentationComposition,
-  createProductionPresentationGenerationComposition,
   type PptMasterPresentationScope,
 } from '@/server/runtime/presentation/production-factory';
-import {
-  createProductionOpenAIImageGenerationPort,
-  PRODUCTION_IMAGE_ENV_KEYS,
-} from '@/server/runtime/presentation/production-image-config';
-import { createPresentationChatFetch } from '@/server/runtime/presentation/resilient-fetch';
-import { createProcessPresentationRunner } from '@/server/runtime/presentation/runner';
 import {
   createPresentationJobEventSseResponse,
   type PresentationJobEventSerializer,
 } from '@/server/runtime/presentation/sse';
 import { handleTeachingRequest } from '@/server/runtime/presentation/teaching-handler';
-import { FileTeachingMemory } from '@/server/runtime/presentation/teaching-memory';
-import { FilePresentationTemplateLibrary } from '@/server/runtime/presentation/templates';
-import { createOpenAICompatibleAudioTranscriber } from '@/server/runtime/presentation/templates/audio-transcription';
-import { PptMasterToolchain } from '@/server/runtime/presentation/toolchain';
 import {
-  createUserChatProvider,
   userChatEndpoint,
 } from '@/server/runtime/presentation/user-chat-provider';
 
@@ -369,196 +345,11 @@ const defaultProductionPortFactory = (): PresentationPortFactory => {
   }
 };
 
-const createDefaultGenerationContextFactory = (
-  pptMasterRoot: string,
-  pythonCommand: string,
-): PresentationGenerationContextFactory => {
-  const runnerId = 'ppt-master-generation-toolchain';
-  const runner = createProcessPresentationRunner({
-    command: [pythonCommand],
-    declareArtifacts: (request) =>
-      request.operation === 'export' ? ['exports/presentation.pptx'] : [],
-    id: runnerId,
-    maxArtifacts: 64,
-  });
-  const scriptsRoot = nodePath.join(pptMasterRoot, 'skills', 'ppt-master', 'scripts');
-  const toolchain = new PptMasterToolchain({
-    allowedRunnerIds: [runnerId],
-    convertScriptPath: nodePath.join(scriptsRoot, 'svg_to_pptx.py'),
-    providerCommand: [pythonCommand],
-    pptMasterRoot,
-    qualityScriptPath: nodePath.join(scriptsRoot, 'svg_quality_checker.py'),
-    runner,
-    runnerId,
-    timeoutMs: 120_000,
-    workspaceRoot: tmpdir(),
-  });
-
-  return (jobId) => {
-    const safeJobId = jobId.replaceAll(/[^\w-]/g, '_');
-    const workspacePath = nodePath.join(tmpdir(), `lobehub-presentation-generation-${safeJobId}`);
-    return {
-      plannerContext: {},
-      workerContext: {
-        convert: (path, signal) => toolchain.convert(path, signal),
-        jobId,
-        qualityCheck: (path, signal) => toolchain.qualityCheck(path, signal),
-        workspace: {
-          cleanup: () => rm(workspacePath, { force: true, recursive: true }),
-          path: workspacePath,
-          write: async (relativePath, content) => {
-            const target = nodePath.join(workspacePath, relativePath);
-            await mkdir(nodePath.dirname(target), { recursive: true });
-            await writeFile(target, content);
-          },
-        },
-      },
-    };
-  };
-};
-
 const defaultProductionGenerationComposition = (): PresentationRuntimeComposition | undefined => {
-  const root = process.env.CORDIS_PPT_MASTER_ROOT;
-  const runnerPath = process.env.CORDIS_PPT_RUNNER;
-  // Chat credentials and selection are resolved per authenticated user, not at startup.
-  const imageApiKey = process.env[PRODUCTION_IMAGE_ENV_KEYS.apiKey];
-
-  // If the presentation runner (ppt-master) is not configured, do not assemble
-  // a half-baked composition that cannot produce presentation output. Fail-closed
-  // with PROVIDER_UNAVAILABLE.
-  if (!root || !runnerPath) {
-    return undefined;
-  }
-
-  const pptEnv: Readonly<Record<string, string | undefined>> = {
-    [PRODUCTION_PRESENTATION_ENV_KEYS.provider]:
-      process.env[PRODUCTION_PRESENTATION_ENV_KEYS.provider] ?? 'ppt-master',
-    [PRODUCTION_PRESENTATION_ENV_KEYS.command]:
-      process.env[PRODUCTION_PRESENTATION_ENV_KEYS.command] ??
-      JSON.stringify([process.env.CORDIS_PPT_PYTHON ?? 'python3', runnerPath]),
-    [PRODUCTION_PRESENTATION_ENV_KEYS.runnerId]:
-      process.env[PRODUCTION_PRESENTATION_ENV_KEYS.runnerId] ?? 'ppt-master-runner',
-    [PRODUCTION_PRESENTATION_ENV_KEYS.allowedRunnerIds]:
-      process.env[PRODUCTION_PRESENTATION_ENV_KEYS.allowedRunnerIds] ??
-      JSON.stringify(['ppt-master-runner']),
-    [PRODUCTION_PRESENTATION_ENV_KEYS.imageBudget]:
-      process.env[PRODUCTION_PRESENTATION_ENV_KEYS.imageBudget],
-  };
-
-  const imgEnv = {
-    [PRODUCTION_IMAGE_ENV_KEYS.apiKey]: imageApiKey,
-    [PRODUCTION_IMAGE_ENV_KEYS.baseUrl]: process.env[PRODUCTION_IMAGE_ENV_KEYS.baseUrl],
-    [PRODUCTION_IMAGE_ENV_KEYS.model]: process.env[PRODUCTION_IMAGE_ENV_KEYS.model],
-  } as const;
-
-  try {
-    const dataRoot =
-      process.env.CORDIS_PRESENTATION_DATA_DIR ??
-      nodePath.join(process.cwd(), '.data', 'presentation');
-    const artifactStore = new FilePresentationStorage(dataRoot);
-    const assetStore = createPresentationArtifactAssetStoreBridge(artifactStore);
-    const journalCache = new ScopedPresentationJobEventJournalCache({
-      load: async (scope) => artifactStore.createJournal(scope),
-    });
-    const journalBindings = createPresentationRouteJournalBindings(journalCache);
-
-    const multimodalChatPort = createResilientMultimodalChatPort(
-      createUserChatProvider({
-        fetcher: createPresentationChatFetch(globalThis.fetch),
-        resolve: async (scope) => {
-          const { getServerDB } = await import('@/database/core/db-adaptor');
-          const { resolveUserChatProvider } = await import('@/server/services/modelProvider');
-          return resolveUserChatProvider(await getServerDB(), scope.userId);
-        },
-      }),
-    );
-
-    const imageGenerationCapability = imageApiKey
-      ? createImageGenerationCapability({
-          assetStore,
-          eventPublisherFactory: async (scope, jobId) =>
-            createPresentationImageGenerationEventPublisher({
-              publisher: await journalBindings.generationEventPublisherFactory(
-                scope,
-                jobId,
-                new Request('http://presentation.internal/image-generation'),
-              ),
-              scope,
-            }),
-          imagePort: createProductionOpenAIImageGenerationPort(imgEnv, {
-            readReferenceAsset: async (scope, ref) => {
-              const artifact = await artifactStore.get(scope, ref);
-              return artifact?.bytes && artifact.mimeType
-                ? { bytes: artifact.bytes, mimeType: artifact.mimeType }
-                : null;
-            },
-            assetSink: async ({ bytes, metadata, scope }) => {
-              const artifactId = `image-${createHash('sha256').update(bytes).digest('hex').slice(0, 32)}`;
-              const stored = await assetStore.put(scope, {
-                asset: { ref: artifactId },
-                bytes,
-                idempotencyKey: artifactId,
-                metadata,
-              });
-              return stored.asset;
-            },
-            fetcher: globalThis.fetch,
-          }),
-        })
-      : undefined;
-
-    const runnerFactory = createPptMasterProcessRunnerFactory({ pptMasterRoot: root });
-    const contextFactory = createDefaultGenerationContextFactory(
-      root,
-      process.env.CORDIS_PPT_PYTHON ?? 'python3',
-    );
-
-    let audioTranscriber: ReturnType<typeof createOpenAICompatibleAudioTranscriber> | undefined;
-    const transcriptionApiKey = process.env.OPENAI_API_KEY?.trim();
-    const transcriptionBaseUrl = process.env.OPENAI_BASE_URL?.trim();
-    if (transcriptionApiKey && transcriptionBaseUrl) {
-      try {
-        audioTranscriber = createOpenAICompatibleAudioTranscriber({
-          apiKey: transcriptionApiKey,
-          baseUrl: transcriptionBaseUrl,
-          fetcher: globalThis.fetch,
-          model: process.env.PRESENTATION_AUDIO_TRANSCRIPTION_MODEL,
-        });
-      } catch {
-        // Optional STT must not make the presentation runtime unavailable.
-      }
-    }
-
-    const result = createProductionPresentationGenerationComposition({
-      teachingMemory: new FileTeachingMemory(nodePath.join(dataRoot, 'teaching-memory')),
-      capabilityMemory: new FileCapabilityCapsuleStore(
-        nodePath.join(dataRoot, 'capability-memory'),
-      ),
-      audioTranscriber,
-      templateLibrary: new FilePresentationTemplateLibrary({
-        root: nodePath.join(dataRoot, 'templates'),
-      }),
-      artifactStore,
-      jobRepository: artifactStore,
-      contextFactory,
-      env: pptEnv,
-      imageGenerationCapability,
-      journalCache,
-      multimodalChatPort,
-      runnerFactory,
-    });
-
-    if (configuredDefaultReadiness === undefined) {
-      configuredDefaultReadiness = result.readiness;
-    }
-
-    return result.composition;
-  } catch (error) {
-    if (configuredDefaultReadinessError === undefined) {
-      configuredDefaultReadinessError = error;
-    }
-    return undefined;
-  }
+  const result = getDefaultPresentationComposition();
+  configuredDefaultReadiness ??= result.readiness;
+  configuredDefaultReadinessError ??= result.error;
+  return result.composition;
 };
 
 const configuredDefaultComposition = defaultProductionGenerationComposition();

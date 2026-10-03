@@ -138,6 +138,8 @@ const readBoundedBody = async (request: Request): Promise<Uint8Array> => {
 export const createGatewayAuthenticator = (
   options: GatewayScope & {
     readonly claimReplay?: ClaimWebhookReplay;
+    /** Signed retries are deduplicated by the durable inbox, including retries after a 503. */
+    readonly durableReceipt?: boolean;
     readonly now?: () => number;
   },
 ): ((request: Request) => Promise<Response | void>) => {
@@ -172,6 +174,7 @@ export const createGatewayAuthenticator = (
     if (!timingSafeEqual(Buffer.from(signature, 'hex'), Buffer.from(expected, 'hex'))) {
       return new Response('Invalid gateway authentication', { status: 401 });
     }
+    if (options.durableReceipt) return;
     try {
       // Partition by scope, not by caller-controlled identity or a shared nonce alone.
       const key = JSON.stringify([PURPOSE, options.platform, options.applicationId, nonce]);

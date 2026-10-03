@@ -221,8 +221,8 @@ export class AgentRuntimeService {
     const impl = this.queueService.getImpl();
     if (impl instanceof LocalQueueServiceImpl) {
       log('Setting up local execution callback');
-      impl.setExecutionCallback(async (operationId, stepIndex, context) => {
-        await this.executeStep({ context, operationId, stepIndex });
+      impl.setExecutionCallback(async (operationId, stepIndex, context, payload) => {
+        await this.executeStep({ ...payload, context, operationId, stepIndex });
       });
     }
   }
@@ -1605,8 +1605,7 @@ export class AgentRuntimeService {
               activeDeviceId,
               devicePlatform: msg.pluginState?.metadata?.devicePlatform as string | undefined,
               deviceSystemInfo: msg.pluginState?.metadata?.deviceSystemInfo as
-                | Record<string, string>
-                | undefined,
+                Record<string, string> | undefined,
             };
           }
         },

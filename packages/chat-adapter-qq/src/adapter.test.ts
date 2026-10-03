@@ -98,6 +98,30 @@ describe('QQAdapter', () => {
     vi.restoreAllMocks();
   });
 
+  it('persists verified dispatches before ACK and returns 503 on storage failure', async () => {
+    const persist = vi.fn().mockResolvedValue(undefined);
+    const durable = new QQAdapter({
+      appId: 'test_app',
+      clientSecret: 'test_secret',
+      persistVerifiedWebhook: persist,
+    });
+    vi.spyOn((durable as any).api, 'getAccessToken').mockResolvedValue('mock_token');
+    vi.spyOn((durable as any).api, 'getBotInfo').mockResolvedValue({});
+    await durable.initialize(mockChat as any);
+    const payload = makeWebhookPayload(QQ_EVENT_TYPES.GROUP_AT_MESSAGE_CREATE, {});
+    expect((await durable.handleWebhook(makeRequest(payload))).status).toBe(202);
+    expect(persist).toHaveBeenCalledWith(
+      expect.objectContaining({ t: QQ_EVENT_TYPES.GROUP_AT_MESSAGE_CREATE }),
+      expect.any(String),
+      expect.any(String),
+    );
+    expect(mockChat.processMessage).not.toHaveBeenCalled();
+    persist.mockRejectedValueOnce(new Error('database down'));
+    const retry = makeRequest(payload);
+    expect((await durable.handleWebhook(retry.clone())).status).toBe(503);
+    expect((await durable.handleWebhook(retry)).status).toBe(202);
+  });
+
   // ---------- constructor ----------
 
   describe('constructor', () => {
@@ -204,6 +228,100 @@ describe('QQAdapter', () => {
 
       expect(res.status).toBe(200);
       expect(mockChat.processMessage).toHaveBeenCalledTimes(1);
+      const factory = vi.mocked(mockChat.processMessage).mock.calls[0]?.[2];
+      const message = await factory?.();
+      expect(message?.isMention).toBe(true);
+    });
+
+    it('persists full group events and preserves bot mentions when replaying', async () => {
+      const persist = vi.fn().mockResolvedValue(undefined);
+      const durable = new QQAdapter({
+        appId: 'test_app',
+        clientSecret: 'test_secret',
+        persistVerifiedWebhook: persist,
+      });
+      vi.spyOn((durable as any).api, 'getAccessToken').mockResolvedValue('mock_token');
+      vi.spyOn((durable as any).api, 'getBotInfo').mockResolvedValue({ id: 'bot_123' });
+      await durable.initialize(mockChat as any);
+      const payload = makeWebhookPayload(QQ_EVENT_TYPES.GROUP_MESSAGE_CREATE, {
+        author: { member_openid: 'member_123' },
+        mentions: [{ id: 'bot_openid_in_another_namespace', is_you: true }],
+      });
+      expect((await durable.handleWebhook(makeRequest(payload))).status).toBe(202);
+      expect(persist).toHaveBeenCalledWith(
+        expect.objectContaining({ t: QQ_EVENT_TYPES.GROUP_MESSAGE_CREATE }),
+        expect.any(String),
+        'qq:group:group_abc',
+      );
+      expect(mockChat.processMessage).not.toHaveBeenCalled();
+      await durable.dispatchVerifiedWebhook(payload);
+      const message = await vi.mocked(mockChat.processMessage).mock.calls[0]?.[2]?.();
+      expect(message?.isMention).toBe(true);
+      expect(message?.author.userId).toBe('member_123');
+      expect(durable.parseMessage(message!.raw).isMention).toBe(true);
+    });
+
+    it('only trusts a true self-mention marker, not another bot or a truthy string', async () => {
+      for (const mention of [
+        { bot: true, id: 'other_bot_openid', is_you: false },
+        { bot: true, id: 'other_bot_openid' },
+        { id: 'other_user_openid', is_you: 'true' },
+      ]) {
+        mockChat.processMessage.mockClear();
+        await adapter.handleWebhook(
+          makeRequest(makeWebhookPayload(QQ_EVENT_TYPES.GROUP_MESSAGE_CREATE, { mentions: [mention] })),
+        );
+        const message = await vi.mocked(mockChat.processMessage).mock.calls[0]?.[2]?.();
+        expect(message?.isMention).toBe(false);
+      }
+    });
+
+    it('does not classify ordinary full group messages as bot mentions', async () => {
+      const payload = makeWebhookPayload(QQ_EVENT_TYPES.GROUP_MESSAGE_CREATE, {});
+      await adapter.handleWebhook(makeRequest(payload));
+      const message = await vi.mocked(mockChat.processMessage).mock.calls[0]?.[2]?.();
+      expect(message?.isMention).toBe(false);
+      expect(message?.threadId).toBe('qq:group:group_abc');
+    });
+
+    it('recognizes display name mentions on full group events without matching longer names', async () => {
+      const namedAdapter = new QQAdapter({ appId: 'test_app', clientSecret: 'test_secret' });
+      vi.spyOn((namedAdapter as any).api, 'getAccessToken').mockResolvedValue('mock_token');
+      vi.spyOn((namedAdapter as any).api, 'getBotInfo').mockResolvedValue({ username: 'SmallBot' });
+      await namedAdapter.initialize(mockChat as any);
+      for (const [content, expected] of [
+        ['@SmallBot hello', true],
+        ['@SmallBotOther hello', false],
+        ['user@SmallBot.com', false],
+      ] as const) {
+        mockChat.processMessage.mockClear();
+        await namedAdapter.handleWebhook(
+          makeRequest(makeWebhookPayload(QQ_EVENT_TYPES.GROUP_MESSAGE_CREATE, { content })),
+        );
+        const message = await vi.mocked(mockChat.processMessage).mock.calls[0]?.[2]?.();
+        expect(message?.isMention).toBe(expected);
+      }
+    });
+
+    it('routes C2C events that identify the sender only through user_openid', async () => {
+      const payload = makeWebhookPayload(QQ_EVENT_TYPES.C2C_MESSAGE_CREATE, {
+        author: { user_openid: 'private_123' },
+        group_openid: undefined,
+      });
+      await adapter.handleWebhook(makeRequest(payload));
+      const message = await vi.mocked(mockChat.processMessage).mock.calls[0]?.[2]?.();
+      expect(message?.threadId).toBe('qq:c2c:private_123');
+      expect(message?.author.userId).toBe('private_123');
+      expect(message?.isMention).toBe(false);
+    });
+
+    it('preserves bot authors on full group events so bot replies cannot wake the agent', async () => {
+      const payload = makeWebhookPayload(QQ_EVENT_TYPES.GROUP_MESSAGE_CREATE, {
+        author: { bot: true, id: 'another_bot' },
+      });
+      await adapter.handleWebhook(makeRequest(payload));
+      const message = await vi.mocked(mockChat.processMessage).mock.calls[0]?.[2]?.();
+      expect(message?.author.isBot).toBe(true);
     });
 
     it('should skip empty content with no attachments', async () => {
@@ -406,7 +524,7 @@ describe('QQAdapter', () => {
 
   describe('fetchAttachmentData', () => {
     it('should fetch attachment data via fetchData callback', async () => {
-      const imageBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+      const imageBytes = new Uint8Array([0x89, 0x50, 0x4E, 0x47]);
       vi.stubGlobal(
         'fetch',
         vi.fn().mockResolvedValueOnce(new Response(imageBytes, { status: 200 })),
@@ -420,7 +538,7 @@ describe('QQAdapter', () => {
       const data = await message.attachments[0].fetchData!();
 
       expect(data).toBeInstanceOf(Buffer);
-      expect(data.length).toBe(4);
+      expect(data instanceof ArrayBuffer ? data.byteLength : data.length).toBe(4);
 
       vi.unstubAllGlobals();
     });

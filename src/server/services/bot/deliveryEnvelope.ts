@@ -6,6 +6,17 @@ import { callbackHash, callbackScopeKey } from './callbackLedger';
 
 export const BOT_CALLBACK_PATH = '/api/agent/webhooks/bot-callback';
 export const MAX_CALLBACK_BYTES = 1024 * 1024;
+/** A pause is a resumable interaction event, never the terminal completion intent. */
+export function normalizeBotPausePayload(body: Record<string, unknown>) {
+  if (
+    body.type === 'completion' &&
+    body.reason === 'waiting_for_human' &&
+    Number.isSafeInteger(body.steps) &&
+    (body.steps as number) >= 0
+  )
+    return { ...body, type: 'step', stepIndex: body.steps };
+  return body;
+}
 const id = z
   .string()
   .min(1)
@@ -39,6 +50,7 @@ export const durableCallbackSchema = z
 
 /** Pure serialization/identity; never accepts a caller-supplied destination URL or queue state. */
 export function deliveryEnvelope(input: unknown): DeliveryEnvelope {
+  input = normalizeBotPausePayload(input as Record<string, unknown>);
   durableCallbackSchema.parse(input);
   // Keep the original property order for legacy Redis fingerprints. SQL stores payload as JSON wire text,
   // not a database-decoded JSON/JSONB object; the event intent hash below is separately canonicalized for queue deduplication.
@@ -46,7 +58,10 @@ export function deliveryEnvelope(input: unknown): DeliveryEnvelope {
   if (Buffer.byteLength(JSON.stringify(body)) > MAX_CALLBACK_BYTES)
     throw new Error('callback_too_large');
   const scopeKey = callbackScopeKey(body);
-  const event = body.type === 'completion' ? 'completion' : `step:${body.stepIndex}`;
+  const event =
+    body.type === 'completion'
+      ? 'completion'
+      : `${body.reason === 'waiting_for_human' ? 'interaction' : 'step'}:${body.stepIndex}`;
   // Transport timing/observability fields are not business identity. Freeze the first payload.
   const {
     duration: _duration,

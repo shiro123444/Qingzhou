@@ -2,6 +2,7 @@
  * Lark/Feishu adapter configuration.
  */
 export interface LarkAdapterConfig {
+  persistVerifiedWebhook?: (payload: unknown, eventId: string, threadId: string) => Promise<void>;
   /** Lark app ID */
   appId: string;
   /** Lark app secret */

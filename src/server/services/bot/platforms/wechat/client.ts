@@ -191,15 +191,15 @@ class WechatGatewayClient implements PlatformClient {
       try {
         const response = await this.api.getUpdates(cursor, this.abort.signal);
 
-        // Reset retry delay on success
-        retryDelay = 1000;
-
         await this.processUpdates(response.msgs, webhookUrl);
 
         // Do not skip this batch when authenticated forwarding is rejected.
         if (response.get_updates_buf) {
+          await this.context.pollingCursorStore?.save(response.get_updates_buf);
           cursor = response.get_updates_buf;
         }
+        // A successful poll is not a successful batch until forwarding has completed.
+        retryDelay = 1000;
       } catch (err: any) {
         if (this.abort.signal.aborted) break;
 
@@ -235,16 +235,20 @@ class WechatGatewayClient implements PlatformClient {
       probeAbort.abort();
     }, READY_PROBE_TIMEOUT_MS);
 
+    let previousCursor: string | undefined;
     try {
       const signal = AbortSignal.any([this.abort.signal, probeAbort.signal]);
-      const response = await this.api.getUpdates(undefined, signal);
+      previousCursor = await this.context.pollingCursorStore?.load();
+      const response = await this.api.getUpdates(previousCursor, signal);
 
       await this.processUpdates(response.msgs, webhookUrl);
-      return response.get_updates_buf || undefined;
+      if (response.get_updates_buf)
+        await this.context.pollingCursorStore?.save(response.get_updates_buf);
+      return response.get_updates_buf || previousCursor;
     } catch (err) {
       if (this.abort.signal.aborted || probeAbort.signal.aborted) {
         log('WechatBot appId=%s readiness probe timed out, continuing', this.applicationId);
-        return undefined;
+        return previousCursor;
       }
 
       throw err;
@@ -322,7 +326,9 @@ class WechatGatewayClient implements PlatformClient {
   createAdapter(): Record<string, any> {
     return {
       wechat: createWechatAdapter({
+        persistVerifiedWebhook: this.context.persistVerifiedWebhook,
         authenticateWebhook: createGatewayAuthenticator({
+          durableReceipt: !!this.context.persistVerifiedWebhook,
           applicationId: this.applicationId,
           platform: this.id,
           secret: getWechatBotToken(this.config.credentials),
@@ -401,6 +407,14 @@ class WechatGatewayClient implements PlatformClient {
     };
 
     return {
+      prepareFile: async ({ bytes, filename, deliveryId }) => {
+        const token = await resolveToken();
+        if (!token) throw new Error('WeChat file replies require a conversation context token');
+        const item = await this.api.uploadFile(targetId, bytes, filename);
+        return async () => {
+          await this.api.sendFile(targetId, item, token, deliveryId);
+        };
+      },
       createMessage: async (content) => {
         const token = await resolveToken();
         await this.api.sendMessage(targetId, content, token);

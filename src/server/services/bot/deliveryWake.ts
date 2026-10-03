@@ -8,7 +8,12 @@ export function wakeBotDelivery(db: LobeChatDatabase): void {
     after(async () => {
       try {
         const { BotDeliveryService } = await import('./BotDeliveryService');
-        await new BotDeliveryService(db).sweep();
+        const { BotInboundService } = await import('./BotInboundService');
+        const results = await Promise.allSettled([
+          new BotDeliveryService(db).sweep(),
+          new BotInboundService(db).sweep(),
+        ]);
+        if (results.some((r) => r.status === 'rejected')) throw new Error('drain_deferred');
       } catch {
         console.error('Bot delivery background drain deferred to scheduler');
       }

@@ -20,6 +20,7 @@ export interface PresentationToolchainOptions {
   maxOutputBytes?: number;
   pptMasterRoot: string;
   providerCommand: readonly string[];
+  qualityArgs?: readonly string[];
   qualityScriptPath: string;
   runner: PresentationRunner;
   runnerId: string;
@@ -188,6 +189,7 @@ export class PptMasterToolchain implements PresentationToolchain {
         ...this.options.providerCommand.slice(1),
         script,
         workspace,
+        ...(kind === 'quality' ? (this.options.qualityArgs ?? []) : []),
         // The converter's default auto mode cycles effects across the whole
         // deck. A fixed effect keeps untouched slides stable after page edits.
         ...(kind === 'convert'

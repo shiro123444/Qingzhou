@@ -10,6 +10,7 @@ export * from './apiKey';
 export * from './asyncTask';
 export * from './betterAuth';
 export * from './botDelivery';
+export * from './botInbound';
 export * from './chatGroup';
 export * from './documentHistory';
 export * from './file';

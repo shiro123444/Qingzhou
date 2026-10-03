@@ -1,4 +1,4 @@
-import { createCipheriv } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash } from 'node:crypto';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -39,6 +39,56 @@ describe('WechatApiClient', () => {
   beforeEach(() => {
     mockFetch.mockReset();
     client = new WechatApiClient('test-token', 'bot-123');
+  });
+
+  describe('file replies', () => {
+    it('encrypts uploaded bytes and sends a matching file reference with the conversation token', async () => {
+      const bytes = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>');
+      mockFetch
+        .mockResolvedValueOnce(jsonResponse({ ret: 0, upload_param: 'upload-parameter' }))
+        .mockResolvedValueOnce(
+          new Response(null, { headers: { 'x-encrypted-param': 'download-parameter' } }),
+        )
+        .mockResolvedValueOnce(jsonResponse({ ret: 0 }));
+      const item = await client.uploadFile('user-1', bytes, 'formula.svg');
+      const request = JSON.parse(mockFetch.mock.calls[0][1]!.body as string);
+      expect(request).toMatchObject({ media_type: 3, rawsize: bytes.length, to_user_id: 'user-1' });
+      expect(request.rawfilemd5).toBe(createHash('md5').update(bytes).digest('hex'));
+      const encrypted = Buffer.from(mockFetch.mock.calls[1][1]!.body as Uint8Array);
+      const decipher = createDecipheriv('aes-128-ecb', Buffer.from(request.aeskey, 'hex'), null);
+      expect(Buffer.concat([decipher.update(encrypted), decipher.final()])).toEqual(bytes);
+      expect(request.filesize).toBe(encrypted.length);
+      expect(item.file_item?.media?.aes_key).toBe(Buffer.from(request.aeskey).toString('base64'));
+      await client.sendFile('user-1', item, 'context-1', 'stable-delivery-id');
+      const sent = JSON.parse(mockFetch.mock.calls[2][1]!.body as string);
+      expect(sent.msg).toMatchObject({
+        client_id: 'stable-delivery-id',
+        context_token: 'context-1',
+        item_list: [item],
+      });
+      expect(item.file_item?.len).toBe(String(bytes.length));
+    });
+
+    it('rejects unsupported upload hosts before transmitting file bytes', async () => {
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse({ upload_full_url: 'http://127.0.0.1/private' }),
+      );
+      await expect(client.uploadFile('user-1', Buffer.from('private'), 'test.txt')).rejects.toThrow(
+        'unsupported CDN',
+      );
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('never sends a file after failed CDN upload or missing context', async () => {
+      mockFetch
+        .mockResolvedValueOnce(jsonResponse({ upload_param: 'upload' }))
+        .mockResolvedValueOnce(new Response(null, { status: 503 }));
+      await expect(client.uploadFile('user-1', Buffer.from('hello'), 'test.txt')).rejects.toThrow(
+        'HTTP 503',
+      );
+      await expect(client.sendFile('user-1', {} as any, '', 'id')).rejects.toThrow('context token');
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
   });
 
   // ---------- constructor ----------

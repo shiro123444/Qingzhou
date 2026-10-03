@@ -61,6 +61,45 @@ describe('WechatAdapter', () => {
     vi.restoreAllMocks();
   });
 
+  it('acknowledges only after the authenticated raw message is durably accepted', async () => {
+    const persist = vi.fn().mockResolvedValue(undefined);
+    const auth = vi.fn().mockResolvedValue(undefined);
+    const durable = new WechatAdapter({
+      botId: 'bot_123',
+      botToken: 'tok',
+      authenticateWebhook: auth,
+      persistVerifiedWebhook: persist,
+    });
+    await durable.initialize(mockChat as any);
+    const raw = makeRawMessage();
+    expect((await durable.handleWebhook(makeRequest(raw))).status).toBe(202);
+    expect(persist).toHaveBeenCalledWith(raw, '42', 'wechat:single:user_abc@im.wechat');
+    expect(auth.mock.invocationCallOrder[0]).toBeLessThan(persist.mock.invocationCallOrder[0]);
+    expect(mockChat.processMessage).not.toHaveBeenCalled();
+    persist.mockRejectedValueOnce(new Error('database down'));
+    expect((await durable.handleWebhook(makeRequest(raw))).status).toBe(503);
+  });
+
+  it('never stores an unauthenticated payload, but awaits trusted replay errors', async () => {
+    const persist = vi.fn();
+    const durable = new WechatAdapter({
+      botId: 'bot_123',
+      botToken: 'tok',
+      authenticateWebhook: async () => new Response('Unauthorized', { status: 401 }),
+      persistVerifiedWebhook: persist,
+    });
+    await durable.initialize(mockChat as any);
+    expect((await durable.handleWebhook(makeRequest(makeRawMessage()))).status).toBe(401);
+    expect(persist).not.toHaveBeenCalled();
+    mockChat.processMessage.mockRejectedValueOnce(new Error('handler failed'));
+    await expect(
+      durable.dispatchVerifiedWebhook(makeRawMessage(), {
+        deduplicate: false,
+        propagateHandlerErrors: true,
+      }),
+    ).rejects.toThrow('handler failed');
+  });
+
   // ---------- constructor & initialize ----------
 
   describe('constructor', () => {

@@ -6,6 +6,8 @@ import debug from 'debug';
 import { getServerDB } from '@/database/core/db-adaptor';
 import type { DecryptedBotProvider } from '@/database/models/agentBotProvider';
 import { AgentBotProviderModel } from '@/database/models/agentBotProvider';
+import { BotInboundModel } from '@/database/models/botInbound';
+import type { BotInboundEvent } from '@/database/schemas/botInbound';
 import type { LobeChatDatabase } from '@/database/type';
 import { appEnv } from '@/envs/app';
 import { getAgentRuntimeRedisClient } from '@/server/modules/AgentRuntime/redis';
@@ -14,7 +16,10 @@ import { emitAgentSignalSourceEvent } from '@/server/services/agentSignal';
 import { AiAgentService } from '@/server/services/aiAgent';
 
 import { AgentBridgeService } from './AgentBridgeService';
+import { BotInboundService, inboundExecution } from './BotInboundService';
+import { BotInteractionError, BotInteractionService } from './BotInteractionService';
 import { buildBotContext } from './buildBotContext';
+import { wakeBotDelivery } from './deliveryWake';
 import {
   createOrGetPairingRequest,
   deletePairingRequest,
@@ -57,6 +62,7 @@ import {
   renderInlineError,
   renderSenderRejected,
 } from './replyTemplate';
+import { botSessionKey } from './sessionScope';
 
 const log = debug('lobe-server:bot:message-router');
 
@@ -95,6 +101,7 @@ interface ResolvedAgentInfo {
 }
 
 interface RegisteredBot {
+  adapters: Record<string, any>;
   agentInfo: ResolvedAgentInfo;
   chatBot: Chat<any>;
   client: PlatformClient;
@@ -219,6 +226,28 @@ export class BotMessageRouter {
     return new Response(`No bot configured for ${platform}`, { status: 404 });
   }
 
+  /** Database receipts are trusted only after rechecking the current owning provider. */
+  async dispatchPersistedInbound(job: BotInboundEvent): Promise<void> {
+    const db = await getServerDB();
+    const provider = await AgentBotProviderModel.findByPlatformAndAppId(
+      db,
+      job.platform,
+      job.applicationId,
+    );
+    if (!provider || provider.enabled === false || provider.userId !== job.userId) return;
+    const bot = await this.getOrCreateBot(job.platform, job.applicationId);
+    if (!bot || bot.agentInfo.userId !== job.userId || bot.agentInfo.agentId !== provider.agentId)
+      throw new Error('inbound_provider_unavailable');
+    const adapter = bot.adapters[job.platform];
+    if (!adapter?.dispatchVerifiedWebhook || !job.payload)
+      throw new Error('inbound_adapter_unavailable');
+    const response = await adapter.dispatchVerifiedWebhook(JSON.parse(job.payload), {
+      deduplicate: false,
+      propagateHandlerErrors: true,
+    });
+    if (!response.ok) throw new Error('inbound_dispatch_rejected');
+  }
+
   // ------------------------------------------------------------------
   // On-demand bot loading
   // ------------------------------------------------------------------
@@ -304,6 +333,17 @@ export class BotMessageRouter {
     const runtimeContext: BotPlatformRuntimeContext = {
       appUrl: appEnv.APP_URL,
       redisClient: getAgentRuntimeRedisClient() as any,
+      persistVerifiedWebhook: async (payload, eventId, threadId) => {
+        await new BotInboundService(serverDB).accept(
+          userId,
+          platform,
+          applicationId,
+          payload,
+          eventId,
+          threadId,
+        );
+        wakeBotDelivery(serverDB);
+      },
     };
 
     const client = entry.clientFactory.createClient(providerConfig, runtimeContext);
@@ -341,8 +381,8 @@ export class BotMessageRouter {
     const debounceMs = (settings.debounceMs as number) || DEFAULT_BOT_DEBOUNCE_MS;
     const chatBot = this.createChatBot(
       adapters,
-      `agent-${agentId}`,
-      concurrencyStrategy,
+      `agent-${userId}-${platform}-${applicationId}`,
+      ['qq', 'wechat', 'feishu'].includes(platform) ? 'concurrent' : concurrencyStrategy,
       debounceMs,
     );
     this.registerHandlers(chatBot, serverDB, client, commands, {
@@ -368,6 +408,7 @@ export class BotMessageRouter {
     }
 
     const registered: RegisteredBot = {
+      adapters,
       agentInfo: { agentId, userId },
       chatBot,
       client,
@@ -428,7 +469,11 @@ export class BotMessageRouter {
     const config: any = {
       adapters,
       concurrency:
-        concurrencyStrategy === 'debounce' ? { debounceMs, strategy: 'debounce' } : 'queue',
+        concurrencyStrategy === 'concurrent'
+          ? 'concurrent'
+          : concurrencyStrategy === 'debounce'
+            ? { debounceMs, strategy: 'debounce' }
+            : 'queue',
       userName: `lobehub-bot-${label}`,
     };
 
@@ -517,7 +562,6 @@ export class BotMessageRouter {
     },
   ): void {
     const { agentId, applicationId, platform, userId } = info;
-    const bridge = new AgentBridgeService(serverDB, userId);
     const charLimit = (info.settings?.charLimit as number) || undefined;
     const displayToolCalls = info.settings?.displayToolCalls === true;
     const dmSettings: DmSettings = extractDmSettings(info.settings);
@@ -773,6 +817,27 @@ export class BotMessageRouter {
       return true;
     };
 
+    const tryAnswerInteraction = async (
+      thread: { id: string; post: (text: string) => Promise<any> },
+      message: Message,
+    ) => {
+      try {
+        const operationId = await new BotInteractionService(serverDB, userId).respondToMessage(
+          { platform, applicationId, platformThreadId: thread.id },
+          message.author?.userId,
+          message.text ?? '',
+          inboundExecution.getStore()?.receivedAt,
+        );
+        if (!operationId) return false;
+        await thread.post(`已收到回答，继续处理执行：${operationId}`);
+        return true;
+      } catch (error) {
+        if (!(error instanceof BotInteractionError)) throw error;
+        await thread.post(error.message);
+        return true;
+      }
+    };
+
     /** Returns true when the inbound passes the standard caller-test
      *  text. Used to short-circuit gate checks for non-command messages in
      *  subscribed group threads that aren't addressed to the bot. */
@@ -930,6 +995,7 @@ export class BotMessageRouter {
       }
 
       if (await tryDispatch(thread, message.text, message.author, replyLocale)) return;
+      if (await tryAnswerInteraction(thread, message)) return;
 
       log(
         'onNewMention raw: agent=%s, platform=%s, msgId=%s, textLen=%d, attachments=%o, skipped=%d',
@@ -982,7 +1048,7 @@ export class BotMessageRouter {
         ((merged as any).attachments as unknown[] | undefined)?.length ?? 0,
       );
       try {
-        await bridge.handleMention(thread, merged, {
+        await new AgentBridgeService(serverDB, userId).handleMention(thread, merged, {
           agentId,
           botContext: buildBotContext({
             applicationId,
@@ -997,6 +1063,7 @@ export class BotMessageRouter {
           replyLocale,
         });
       } catch (error) {
+        if (inboundExecution.getStore()) throw error;
         const operationId = AgentBridgeService.getActiveOperationId(thread.id);
         log(
           'onNewMention: unhandled error from handleMention: operationId=%s, %O',
@@ -1095,6 +1162,7 @@ export class BotMessageRouter {
       }
 
       if (await tryDispatch(thread, message.text, message.author, replyLocale)) return;
+      if (await tryAnswerInteraction(thread, message)) return;
 
       log(
         'onSubscribedMessage raw: agent=%s, platform=%s, msgId=%s, textLen=%d, attachments=%o, skipped=%d',
@@ -1168,7 +1236,7 @@ export class BotMessageRouter {
       );
 
       try {
-        await bridge.handleSubscribedMessage(thread, merged, {
+        await new AgentBridgeService(serverDB, userId).handleSubscribedMessage(thread, merged, {
           agentId,
           botContext: buildBotContext({
             applicationId,
@@ -1183,6 +1251,7 @@ export class BotMessageRouter {
           replyLocale,
         });
       } catch (error) {
+        if (inboundExecution.getStore()) throw error;
         const operationId = AgentBridgeService.getActiveOperationId(thread.id);
         log(
           'onSubscribedMessage: unhandled error from handleSubscribedMessage: operationId=%s, %O',
@@ -1385,7 +1454,7 @@ export class BotMessageRouter {
         );
 
         try {
-          await bridge.handleMention(thread, merged, {
+          await new AgentBridgeService(serverDB, userId).handleMention(thread, merged, {
             agentId,
             botContext: buildBotContext({
               applicationId,
@@ -1400,6 +1469,7 @@ export class BotMessageRouter {
             replyLocale,
           });
         } catch (error) {
+          if (inboundExecution.getStore()) throw error;
           log('onNewMessage: unhandled error from handleMention: %O', error);
           try {
             const errMsg = error instanceof Error ? error.message : String(error);
@@ -1455,6 +1525,70 @@ export class BotMessageRouter {
 
     return [
       {
+        name: 'status',
+        description: 'Show execution status and pending channel interaction',
+        handler: async (ctx) => {
+          const active = await new BotInboundModel(serverDB).getSession(
+            userId,
+            botSessionKey(userId, {
+              platform,
+              applicationId,
+              platformThreadId: ctx.threadId,
+            }),
+          );
+          if (!active?.operationId) {
+            await ctx.post('当前会话没有正在执行的任务。');
+            return;
+          }
+          const pending = await new BotInteractionService(serverDB, userId).pending(
+            active.operationId,
+          );
+          if (
+            pending &&
+            pending.state.metadata?.botContext?.senderExternalUserId !== ctx.authorUserId
+          ) {
+            await ctx.post('只有本次请求的发送者可以查看交互详情。');
+            return;
+          }
+          const notice = await new BotInteractionService(serverDB, userId).describe(
+            active.operationId,
+          );
+          await ctx.post(notice ?? `当前执行：${active.operationId}\n正在处理，可用 /stop 取消。`);
+        },
+      },
+      ...(['confirm', 'reject', 'answer'] as const).map((name) => ({
+        name,
+        description: `${name} the pending interaction using its token`,
+        options: [
+          {
+            name: 'input',
+            description: 'Interaction token followed by your answer when required',
+            required: true,
+          },
+        ],
+        handler: async (ctx: CommandContext) => {
+          try {
+            const operationId = await new BotInteractionService(serverDB, userId).respond(
+              {
+                platform,
+                applicationId,
+                platformThreadId: ctx.threadId,
+              },
+              ctx.authorUserId,
+              name,
+              ctx.args,
+            );
+            await ctx.post(`已提交，继续处理执行：${operationId}`);
+          } catch (error) {
+            await ctx.post(
+              error instanceof BotInteractionError
+                ? error.message
+                : '交互提交失败，请查看执行状态后重试。',
+            );
+          }
+        },
+      })),
+      {
         description: 'Start a new conversation',
         handler: async (ctx) => {
           log('command /new: agent=%s, platform=%s', agentId, platform);
@@ -1467,12 +1601,18 @@ export class BotMessageRouter {
         description: 'Stop the current execution',
         handler: async (ctx) => {
           log('command /stop: agent=%s, platform=%s', agentId, platform);
-          const isActive = AgentBridgeService.isThreadActive(ctx.threadId);
-          if (!isActive) {
+          const key = botSessionKey(userId, {
+            platform,
+            applicationId,
+            platformThreadId: ctx.threadId,
+          });
+          const sessions = new BotInboundModel(serverDB);
+          const active = await sessions.getSession(userId, key);
+          if (!active) {
             await ctx.post(renderCommandReply('cmdStopNotActive', ctx.replyLocale));
             return;
           }
-          const operationId = AgentBridgeService.getActiveOperationId(ctx.threadId);
+          const operationId = active.operationId;
           if (operationId) {
             try {
               const aiAgentService = new AiAgentService(serverDB, userId);
@@ -1482,7 +1622,8 @@ export class BotMessageRouter {
                 await ctx.post(renderCommandReply('cmdStopUnable', ctx.replyLocale));
                 return;
               }
-              AgentBridgeService.clearActiveThread(ctx.threadId);
+              await sessions.releaseSession(userId, key, { operationId });
+              AgentBridgeService.clearActiveThread(key);
               log('command /stop: interrupted operationId=%s', operationId);
             } catch (error) {
               log('command /stop: interruptTask failed: %O', error);
@@ -1490,7 +1631,8 @@ export class BotMessageRouter {
               return;
             }
           } else {
-            AgentBridgeService.requestStop(ctx.threadId);
+            await sessions.requestStop(userId, key);
+            AgentBridgeService.requestStop(key);
             log('command /stop: queued deferred stop for thread=%s', ctx.threadId);
           }
           await ctx.post(renderCommandReply('cmdStopRequested', ctx.replyLocale));

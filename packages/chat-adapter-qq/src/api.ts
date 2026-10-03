@@ -7,7 +7,7 @@ import type {
 import { QQ_MSG_TYPE } from './types';
 
 const AUTH_URL = 'https://bots.qq.com/app/getAppAccessToken';
-const API_BASE_URL = 'https://api.sgroup.qq.com';
+const API_BASE_URL = 'https://api.bot.qq.com';
 const MAX_TEXT_LENGTH = 2000;
 
 export class QQApiClient {
@@ -206,5 +206,50 @@ export class QQApiClient {
       return text.slice(0, MAX_TEXT_LENGTH - 3) + '...';
     }
     return text;
+  }
+
+  /** Upload without sending; the caller ledgers the separate visible message. */
+  async uploadFile(
+    threadType: 'group' | 'c2c',
+    targetId: string,
+    file: { bytes: Uint8Array; filename: string; mimeType: string },
+  ): Promise<string> {
+    if (file.bytes.length < 1 || file.bytes.length > 10 * 1024 * 1024)
+      throw new Error('QQ direct file replies support files up to 10 MiB');
+    const fileType = ['image/png', 'image/jpeg'].includes(file.mimeType) ? 1 : 4;
+    const prefix = threadType === 'group' ? 'groups' : 'users';
+    const result = await this.call<{ file_info?: string }>(
+      'POST',
+      `/v2/${prefix}/${encodeURIComponent(targetId)}/files`,
+      {
+        file_type: fileType,
+        file_data: Buffer.from(file.bytes).toString('base64'),
+        file_name: file.filename,
+        srv_send_msg: false,
+      },
+    );
+    if (typeof result.file_info !== 'string' || !result.file_info)
+      throw new Error('QQ upload response is missing file_info');
+    return result.file_info;
+  }
+
+  async sendFile(
+    threadType: 'group' | 'c2c',
+    targetId: string,
+    fileInfo: string,
+    options?: { msgId?: string; msgSeq?: number },
+  ): Promise<QQSendMessageResponse> {
+    const prefix = threadType === 'group' ? 'groups' : 'users';
+    return this.call<QQSendMessageResponse>(
+      'POST',
+      `/v2/${prefix}/${encodeURIComponent(targetId)}/messages`,
+      {
+        content: '',
+        msg_type: QQ_MSG_TYPE.MEDIA,
+        media: { file_info: fileInfo },
+        ...(options?.msgId ? { msg_id: options.msgId } : {}),
+        ...(options?.msgSeq !== undefined ? { msg_seq: options.msgSeq } : {}),
+      },
+    );
   }
 }

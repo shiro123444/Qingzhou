@@ -5,6 +5,7 @@ import debug from 'debug';
 
 import type { MessengerPlatform } from '@/config/messenger';
 import { AgentBotProviderModel } from '@/database/models/agentBotProvider';
+import { BotInboundModel } from '@/database/models/botInbound';
 import { TopicModel } from '@/database/models/topic';
 import { UserModel } from '@/database/models/user';
 import type { LobeChatDatabase } from '@/database/type';
@@ -13,28 +14,20 @@ import { AiAgentService } from '@/server/services/aiAgent';
 import { GatewayService } from '@/server/services/gateway';
 import { getMessageGatewayClient } from '@/server/services/gateway/MessageGatewayClient';
 import { isQueueAgentRuntimeEnabled } from '@/server/services/queue/impls';
-import { SystemAgentService } from '@/server/services/systemAgent';
 
+import { inboundExecution, InboundSessionBusy } from './BotInboundService';
 import { formatPrompt as formatPromptUtil } from './formatPrompt';
 import type { BotReplyLocale, PlatformClient } from './platforms';
 import {
   getBotReplyLocale,
-  getStepReactionEmoji,
   platformRegistry,
   RECEIVED_REACTION_EMOJI,
   THINKING_REACTION_EMOJI,
 } from './platforms';
+import { boundedDeliveryIO } from './postgresCallbackLedger';
 import { clearReactionState, saveReactionState } from './reactionState';
-import {
-  renderAgentError,
-  renderError,
-  renderErrorWithDetails,
-  renderFinalReply,
-  renderStart,
-  renderStepProgress,
-  renderStopped,
-  splitMessage,
-} from './replyTemplate';
+import { renderError, renderErrorWithDetails, renderStart, renderStopped } from './replyTemplate';
+import { botSessionKey } from './sessionScope';
 
 const log = debug('lobe-server:bot:agent-bridge');
 
@@ -131,6 +124,79 @@ interface ActiveReaction {
  * Provides real-time feedback via emoji reactions and editable progress messages.
  */
 export class AgentBridgeService {
+  private executionSession?: { key: string; owner: string };
+  private sessionTimer?: ReturnType<typeof setInterval>;
+  private sessionRenewal?: Promise<void>;
+  private sessionLost = false;
+  private awaitingHuman = false;
+  private sessionExpiresAt = 0;
+
+  private async acquireExecutionSession(threadId: string, opts: BridgeHandlerOpts): Promise<void> {
+    if (!opts.botContext) return;
+    inboundExecution.getStore()?.assertHeld();
+    const key = botSessionKey(this.userId, opts.botContext);
+    const model = new BotInboundModel(this.db);
+    const begun = Date.now();
+    const owner = await boundedDeliveryIO(() => model.acquireSession(this.userId, key));
+    if (!owner) throw new InboundSessionBusy();
+    this.executionSession = { key, owner };
+    this.sessionLost = false;
+    this.sessionExpiresAt = begun + 50_000;
+    const renew = () => {
+      if (this.sessionRenewal || this.sessionLost) return;
+      const started = Date.now();
+      this.sessionRenewal = boundedDeliveryIO(async () => {
+        const held = await model.renewSession(this.userId, key, owner);
+        const state = await model.getSession(this.userId, key);
+        if (!held || Date.now() >= this.sessionExpiresAt || state?.owner !== owner)
+          throw new Error('session_lease_lost');
+        this.sessionExpiresAt = started + 50_000;
+        if (state.stopRequested) AgentBridgeService.requestStop(key);
+      })
+        .catch(() => {
+          this.sessionLost = true;
+          AgentBridgeService.requestStop(key);
+        })
+        .finally(() => {
+          this.sessionRenewal = undefined;
+        });
+    };
+    this.sessionTimer = setInterval(renew, 10_000);
+    this.sessionTimer.unref?.();
+  }
+
+  private assertSessionHeld() {
+    inboundExecution.getStore()?.assertHeld();
+    if (this.sessionLost || (this.executionSession && Date.now() >= this.sessionExpiresAt))
+      throw createAbortError('Bot session ownership lost');
+  }
+
+  private async trackSessionOperation(operationId: string): Promise<void> {
+    if (!this.executionSession) return;
+    const { key, owner } = this.executionSession;
+    try {
+      this.assertSessionHeld();
+      const row = await boundedDeliveryIO(() =>
+        new BotInboundModel(this.db).attachOperation(this.userId, key, owner, operationId),
+      );
+      if (!row) throw createAbortError('Bot session ownership lost during startup');
+      if (row.stopRequested) await this.interruptTrackedOperation(key, operationId);
+    } catch (error) {
+      await new AiAgentService(this.db, this.userId).interruptTask({ operationId }).catch(() => {});
+      throw error;
+    }
+  }
+
+  private async finishExecutionSession(handoff: boolean) {
+    clearInterval(this.sessionTimer);
+    await this.sessionRenewal;
+    if (this.executionSession && !handoff) {
+      const { key, owner } = this.executionSession;
+      await boundedDeliveryIO(() =>
+        new BotInboundModel(this.db).releaseSession(this.userId, key, { owner }),
+      );
+    }
+  }
   private readonly db: LobeChatDatabase;
   private readonly userId: string;
 
@@ -216,7 +282,7 @@ export class AgentBridgeService {
     botContext?: ChatTopicBotContext,
   ): Promise<void> {
     const reactionThreadId = client?.resolveReactionThreadId?.(thread.id, message.id) ?? thread.id;
-    const current = AgentBridgeService.activeReactions.get(thread.id);
+    const current = AgentBridgeService.activeReactions.get(this.executionSession?.key ?? thread.id);
     if (current && current.emoji === nextEmoji && current.userMessageId === message.id) {
       return;
     }
@@ -226,7 +292,7 @@ export class AgentBridgeService {
       () => messenger?.replaceReaction?.(message.id, prevEmoji, nextEmoji) ?? Promise.resolve(),
       'replace reaction',
     );
-    AgentBridgeService.activeReactions.set(thread.id, {
+    AgentBridgeService.activeReactions.set(this.executionSession?.key ?? thread.id, {
       applicationId: botContext?.applicationId,
       emoji: nextEmoji,
       platform: botContext?.platform,
@@ -247,9 +313,9 @@ export class AgentBridgeService {
    * tracking entry. Safe to call even when no reaction was set.
    */
   private async clearReaction(thread: Thread<ThreadState>, client?: PlatformClient): Promise<void> {
-    const current = AgentBridgeService.activeReactions.get(thread.id);
+    const current = AgentBridgeService.activeReactions.get(this.executionSession?.key ?? thread.id);
     if (!current) return;
-    AgentBridgeService.activeReactions.delete(thread.id);
+    AgentBridgeService.activeReactions.delete(this.executionSession?.key ?? thread.id);
     const messenger = client?.getMessenger(current.reactionThreadId);
     await safeSideEffect(
       () =>
@@ -350,7 +416,7 @@ export class AgentBridgeService {
       errorMessage,
     );
 
-    AgentBridgeService.clearActiveThread(thread.id);
+    AgentBridgeService.clearActiveThread(this.executionSession?.key ?? thread.id);
 
     const errorContent = {
       markdown: stopped
@@ -406,8 +472,9 @@ export class AgentBridgeService {
       ((message as any).attachments as unknown[] | undefined)?.length ?? 0,
     );
 
+    await this.acquireExecutionSession(thread.id, opts);
     // Skip if there's already an active execution for this thread
-    if (AgentBridgeService.activeThreads.has(thread.id)) {
+    if (!opts.botContext && AgentBridgeService.activeThreads.has(thread.id)) {
       log('handleMention: skipping, thread=%s already has an active execution', thread.id);
       return;
     }
@@ -419,7 +486,7 @@ export class AgentBridgeService {
     // Mark the thread as active and run the rest inside a try/finally so the
     // active flag is ALWAYS released even if a side-effect call (subscribe /
     // startTyping / addReaction) throws on a transient platform network error.
-    AgentBridgeService.activeThreads.add(thread.id);
+    AgentBridgeService.activeThreads.add(this.executionSession?.key ?? thread.id);
 
     try {
       // Immediate feedback: mark as received + show typing. Both are
@@ -466,7 +533,10 @@ export class AgentBridgeService {
           log('handleMention: stored topicId=%s in thread=%s state', topicId, thread.id);
         }
       } catch (error) {
-        const operationId = AgentBridgeService.activeOperations.get(thread.id);
+        if (inboundExecution.getStore()) throw error;
+        const operationId = AgentBridgeService.activeOperations.get(
+          this.executionSession?.key ?? thread.id,
+        );
         log('handleMention error: operationId=%s, %O', operationId, error);
         try {
           await thread.post({ markdown: renderError(operationId, replyLocale) });
@@ -475,7 +545,8 @@ export class AgentBridgeService {
         }
       }
     } finally {
-      AgentBridgeService.activeThreads.delete(thread.id);
+      await this.finishExecutionSession(this.awaitingHuman || (queueMode && queueHandoffSucceeded));
+      AgentBridgeService.activeThreads.delete(this.executionSession?.key ?? thread.id);
       // In queue mode, the callback owns cleanup only after webhook handoff succeeds.
       // If setup fails before that point, clean up locally to avoid leaked reactions.
       if (!queueMode || !queueHandoffSucceeded) {
@@ -515,7 +586,7 @@ export class AgentBridgeService {
     // a concurrent message clears topicId (stale reset) and then no-ops
     // in handleMention because the thread is active — dropping the message
     // but leaving state cleared so the next message starts a fresh topic.
-    if (AgentBridgeService.activeThreads.has(thread.id)) {
+    if (!opts.botContext && AgentBridgeService.activeThreads.has(thread.id)) {
       log(
         'handleSubscribedMessage: skipping, thread=%s already has an active execution',
         thread.id,
@@ -539,7 +610,7 @@ export class AgentBridgeService {
             elapsed / (60 * 60 * 1000),
           );
           await thread.setState({ ...threadState, topicId: undefined });
-          return this.handleMention(thread, message, opts);
+          return new AgentBridgeService(this.db, this.userId).handleMention(thread, message, opts);
         }
       }
     } catch (error) {
@@ -556,12 +627,13 @@ export class AgentBridgeService {
     const queueMode = isQueueAgentRuntimeEnabled();
     let queueHandoffSucceeded = false;
 
+    await this.acquireExecutionSession(thread.id, opts);
     // Mark the thread as active and run the rest inside a try/finally so the
     // active flag is ALWAYS released. Earlier this `add` happened outside the
     // try block, and a network error from `thread.startTyping()` would escape
     // before we entered the try — leaving the thread permanently locked
     // ("already has an active execution") until process restart.
-    AgentBridgeService.activeThreads.add(thread.id);
+    AgentBridgeService.activeThreads.add(this.executionSession?.key ?? thread.id);
 
     try {
       // Immediate feedback: mark as received + show typing. Both are
@@ -602,12 +674,17 @@ export class AgentBridgeService {
             'handleSubscribedMessage: stale topicId=%s, resetting and retrying as new mention',
             topicId,
           );
-          AgentBridgeService.activeThreads.delete(thread.id);
+          AgentBridgeService.activeThreads.delete(this.executionSession?.key ?? thread.id);
+          await this.finishExecutionSession(false);
           await thread.setState({ ...threadState, topicId: undefined });
-          return this.handleMention(thread, message, opts);
+          return new AgentBridgeService(this.db, this.userId).handleMention(thread, message, opts);
         }
 
-        const operationId = AgentBridgeService.activeOperations.get(thread.id);
+        if (inboundExecution.getStore()) throw error;
+
+        const operationId = AgentBridgeService.activeOperations.get(
+          this.executionSession?.key ?? thread.id,
+        );
         log('handleSubscribedMessage error: operationId=%s, %O', operationId, error);
         try {
           await thread.post({
@@ -618,7 +695,8 @@ export class AgentBridgeService {
         }
       }
     } finally {
-      AgentBridgeService.activeThreads.delete(thread.id);
+      await this.finishExecutionSession(this.awaitingHuman || (queueMode && queueHandoffSucceeded));
+      AgentBridgeService.activeThreads.delete(this.executionSession?.key ?? thread.id);
       // In queue mode, the callback owns cleanup only after webhook handoff succeeds.
       if (!queueMode || !queueHandoffSucceeded) {
         await this.clearReaction(thread, opts.client);
@@ -652,13 +730,13 @@ export class AgentBridgeService {
       ? platformRegistry.getPlatform(opts.botContext.platform)
       : undefined;
     const botPlatformContext:
-      | { platformName: string; supportsMarkdown: boolean; warnings?: string[] }
-      | undefined = platformDef
-      ? {
-          platformName: platformDef.name,
-          supportsMarkdown: platformDef.supportsMarkdown !== false,
-        }
-      : undefined;
+      { platformName: string; supportsMarkdown: boolean; warnings?: string[] } | undefined =
+      platformDef
+        ? {
+            platformName: platformDef.name,
+            supportsMarkdown: platformDef.supportsMarkdown !== false,
+          }
+        : undefined;
     // Whether we can edit a previously-posted message in place. When false
     // (QQ/WeChat today), the chat-adapter falls editMessage back to postMessage,
     // so each step/completion edit surfaces as a NEW message — leaving the
@@ -900,53 +978,55 @@ export class AgentBridgeService {
 
     let result: ExecAgentResult;
     try {
-      result = await AgentBridgeService.runWithStartupSignal(thread.id, (signal) =>
-        aiAgentService.execAgent({
-          agentId,
-          appContext: topicId ? { topicId } : undefined,
-          autoStart: true,
-          botContext,
-          botPlatformContext,
-          discordContext: channelContext
-            ? {
-                channel: channelContext.channel,
-                guild: channelContext.guild,
-                thread: channelContext.thread,
-              }
-            : undefined,
-          files,
-          hooks: [
-            {
-              handler: async () => {
-                /* local handler not used in queue mode */
+      result = await AgentBridgeService.runWithStartupSignal(
+        this.executionSession?.key ?? thread.id,
+        (signal) =>
+          aiAgentService.execAgent({
+            agentId,
+            appContext: topicId ? { topicId } : undefined,
+            autoStart: true,
+            botContext,
+            botPlatformContext,
+            discordContext: channelContext
+              ? {
+                  channel: channelContext.channel,
+                  guild: channelContext.guild,
+                  thread: channelContext.thread,
+                }
+              : undefined,
+            files,
+            hooks: [
+              {
+                handler: async () => {
+                  /* local handler not used in queue mode */
+                },
+                id: 'bot-step-progress',
+                type: 'afterStep',
+                webhook: {
+                  body: { ...webhookBody, type: 'step' },
+                  delivery: 'qstash',
+                  url: callbackUrl,
+                },
               },
-              id: 'bot-step-progress',
-              type: 'afterStep',
-              webhook: {
-                body: { ...webhookBody, type: 'step' },
-                delivery: 'qstash',
-                url: callbackUrl,
+              {
+                handler: async () => {
+                  /* local handler not used in queue mode */
+                },
+                id: 'bot-completion',
+                type: 'onComplete',
+                webhook: {
+                  body: { ...webhookBody, type: 'completion', userPrompt: prompt },
+                  delivery: 'qstash',
+                  url: callbackUrl,
+                },
               },
-            },
-            {
-              handler: async () => {
-                /* local handler not used in queue mode */
-              },
-              id: 'bot-completion',
-              type: 'onComplete',
-              webhook: {
-                body: { ...webhookBody, type: 'completion', userPrompt: prompt },
-                delivery: 'qstash',
-                url: callbackUrl,
-              },
-            },
-          ],
-          prompt,
-          signal,
-          title: '',
-          trigger,
-          userInterventionConfig: { approvalMode: 'headless' },
-        }),
+            ],
+            prompt,
+            signal,
+            title: '',
+            trigger,
+            userInterventionConfig: { approvalMode: 'auto-run' },
+          }),
       );
     } catch (error) {
       log('executeWithCallback[queue]: execAgent failed: %O', error);
@@ -988,11 +1068,18 @@ export class AgentBridgeService {
     );
 
     if (result.operationId) {
-      AgentBridgeService.activeOperations.set(thread.id, result.operationId);
+      await this.trackSessionOperation(result.operationId);
+      AgentBridgeService.activeOperations.set(
+        this.executionSession?.key ?? thread.id,
+        result.operationId,
+      );
 
-      if (AgentBridgeService.consumeStopRequest(thread.id)) {
+      if (AgentBridgeService.consumeStopRequest(this.executionSession?.key ?? thread.id)) {
         try {
-          await this.interruptTrackedOperation(thread.id, result.operationId);
+          await this.interruptTrackedOperation(
+            this.executionSession?.key ?? thread.id,
+            result.operationId,
+          );
         } catch (error) {
           log(
             'executeWithCallback[queue]: deferred stop failed for thread=%s: %O',
@@ -1037,27 +1124,17 @@ export class AgentBridgeService {
       botContext,
       botPlatformContext,
       callbackUrl,
-      charLimit,
       channelContext,
-      client,
-      displayToolCalls,
       files,
       gatewayConnectionId,
       prompt,
       replyLocale,
       topicId,
       trigger,
-      userMessage,
       webhookBody,
     } = opts;
 
-    let { progressMessage } = opts;
-    let operationStartTime = 0;
-    // Tracks the last markdown body written to `progressMessage` so we can
-    // skip redundant edits. Telegram rejects edits with identical content
-    // ("message is not modified"), and the final reply often matches the
-    // last streamed progress frame.
-    let lastProgressText: string | undefined;
+    const { progressMessage } = opts;
 
     const stopGatewayTyping = () => {
       if (gatewayConnectionId && botContext?.platformThreadId) {
@@ -1076,9 +1153,7 @@ export class AgentBridgeService {
 
       let resolvedTopicId = topicId ?? '';
 
-      const getElapsedMs = () => (operationStartTime > 0 ? Date.now() - operationStartTime : 0);
-
-      AgentBridgeService.runWithStartupSignal(thread.id, (signal) =>
+      AgentBridgeService.runWithStartupSignal(this.executionSession?.key ?? thread.id, (signal) =>
         aiAgentService.execAgent({
           agentId,
           appContext: topicId ? { topicId } : undefined,
@@ -1095,59 +1170,7 @@ export class AgentBridgeService {
           files,
           hooks: [
             {
-              handler: async (event) => {
-                if (event.shouldContinue && userMessage) {
-                  const desiredEmoji = getStepReactionEmoji(event.stepType, event.toolsCalling);
-                  await this.setReaction(thread, userMessage, client, desiredEmoji, botContext);
-                }
-
-                if (!event.shouldContinue || !progressMessage || displayToolCalls !== true) return;
-
-                const msgBody = renderStepProgress(
-                  {
-                    content: event.content,
-                    elapsedMs: event.elapsedMs ?? getElapsedMs(),
-                    executionTimeMs: event.executionTimeMs ?? 0,
-                    lastContent: event.lastLLMContent,
-                    lastToolsCalling: event.lastToolsCalling,
-                    reasoning: event.reasoning,
-                    stepType: (event.stepType as 'call_llm' | 'call_tool') ?? 'call_llm',
-                    thinking: event.thinking ?? false,
-                    toolsCalling: event.toolsCalling,
-                    toolsResult: event.toolsResult,
-                    totalCost: event.totalCost ?? 0,
-                    totalInputTokens: event.totalInputTokens ?? 0,
-                    totalOutputTokens: event.totalOutputTokens ?? 0,
-                    totalSteps: event.totalSteps ?? 0,
-                    totalTokens: event.totalTokens ?? 0,
-                    totalToolCalls: event.totalToolCalls ?? 0,
-                  },
-                  replyLocale,
-                );
-
-                const stats = {
-                  elapsedMs: event.elapsedMs ?? getElapsedMs(),
-                  totalCost: event.totalCost ?? 0,
-                  totalTokens: event.totalTokens ?? 0,
-                };
-                // Local mode goes through the Chat SDK adapter, which only
-                // applies the platform's markdown parse_mode when the message
-                // is `{ markdown }`. Pre-converting via `formatMarkdown` (HTML
-                // for Telegram, mrkdwn for Slack, …) would land in a plain
-                // string branch and render literal `**` / `<b>`. `formatReply`
-                // only appends a plain stats line, so it composes cleanly with
-                // the markdown body.
-                const progressBody = client?.formatReply?.(msgBody, stats) ?? msgBody;
-
-                if (progressBody === lastProgressText) return;
-
-                try {
-                  progressMessage = await progressMessage.edit({ markdown: progressBody });
-                  lastProgressText = progressBody;
-                } catch (error) {
-                  log('executeWithCallback[local]: failed to edit progress message: %O', error);
-                }
-              },
+              handler: async () => {},
               id: 'bot-step-progress',
               type: 'afterStep' as const,
               webhook: {
@@ -1158,138 +1181,17 @@ export class AgentBridgeService {
             },
             {
               handler: async (event) => {
+                if (event.reason === 'waiting_for_human') {
+                  this.awaitingHuman = true;
+                  clearTimeout(timeout);
+                  stopGatewayTyping();
+                  resolve({ reply: '', topicId: resolvedTopicId });
+                  return;
+                }
                 clearTimeout(timeout);
                 stopGatewayTyping();
-
-                const reason = event.reason;
-                log('onComplete: reason=%s', reason);
-
-                if (reason === 'error') {
-                  const errorMsg = event.errorMessage || 'Agent execution failed';
-                  log(
-                    'onComplete: agent run failed, operationId=%s, errorType=%s, errorMessage=%s',
-                    event.operationId,
-                    event.errorType,
-                    errorMsg,
-                  );
-                  try {
-                    const errorBody = renderAgentError(
-                      event.errorType,
-                      errorMsg,
-                      event.operationId,
-                      replyLocale,
-                    );
-                    // Wrap in `{ markdown }` so the Chat SDK adapter sets the
-                    // platform's markdown parse_mode (e.g. Telegram `Markdown`,
-                    // Slack `mrkdwn`) and converts the body. Plain strings are
-                    // sent without parse_mode and would render literal `**`.
-                    if (progressMessage) {
-                      await progressMessage.edit({ markdown: errorBody });
-                    } else {
-                      await thread.post({ markdown: errorBody });
-                    }
-                  } catch {
-                    // ignore send failure
-                  }
-                  // Resolve (not reject) — the friendly error has already been
-                  // posted to the user. Rejecting would bubble up to the outer
-                  // try/catch in handleMention and cause a duplicate generic
-                  // "Agent Execution Failed" message on top of the friendly one.
-                  resolve({ reply: '', topicId: resolvedTopicId });
-                  return;
-                }
-
-                if (reason === 'interrupted') {
-                  if (progressMessage) {
-                    try {
-                      await progressMessage.edit({
-                        markdown: renderStopped(undefined, replyLocale),
-                      });
-                    } catch {
-                      // ignore edit failure
-                    }
-                  }
-                  resolve({ reply: '', topicId: resolvedTopicId });
-                  return;
-                }
-
-                try {
-                  const lastAssistantContent = event.lastAssistantContent;
-
-                  if (lastAssistantContent) {
-                    const replyBody = renderFinalReply(lastAssistantContent);
-                    const replyStats = {
-                      elapsedMs: event.duration ?? getElapsedMs(),
-                      llmCalls: event.llmCalls ?? 0,
-                      toolCalls: event.toolCalls ?? 0,
-                      totalCost: event.cost ?? 0,
-                      totalTokens: event.totalTokens ?? 0,
-                    };
-                    // See progress-handler note above: keep the body as
-                    // markdown and let the Chat SDK adapter render it with the
-                    // platform's parse_mode. `formatReply` only appends a
-                    // plain-text stats line.
-                    const finalText = client?.formatReply?.(replyBody, replyStats) ?? replyBody;
-
-                    const chunks = splitMessage(finalText, charLimit);
-
-                    try {
-                      if (progressMessage) {
-                        if (chunks[0] !== lastProgressText) {
-                          await progressMessage.edit({ markdown: chunks[0] });
-                          lastProgressText = chunks[0];
-                        }
-                        for (let i = 1; i < chunks.length; i++) {
-                          await thread.post({ markdown: chunks[i] });
-                        }
-                      } else {
-                        for (const chunk of chunks) {
-                          await thread.post({ markdown: chunk });
-                        }
-                      }
-                    } catch (error) {
-                      log('executeWithCallback[local]: failed to send final message: %O', error);
-                    }
-
-                    log(
-                      'executeWithCallback[local]: got response (%d chars, %d chunks)',
-                      lastAssistantContent.length,
-                      chunks.length,
-                    );
-                    resolve({ reply: lastAssistantContent, topicId: resolvedTopicId });
-
-                    // Fire-and-forget: summarize topic title in DB
-                    if (resolvedTopicId && prompt) {
-                      const topicModel = new TopicModel(this.db, this.userId);
-                      topicModel
-                        .findById(resolvedTopicId)
-                        .then(async (topic) => {
-                          if (topic?.title) return;
-
-                          const systemAgent = new SystemAgentService(this.db, this.userId);
-                          const title = await systemAgent.generateTopicTitle({
-                            lastAssistantContent,
-                            userPrompt: prompt,
-                          });
-                          if (!title) return;
-
-                          await topicModel.update(resolvedTopicId, { title });
-                        })
-                        .catch((error) => {
-                          log(
-                            'executeWithCallback[local]: topic title summarization failed: %O',
-                            error,
-                          );
-                        });
-                    }
-
-                    return;
-                  }
-
-                  reject(new Error('Agent completed but no response content found'));
-                } catch (error) {
-                  reject(error);
-                }
+                // HookDispatcher persists the callback; all platform sends use the same worker/ledger.
+                resolve({ reply: event.lastAssistantContent ?? '', topicId: resolvedTopicId });
               },
               id: 'bot-completion',
               type: 'onComplete' as const,
@@ -1304,21 +1206,26 @@ export class AgentBridgeService {
           signal,
           title: '',
           trigger,
-          userInterventionConfig: { approvalMode: 'headless' },
+          userInterventionConfig: { approvalMode: 'auto-run' },
         }),
       )
         .then(async (result) => {
           resolvedTopicId = result.topicId;
-          operationStartTime = new Date(result.createdAt).getTime();
 
           if (!result.success) {
             clearTimeout(timeout);
+            stopGatewayTyping();
 
             log(
               'executeWithCallback[local]: startup failed, operationId=%s, error=%s',
               result.operationId,
               result.error,
             );
+
+            if (inboundExecution.getStore()) {
+              reject(new Error('backend_unavailable'));
+              return;
+            }
 
             if (progressMessage) {
               try {
@@ -1328,6 +1235,11 @@ export class AgentBridgeService {
               } catch (error) {
                 log('executeWithCallback[local]: failed to edit startup error: %O', error);
               }
+            } else {
+              await safeSideEffect(
+                () => thread.post({ markdown: renderError(result.operationId, replyLocale) }),
+                'post startup error',
+              );
             }
 
             resolve({ reply: '', topicId: result.topicId });
@@ -1335,11 +1247,18 @@ export class AgentBridgeService {
           }
 
           if (result.operationId) {
-            AgentBridgeService.activeOperations.set(thread.id, result.operationId);
+            await this.trackSessionOperation(result.operationId);
+            AgentBridgeService.activeOperations.set(
+              this.executionSession?.key ?? thread.id,
+              result.operationId,
+            );
 
-            if (AgentBridgeService.consumeStopRequest(thread.id)) {
+            if (AgentBridgeService.consumeStopRequest(this.executionSession?.key ?? thread.id)) {
               try {
-                await this.interruptTrackedOperation(thread.id, result.operationId);
+                await this.interruptTrackedOperation(
+                  this.executionSession?.key ?? thread.id,
+                  result.operationId,
+                );
               } catch (error) {
                 log(
                   'executeWithCallback[local]: deferred stop failed for thread=%s: %O',
@@ -1376,6 +1295,12 @@ export class AgentBridgeService {
 
           log('executeWithCallback[local]: startup error: %s', extractErrorMessage(error));
 
+          if (inboundExecution.getStore()) {
+            stopGatewayTyping();
+            reject(new Error('backend_unavailable'));
+            return;
+          }
+
           // Stale topic_id FK violation: propagate so handleSubscribedMessage can
           // clear thread state and retry as a fresh mention. Queue mode does the
           // same bailout in executeWithHooksQueueMode.
@@ -1390,7 +1315,9 @@ export class AgentBridgeService {
           // error inside the resolved-then path), the operationId may already
           // have been stashed in activeOperations — surface it so the failure
           // is traceable instead of opaque.
-          const fallbackOperationId = AgentBridgeService.activeOperations.get(thread.id);
+          const fallbackOperationId = AgentBridgeService.activeOperations.get(
+            this.executionSession?.key ?? thread.id,
+          );
 
           if (progressMessage) {
             try {
@@ -1400,6 +1327,11 @@ export class AgentBridgeService {
             } catch (editError) {
               log('executeWithCallback[local]: failed to edit startup error: %O', editError);
             }
+          } else {
+            await safeSideEffect(
+              () => thread.post({ markdown: renderError(fallbackOperationId, replyLocale) }),
+              'post startup error',
+            );
           }
 
           resolve({ reply: '', topicId: topicId ?? '' });
@@ -1531,8 +1463,7 @@ export class AgentBridgeService {
       const userModel = new UserModel(this.db, this.userId);
       const settings = await userModel.getUserSettings();
       this.timezone = (settings?.general as Record<string, unknown>)?.timezone as
-        | string
-        | undefined;
+        string | undefined;
     } catch {
       // Fall back to server time if settings can't be loaded
     }

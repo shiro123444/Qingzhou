@@ -1,5 +1,6 @@
 import { Client } from '@upstash/qstash';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as deliveryStore from '@/server/services/bot/deliveryStore';
 
 import { HookDispatcher } from '../HookDispatcher';
 import type { AgentHook, AgentHookEvent } from '../types';
@@ -64,6 +65,60 @@ describe('HookDispatcher', () => {
   });
 
   describe('dispatch (local mode)', () => {
+    it('persists the frozen bot intent before completing local lifecycle', async () => {
+      const enqueue = vi
+        .spyOn(deliveryStore, 'enqueueBotOutbox')
+        .mockResolvedValue({ id: 'outbox:id', status: 'pending' } as any);
+      const handler = vi.fn();
+      const frozen = {
+        operationId,
+        hookId: 'bot',
+        hookType: 'onComplete',
+        userId: 'user_test',
+        applicationId: 'app',
+        platformThreadId: 'qq:group:test',
+        type: 'completion',
+        duration: 100,
+      };
+      dispatcher.register(operationId, [
+        {
+          id: 'bot',
+          type: 'onComplete',
+          handler,
+          webhook: {
+            url: '/api/agent/webhooks/bot-callback',
+            body: { applicationId: 'app', platformThreadId: 'qq:group:test', type: 'completion' },
+          },
+        },
+      ]);
+      await dispatcher.dispatch(
+        operationId,
+        'onComplete',
+        makeEvent({ finalState: { metadata: { _pendingBotCallbacks: [frozen] } } as any }),
+      );
+      expect(enqueue).toHaveBeenCalledWith(frozen, undefined);
+      expect(enqueue.mock.invocationCallOrder[0]).toBeLessThan(handler.mock.invocationCallOrder[0]);
+    });
+
+    it('reports durable storage failure while still finishing local lifecycle cleanup', async () => {
+      vi.spyOn(deliveryStore, 'enqueueBotOutbox').mockRejectedValue(
+        new Error('database unavailable'),
+      );
+      const handler = vi.fn();
+      dispatcher.register(operationId, [
+        {
+          id: 'bot',
+          type: 'onComplete',
+          handler,
+          webhook: { url: '/api/agent/webhooks/bot-callback', body: { applicationId: 'app' } },
+        },
+      ]);
+      expect(await dispatcher.dispatch(operationId, 'onComplete', makeEvent())).toMatchObject({
+        success: false,
+        failures: [{ code: 'OUTBOX_PERSIST_FAILED', delivery: 'sql-outbox' }],
+      });
+      expect(handler).toHaveBeenCalledTimes(1);
+    });
     it('should call handler for matching hook type', async () => {
       const handler = vi.fn();
       dispatcher.register(operationId, [{ handler, id: 'test', type: 'onComplete' }]);

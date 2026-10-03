@@ -373,6 +373,7 @@ class CalculatorExecutor
         }
 
         const result = nerdamer.solveEquations(equation, solveVariables);
+        if (result === null) throw new Error('No solution found');
         const rawResult = result.toString();
 
         const pairs = rawResult.split(',');

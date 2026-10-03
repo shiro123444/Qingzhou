@@ -1,4 +1,6 @@
 export interface WechatAdapterConfig {
+  /** Server-owned durable receipt, called only after authentication and message validation. */
+  persistVerifiedWebhook?: (payload: unknown, eventId: string, threadId: string) => Promise<void>;
   /** Required for HTTP delivery: server-owned authentication of polling-gateway forwards. */
   authenticateWebhook?: (request: Request) => Promise<Response | void>;
   /** Bot's iLink user ID (from QR login) */

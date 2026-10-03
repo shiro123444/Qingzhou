@@ -1,169 +1,131 @@
 // @vitest-environment node
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { CallbackDeliveryError } from '@/server/services/bot/callbackLedger';
+import { BotDeliveryConflict } from '@/database/models/botDelivery';
+import { MAX_CALLBACK_BYTES } from '@/server/services/bot/deliveryEnvelope';
 
 import { botCallback } from '../botCallback';
 
-const mockHandleCallback = vi.fn();
+const { accept, wake } = vi.hoisted(() => ({ accept: vi.fn(), wake: vi.fn() }));
 
-vi.mock('@/server/services/bot/BotCallbackService', () => ({
-  BotCallbackService: vi.fn().mockImplementation(() => ({
-    handleCallback: mockHandleCallback,
-  })),
+vi.mock('@/server/services/bot/BotDeliveryService', () => ({
+  BotDeliveryService: vi.fn().mockImplementation(() => ({ accept })),
 }));
+vi.mock('@/server/services/bot/deliveryWake', () => ({ wakeBotDelivery: wake }));
+vi.mock('@/database/core/db-adaptor', () => ({ getServerDB: vi.fn().mockResolvedValue({}) }));
 
-vi.mock('@/database/core/db-adaptor', () => ({
-  getServerDB: vi.fn().mockResolvedValue({} as any),
-}));
-
-function buildContext(opts: { body?: unknown; jsonThrows?: boolean }) {
-  const captures: Array<{ body: any; status: number }> = [];
-  const ctx = {
+function context(body: unknown, raw = JSON.stringify(body)) {
+  return {
     header: vi.fn(),
-    json: (b: any, status = 200) => {
-      captures.push({ body: b, status });
-      return Response.json(b, { status });
-    },
-    req: {
-      json: opts.jsonThrows
-        ? async () => {
-            throw new Error('bad json');
-          }
-        : async () => opts.body,
-    },
+    json: (value: unknown, status = 200) => Response.json(value, { status }),
+    req: { text: vi.fn().mockResolvedValue(raw) },
   } as any;
-  return { ctx, getCaptures: () => captures };
 }
 
-const validStepBody = {
+const step = {
   applicationId: 'app-1',
-  platformThreadId: 'thread-1',
+  operationId: 'op-1',
+  platformThreadId: 'qq:group:thread-1',
   progressMessageId: 'msg-1',
+  stepIndex: 1,
   type: 'step',
+  userId: 'user-1',
 };
 
-describe('botCallback handler', () => {
+describe('botCallback durable receipt', () => {
   beforeEach(() => {
-    mockHandleCallback.mockReset();
-  });
-
-  afterEach(() => {
     vi.clearAllMocks();
+    accept.mockReset().mockResolvedValue({ id: 'receipt-1', status: 'pending' });
   });
 
-  it('returns 400 when JSON parsing throws', async () => {
-    const { ctx } = buildContext({ jsonThrows: true });
-    const res = await botCallback(ctx);
-    expect(res.status).toBe(400);
-    expect(mockHandleCallback).not.toHaveBeenCalled();
+  it('rejects invalid JSON before touching the receipt store', async () => {
+    const response = await botCallback(context(undefined, '{'));
+    expect(response.status).toBe(400);
+    expect(accept).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ['type', { ...validStepBody, type: undefined }],
-    ['applicationId', { ...validStepBody, applicationId: undefined }],
-    ['platformThreadId', { ...validStepBody, platformThreadId: undefined }],
-  ])('returns 400 when required field %s is missing', async (_field, body) => {
-    const { ctx, getCaptures } = buildContext({ body });
-    const res = await botCallback(ctx);
-    expect(res.status).toBe(400);
-    expect(getCaptures()[0].body.error).toMatch(/Missing required fields/);
-    expect(mockHandleCallback).not.toHaveBeenCalled();
+  it('bounds the raw callback before parsing or persisting it', async () => {
+    const response = await botCallback(context({}, 'x'.repeat(MAX_CALLBACK_BYTES + 1)));
+    expect(response.status).toBe(413);
+    expect(accept).not.toHaveBeenCalled();
   });
 
-  it('returns 400 for unknown callback types', async () => {
-    const { ctx, getCaptures } = buildContext({
-      body: { ...validStepBody, type: 'unknown' },
-    });
-    const res = await botCallback(ctx);
-    expect(res.status).toBe(400);
-    expect(getCaptures()[0].body.error).toBe('Unknown callback type: unknown');
-  });
-
-  it('delegates to BotCallbackService and returns 200 on happy path', async () => {
-    mockHandleCallback.mockResolvedValue({ status: 'delivered' });
-    const { ctx, getCaptures } = buildContext({ body: validStepBody });
-
-    const res = await botCallback(ctx);
-
-    expect(res.status).toBe(200);
-    expect(getCaptures()[0].body).toEqual({ status: 'delivered', success: true });
-    expect(mockHandleCallback).toHaveBeenCalledWith(validStepBody);
-  });
-
-  it('accepts type=completion', async () => {
-    mockHandleCallback.mockResolvedValue({ status: 'delivered' });
-    const body = { ...validStepBody, type: 'completion' };
-    const { ctx } = buildContext({ body });
-
-    const res = await botCallback(ctx);
-    expect(res.status).toBe(200);
-    expect(mockHandleCallback).toHaveBeenCalledWith(body);
-  });
-
-  it('returns sanitized 500 when the service throws', async () => {
-    mockHandleCallback.mockRejectedValue(new Error('service down'));
-    const { ctx, getCaptures } = buildContext({ body: validStepBody });
-
-    const res = await botCallback(ctx);
-
-    expect(res.status).toBe(500);
-    expect(getCaptures()[0].body).toEqual({
-      retryable: true,
-      status: 'callback_failed',
-      success: false,
-    });
-  });
-});
-
-it.each([
-  ['busy', 503, true],
-  ['lease_lost', 503, true],
-  ['backend_unavailable', 503, true],
-  ['unknown_delivery', 409, false],
-  ['payload_conflict', 409, false],
-  ['invalid_callback', 400, false],
-] as const)('exposes %s without leaking its cause', async (status, code, retryable) => {
-  mockHandleCallback.mockRejectedValue(
-    new CallbackDeliveryError(status, { cause: new Error('secret') }),
+  it.each(['type', 'applicationId', 'platformThreadId', 'operationId', 'userId', 'stepIndex'])(
+    'rejects a missing %s before touching the receipt store',
+    async (key) => {
+      expect((await botCallback(context({ ...step, [key]: undefined }))).status).toBe(400);
+      expect(accept).not.toHaveBeenCalled();
+    },
   );
-  const { ctx, getCaptures } = buildContext({ body: validStepBody });
-  const response = await botCallback(ctx);
-  expect(response.status).toBe(code);
-  expect(getCaptures()[0].body).toEqual({ retryable, status, success: false });
-  if (retryable) expect(ctx.header).toHaveBeenCalledWith('Retry-After', '30');
-});
 
-it('returns 200 skip for a duplicate', async () => {
-  mockHandleCallback.mockResolvedValue({ status: 'skipped' });
-  const { ctx, getCaptures } = buildContext({ body: validStepBody });
-  expect((await botCallback(ctx)).status).toBe(200);
-  expect(getCaptures()[0].body.status).toBe('skipped');
-});
+  it.each([null, [], 'text', { ...step, type: 'unknown' }])(
+    'rejects invalid payload %j',
+    async (body) => {
+      expect((await botCallback(context(body))).status).toBe(400);
+      expect(accept).not.toHaveBeenCalled();
+    },
+  );
 
-it.each([null, [], 'text'])('rejects non-object JSON %j', async (body) => {
-  expect((await botCallback(buildContext({ body }).ctx)).status).toBe(400);
-});
+  it.each(['pending', 'running'])(
+    'acknowledges SQL receipt %s and wakes recovery',
+    async (status) => {
+      accept.mockResolvedValue({ id: 'receipt-1', status });
+      const response = await botCallback(context(step));
+      expect(response.status).toBe(202);
+      expect(await response.json()).toEqual({
+        deliveryStatus: status,
+        receiptId: 'receipt-1',
+        status: 'accepted',
+        success: true,
+      });
+      expect(accept).toHaveBeenCalledWith(step);
+      expect(wake).toHaveBeenCalledTimes(1);
+    },
+  );
 
-it('reports a human-approval pause as skipped and still delegates resumed callbacks', async () => {
-  mockHandleCallback.mockReset();
-  mockHandleCallback
-    .mockResolvedValueOnce({ status: 'skipped' })
-    .mockResolvedValue({ status: 'delivered' });
-  const pause = {
-    ...validStepBody,
-    operationId: 'paused-op',
-    type: 'completion',
-    reason: 'waiting_for_human',
-  };
-  const { ctx, getCaptures } = buildContext({ body: pause });
-  expect((await botCallback(ctx)).status).toBe(200);
-  expect(getCaptures()[0].body).toEqual({ status: 'skipped', success: true });
-  const resumed = { ...pause, type: 'step', reason: undefined, stepIndex: 2 };
-  expect((await botCallback(buildContext({ body: resumed }).ctx)).status).toBe(200);
-  const completion = { ...pause, reason: 'completed' };
-  expect((await botCallback(buildContext({ body: completion }).ctx)).status).toBe(200);
-  expect(mockHandleCallback).toHaveBeenNthCalledWith(1, pause);
-  expect(mockHandleCallback).toHaveBeenNthCalledWith(2, resumed);
-  expect(mockHandleCallback).toHaveBeenNthCalledWith(3, completion);
+  it.each(['delivered', 'unknown_delivery', 'dead'])(
+    'preserves existing %s receipt without waking a send',
+    async (status) => {
+      accept.mockResolvedValue({ id: 'receipt-1', status });
+      const response = await botCallback(context(step));
+      expect(response.status).toBe(202);
+      expect((await response.json()).deliveryStatus).toBe(status);
+      expect(wake).not.toHaveBeenCalled();
+    },
+  );
+
+  it('accepts completion without a step index', async () => {
+    const body = { ...step, stepIndex: undefined, type: 'completion' };
+    expect((await botCallback(context(body))).status).toBe(202);
+    expect(accept).toHaveBeenCalledWith(JSON.parse(JSON.stringify(body)));
+  });
+
+  it('returns a sanitized retryable failure when SQL receipt is unavailable', async () => {
+    accept.mockRejectedValue(new Error('database password=secret'));
+    const ctx = context(step);
+    const response = await botCallback(ctx);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ status: 'receipt_unavailable', success: false });
+    expect(ctx.header).toHaveBeenCalledWith('Retry-After', '10');
+    expect(wake).not.toHaveBeenCalled();
+  });
+
+  it('rejects conflicting intent without waking a send', async () => {
+    accept.mockRejectedValue(new BotDeliveryConflict('payload_conflict'));
+    const response = await botCallback(context(step));
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ status: 'payload_conflict', success: false });
+    expect(wake).not.toHaveBeenCalled();
+  });
+
+  it('acknowledges a paused execution as skipped and accepts the resumed intent', async () => {
+    accept.mockResolvedValueOnce({ status: 'skipped' });
+    const pause = { ...step, type: 'completion', reason: 'waiting_for_human' };
+    const response = await botCallback(context(pause));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: 'skipped', success: true });
+    expect(wake).not.toHaveBeenCalled();
+    expect((await botCallback(context({ ...step, stepIndex: 2 }))).status).toBe(202);
+    expect(wake).toHaveBeenCalledTimes(1);
+  });
 });

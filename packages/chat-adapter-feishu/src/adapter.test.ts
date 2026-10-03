@@ -78,7 +78,7 @@ describe('LarkAdapter', () => {
     processMessage: vi.fn(),
   };
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.resetAllMocks();
     adapter = new LarkAdapter({
       appId: 'cli_test',
@@ -89,11 +89,35 @@ describe('LarkAdapter', () => {
     });
     // Mock API methods to avoid real network calls
     vi.spyOn((adapter as any).api, 'getTenantAccessToken').mockResolvedValue('mock_token');
-    adapter.initialize(mockChat as any);
+    vi.spyOn((adapter as any).api, 'getBotInfo').mockResolvedValue({});
+    vi.spyOn((adapter as any).api, 'getUserInfo').mockResolvedValue(null);
+    await adapter.initialize(mockChat as any);
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('persists authenticated messages without entering the transient SDK queue', async () => {
+    const persist = vi.fn().mockResolvedValue(undefined);
+    const durable = new LarkAdapter({
+      appId: 'cli_test',
+      appSecret: 'secret_test',
+      encryptKey: 'encrypt_test',
+      verificationToken: 'verify_tok',
+      persistVerifiedWebhook: persist,
+    });
+    vi.spyOn((durable as any).api, 'getTenantAccessToken').mockResolvedValue('mock_token');
+    vi.spyOn((durable as any).api, 'getBotInfo').mockResolvedValue({});
+    await durable.initialize(mockChat as any);
+    const payload = makeWebhookPayload(makeLarkMessage());
+    expect((await durable.handleWebhook(makeRequest(payload))).status).toBe(202);
+    expect(persist).toHaveBeenCalledWith(payload, 'om_test_msg_001', expect.any(String));
+    expect(mockChat.processMessage).not.toHaveBeenCalled();
+    persist.mockRejectedValueOnce(new Error('database down'));
+    const retry = makeRequest(payload);
+    expect((await durable.handleWebhook(retry.clone())).status).toBe(503);
+    expect((await durable.handleWebhook(retry)).status).toBe(202);
   });
 
   // ---------- constructor & initialize ----------

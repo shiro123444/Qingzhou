@@ -12,6 +12,7 @@ import {
   assertPresentationPublishable,
   inspectPresentationContent,
 } from '../src/server/runtime/presentation/content-quality';
+import { pptMasterProjectLock } from '../src/server/runtime/presentation/ppt-master-project';
 import { renderSemanticBlocks } from '../src/server/runtime/presentation/semantic-blocks';
 
 const pptMasterRoot = process.argv[2];
@@ -121,6 +122,7 @@ const plan = {
   })),
 };
 assertPresentationPublishable(plan);
+await writeFile(path.join(root, 'spec_lock.md'), pptMasterProjectLock(plan));
 for (const [index, slide] of rendered.entries()) {
   const name = String(index + 1).padStart(3, '0');
   await writeFile(path.join(root, 'svg_output', `${name}.svg`), slide.svg);
@@ -133,11 +135,23 @@ for (const [index, slide] of rendered.entries()) {
   );
 }
 const scripts = path.join(pptMasterRoot, 'skills', 'ppt-master', 'scripts');
-await promisify(execFile)('python3', [path.join(scripts, 'svg_quality_checker.py'), root], {
-  timeout: 120_000,
-});
+const pythonCommand = process.env.CORDIS_PPT_PYTHON || 'python3';
 await promisify(execFile)(
-  'python3',
+  pythonCommand,
+  [
+    path.join(scripts, 'svg_quality_checker.py'),
+    root,
+    '--canonical-authoring',
+    '--stage',
+    'final',
+    '--json',
+  ],
+  {
+    timeout: 120_000,
+  },
+);
+await promisify(execFile)(
+  pythonCommand,
   [
     path.join(scripts, 'svg_to_pptx.py'),
     root,

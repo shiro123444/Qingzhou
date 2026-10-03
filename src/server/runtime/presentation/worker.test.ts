@@ -123,6 +123,7 @@ describe('C-52 presentation plan worker', () => {
       'svg_output/001.svg',
       'svg_output/002.svg',
       'design_spec.json',
+      'spec_lock.md',
     ]);
     expect(writes.get('design_spec.json')).toContain('light');
     result.artifacts[0]!.bytes[0] = 9;

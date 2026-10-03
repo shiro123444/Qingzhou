@@ -46,6 +46,29 @@ const setup = async () => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('real WeChat client → configured adapter → gateway authentication', () => {
+  it('allows an identical authenticated retry after SQL receipt fails', async () => {
+    const persist = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('database down'))
+      .mockResolvedValue(undefined);
+    const client = new WechatClientFactory().createClient(config, {
+      persistVerifiedWebhook: persist,
+    });
+    const adapter = client.createAdapter().wechat as WechatAdapter;
+    const processMessage = vi.fn();
+    await adapter.initialize({
+      getLogger: () => ({ debug: vi.fn(), error: vi.fn(), info: vi.fn(), warn: vi.fn() }),
+      getUserName: () => 'test-bot',
+      processMessage,
+    } as never);
+    const init = signed();
+    expect((await adapter.handleWebhook(new Request(url, init))).status).toBe(503);
+    expect((await adapter.handleWebhook(new Request(url, init))).status).toBe(202);
+    expect(processMessage).not.toHaveBeenCalled();
+    const tampered = new Request(url, { ...init, body: body.replace('alice', 'victim') });
+    expect((await adapter.handleWebhook(tampered)).status).toBe(401);
+    expect(persist).toHaveBeenCalledTimes(2);
+  });
   it('accepts signed forwards once and blocks unsigned/modified deliveries', async () => {
     const keys = new Set<string>();
     const set = vi.fn(async (key: string) => {

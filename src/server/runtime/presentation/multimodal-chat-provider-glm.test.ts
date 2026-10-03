@@ -122,6 +122,22 @@ const defaultOptions = (fetcher: GLMChatFetcher) => ({
 });
 
 describe('GLMMultimodalChatAdapter (C-106)', () => {
+  it('reads explicit successful gateway envelopes and rejects unsuccessful envelopes', async () => {
+    const completion = {
+      choices: [{ message: { content: 'Real completion', role: 'assistant' } }],
+    };
+    const fetcher = vi
+      .fn<GLMChatFetcher>()
+      .mockResolvedValueOnce(response({ success: true, data: completion }))
+      .mockResolvedValueOnce(response({ success: false, data: completion }));
+    const port = createGLMMultimodalChatPort(defaultOptions(fetcher));
+    const request = { messages: [{ content: 'Hi', role: 'user' as const }] };
+    await expect(port.chat(request, { scope: defaultScope })).resolves.toMatchObject(completion);
+    await expect(port.chat(request, { scope: defaultScope })).rejects.toMatchObject({
+      code: 'CHAT_PAYLOAD_INVALID',
+    });
+  });
+
   it('sends OpenAI-compatible chat completions requests with bearer authorization', async () => {
     let capturedEndpoint = '';
     let capturedInit: RequestInit | undefined;

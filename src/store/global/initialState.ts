@@ -48,6 +48,7 @@ export enum SettingsTabs {
   APIKey = 'apikey',
   Appearance = 'appearance',
   Billing = 'billing',
+  BotDelivery = 'bot-delivery',
   /** @deprecated Use Appearance instead */
   ChatAppearance = 'chat-appearance',
   /** @deprecated Use Appearance instead */

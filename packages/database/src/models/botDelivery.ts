@@ -415,6 +415,19 @@ export class BotDeliveryModel {
     };
   }
 
+  async stats(userId: string) {
+    return this.db
+      .select({
+        status: botDeliveryJobs.status,
+        role: botDeliveryJobs.role,
+        count: sql<number>`count(*)::int`,
+        oldestAt: sql<string | null>`min(${botDeliveryJobs.createdAt})::text`,
+      })
+      .from(botDeliveryJobs)
+      .where(eq(botDeliveryJobs.userId, userId))
+      .groupBy(botDeliveryJobs.status, botDeliveryJobs.role);
+  }
+
   async inspect(userId: string, scopeKey: string) {
     const ledger = await this.getLedger(userId, scopeKey);
     const jobs = await this.db
