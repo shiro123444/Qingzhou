@@ -166,6 +166,11 @@ const AppTheme = memo<AppThemeProps>(
               fontFamily: customFontFamily
                 ? `${customFontFamily},${antdTheme.fontFamily}`
                 : undefined,
+              borderRadius: 8,
+              borderRadiusLG: 12,
+              controlHeight: 34,
+              boxShadow: 'none',
+              boxShadowSecondary: 'none',
               motion: animationMode !== 'disabled',
               motionUnit: animationMode === 'agile' ? 0.05 : 0.1,
             },

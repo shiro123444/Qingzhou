@@ -40,6 +40,8 @@ export const userChatEndpoint = (baseURL: string): string => {
  */
 export const createUserChatProvider = (options: {
   readonly fetcher: MultimodalChatFetcher;
+  /** Text-only capabilities can reuse the saved provider without requiring vision. */
+  readonly requiresVision?: boolean;
   readonly resolve: (scope: RuntimeScope) => Promise<UserChatConnection>;
 }): MultimodalChatPort => ({
   providerId: 'user-chat-provider',
@@ -48,7 +50,7 @@ export const createUserChatProvider = (options: {
     model: 'inbox',
     providerId: 'user-chat-provider',
     supportsIdempotency: false,
-    supportsVision: true,
+    supportsVision: options.requiresVision !== false,
   }),
   chat: async (request, context) => {
     if (!context?.scope?.userId?.trim() || !context.scope.sessionId?.trim()) {
@@ -69,7 +71,7 @@ export const createUserChatProvider = (options: {
     }
     if (context.signal?.aborted)
       throw new MultimodalChatProviderError('CHAT_CANCELLED', '模型请求已取消');
-    if (!connection.supportsVision) {
+    if (options.requiresVision !== false && !connection.supportsVision) {
       throw new MultimodalChatProviderError(
         'CHAT_REQUEST_INVALID',
         'PPT 需要视觉模型，请在主页面选择已启用视觉能力的模型',

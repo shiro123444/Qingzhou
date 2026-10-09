@@ -1,7 +1,15 @@
 import { createStaticStyles, keyframes } from 'antd-style';
 
 const turn = keyframes`to { transform: rotate(360deg); }`;
+const cabinSwing = keyframes`
+  0%, 100% { transform: rotate(-2deg); }
+  50% { transform: rotate(2deg); }
+`;
 const counterTurn = keyframes`to { transform: rotate(-360deg); }`;
+const boatDrift = keyframes`
+  0%, 100% { transform: translateY(0) rotate(-2deg); }
+  50% { transform: translateY(-2px) rotate(2deg); }
+`;
 const settle = keyframes`
   0% { transform: rotate(-12deg); }
   35% { transform: rotate(6deg); }
@@ -12,10 +20,6 @@ const ripple = keyframes`
   0%, 18% { opacity: 0; transform: scale(.72); }
   42% { opacity: .42; }
   100% { opacity: 0; transform: scale(1.24); }
-`;
-const washBreathe = keyframes`
-  0%, 100% { opacity: .42; transform: scale(1); }
-  50% { opacity: .54; transform: scale(1.012); }
 `;
 
 export const styles = createStaticStyles(({ css, cssVar }) => ({
@@ -96,7 +100,8 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     }
   `,
   ferris: css`
-    --qz-wheel-duration: 160s;
+    --qz-wheel-duration: 96s;
+    --qz-wheel-surface: ${cssVar.colorBgContainer};
 
     position: absolute;
     inset-block-start: 0;
@@ -104,7 +109,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     width: min(64%, 460px);
 
-    opacity: 0.17;
+    opacity: 0.58;
 
     mask-image: linear-gradient(to right, transparent, #000 35%);
 
@@ -126,7 +131,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
       width: min(58vw, 820px);
 
-      opacity: 0.23;
+      opacity: 0.55;
       filter: saturate(0.9);
 
       mask-image: linear-gradient(to bottom, #000 0%, #000 74%, transparent 100%);
@@ -136,7 +141,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       inset-block-start: 5px;
       inset-inline-end: -30px;
       width: 220px;
-      opacity: 0.1;
+      opacity: 0.25;
 
       * {
         animation: none !important;
@@ -170,6 +175,10 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     transform-origin: 0 0;
     animation: ${counterTurn} var(--qz-wheel-duration) linear infinite;
   `,
+  cabinSwing: css`
+    transform-origin: 0 0;
+    animation: ${cabinSwing} 7s ease-in-out var(--qz-cabin-delay, 0s) infinite;
+  `,
   presentationMist: css`
     position: absolute;
     inset-block: 0;
@@ -178,12 +187,11 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     width: 100%;
     height: 100%;
 
+    color: ${cssVar.colorTextSecondary};
+
     opacity: 0.46;
     object-fit: cover;
     object-position: center bottom;
-    filter: saturate(0.84);
-
-    animation: ${washBreathe} 18s ease-in-out infinite;
 
     mask-image: linear-gradient(to bottom, transparent 0%, #000 22%, #000 100%);
   `,
@@ -232,9 +240,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       visibility 0.8s ease;
 
     &[data-active='true'] [data-qz-ferris] {
-      --qz-wheel-duration: 66s;
-
-      opacity: 0.29;
+      opacity: 0.62;
     }
 
     &[data-stage='intake'] {
@@ -283,7 +289,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     z-index: 2;
     inset: 0;
 
-    img {
+    svg {
       display: block;
       width: 100%;
       height: auto;
@@ -302,6 +308,8 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     transform-origin: 50% 0;
 
     width: 27px;
+
+    color: ${cssVar.colorTextSecondary};
 
     opacity: 0.68;
 
@@ -334,13 +342,19 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     border-block-end: 1px solid rgb(70 175 188 / 18%);
     border-radius: 50%;
 
+    color: ${cssVar.colorTextSecondary};
+
     opacity: 0.65;
 
-    img {
+    svg {
       position: absolute;
       inset-block-end: 1px;
       inset-inline-start: 22px;
+      transform-origin: 50% 90%;
+
       width: 23px;
+
+      animation: ${boatDrift} 6s ease-in-out infinite;
     }
 
     @media (width <= 600px) {

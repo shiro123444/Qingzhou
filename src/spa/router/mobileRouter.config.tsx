@@ -320,6 +320,10 @@ export const mobileRoutes: RouteObject[] = [
         path: 'me',
       },
 
+      {
+        element: dynamicElement(() => import('@/routes/(main)/sites'), 'Mobile > Sites'),
+        path: 'sites',
+      },
       // Default route - home page
       {
         children: [
@@ -368,6 +372,10 @@ export const mobileRoutes: RouteObject[] = [
   },
   ...BusinessMobileRoutesWithoutMainLayout,
 
+  {
+    element: dynamicElement(() => import('@/routes/share/sites/[siteId]'), 'Mobile > Public Blog'),
+    path: '/sites/view/:siteId',
+  },
   // Share topic route (outside main layout)
   {
     children: [

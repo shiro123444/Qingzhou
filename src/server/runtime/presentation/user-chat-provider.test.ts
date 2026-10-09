@@ -31,6 +31,17 @@ const makeFetcher = () =>
   }));
 
 describe('user-scoped presentation provider', () => {
+  it('allows text-only site editing while keeping the saved user model', async () => {
+    const fetcher = makeFetcher();
+    const port = createUserChatProvider({
+      fetcher,
+      requiresVision: false,
+      resolve: async () => ({ ...connection('alice'), supportsVision: false }),
+    });
+    expect((await port.chat(request, { scope })).model).toBe('selected-alice');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(port.manifest.supportsVision).toBe(false);
+  });
   it('uses the saved main-chat selection and credentials, never request model overrides', async () => {
     const fetcher = makeFetcher();
     const resolve = vi.fn(async () => connection('alice'));
