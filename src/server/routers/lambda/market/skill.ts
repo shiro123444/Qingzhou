@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { publicProcedure, router } from '@/libs/trpc/lambda';
 import { marketUserInfo, serverDatabase } from '@/libs/trpc/lambda/middleware';
 import { MarketService } from '@/server/services/market';
+import { marketDetailError } from '@/server/services/market/readPublicDetail';
 import { NexusRegistryService } from '@/server/services/nexusRegistry';
 import { type SkillCategoryItem, type SkillListResponse, SkillSorts } from '@/types/discover';
 
@@ -169,10 +170,7 @@ export const skillRouter = router({
         });
       } catch (error) {
         log('Error fetching skill detail: %O', error);
-        throw new TRPCError({
-          code: 'INTERNAL_SERVER_ERROR',
-          message: 'Failed to fetch skill detail',
-        });
+        throw marketDetailError(error, 'Failed to fetch skill detail');
       }
     }),
 

@@ -3,6 +3,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
+import CommunityDetailFetchError from '@/features/CommunityDetail/FetchError';
 import { useMarketAuth, useMarketUserProfile } from '@/layout/AuthProvider/MarketAuth';
 import { type MarketUserProfile } from '@/layout/AuthProvider/MarketAuth/types';
 import { useDiscoverStore } from '@/store/discover';
@@ -27,7 +28,7 @@ const UserDetailPage = memo<UserDetailPageProps>(({ mobile }) => {
     useMarketAuth();
 
   const useUserProfile = useDiscoverStore((s) => s.useUserProfile);
-  const { data, isLoading, mutate } = useUserProfile({ username });
+  const { data, error, isLoading, mutate } = useUserProfile({ username });
 
   // Get current user's profile to check ownership by userName
   const currentUser = getCurrentUserInfo();
@@ -109,6 +110,8 @@ const UserDetailPage = memo<UserDetailPageProps>(({ mobile }) => {
   }, [data, isOwner, mobile, handleEditProfile, handleStatusChange]);
 
   if (isLoading) return <Loading />;
+  if (error && !data)
+    return <CommunityDetailFetchError error={error} onRetry={() => void mutate()} />;
   if (!contextConfig) return <NotFound />;
 
   return (

@@ -73,6 +73,7 @@ import { normalizeLocale } from '@/locales/resources';
 import { AssistantStore } from '@/server/modules/AssistantStore';
 import { PluginStore } from '@/server/modules/PluginStore';
 import { MarketService } from '@/server/services/market';
+import { readPublicMarketDetail } from '@/server/services/market/readPublicDetail';
 
 const getAppOrigin = () => appEnv.APP_URL?.replace(/\/+$/, '') || 'https://lobehub.com';
 
@@ -556,10 +557,9 @@ export class DiscoverService {
 
     try {
       // @ts-ignore
-      const data = await this.market.agents.getAgentDetail(identifier, {
-        locale: normalizedLocale,
-        version,
-      });
+      const data = await readPublicMarketDetail(this.market, (client) =>
+        client.agents.getAgentDetail(identifier, { locale: normalizedLocale, version }),
+      );
 
       if (!data) {
         log('getAssistantDetail: assistant not found for identifier=%s', identifier);
@@ -623,6 +623,9 @@ export class DiscoverService {
         page: 1,
         pageSize: 7,
         source,
+      }).catch((error) => {
+        log('getAssistantDetail: related assistants unavailable: %O', error);
+        return { items: [] };
       });
 
       const result = {
@@ -634,7 +637,8 @@ export class DiscoverService {
       return result;
     } catch (error) {
       log('getAssistantDetail: error fetching from market SDK: %O', error);
-      return;
+      if ((error as { status?: number } | null)?.status === 404) return;
+      throw error;
     }
   };
 
@@ -812,13 +816,11 @@ export class DiscoverService {
     log('getMcpDetail: params=%O', params);
     const { locale } = params;
     const normalizedLocale = normalizeLocale(locale);
-    const mcp = await this.market.plugins.getPluginDetail(
-      { ...params, locale: normalizedLocale },
-      {
-        next: {
-          revalidate: 3600,
-        },
-      },
+    const mcp = await readPublicMarketDetail(this.market, (client) =>
+      client.plugins.getPluginDetail(
+        { ...params, locale: normalizedLocale },
+        { next: { revalidate: 3600 } },
+      ),
     );
 
     // Fetch related MCPs
@@ -827,6 +829,9 @@ export class DiscoverService {
       locale,
       page: 1,
       pageSize: 7,
+    }).catch((error) => {
+      log('getMcpDetail: related MCPs unavailable: %O', error);
+      return { items: [] };
     });
 
     const result = {
@@ -2074,10 +2079,12 @@ export class DiscoverService {
     version?: string;
   }) => {
     try {
-      const response = await this.market.agentGroups.getAgentGroupDetail(params.identifier, {
-        locale: params.locale,
-        version: params.version ? Number(params.version) : undefined,
-      });
+      const response = await readPublicMarketDetail(this.market, (client) =>
+        client.agentGroups.getAgentGroupDetail(params.identifier, {
+          locale: params.locale,
+          version: params.version ? Number(params.version) : undefined,
+        }),
+      );
       return response;
     } catch (error) {
       log('getGroupAgentDetail: error: %O', error);

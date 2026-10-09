@@ -8,6 +8,7 @@ import { publicProcedure, router } from '@/libs/trpc/lambda';
 import { marketUserInfo, serverDatabase } from '@/libs/trpc/lambda/middleware';
 import { DiscoverService } from '@/server/services/discover';
 import { MarketService } from '@/server/services/market';
+import { marketDetailError } from '@/server/services/market/readPublicDetail';
 import { NexusRegistryService } from '@/server/services/nexusRegistry';
 import {
   AssistantSorts,
@@ -238,10 +239,7 @@ export const marketRouter = router({
         return await ctx.discoverService.getAssistantDetail(input);
       } catch (error) {
         log('Error fetching assistants detail: %O', error);
-        throw new TRPCError({
-          code: 'INTERNAL_SERVER_ERROR',
-          message: 'Failed to fetch assistants detail',
-        });
+        throw marketDetailError(error, 'Failed to fetch assistants detail');
       }
     }),
 
@@ -338,10 +336,7 @@ export const marketRouter = router({
         return await ctx.discoverService.getGroupAgentDetail(input);
       } catch (error) {
         log('Error fetching group agent detail: %O', error);
-        throw new TRPCError({
-          code: 'INTERNAL_SERVER_ERROR',
-          message: 'Failed to fetch group agent detail',
-        });
+        throw marketDetailError(error, 'Failed to fetch group agent detail');
       }
     }),
 
@@ -474,10 +469,7 @@ export const marketRouter = router({
         return await ctx.discoverService.getMcpDetail(input);
       } catch (error) {
         console.error('Error fetching mcp detail: %O', error);
-        throw new TRPCError({
-          code: 'INTERNAL_SERVER_ERROR',
-          message: 'Failed to fetch mcp detail',
-        });
+        throw marketDetailError(error, 'Failed to fetch mcp detail');
       }
     }),
 

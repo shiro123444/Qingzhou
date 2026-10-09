@@ -4,6 +4,7 @@ import { Flexbox } from '@lobehub/ui';
 import { memo } from 'react';
 import { useParams } from 'react-router-dom';
 
+import CommunityDetailFetchError from '@/features/CommunityDetail/FetchError';
 import { useQuery } from '@/hooks/useQuery';
 import { useDiscoverStore } from '@/store/discover';
 
@@ -26,9 +27,11 @@ const GroupAgentDetailPage = memo<GroupAgentDetailPageProps>(({ mobile }) => {
 
   // Fetch group agent detail
   const useGroupAgentDetail = useDiscoverStore((s) => s.useGroupAgentDetail);
-  const { data, isLoading } = useGroupAgentDetail({ identifier, version });
+  const { data, error, isLoading, mutate } = useGroupAgentDetail({ identifier, version });
 
   if (isLoading) return <Loading />;
+  if (error && !data)
+    return <CommunityDetailFetchError error={error} onRetry={() => void mutate()} />;
 
   if (!data) return <NotFound />;
 
