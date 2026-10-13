@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 
 import type { PresentationSlidePlan } from '../../../../packages/runtime-contracts/src';
 import { renderSemanticBlocks } from './semantic-blocks';
-import { inspectVisualOccupancy, reconcileNativeVisualAssets } from './visual-ownership';
+import {
+  inspectVisualOccupancy,
+  reconcileEmbeddedVisualAnnotations,
+  reconcileNativeVisualAssets,
+} from './visual-ownership';
 
 const ref = '/api/runtime/presentation/artifacts/old-chart';
 const diagram = {
@@ -34,6 +38,54 @@ async function fixture(): Promise<PresentationSlidePlan> {
 }
 
 describe('visual representation ownership', () => {
+  it('removes an embedded diagram overlay while retaining its original image and slide text', () => {
+    const slide: PresentationSlidePlan = {
+      slideId: 'slide-6',
+      order: 6,
+      svg: `<svg viewBox="0 0 960 540"><image href="${ref}"/><text>标题</text><g data-asset-annotations="visual-1"><text>重复标签</text></g></svg>`,
+      metadata: {
+        visualRequirements: [
+          {
+            id: 'visual-1',
+            kind: 'scientific-diagram',
+            renderer: 'image',
+            fidelity: 'conceptual',
+            brief: '课程知识地图',
+            required: true,
+            annotationMode: 'embedded',
+          },
+        ],
+      },
+    };
+    const repaired = reconcileEmbeddedVisualAnnotations(slide);
+    expect(repaired.svg).toContain(ref);
+    expect(repaired.svg).toContain('标题');
+    expect(repaired.svg).not.toContain('重复标签');
+    expect(reconcileEmbeddedVisualAnnotations(repaired)).toBe(repaired);
+  });
+
+  it('does not reflow text sitting in an empty contain margin', () => {
+    const slide: PresentationSlidePlan = {
+      slideId: 'slide-6',
+      order: 6,
+      svg: `<svg viewBox="0 0 960 540"><image href="${ref}" x="100" y="120" width="800" height="300" preserveAspectRatio="xMidYMid meet"/><text x="120" y="200" font-size="24">说明</text></svg>`,
+      metadata: {
+        visualAssets: [
+          { visualId: 'visual-1', kind: 'scientific-diagram', ref, origin: 'generated' },
+        ],
+      },
+    };
+    expect(inspectVisualOccupancy(slide)).toContain('Text overlaps image visual-1');
+    expect(inspectVisualOccupancy(slide, new Map([[ref, { width: 100, height: 100 }]]))).toEqual(
+      [],
+    );
+    expect(
+      inspectVisualOccupancy(
+        { ...slide, svg: slide.svg.replace('x="120" y="200"', 'x="480" y="200"') },
+        new Map([[ref, { width: 100, height: 100 }]]),
+      ),
+    ).toContain('Text overlaps image visual-1');
+  });
   it('retires the old bitmap after a native replacement and is idempotent', async () => {
     const slide = await fixture();
     const next = reconcileNativeVisualAssets(slide);

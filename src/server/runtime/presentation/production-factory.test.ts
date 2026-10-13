@@ -587,7 +587,7 @@ describe('createProductionPresentationGenerationComposition (R2-A pipeline)', ()
     [PRODUCTION_PRESENTATION_ENV_KEYS.runnerId]: 'ppt-master-runner',
   };
 
-  it('assembles generation pipeline without side-effects or network calls during construction', () => {
+  it('assembles independent capability plugins without network calls during construction', async () => {
     const chatPort = makeMockChatPort();
     const imageCap = makeMockImageCapability();
     const result = createProductionPresentationGenerationComposition({
@@ -599,6 +599,10 @@ describe('createProductionPresentationGenerationComposition (R2-A pipeline)', ()
     expect(result.readiness).toBeDefined();
     expect(chatPort.chat).not.toHaveBeenCalled();
     expect(imageCap.generate).not.toHaveBeenCalled();
+    expect(
+      (await result.composition.atomicRuntime!.snapshot(baseScope())).plugins.map(({ id }) => id),
+    ).toEqual(['teaching', 'presentation', 'assets', 'skills']);
+    await result.composition.dispose();
   });
 
   it('passes one deck image budget to both the content compiler and the asset planner', () => {

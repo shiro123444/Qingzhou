@@ -246,6 +246,34 @@ describe('presentation revision assets', () => {
     expect(request).toContain('切点 x*');
   });
 
+  it.each([false, true])(
+    'gives the bitmap its labels without overlay instructions (omitted slot: %s)',
+    async (omitted) => {
+      const images = imageCapability();
+      const annotated = mixedInput();
+      const slides = (annotated.jobInput.options as { contentIntents?: { slides: any[] } })
+        .contentIntents!.slides;
+      slides[0].visuals[0] = {
+        ...slides[0].visuals[0],
+        annotationMode: 'embedded',
+        annotations: [
+          { at: { x: 0.2, y: 0.5 }, text: '输入层', type: 'label' },
+          { at: { x: 0.8, y: 0.5 }, text: '输出层', type: 'label' },
+        ],
+      };
+      await createRevisionAssetPlanner({
+        chatPort: chatPort(
+          omitted ? [] : [{ ...replaceIntent, prompt: 'Draw the network diagram.' }],
+        ),
+        imageGenerationCapability: images.capability,
+      }).prepare(annotated);
+      const request = JSON.stringify(vi.mocked(images.port.generate).mock.calls[0]);
+      expect(request).toContain('This image owns its internal labels');
+      expect(request).toContain('输入层、输出层');
+      expect(request).not.toContain('Do not paint them yourself');
+    },
+  );
+
   it('generates a required raster slot the model omitted instead of failing the deck', async () => {
     const images = imageCapability();
     const result = await createRevisionAssetPlanner({

@@ -2,9 +2,7 @@ import { Tag } from '@lobehub/ui';
 import { memo } from 'react';
 
 import type { ArtifactSnapshot } from '../../../../packages/runtime-contracts/src/index';
-import type { PresentationSlotState } from '../store/presentationStore';
-import { revealSrcsForSlide } from './slidePaint';
-import SlidePaintOverlay from './SlidePaintOverlay';
+import SlideGenerationOverlay from './SlideGenerationOverlay';
 import { styles } from './style';
 
 export interface PanoramaGridProps {
@@ -12,10 +10,8 @@ export interface PanoramaGridProps {
   painting?: boolean;
   paintingSlideNumber?: number;
   paintInterrupted?: boolean;
-  resolveArtifactUri?: (artifactId: string) => string | undefined;
   selectedArtifactId: string | null;
   slides: ArtifactSnapshot[];
-  slots?: PresentationSlotState[];
 }
 
 export const PanoramaGrid = memo<PanoramaGridProps>(
@@ -24,10 +20,8 @@ export const PanoramaGrid = memo<PanoramaGridProps>(
     paintInterrupted = false,
     painting = false,
     paintingSlideNumber,
-    resolveArtifactUri,
     selectedArtifactId,
     slides,
-    slots = [],
   }) => {
     return (
       <section
@@ -73,10 +67,10 @@ export const PanoramaGrid = memo<PanoramaGridProps>(
                     SVG 暂不可用
                   </div>
                 )}
-                <SlidePaintOverlay
+                <SlideGenerationOverlay
+                  compact
                   active={slidePainting}
                   interrupted={paintInterrupted}
-                  revealSrcs={revealSrcsForSlide(slide, slots, resolveArtifactUri)}
                 />
               </div>
 

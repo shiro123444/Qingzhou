@@ -1,6 +1,5 @@
 import { parseString } from '../../../../packages/file-loaders/src/utils/parser-utils';
 import type { PresentationPlan } from '../../../../packages/runtime-contracts/src';
-import { visualRequirementSchema } from './content-intent';
 import {
   renderScientificDiagram,
   renderSemanticBlocks,
@@ -10,7 +9,10 @@ import {
 import type { TemplateApplication } from './templates';
 import { measureSlideText } from './text-measurement';
 import type { PresentationVisualReview } from './visual-critic';
-import { reconcileNativeVisualAssets } from './visual-ownership';
+import {
+  reconcileEmbeddedVisualAnnotations,
+  reconcileNativeVisualAssets,
+} from './visual-ownership';
 
 /** Only an explicit, page-selected header contract may author template chrome. */
 export function stampLockedTemplateChrome(
@@ -98,7 +100,9 @@ export async function stabilizePresentationVisuals(
         template,
         (slide.metadata?.visualDirection as { archetypeId?: string } | undefined)?.archetypeId,
       );
-      return reconcileNativeVisualAssets(svg === slide.svg ? slide : { ...slide, svg });
+      return reconcileEmbeddedVisualAnnotations(
+        reconcileNativeVisualAssets(svg === slide.svg ? slide : { ...slide, svg }),
+      );
     }),
   );
   return slides.every((slide, index) => slide === plan.slides[index]) ? plan : { ...plan, slides };
@@ -323,40 +327,19 @@ export function reconcileEvidenceBasedVisualReview(
   plan: PresentationPlan,
 ): { adjudications: VisualEvidenceAdjudication[]; review: PresentationVisualReview } {
   const formulaReview = reconcileTypedFormulaReview(review, plan);
-  // Arrow directions, leader lines and their labels are drawn by the server from the signed
-  // annotations, so a complaint about them inside the bitmap is not an actionable defect.
-  const annotated = new Set<string>();
-  for (const slide of plan.slides) {
-    const parsed = visualRequirementSchema
-      .array()
-      .safeParse(slide.metadata?.visualRequirements ?? []);
-    if (!parsed.success) continue;
-    for (const visual of parsed.data)
-      if (visual.annotations?.length) annotated.add(`${slide.slideId}/${visual.id}`);
-  }
-  const serverAnnotated = (issue: PresentationVisualReview['issues'][number]): boolean =>
-    Boolean(issue.visualId) &&
-    annotated.has(`${issue.slideId}/${issue.visualId}`) &&
-    ['legibility', 'scientific-semantics'].includes(issue.category) &&
-    /箭头|向量|方向|引线|法向|梯度|arrow|vector|direction|leader/iu.test(issue.evidence);
+  // A server-rendered overlay can still be misplaced or cover bitmap labels.
+  // Its ownership alone is not evidence that a visual complaint is false.
   const adjudications: VisualEvidenceAdjudication[] = [
     ...review.issues
-      .filter((issue) => !formulaReview.issues.includes(issue) && !serverAnnotated(issue))
+      .filter((issue) => !formulaReview.issues.includes(issue))
       .map((issue) => ({
         category: issue.category,
         reason: 'verified-formula-source' as const,
         slideId: issue.slideId,
         ...(issue.visualId ? { visualId: issue.visualId } : {}),
       })),
-    ...formulaReview.issues.filter(serverAnnotated).map((issue) => ({
-      category: issue.category,
-      reason: 'server-drawn-annotations' as const,
-      slideId: issue.slideId,
-      ...(issue.visualId ? { visualId: issue.visualId } : {}),
-    })),
   ];
   const issues = formulaReview.issues.filter((issue) => {
-    if (serverAnnotated(issue)) return false;
     if (
       !issue.visualId ||
       !['legibility', 'spacing', 'scientific-semantics'].includes(issue.category) ||

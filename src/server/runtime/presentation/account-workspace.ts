@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { copyFile, mkdir, readdir, readFile, rename, unlink } from 'node:fs/promises';
-import { join } from 'node:path';
+import path from 'node:path';
 
 import type { RuntimeScope } from '../../../../packages/runtime-contracts/src';
 
@@ -20,21 +20,24 @@ export async function migratePresentationSessions(
   const accountKey = hash(JSON.stringify([account.userId, account.sessionId]));
   const report = { copied: 0, kept: 0 };
   async function merge(source: string, destination: string) {
-    const entries = await readdir(source, { withFileTypes: true }).catch((error) => {
+    // User data is supplied at runtime and must not be scanned into build artifacts.
+    const entries = await readdir(/* turbopackIgnore: true */ source, {
+      withFileTypes: true,
+    }).catch((error) => {
       if (error.code === 'ENOENT') return [];
       throw error;
     });
     for (const entry of entries) {
       if (entry.isSymbolicLink() || entry.name.endsWith('.tmp')) continue;
-      const from = join(source, entry.name);
-      const to = join(destination, entry.name);
+      const from = path.join(/* turbopackIgnore: true */ source, entry.name);
+      const to = path.join(/* turbopackIgnore: true */ destination, entry.name);
       if (entry.isDirectory()) {
         await merge(from, to);
         continue;
       }
       if (!entry.isFile()) continue;
       await mkdir(destination, { recursive: true, mode: 0o700 });
-      const existing = await readFile(to).catch((error) => {
+      const existing = await readFile(/* turbopackIgnore: true */ to).catch((error) => {
         if (error.code === 'ENOENT') return null;
         throw error;
       });
@@ -45,7 +48,7 @@ export async function migratePresentationSessions(
           continue;
         }
         const old = JSON.parse(existing.toString());
-        const incoming = JSON.parse(await readFile(from, 'utf8'));
+        const incoming = JSON.parse(await readFile(/* turbopackIgnore: true */ from, 'utf8'));
         if ((old.job?.updatedAt ?? '') >= (incoming.job?.updatedAt ?? '')) {
           report.kept++;
           continue;
@@ -66,10 +69,13 @@ export async function migratePresentationSessions(
     const legacyKey = hash(JSON.stringify([userId, sessionId]));
     // Events remain execution-session history; current jobs provide a fresh snapshot on reconnect.
     for (const kind of ['jobs', 'artifacts'])
-      await merge(join(root, legacyKey, kind), join(root, accountKey, kind));
+      await merge(
+        path.join(/* turbopackIgnore: true */ root, legacyKey, kind),
+        path.join(/* turbopackIgnore: true */ root, accountKey, kind),
+      );
     await merge(
-      join(root, 'templates', legacyKey, 'templates'),
-      join(root, 'templates', accountKey, 'templates'),
+      path.join(/* turbopackIgnore: true */ root, 'templates', legacyKey, 'templates'),
+      path.join(/* turbopackIgnore: true */ root, 'templates', accountKey, 'templates'),
     );
   }
   return report;

@@ -372,7 +372,7 @@ describe('CompletedWorkspace', () => {
     });
   });
 
-  it('frosts retained slides with a live paint overlay while regeneration is running', () => {
+  it('keeps retained previews readable with a generation status while regeneration is running', () => {
     render(
       <CompletedWorkspace
         activity="第 1 页 · 第 1 张素材 · 正在处理素材的透明背景"
@@ -403,8 +403,10 @@ describe('CompletedWorkspace', () => {
       />,
     );
 
-    expect(screen.getByTestId('slide-paint-overlay')).toBeInTheDocument();
-    expect(screen.getByTestId('slide-preview')).toHaveTextContent('正在绘制');
+    expect(screen.getByTestId('slide-generation-overlay')).toBeInTheDocument();
+    expect(screen.queryByTestId('paint-brush')).not.toBeInTheDocument();
+    expect(screen.getByTestId('slide-preview-image')).toHaveAttribute('src', mockSlides[0].uri);
+    expect(screen.getByTestId('slide-preview')).toHaveTextContent('正在更新');
     expect(screen.getByLabelText(/第 1 页/)).toHaveAttribute('data-painting', 'true');
     expect(screen.getByTestId('presentation-completed-tag')).toHaveTextContent(
       '第 1 页 · 第 1 张素材 · 正在处理素材的透明背景',
@@ -419,10 +421,10 @@ describe('CompletedWorkspace', () => {
     );
 
     fireEvent.click(screen.getByRole('button', { name: '全景网格' }));
-    expect(screen.getAllByTestId('slide-paint-overlay')).toHaveLength(mockSlides.length);
+    expect(screen.getAllByTestId('slide-generation-overlay')).toHaveLength(mockSlides.length);
   });
 
-  it('keeps the unfinished edit masked after an asset failure and across page navigation', () => {
+  it('preserves an interrupted status and readable previews across page navigation', () => {
     const interruptedJob: PresentationJob = {
       ...mockJob,
       error: { code: 'IMAGE_UNAVAILABLE', message: 'Image provider failed' },
@@ -457,8 +459,12 @@ describe('CompletedWorkspace', () => {
     };
     const { rerender } = render(<CompletedWorkspace {...props} selectedSlide={mockSlides[0]} />);
 
-    expect(screen.getByTestId('slide-paint-overlay')).toHaveTextContent('已保留，等待续绘');
-    expect(within(screen.getByTestId('slide-paint-overlay')).queryByRole('img')).toBeNull();
+    expect(screen.getByTestId('slide-generation-overlay')).toHaveTextContent('已保留，等待继续');
+    expect(screen.getByTestId('slide-generation-overlay')).toHaveAttribute(
+      'data-state',
+      'interrupted',
+    );
+    expect(within(screen.getByTestId('slide-generation-overlay')).queryByRole('img')).toBeNull();
 
     rerender(
       <CompletedWorkspace
@@ -467,7 +473,11 @@ describe('CompletedWorkspace', () => {
         selectedSlide={mockSlides[1]}
       />,
     );
-    expect(screen.getByTestId('slide-paint-overlay')).toHaveTextContent('已保留，等待续绘');
+    expect(screen.getByTestId('slide-generation-overlay')).toHaveTextContent('已保留，等待继续');
+    expect(screen.getByTestId('slide-generation-overlay')).toHaveAttribute(
+      'data-state',
+      'interrupted',
+    );
     expect(screen.getByTestId('slide-preview-image')).toHaveAttribute(
       'src',
       'data:image/svg+xml,mock-svg-2',
@@ -506,7 +516,7 @@ describe('CompletedWorkspace', () => {
       />,
     );
 
-    expect(screen.queryByTestId('slide-paint-overlay')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('slide-generation-overlay')).not.toBeInTheDocument();
     expect(screen.getByTestId('presentation-completed-tag')).toHaveTextContent(
       '素材规划未完成，请再试一次',
     );

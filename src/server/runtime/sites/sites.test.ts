@@ -2,12 +2,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import nodePath from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { AtomicRuntime } from '../atomic-runtime';
-import type { MultimodalChatPort } from '../presentation/multimodal-chat-provider';
+import type { SkillChatPort } from '../skills-plugin';
 import type { Site } from './contracts';
-import { createSitesPlugin } from './plugin';
+import { createSitesRuntime } from './runtime';
 import { sourceOperations } from './sources';
 import { SiteStore } from './store';
 
@@ -19,20 +18,74 @@ const owner = { userId: 'alice', sessionId: 'session' };
 const article = (text: string, draft = false) =>
   `---\ntitle: "Article"\ndescription: "A blog article"\npublishDate: 2026-10-09\ntags: []\ndraft: ${draft}\n---\n\n${text}\n`;
 const path = 'src/content/blog/welcome.md';
-async function harness(chat?: MultimodalChatPort) {
+async function harness(chat?: SkillChatPort) {
   const root = await mkdtemp(nodePath.join(tmpdir(), 'qingzhou-sites-'));
   const store = new SiteStore(root);
-  const runtime = new AtomicRuntime([createSitesPlugin(store, chat)]);
+  const { runtime } = createSitesRuntime({ store });
   cleanups.push(async () => {
     await runtime.dispose();
     await rm(root, { recursive: true, force: true });
   });
   const call = <T = Site>(name: string, input: unknown, scope = owner) =>
-    runtime.invoke<T>(name, input, { scope });
+    runtime.invoke<T>(name, input, { scope, services: chat ? { sitesChat: chat } : undefined });
   return { store, call, runtime, root };
 }
 
 describe('Qingzhou sites on Cordis', () => {
+  it('keeps the account site limit under concurrent creation without loading all histories', async () => {
+    const { store } = await harness();
+    const read = vi.spyOn(store, 'read');
+    const results = await Promise.allSettled(
+      Array.from({ length: 21 }, (_, index) => store.create('alice', `Blog ${index}`, 'Alice')),
+    );
+    expect(results.filter(({ status }) => status === 'fulfilled')).toHaveLength(20);
+    expect(results.find(({ status }) => status === 'rejected')).toMatchObject({
+      reason: { code: 'SITE_LIMIT' },
+    });
+    expect(read).not.toHaveBeenCalled();
+    expect(await store.list('alice')).toHaveLength(20);
+  });
+
+  it('allows another account to write while an existing account write is awaiting storage', async () => {
+    const { store } = await harness();
+    const alice = await store.create('alice', 'Alice blog', 'Alice');
+    const bob = await store.create('bob', 'Bob blog', 'Bob');
+    let release!: () => void;
+    let entered!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const original = store.read.bind(store);
+    vi.spyOn(store, 'read').mockImplementation(async (userId, id) => {
+      if (userId === 'alice') {
+        entered();
+        await held;
+      }
+      return original(userId, id);
+    });
+    const blocked = store.change('alice', alice.id, alice.draft.revision, {
+      [path]: article('Alice edit'),
+    });
+    await started;
+    try {
+      const changed = await store.change('bob', bob.id, bob.draft.revision, {
+        [path]: article('Bob edit'),
+      });
+      expect(changed.draft.files[path]).toContain('Bob edit');
+    } finally {
+      release();
+      await blocked;
+    }
+    // Failed writes must not poison subsequent operations for the same account.
+    await expect(
+      store.change('bob', bob.id, bob.draft.revision, { [path]: article('Stale') }),
+    ).rejects.toMatchObject({ code: 'SITE_CONFLICT' });
+    expect((await store.create('bob', 'Second blog', 'Bob')).name).toBe('Second blog');
+  });
+
   it('keeps owner isolation and unpublished drafts across restarts', async () => {
     const { store, call, root } = await harness();
     const site = await call('sites.create', { name: 'Alice blog', author: 'Alice' });
@@ -110,24 +163,33 @@ describe('Qingzhou sites on Cordis', () => {
 
   it('saves an agent result only as a draft and checks ownership before contacting the model', async () => {
     let calls = 0;
-    const chat = {
+    const chat: SkillChatPort = {
       manifest: { model: 'test' },
-      chat: async () => {
+      chat: async (request) => {
         calls++;
+        const { resources } = JSON.parse(request.messages[1].content);
         return {
           choices: [
             {
               message: {
-                content: JSON.stringify({
-                  changes: { [path]: article('Agent edit') },
-                  summary: 'Edited',
-                }),
+                content: JSON.stringify(
+                  calls === 1
+                    ? {
+                        operation: 'sites.edit',
+                        input: {
+                          id: resources.siteId,
+                          baseRevision: resources.baseRevision,
+                          changes: { [path]: article('Agent edit') },
+                        },
+                      }
+                    : { done: true, summary: 'Edited' },
+                ),
               },
             },
           ],
         };
       },
-    } as unknown as MultimodalChatPort;
+    };
     const { store, call } = await harness(chat);
     const site = await call('sites.create', { name: 'Blog', author: 'Alice' });
     await expect(
@@ -172,6 +234,12 @@ describe('Qingzhou sites on Cordis', () => {
     const { runtime } = await harness();
     expect((await runtime.catalog()).map((operation) => operation.name)).toContain('sites.change');
     await runtime.remove('sites');
-    expect(await runtime.catalog()).toEqual([]);
+    expect(
+      (await runtime.catalog()).every((operation) => operation.name.startsWith('skills.')),
+    ).toBe(true);
+    expect(await runtime.invoke('skills.catalog', {}, { scope: owner })).toMatchObject({
+      tools: [],
+      recipes: [],
+    });
   });
 });

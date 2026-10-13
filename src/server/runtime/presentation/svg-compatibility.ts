@@ -1,5 +1,7 @@
 import { XMLBuilder, XMLParser } from 'fast-xml-parser';
 
+import { parseString } from '../../../../packages/file-loaders/src/utils/parser-utils';
+
 type XmlNode = Record<string, unknown> & { ':@'?: Record<string, string> };
 const options = {
   preserveOrder: true,
@@ -8,8 +10,11 @@ const options = {
   trimValues: false,
 };
 
-/** ppt-master requires opacity on individual shapes. Leave already-compatible SVG byte-for-byte intact. */
+/** Canonicalize attribute quotes and shape opacity for ppt-master's SVG tools. */
 export const normalizePresentationSvg = (svg: string): string => {
+  // Some ppt-master checks read attributes with double-quote-only patterns.
+  // XML serialization preserves coordinates and escapes attribute contents safely.
+  if (/<[\w:.-]+\b[^>]*\s[\w:.-]+\s*=\s*'/u.test(svg)) svg = parseString(svg).toString();
   if (!/<g\b[^>]*\sopacity\s*=/i.test(svg)) return svg;
   const nodes = new XMLParser(options).parse(svg) as XmlNode[];
   const opacity = (value?: string) =>

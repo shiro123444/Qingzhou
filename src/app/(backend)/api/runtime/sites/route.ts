@@ -5,7 +5,6 @@ import { MultimodalChatProviderError } from '@/server/runtime/presentation/multi
 import { createUserChatProvider } from '@/server/runtime/presentation/user-chat-provider';
 import { SiteError } from '@/server/runtime/sites/contracts';
 import { getSitesRuntime } from '@/server/runtime/sites/runtime';
-import { resolveUserChatProvider } from '@/server/services/modelProvider';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -33,31 +32,52 @@ export const POST = checkAuth(async (request, { userId, serverDB }) => {
           'sites.list',
           'sites.create',
           'sites.read',
+          'sites.edit',
           'sites.change',
           'sites.publish',
           'sites.rollback',
           'sites.agent.edit',
+          'skills.catalog',
+          'skills.run',
+          'skills.autorun',
         ]),
         input: z.unknown(),
       })
       .strict()
       .parse(JSON.parse(text));
-    const result = await getSitesRuntime().runtime.invoke(body.operation, body.input, {
+    const { runtime: siteRuntime } = await getSitesRuntime();
+    const result = await siteRuntime.invoke(body.operation, body.input, {
       scope: { userId, sessionId: `sites:${userId}` },
       signal: request.signal,
       services:
-        body.operation === 'sites.agent.edit'
+        body.operation === 'sites.agent.edit' ||
+        body.operation === 'skills.autorun' ||
+        body.operation === 'skills.run'
           ? {
               sitesChat: createUserChatProvider({
                 fetcher: fetch,
                 requiresVision: false,
-                resolve: (scope) => resolveUserChatProvider(serverDB, scope.userId),
+                resolve: async (scope) => {
+                  const { resolveUserChatProvider } =
+                    await import('@/server/services/modelProvider');
+                  return resolveUserChatProvider(serverDB, scope.userId);
+                },
               }),
             }
           : undefined,
     });
     return Response.json({ success: true, result }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {
+    if (
+      request.signal.aborted ||
+      ['PRESENTATION_WORKER_CANCELLED', 'CHAT_CANCELLED'].includes(
+        (error as { code?: string })?.code ?? '',
+      )
+    )
+      return Response.json(
+        { success: false, code: 'SITE_CANCELLED', message: 'Site operation cancelled' },
+        { status: 499 },
+      );
     if (error instanceof MultimodalChatProviderError)
       return Response.json(
         { success: false, code: 'SITE_AGENT_UNAVAILABLE', message: error.message },
@@ -67,6 +87,30 @@ export const POST = checkAuth(async (request, { userId, serverDB }) => {
       return Response.json(
         { success: false, code: error.code, message: error.message },
         { status: error.status },
+      );
+    if (
+      error instanceof Error &&
+      (error.message.startsWith('Operation cannot be composed: ') ||
+        error.message === 'Agent selected an unavailable operation')
+    )
+      return Response.json(
+        {
+          success: false,
+          code: 'SITE_FORBIDDEN',
+          message: 'The operation is not enabled for this composition',
+        },
+        { status: 403 },
+      );
+    if (
+      ['PROVIDER_UNAVAILABLE', 'TOOL_NOT_FOUND'].includes((error as { code?: string })?.code ?? '')
+    )
+      return Response.json(
+        {
+          success: false,
+          code: 'SITE_CAPABILITY_UNAVAILABLE',
+          message: 'The site capability is disabled in this profile',
+        },
+        { status: 503 },
       );
     if (
       error instanceof z.ZodError ||

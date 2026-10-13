@@ -1,14 +1,73 @@
 // @vitest-environment node
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { generateSitemaps } from '@/app/sitemap';
+import { DiscoverService } from '@/server/services/discover';
 import { getCanonicalUrl } from '@/server/utils/url';
 
 import { LAST_MODIFIED, Sitemap, SitemapType } from './sitemap';
 
 const LOCALE_COUNT = 18;
 
+describe('local sitemap builds', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('keeps route enumeration, index and direct requests local when remote SEO is disabled', async () => {
+    vi.stubEnv('QINGZHOU_MARKET_SITEMAPS', '');
+    const discovery = vi
+      .spyOn(
+        Sitemap.prototype as unknown as { discoverService: () => Promise<DiscoverService> },
+        'discoverService',
+      )
+      .mockRejectedValue(new Error('Remote discovery must stay unloaded'));
+    const local = new Sitemap();
+    await expect(generateSitemaps()).resolves.toEqual([{ id: SitemapType.Pages }]);
+    await expect(local.getSitemapIds()).resolves.toEqual([{ id: SitemapType.Pages }]);
+    expect(await local.getIndex()).not.toContain('assistants-');
+    expect(await local.getIndex()).not.toContain('providers.xml');
+    await expect(
+      Promise.all([
+        local.getPluginPageCount(),
+        local.getAssistantPageCount(),
+        local.getModelPageCount(),
+      ]),
+    ).resolves.toEqual([0, 0, 0]);
+    await expect(
+      Promise.all([
+        local.getAssistants(1),
+        local.getPlugins(1),
+        local.getModels(1),
+        local.getProviders(),
+      ]),
+    ).resolves.toEqual([[], [], [], []]);
+    expect(await local.getPage()).toContainEqual(
+      expect.objectContaining({ url: getCanonicalUrl('/') }),
+    );
+    expect(discovery).not.toHaveBeenCalled();
+  });
+
+  it('includes remote pagination only when the operator explicitly enables it', async () => {
+    vi.stubEnv('QINGZHOU_MARKET_SITEMAPS', '1');
+    const discovery = new DiscoverService();
+    vi.spyOn(
+      Sitemap.prototype as unknown as { discoverService: () => Promise<DiscoverService> },
+      'discoverService',
+    ).mockResolvedValue(discovery);
+    vi.spyOn(discovery, 'getAssistantIdentifiers').mockResolvedValue([]);
+    vi.spyOn(discovery, 'getPluginIdentifiers').mockResolvedValue([]);
+    vi.spyOn(discovery, 'getModelIdentifiers').mockResolvedValue([]);
+    await expect(generateSitemaps()).resolves.toEqual([
+      { id: SitemapType.Pages },
+      { id: SitemapType.Providers },
+    ]);
+  });
+});
+
 describe('Sitemap', () => {
-  const sitemap = new Sitemap();
+  const sitemap = new Sitemap({ includeMarketplace: true });
 
   describe('getIndex', () => {
     it('should return a valid sitemap index with pagination', async () => {
@@ -76,7 +135,7 @@ describe('Sitemap', () => {
 
   describe('getAssistants', () => {
     it('should return a valid assistants sitemap without pagination', async () => {
-      vi.spyOn(sitemap['discoverService'], 'getAssistantIdentifiers').mockResolvedValue([
+      vi.spyOn(await sitemap['discoverService'](), 'getAssistantIdentifiers').mockResolvedValue([
         // @ts-ignore
         { identifier: 'test-assistant', lastModified: '2023-01-01' },
       ]);
@@ -103,7 +162,7 @@ describe('Sitemap', () => {
         lastModified: '2023-01-01',
       }));
 
-      vi.spyOn(sitemap['discoverService'], 'getAssistantIdentifiers').mockResolvedValue(
+      vi.spyOn(await sitemap['discoverService'](), 'getAssistantIdentifiers').mockResolvedValue(
         // @ts-ignore
         mockAssistants,
       );
@@ -132,7 +191,7 @@ describe('Sitemap', () => {
 
   describe('getPlugins', () => {
     it('should return a valid plugins sitemap without pagination', async () => {
-      vi.spyOn(sitemap['discoverService'], 'getPluginIdentifiers').mockResolvedValue([
+      vi.spyOn(await sitemap['discoverService'](), 'getPluginIdentifiers').mockResolvedValue([
         // @ts-ignore
         { identifier: 'test-plugin', lastModified: '2023-01-01' },
       ]);
@@ -159,7 +218,7 @@ describe('Sitemap', () => {
         lastModified: '2023-01-01',
       }));
 
-      vi.spyOn(sitemap['discoverService'], 'getPluginIdentifiers').mockResolvedValue(
+      vi.spyOn(await sitemap['discoverService'](), 'getPluginIdentifiers').mockResolvedValue(
         // @ts-ignore
         mockPlugins,
       );
@@ -176,7 +235,7 @@ describe('Sitemap', () => {
 
   describe('getModels', () => {
     it('should return a valid models sitemap without pagination', async () => {
-      vi.spyOn(sitemap['discoverService'], 'getModelIdentifiers').mockResolvedValue([
+      vi.spyOn(await sitemap['discoverService'](), 'getModelIdentifiers').mockResolvedValue([
         // @ts-ignore
         { identifier: 'test:model', lastModified: '2023-01-01' },
       ]);
@@ -203,7 +262,7 @@ describe('Sitemap', () => {
         lastModified: '2023-01-01',
       }));
 
-      vi.spyOn(sitemap['discoverService'], 'getModelIdentifiers').mockResolvedValue(
+      vi.spyOn(await sitemap['discoverService'](), 'getModelIdentifiers').mockResolvedValue(
         // @ts-ignore
         mockModels,
       );
@@ -220,7 +279,7 @@ describe('Sitemap', () => {
 
   describe('getProviders', () => {
     it('should return a valid providers sitemap', async () => {
-      vi.spyOn(sitemap['discoverService'], 'getProviderIdentifiers').mockResolvedValue([
+      vi.spyOn(await sitemap['discoverService'](), 'getProviderIdentifiers').mockResolvedValue([
         // @ts-ignore
         { identifier: 'test-provider', lastModified: '2023-01-01' },
       ]);
@@ -244,7 +303,7 @@ describe('Sitemap', () => {
 
   describe('page count methods', () => {
     it('should return correct plugin page count', async () => {
-      vi.spyOn(sitemap['discoverService'], 'getPluginIdentifiers').mockResolvedValue(
+      vi.spyOn(await sitemap['discoverService'](), 'getPluginIdentifiers').mockResolvedValue(
         // @ts-ignore
         Array.from({ length: 150 }, (_, i) => ({ identifier: `plugin-${i}` })),
       );
@@ -254,7 +313,7 @@ describe('Sitemap', () => {
     });
 
     it('should return correct assistant page count', async () => {
-      vi.spyOn(sitemap['discoverService'], 'getAssistantIdentifiers').mockResolvedValue(
+      vi.spyOn(await sitemap['discoverService'](), 'getAssistantIdentifiers').mockResolvedValue(
         // @ts-ignore
         Array.from({ length: 250 }, (_, i) => ({ identifier: `assistant-${i}` })),
       );
@@ -264,7 +323,7 @@ describe('Sitemap', () => {
     });
 
     it('should return correct model page count', async () => {
-      vi.spyOn(sitemap['discoverService'], 'getModelIdentifiers').mockResolvedValue(
+      vi.spyOn(await sitemap['discoverService'](), 'getModelIdentifiers').mockResolvedValue(
         // @ts-ignore
         Array.from({ length: 120 }, (_, i) => ({ identifier: `model-${i}` })),
       );

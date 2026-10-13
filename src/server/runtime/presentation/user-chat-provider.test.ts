@@ -82,7 +82,23 @@ describe('user-scoped presentation provider', () => {
     ]);
   });
 
-  it('rejects missing scopes, cancelled requests and non-visual models before network access', async () => {
+  it('allows PPT text planning with a non-visual DeepSeek model', async () => {
+    const fetcher = makeFetcher();
+    const port = createUserChatProvider({
+      fetcher,
+      resolve: async () => ({
+        ...connection('alice'),
+        baseURL: 'https://api.deepseek.com/v1',
+        model: 'deepseek-chat',
+        provider: 'deepseek',
+        supportsVision: false,
+      }),
+    });
+    expect((await port.chat(request, { scope })).model).toBe('deepseek-chat');
+    expect(fetcher.mock.calls[0][0]).toBe('https://api.deepseek.com/v1/chat/completions');
+  });
+
+  it('rejects missing scopes, cancelled requests and images on non-visual models before network access', async () => {
     const fetcher = makeFetcher();
     const resolve = vi.fn(async () => ({ ...connection('alice'), supportsVision: false }));
     const port = createUserChatProvider({ fetcher, resolve });
@@ -93,9 +109,43 @@ describe('user-scoped presentation provider', () => {
       code: 'CHAT_CANCELLED',
     });
     expect(resolve).not.toHaveBeenCalled();
-    await expect(port.chat(request, { scope })).rejects.toMatchObject({
+    const imageRequest = {
+      messages: [
+        {
+          role: 'user' as const,
+          content: [
+            { type: 'image_url' as const, image_url: { url: 'https://example.com/image.png' } },
+          ],
+        },
+      ],
+    };
+    await expect(port.chat(imageRequest, { scope })).rejects.toMatchObject({
       code: 'CHAT_REQUEST_INVALID',
+      message: expect.stringContaining('此步骤需要读取图片'),
     });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('rejects images in a text-only capability even with a visual model', async () => {
+    const fetcher = makeFetcher();
+    const port = createUserChatProvider({
+      fetcher,
+      requiresVision: false,
+      resolve: async () => connection('alice'),
+    });
+    await expect(
+      port.chat(
+        {
+          messages: [
+            {
+              role: 'user',
+              content: [{ type: 'image_url', image_url: { url: 'https://example.com/image.png' } }],
+            },
+          ],
+        },
+        { scope },
+      ),
+    ).rejects.toMatchObject({ code: 'CHAT_REQUEST_INVALID' });
     expect(fetcher).not.toHaveBeenCalled();
   });
 

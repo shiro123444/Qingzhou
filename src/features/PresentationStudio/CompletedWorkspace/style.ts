@@ -1,25 +1,17 @@
 import { createStaticStyles, keyframes } from 'antd-style';
 
-const frostBreathe = keyframes`
-  0%,
-  100% {
-    opacity: 0.76;
-  }
-
-  50% {
-    opacity: 0.9;
-  }
-`;
-
-const paintReveal = keyframes`
-  from {
+const watercolorWash = keyframes`
+  0%, 10% {
     clip-path: inset(0 100% 0 0);
-    opacity: 0.35;
+    opacity: 0;
   }
-
-  to {
+  48%, 88% {
     clip-path: inset(0 0 0 0);
     opacity: 1;
+  }
+  100% {
+    clip-path: inset(0 0 0 0);
+    opacity: 0;
   }
 `;
 
@@ -77,11 +69,6 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     border-radius: 8px;
 
     background: #0d0f12;
-
-    &[data-painting='true'] > img {
-      transform: scale(1.05);
-      filter: blur(6px) saturate(0.88);
-    }
   `,
   bentoGrid: css`
     overflow-y: auto;
@@ -503,11 +490,6 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       box-shadow 200ms ease,
       border-color 200ms ease;
 
-    &[data-painting='true'] > img {
-      transform: scale(1.045);
-      filter: blur(8px) saturate(0.9);
-    }
-
     &:hover {
       border-color: ${cssVar.colorBorder};
       box-shadow:
@@ -561,116 +543,113 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     width: 100%;
     min-height: 0;
   `,
-  paintBrushIcon: css`
-    display: grid;
-    place-items: center;
-
-    width: 38px;
-    height: 38px;
-    border: 1px solid rgb(255 255 255 / 74%);
-    border-radius: 50%;
-
-    color: #315f62;
-
-    background: rgb(255 255 255 / 82%);
-    backdrop-filter: blur(10px);
-    box-shadow:
-      0 10px 28px rgb(23 62 69 / 16%),
-      inset 0 0 0 1px rgb(52 130 132 / 8%);
-
-    svg {
-      transform: rotate(-38deg);
-    }
-  `,
-  paintBrushMotion: css`
-    pointer-events: none;
-    position: absolute;
-    z-index: 3;
-    translate: -50% -50%;
-  `,
-  paintCaption: css`
-    pointer-events: none;
-
-    position: absolute;
-    z-index: 3;
-    inset-block-start: 14px;
-    inset-inline-start: 14px;
-
-    padding-block: 4px;
-    padding-inline: 10px;
-    border: 1px solid rgb(30 58 95 / 16%);
-    border-radius: 999px;
-
-    font-size: 11px;
-    font-weight: 600;
-    color: #1e3a5f;
-
-    background: rgb(255 255 255 / 78%);
-    box-shadow: 0 6px 16px rgb(30 58 95 / 10%);
-  `,
-  paintFrost: css`
-    position: absolute;
-    inset: 0;
-
-    background: rgb(248 251 252 / 44%);
-    backdrop-filter: blur(7px) saturate(0.92);
-
-    animation: ${frostBreathe} 2.8s ease-in-out infinite;
-
-    @media (prefers-reduced-motion: reduce) {
-      animation: none;
-    }
-  `,
-  paintAssets: css`
-    position: absolute;
-    inset-block-end: 18px;
-    inset-inline-start: 18px;
-
-    display: flex;
-    gap: 8px;
-
-    img {
-      width: 44px;
-      height: 44px;
-      border: 1px solid rgb(255 255 255 / 75%);
-      border-radius: 10px;
-
-      object-fit: contain;
-      background: rgb(255 255 255 / 65%);
-      box-shadow: 0 4px 14px rgb(35 72 75 / 10%);
-
-      animation: ${paintReveal} 0.8s ease both;
-    }
-
-    @media (prefers-reduced-motion: reduce) {
-      img {
-        animation: none;
-      }
-    }
-  `,
-  paintOverlay: css`
+  generationOverlay: css`
     pointer-events: none;
 
     position: absolute;
     z-index: 2;
-    inset: 0;
+    inset-block-end: 16px;
+    inset-inline-start: 16px;
 
-    overflow: hidden;
+    display: flex;
+    gap: 14px;
+    align-items: center;
 
-    border-radius: inherit;
+    max-width: calc(100% - 32px);
+    padding: 10px;
+    border: 1px solid ${cssVar.colorBorderSecondary};
+    border-radius: 16px;
+
+    color: ${cssVar.colorText};
+
+    background: ${cssVar.colorBgElevated};
+    box-shadow: 0 4px 20px rgb(23 62 69 / 8%);
+
+    &[data-empty='true']:not([data-compact='true']) {
+      inset-block: 50% auto;
+      inset-inline-start: 50%;
+      translate: -50% -50%;
+
+      flex-direction: column;
+
+      width: min(260px, calc(100% - 32px));
+      padding: 16px;
+
+      text-align: center;
+
+      svg {
+        width: 100%;
+      }
+    }
+
+    &[data-compact='true'] {
+      inset-block-end: 8px;
+      inset-inline-start: 8px;
+
+      max-width: calc(100% - 16px);
+      padding-block: 4px;
+      padding-inline: 8px;
+      border-radius: 8px;
+    }
+
+    &[data-state='interrupted'] svg g {
+      animation: none;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      svg g {
+        animation: none;
+      }
+    }
+
+    @media (width <= 680px) {
+      gap: 8px;
+      padding: 7px;
+      border-radius: 12px;
+    }
   `,
-  paintStroke: css`
-    pointer-events: none;
+  generationWatercolor: css`
+    overflow: hidden;
+    flex-shrink: 0;
 
-    position: absolute;
-    inset: 0;
+    width: 112px;
+    height: auto;
+    border-radius: 10px;
 
-    width: 100%;
-    height: 100%;
-
-    color: rgb(59 143 145 / 54%);
-
-    filter: drop-shadow(0 5px 8px rgb(38 105 112 / 10%));
+    @media (width <= 680px) {
+      width: 72px;
+    }
+  `,
+  generationPaper: css`
+    fill: color-mix(in srgb, ${cssVar.colorBgContainer} 85%, #c9ddd1);
+  `,
+  generationSky: css`
+    animation: ${watercolorWash} 18s ease-in-out infinite both;
+  `,
+  generationRiver: css`
+    animation: ${watercolorWash} 18s ease-in-out 1.5s infinite both;
+  `,
+  generationBoat: css`
+    animation: ${watercolorWash} 18s ease-in-out 3s infinite both;
+  `,
+  generationReeds: css`
+    animation: ${watercolorWash} 18s ease-in-out 2s infinite both;
+  `,
+  generationCopy: css`
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding-inline-end: 6px;
+  `,
+  generationCaption: css`
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.5;
+  `,
+  generationHint: css`
+    font-size: 11px;
+    line-height: 1.5;
+    color: ${cssVar.colorTextSecondary};
   `,
   pageCounter: css`
     min-width: 64px;

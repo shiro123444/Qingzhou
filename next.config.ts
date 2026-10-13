@@ -1,5 +1,6 @@
 import { networkInterfaces } from 'node:os';
 
+import { getBuildBudget } from './src/libs/next/config/build-budget';
 import { defineConfig } from './src/libs/next/config/define-config';
 
 const isVercel = !!process.env.VERCEL_ENV;
@@ -42,6 +43,9 @@ const getLocalIPs = () => {
 const nextConfig = defineConfig({
   ...(isVercel ? vercelConfig : {}),
   experimental: {
+    ...getBuildBudget(),
+    // Activate route modules on demand on small servers. Warm routes stay cached.
+    preloadEntriesOnStart: false,
     // PPTX templates allow 100 MiB files. Leave bounded multipart overhead so
     // Next's proxy does not truncate an otherwise valid upload.
     proxyClientMaxBodySize: '110mb',

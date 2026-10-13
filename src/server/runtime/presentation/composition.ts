@@ -1,5 +1,7 @@
 import type { ImageGenerationPort, RuntimeScope } from '../../../../packages/runtime-contracts/src';
 import type { AtomicRuntime } from '../atomic-runtime';
+import { ExecutionLimiter } from '../execution-limiter';
+import { getResourceBudget } from '../resource-budget';
 import type { PresentationArtifactStore } from './artifact-store';
 import type { PresentationAssetStore } from './asset-store';
 import type { CapabilityMemory } from './capability-memory';
@@ -301,6 +303,11 @@ export const createPresentationRuntimeComposition = (
   const resolvedCapability = capability ?? createUnavailableCapability();
   const resolvedContextFactory = contextFactory ?? createUnavailableContextFactory();
   const generationPorts = new Map<string, PresentationGenerationPort>();
+  const budget = getResourceBudget();
+  const executionLimiter = new ExecutionLimiter(
+    budget.generationConcurrency,
+    budget.generationQueue,
+  );
   const generationPortFactory =
     capability && contextFactory && compositionOptions.generationArtifactStore
       ? (scope: RuntimeScope & { readonly request: Request }) => {
@@ -310,6 +317,7 @@ export const createPresentationRuntimeComposition = (
           const port = createPresentationGenerationPort(
             {
               atomicRuntime: compositionOptions.atomicRuntime,
+              executionLimiter,
               contentCompiler: compositionOptions.contentCompiler,
               capabilityMemory: compositionOptions.capabilityMemory,
               templateLibrary: compositionOptions.templateLibrary,
@@ -339,7 +347,10 @@ export const createPresentationRuntimeComposition = (
       resolvedCapability,
       resolvedContextFactory,
       capability && contextFactory
-        ? { generationEventPublisherFactory: bindings.generationEventPublisherFactory }
+        ? {
+            executionLimiter,
+            generationEventPublisherFactory: bindings.generationEventPublisherFactory,
+          }
         : undefined,
     );
 
@@ -375,6 +386,7 @@ export const createPresentationRuntimeComposition = (
     : undefined;
   const outlineCapability = compositionOptions.multimodalChatPort
     ? createPresentationOutlineCapability({
+        atomicRuntime: compositionOptions.atomicRuntime ?? null,
         chat: compositionOptions.multimodalChatPort,
         teachingMemory: compositionOptions.teachingMemory,
       })

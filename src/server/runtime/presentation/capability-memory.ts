@@ -448,7 +448,7 @@ export function capabilityMemoryOperations(
       name: 'presentation.memory.search',
       description:
         'Retrieve verified learning from earlier presentations in this account; match task, style or teaching intent.',
-      agent: { contexts: ['presentation.intake'], maxCalls: 3 },
+      agent: { contexts: ['presentation.intake', 'skills'], maxCalls: 3 },
       input: z
         .object({
           query: z.string().min(1).max(2000),
@@ -460,7 +460,7 @@ export function capabilityMemoryOperations(
     {
       name: 'presentation.memory.load',
       description: 'Inspect an owned immutable capability and its source evidence.',
-      agent: { contexts: ['presentation.intake'], maxCalls: 6 },
+      agent: { contexts: ['presentation.intake', 'skills'], maxCalls: 6 },
       input: z.object({ id: z.string().min(1).max(100) }).strict(),
       execute: ({ id }, ctx) => memory.load(ctx.scope, id),
     },
@@ -468,7 +468,7 @@ export function capabilityMemoryOperations(
       name: 'presentation.memory.compose',
       description:
         'Compose up to six verified learning atoms; current task and fixed content budgets take precedence over learned styling.',
-      agent: { contexts: ['presentation.intake'], maxCalls: 2 },
+      agent: { contexts: ['presentation.intake', 'skills'], maxCalls: 2 },
       input: z.object({ ids: z.array(z.string()).max(6) }).strict(),
       execute: ({ ids }, ctx) => memory.compose(ctx.scope, ids),
     },

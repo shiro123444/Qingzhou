@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { parseString } from '../../../../packages/file-loaders/src/utils/parser-utils';
 import { measureSlideText } from './text-measurement';
 
 /** Local escaping keeps this module a leaf: importing semantic-blocks here would cycle. */
@@ -295,13 +296,17 @@ export const renderAssetAnnotations = (
 };
 
 export interface AnnotatedAsset {
+  readonly annotationMode?: 'embedded' | 'overlay';
   readonly annotations?: readonly AssetAnnotationInput[];
+  /** Measured from owned image bytes, never from model-authored layout metadata. */
+  readonly intrinsicSize?: { readonly height: number; readonly width: number };
   readonly layout?: {
     readonly height: number;
     readonly width: number;
     readonly x: number;
     readonly y: number;
   };
+  readonly preserveAspectRatio?: string;
   readonly visualId: string;
 }
 
@@ -314,13 +319,34 @@ export const assetPlacementBox = (
     readonly x: number;
     readonly y: number;
   },
+  intrinsicSize?: { readonly height: number; readonly width: number },
+  preserveAspectRatio = 'xMidYMid meet',
 ): AnnotationBox => {
   const [minX = 0, minY = 0, width = 960, height = 540] = viewBox;
-  return {
+  const viewport = {
     height: layout.height * height,
     width: layout.width * width,
     x: minX + layout.x * width,
     y: minY + layout.y * height,
+  };
+  if (!intrinsicSize || preserveAspectRatio.trim() === 'none') return viewport;
+  const { width: imageWidth, height: imageHeight } = intrinsicSize;
+  if (![imageWidth, imageHeight].every((value) => Number.isFinite(value) && value > 0))
+    return viewport;
+  const scale = (preserveAspectRatio.includes('slice') ? Math.max : Math.min)(
+    viewport.width / imageWidth,
+    viewport.height / imageHeight,
+  );
+  const paintedWidth = imageWidth * scale;
+  const paintedHeight = imageHeight * scale;
+  const align = preserveAspectRatio.replace(/^defer\s+/u, '').split(/\s+/u)[0];
+  const offset = (space: number, alignment: string) =>
+    alignment.includes('Min') ? 0 : alignment.includes('Max') ? space : space / 2;
+  return {
+    height: paintedHeight,
+    width: paintedWidth,
+    x: viewport.x + offset(viewport.width - paintedWidth, align?.slice(0, 4) ?? 'xMid'),
+    y: viewport.y + offset(viewport.height - paintedHeight, align?.slice(4) ?? 'YMid'),
   };
 };
 
@@ -330,17 +356,29 @@ export const overlayAssetAnnotations = (
   viewBox: readonly number[],
   assets: readonly AnnotatedAsset[],
 ): string => {
+  // Retire old copies on a repair pass, including when the bitmap owns labels.
+  const ids = new Set(assets.map((asset) => asset.visualId));
+  const document = parseString(svg);
+  let removed = false;
+  for (const group of Array.from(document.getElementsByTagName('g')))
+    if (ids.has(group.getAttribute('data-asset-annotations') ?? '')) {
+      group.parentNode?.removeChild(group);
+      removed = true;
+    }
+  const clean = removed ? document.toString().replace(/\/>\s*$/u, '></svg>') : svg;
   const markup = assets
-    .filter((asset) => asset.layout && asset.annotations?.length)
+    .filter(
+      (asset) => asset.annotationMode !== 'embedded' && asset.layout && asset.annotations?.length,
+    )
     .map((asset) =>
       renderAssetAnnotations(
         asset.annotations!,
-        assetPlacementBox(viewBox, asset.layout!),
+        assetPlacementBox(viewBox, asset.layout!, asset.intrinsicSize, asset.preserveAspectRatio),
         asset.visualId,
       ),
     )
     .join('');
-  if (!markup) return svg;
-  const insertion = svg.lastIndexOf('</svg>');
-  return insertion < 0 ? svg : `${svg.slice(0, insertion)}${markup}${svg.slice(insertion)}`;
+  if (!markup) return clean;
+  const insertion = clean.lastIndexOf('</svg>');
+  return insertion < 0 ? clean : `${clean.slice(0, insertion)}${markup}${clean.slice(insertion)}`;
 };

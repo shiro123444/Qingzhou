@@ -38,7 +38,7 @@ const articleMetadata = (content: string) => {
 
 /** Durable account-owned content. No uploaded source code is executed by the host. */
 export class SiteStore {
-  private pending: Promise<unknown> = Promise.resolve();
+  private readonly pending = new Map<string, Promise<void>>();
 
   constructor(private readonly root: string) {}
 
@@ -51,9 +51,16 @@ export class SiteStore {
     return nodePath.join(this.folder(userId), `${siteIdSchema.parse(id)}.json`);
   }
 
-  private serialize<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.pending.then(operation);
-    this.pending = result.catch(() => undefined);
+  private serialize<T>(userId: string, operation: () => Promise<T>): Promise<T> {
+    const result = (this.pending.get(userId) ?? Promise.resolve()).then(operation);
+    const tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.pending.set(userId, tail);
+    void tail.then(() => {
+      if (this.pending.get(userId) === tail) this.pending.delete(userId);
+    });
     return result;
   }
 
@@ -89,7 +96,7 @@ export class SiteStore {
     }
   }
 
-  async list(userId: string) {
+  private async names(userId: string) {
     let names: string[];
     try {
       names = await readdir(this.folder(userId));
@@ -97,16 +104,23 @@ export class SiteStore {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
       throw error;
     }
-    return Promise.all(
-      names
-        .filter((name) => name.endsWith('.json'))
-        .map((name) => this.read(userId, name.slice(0, -5))),
+    return names.filter(
+      (name) => name.endsWith('.json') && siteIdSchema.safeParse(name.slice(0, -5)).success,
     );
   }
 
+  async list(userId: string) {
+    const sites: Site[] = [];
+    // Histories can be large. Avoid reading and parsing every site's JSON concurrently.
+    for (const name of await this.names(userId))
+      sites.push(await this.read(userId, name.slice(0, -5)));
+    return sites;
+  }
+
   create(userId: string, name: string, author: string) {
-    return this.serialize(async () => {
-      if ((await this.list(userId)).length >= 20)
+    return this.serialize(userId, async () => {
+      // Counting directory entries does not materialize every article and published history.
+      if ((await this.names(userId)).length >= 20)
         throw new SiteError('SITE_LIMIT', 'At most 20 sites per account');
       const date = new Date().toISOString().slice(0, 10);
       const site: Site = siteSchema.parse({
@@ -134,7 +148,7 @@ export class SiteStore {
   }
 
   change(userId: string, id: string, baseRevision: string, raw: Record<string, string | null>) {
-    return this.serialize(async () => {
+    return this.serialize(userId, async () => {
       const changes = changesSchema.parse(raw);
       if (!Object.keys(changes).length) throw new SiteError('SITE_INVALID', 'No changes supplied');
       const site = await this.read(userId, id);
@@ -151,7 +165,7 @@ export class SiteStore {
   }
 
   publish(userId: string, id: string, baseRevision: string) {
-    return this.serialize(async () => {
+    return this.serialize(userId, async () => {
       const site = await this.read(userId, id);
       this.assertRevision(site, baseRevision);
       const files = Object.fromEntries(
@@ -168,7 +182,7 @@ export class SiteStore {
   }
 
   rollback(userId: string, id: string, baseRevision: string, revision: string) {
-    return this.serialize(async () => {
+    return this.serialize(userId, async () => {
       const site = await this.read(userId, id);
       this.assertRevision(site, baseRevision);
       const previous = site.history.find((snapshot) => snapshot.revision === revision);

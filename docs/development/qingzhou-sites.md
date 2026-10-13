@@ -1,5 +1,7 @@
 # 清舟文档与博客改造
 
+2026-10-10：已开始[原生插件与场景装配重构](./cordis-native-composition.md)。站点宿主原生装配 `sites + skills`，博客 Agent 复用通用组合器；历史第一轮记录保留如下。资源目标与当前实测见[小型服务器基线](./qingzhou-resource-baseline.md)。
+
 目标：文档公开阅读、开放贡献；博客支持清舟托管、本地编辑回传与 Agent 协助。Fumadocs 与 Astro 保留独立前端，通过 Cordis 共享内容能力。视觉以博客的简洁组件为基准，文档首页保留粒子效果。
 
 ## 实施顺序
@@ -28,6 +30,8 @@
 CORDIS_DOCS_URL=http://localhost:3000
 CORDIS_BLOG_URL=http://localhost:4321
 CORDIS_SITES_DATA_DIR=/absolute/persistent/path/sites
+# Optional native lesson-to-blog composition; default is sites.
+QINGZHOU_SITES_PROFILE=education
 ```
 
 博客 Agent 复用认证用户在清舟主页面保存的模型与服务配置；按次解析，不在全局站点 runtime 保存用户密钥。文本修改不要求视觉模型。当前沿用已有 OpenAI 兼容端口，原生其他协议需后续适配。未配置时，文章编辑、发布与本地同步仍可使用，Agent 返回明确的不可用结果。

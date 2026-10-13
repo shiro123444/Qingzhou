@@ -1,6 +1,7 @@
 import { lessonOutline, type LessonPlan, type TeacherBrief } from '@/types/presentationLesson';
 import type { TeachingSelection } from '@/types/presentationTeaching';
 
+import type { AtomicRuntime } from '../atomic-runtime';
 import { PRESENTATION_CONTENT_BUDGET } from './content-intent';
 import type { PresentationConversationBrief } from './conversation-capability';
 import { proposeLesson } from './lesson';
@@ -77,6 +78,8 @@ const normalizeSlides = (value: unknown): PresentationOutlineSlide[] => {
 };
 
 export const createPresentationOutlineCapability = (options: {
+  /** Production shares its host; null disables teaching. Omit only for standalone helper use. */
+  readonly atomicRuntime?: Pick<AtomicRuntime, 'invoke'> | null;
   readonly chat: MultimodalChatPort;
   readonly teachingMemory?: FileTeachingMemory;
 }): PresentationOutlineCapability => {
@@ -94,24 +97,32 @@ export const createPresentationOutlineCapability = (options: {
       }
       const current = command.currentSlides ?? [];
       if (brief.teacherBrief) {
+        const input = {
+          brief: brief.teacherBrief,
+          topic: brief.topic!,
+          material: { research: brief.research, slides: current },
+          current: command.currentLessonPlan,
+          instruction: command.instruction,
+        };
+        if (options.atomicRuntime !== undefined) {
+          if (!options.atomicRuntime)
+            throw Object.assign(new Error('Teaching plugin is unavailable'), {
+              code: 'PROVIDER_UNAVAILABLE',
+            });
+          const lessonPlan = await options.atomicRuntime.invoke<LessonPlan>(
+            'teaching.lesson.plan',
+            { ...input, teachingSelection: command.teachingSelection },
+            context,
+          );
+          return { lessonPlan, slides: lessonOutline(lessonPlan) };
+        }
         if (command.teachingSelection?.ids.length && !options.teachingMemory)
           throw new Error('Teaching memory is not configured');
         const patterns =
           command.teachingSelection && options.teachingMemory
             ? await options.teachingMemory.compose(context.scope, command.teachingSelection)
             : [];
-        const lessonPlan = await proposeLesson(
-          options.chat,
-          {
-            brief: brief.teacherBrief,
-            topic: brief.topic!,
-            material: { research: brief.research, slides: current },
-            current: command.currentLessonPlan,
-            patterns,
-            instruction: command.instruction,
-          },
-          context,
-        );
+        const lessonPlan = await proposeLesson(options.chat, { ...input, patterns }, context);
         return { lessonPlan, slides: lessonOutline(lessonPlan) };
       }
       return completeStructuredJson({

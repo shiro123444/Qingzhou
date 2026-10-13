@@ -14,6 +14,8 @@ import type {
 } from '@/types/presentationTeaching';
 import { teachingSourceReferenceSchema } from '@/types/presentationTeaching';
 
+import { AtomicRuntime } from '../atomic-runtime';
+import { createTeachingPlugin } from '../teaching/atomic-plugin';
 import type { MultimodalChatPort } from './multimodal-chat-provider';
 import { createPresentationOutlineCapability } from './outline-capability';
 import { handleTeachingRequest } from './teaching-handler';
@@ -75,6 +77,40 @@ afterEach(async () => {
 });
 
 describe('conditional teaching memory', () => {
+  it('preserves account ownership and confirmed records across teaching plugin unload and reinstall', async () => {
+    const { memory, record, root } = await setup();
+    const confirmed = await memory.review(scope, review(record));
+    const runtime = new AtomicRuntime([createTeachingPlugin({ memory })]);
+    try {
+      await expect(
+        runtime.invoke('teaching.memory.compose', { ids: [record.id] }, { scope }),
+      ).resolves.toEqual([confirmed]);
+      expect((await runtime.catalog()).some(({ name }) => name.endsWith('.review'))).toBe(false);
+      await runtime.remove('teaching');
+      await expect(
+        runtime.invoke('teaching.memory.search', { query: '' }, { scope }),
+      ).rejects.toMatchObject({ code: 'PROVIDER_UNAVAILABLE' });
+      expect(await memory.load(scope, record.id)).toEqual(confirmed);
+      await runtime.add(createTeachingPlugin({ memory: new FileTeachingMemory(root) }));
+      await expect(
+        runtime.invoke(
+          'teaching.memory.compose',
+          { ids: [record.id] },
+          { scope: { ...scope, sessionId: 'new-session' } },
+        ),
+      ).resolves.toEqual([confirmed]);
+      await expect(
+        runtime.invoke(
+          'teaching.memory.compose',
+          { ids: [record.id] },
+          { scope: { ...scope, userId: 'other-teacher' } },
+        ),
+      ).rejects.toThrow('unconfirmed');
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
   it('keeps proposals out of search/compose and persists across sessions, not accounts', async () => {
     const { memory, record, root } = await setup();
     expect(await memory.search(scope, '')).toEqual([]);
@@ -152,11 +188,7 @@ describe('conditional teaching memory', () => {
       new FilePresentationTemplateLibrary({ root }),
       {} as MultimodalChatPort,
     );
-    expect(learning.operations().map((op) => op.name)).toEqual([
-      'presentation.teaching.analyze',
-      'presentation.teaching.search',
-      'presentation.teaching.compose',
-    ]);
+    expect(learning.operations().map((op) => op.name)).toEqual(['presentation.teaching.analyze']);
     const body = JSON.stringify({ action: 'review', review: review(record) });
     const request = (origin?: string) =>
       new Request('https://example.test/api/runtime/presentation/teaching', {

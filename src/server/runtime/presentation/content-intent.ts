@@ -63,6 +63,8 @@ export const visualRequirementSchema = z
     required: z.boolean().default(true),
     renderer: z.enum(['image', 'native']).optional(),
     fidelity: z.enum(['conceptual', 'computed']).optional(),
+    /** One owner for internal labels/relations: the bitmap or an explicit vector overlay. */
+    annotationMode: z.enum(['embedded', 'overlay']).optional(),
     /**
      * Precise relations the bitmap must not paint: the server draws them as editable vectors
      * over the artwork, in asset-local 0..1 coordinates so they follow the placed image.
@@ -146,7 +148,7 @@ export const contentInputFingerprint = (input: PresentationJobInput): string =>
         slideCount: input.slideCount,
         title: input.title,
         revision: input.options?.contentRevision,
-        contractVersion: 4,
+        contractVersion: 5,
         imageSlots: input.options?.imageSlots,
         lessonPlan: input.options?.lessonPlan,
       }),
@@ -246,6 +248,8 @@ export const createPresentationContentCompiler = (
             )
               throw new Error('Visual ids must be unique per slide');
             for (const visual of slide.visuals ?? []) {
+              if (isRasterVisual(visual) && visual.fidelity === 'conceptual')
+                visual.annotationMode ??= 'embedded';
               if (visual.kind === 'source-figure' && visual.renderer === 'image')
                 throw new Error('Source figures must be reused, never generated.');
               if (visual.fidelity === 'computed' && isRasterVisual(visual))
@@ -309,7 +313,7 @@ export const createPresentationContentCompiler = (
             {
               role: 'system',
               content:
-                '视觉类型kind与绘制工具renderer必须分开。贴纸、表情包、角标、小徽章这类纯装饰用 kind:"sticker"：只画一个孤立主体，不带文字、不带整幅背景；服务端会自动抠图成透明并小尺寸落位，所以不要在 sticker 上要求背景、场景或图注。框架图、流程图、机制图、实验装置图、概念性科研图优先renderer:image，不限于装饰配图；brief明确部件、关系和箭头，不允许多余拼贴、照片条或无关装饰。框架图/机制图/装置图里凡是方向性箭头、引线、共线/切向/法向关系和关键标签，都要写进 visuals[].annotations：{type:"vector"|"guide"|"label", from/to 或 at（图内 0 到 1 的相对坐标）, label 或 text（不超过 24 字）, color?}；这些由服务端在生图之上用矢量叠加，所以生图只画图形本体，不要把方向性箭头、引线和关键标签烧进图里。科研图默认简洁的二维学术图、实物照片或可核实原始资料；没有定义函数与数据时，不生成装饰性三维曲面、发光光轨和空泛科技背景。需要精确函数、等高线、泰勒逼近、迭代轨迹、实验数值的图选renderer:native,fidelity:computed，交给可复算模型或有来源数据，禁止手填看似正确的点。仅解释概念、不声称定量结果时用fidelity:conceptual，可以生图。复杂页面可以拆成一个image机制图和一个native数据块，不用整页禁用生图。论文原图source-figure只复用。不要强制每页配图。概念/框架/机制图不用添加“示意图·非实测”免责声明；数据图则保留真实来源和实验设置。数学公式默认28px，由服务器测量和等价换行，不能虚构measurement。板书页预算为左侧544px净宽。教学封面优先只用课程标题、统一色彩和留白；没有内容意义的AI背景会被服务端移除。',
+                '视觉类型kind与绘制工具renderer必须分开。贴纸、表情包、角标、小徽章这类纯装饰用 kind:"sticker"：只画一个孤立主体，不带文字、不带整幅背景；服务端会自动抠图成透明并小尺寸落位，所以不要在 sticker 上要求背景、场景或图注。框架图、流程图、机制图、实验装置图、概念性科研图优先renderer:image，不限于装饰配图；brief明确部件、关系和箭头，不允许多余拼贴、照片条或无关装饰。概念性框架图、流程图、知识地图默认 annotationMode:"embedded"：生图负责图内短标签、连接线与箭头，SVG只负责图外标题正文，不再叠加同一套标签和箭头。不要在看到真实图片之前猜测对象坐标。只有确实需要独立编辑、且按确定布局约束生成的精确几何标注才用 annotationMode:"overlay" 与 visuals[].annotations：{type:"vector"|"guide"|"label", from/to 或 at（实际图像内 0 到 1 的相对坐标）, label 或 text（不超过 24 字）, color?}；此模式下图片禁止同名标签与箭头，服务端按真实图像比例投影。定量或严格几何关系优先native，由服务端计算。科研图默认简洁的二维学术图、实物照片或可核实原始资料；没有定义函数与数据时，不生成装饰性三维曲面、发光光轨和空泛科技背景。需要精确函数、等高线、泰勒逼近、迭代轨迹、实验数值的图选renderer:native,fidelity:computed，交给可复算模型或有来源数据，禁止手填看似正确的点。仅解释概念、不声称定量结果时用fidelity:conceptual，可以生图。复杂页面可以拆成一个image机制图和一个native数据块，不用整页禁用生图。论文原图source-figure只复用。不要强制每页配图。概念/框架/机制图不用添加“示意图·非实测”免责声明；数据图则保留真实来源和实验设置。数学公式默认28px，由服务器测量和等价换行，不能虚构measurement。板书页预算为左侧544px净宽。教学封面优先只用课程标题、统一色彩和留白；没有内容意义的AI背景会被服务端移除。',
             },
             {
               role: 'user',
@@ -352,4 +356,4 @@ export const readContentIntents = (input: PresentationJobInput): SlideContentInt
   return value ? z.array(slideContentIntentSchema).parse(value.slides) : [];
 };
 
-export const CONTENT_RENDERING_INSTRUCTIONS = `每页只承担一个讲解动作，不强求3–5要点；允许封面、单图、提问和停顿。正文至少24px，短标签/坐标/页脚至少16px。先留真实图像与公式区域，再排文字；不要复制模板密集正文。公式用formula节点渲染，使用编译器给出的完整latex、measurement字号和尺寸；不能缩字或改变数学含义。板书页左侧净宽544，右侧三分之一留白，不跨栏。按visuals.renderer选工具：image的科研/框架/流程图用已生成的真实image资产，native的计算图用同id scientific-diagram节点；不把image图重复绘制为plot/graph。计算轨迹使用可复算quadratic/taylor模型或有来源数据，不让模型猜坐标。纯概念图不添加“示意图/非实测/AI生成”通用标签，数据性质保存在metadata与备注，需要避免误解的模拟数据应说明实验设置。source-figure保留原图与出处。SVG用空<g data-content-id="块id"/>放置公式/计算图，服务端绘制，不重复画内容。`;
+export const CONTENT_RENDERING_INSTRUCTIONS = `每页只承担一个讲解动作，不强求3–5要点；允许封面、单图、提问和停顿。正文至少24px，短标签/坐标/页脚至少16px。大纲要点只是内容，不代表项目符号列表；默认用短句、分栏或留白组织，不添加Markdown圆点、星号或破折号，只有用户或模板明确要求列表时才保留。先留真实图像与公式区域，再排文字；不要复制模板密集正文。公式用formula节点渲染，使用编译器给出的完整latex、measurement字号和尺寸；不能缩字或改变数学含义。板书页左侧净宽544，右侧三分之一留白，不跨栏。按visuals.renderer选工具：image的科研/框架/流程图用已生成的真实image资产，native的计算图用同id scientific-diagram节点；不把image图重复绘制为plot/graph。annotationMode:embedded的图内文字和箭头已经属于图片，不在SVG里重写或补箭头；overlay模式只由服务端添加已声明的标注。计算轨迹使用可复算quadratic/taylor模型或有来源数据，不让模型猜坐标。纯概念图不添加“示意图/非实测/AI生成”通用标签，数据性质保存在metadata与备注，需要避免误解的模拟数据应说明实验设置。source-figure保留原图与出处。SVG用空<g data-content-id="块id"/>放置公式/计算图，服务端绘制，不重复画内容。`;

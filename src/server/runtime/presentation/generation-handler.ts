@@ -3,6 +3,7 @@ import type {
   PresentationJobInput,
   RuntimeScope,
 } from '../../../../packages/runtime-contracts/src';
+import type { ExecutionLimiter } from '../execution-limiter';
 import type { PresentationGenerationCapability } from './generation-capability';
 import type { PresentationPipelineContext } from './pipeline';
 import type { PresentationJobEventPublisherPort } from './publisher';
@@ -23,6 +24,7 @@ export type PresentationGenerationEventPublisherFactory = (
   | Promise<PresentationJobEventPublisherPort | undefined>;
 
 export interface PresentationGenerationRequestOptions {
+  readonly executionLimiter?: ExecutionLimiter;
   readonly generationEventPublisherFactory?: PresentationGenerationEventPublisherFactory;
 }
 
@@ -84,7 +86,9 @@ const wireSafe = (value: unknown, key?: string): unknown => {
 };
 
 const statusByCode: Readonly<Record<string, number>> = {
+  CAPACITY_BUSY: 503,
   NOT_FOUND: 404,
+  OPERATION_CANCELLED: 499,
   PRESENTATION_INVALID: 400,
   PRESENTATION_EVENT_SCOPE_DENIED: 403,
   PRESENTATION_QUALITY_FAILED: 502,
@@ -137,6 +141,8 @@ export const handlePresentationGenerationRequest = async (
   contextFactory: (jobId: string) => PresentationPipelineContext,
   options: PresentationGenerationRequestOptions = {},
 ): Promise<PresentationGenerationHttpResponse> => {
+  let releaseCapacity: (() => void) | undefined;
+  let eventPublisher: PresentationJobEventPublisherPort | undefined;
   try {
     if (request.method !== 'POST') return bad('Only POST is supported');
     if (!validScope(scope)) return bad('userId and sessionId are required');
@@ -189,14 +195,20 @@ export const handlePresentationGenerationRequest = async (
       sourceVersionIds,
       ...(prompt ? { prompt } : {}),
     } as unknown as PresentationJobInput;
+    releaseCapacity = await options.executionLimiter?.acquire(request.signal);
+    if (request.signal.aborted)
+      throw Object.assign(new Error('Generation request cancelled'), {
+        code: 'OPERATION_CANCELLED',
+      });
     const jobId = `generation-${Date.now()}`;
     const produced = contextFactory(jobId);
-    const eventPublisher = options.generationEventPublisherFactory
+    eventPublisher = options.generationEventPublisherFactory
       ? await options.generationEventPublisherFactory(scope, jobId, request)
       : undefined;
     if (eventPublisher) eventPublisher.assertScope(scope);
     const context = {
       ...produced,
+      plannerContext: { ...produced.plannerContext, abortSignal: request.signal, scope },
       workerContext: {
         ...produced.workerContext,
         abortSignal: request.signal,
@@ -225,5 +237,11 @@ export const handlePresentationGenerationRequest = async (
     };
   } catch (error) {
     return errorResponse(error);
+  } finally {
+    try {
+      eventPublisher?.dispose?.();
+    } finally {
+      releaseCapacity?.();
+    }
   }
 };

@@ -138,12 +138,10 @@ const invalid = (message: string): never => {
   throw new PresentationRevisionAssetError('IMAGE_PLAN_INVALID', message);
 };
 /**
- * Relations the server draws itself must not be painted into the bitmap: a generated image
- * cannot guarantee arrow direction or exact geometric attachment, but a vector can.
+ * Assign internal labels and relations to one renderer, including omitted-slot recovery.
  */
 const annotationClause = (requirement?: VisualRequirement): string => {
   const annotations = requirement?.annotations ?? [];
-  if (!annotations.length) return '';
   const labels = [
     ...new Set(
       annotations.flatMap((annotation) =>
@@ -155,6 +153,9 @@ const annotationClause = (requirement?: VisualRequirement): string => {
       ),
     ),
   ];
+  if (requirement?.annotationMode === 'embedded')
+    return `\nThis image owns its internal labels, connectors and arrows. Render the requested short labels accurately inside the diagram${labels.length ? `: ${labels.join('、')}` : ''}; the server will not overlay another copy. Keep slide titles, body paragraphs and footers outside the artwork.`;
+  if (!annotations.length) return '';
   return `\nThe server overlays these editable vector annotations on top of your artwork: ${labels.join('、') || 'direction arrows and leader lines'}. Do not paint them yourself: no arrows, no leader lines, no such labels, and keep that area clean for them.`;
 };
 
@@ -789,7 +790,7 @@ class RevisionAssetPlanner implements PresentationRevisionAssetPlanner {
                           y: 0.72,
                         })
                       : { fit: 'contain', height: 0.66, width: 0.44, x: 0.52, y: 0.18 },
-                    prompt: visual.brief,
+                    prompt: `${visual.brief}${annotationClause(visual)}`,
                     size: '1024x1024',
                     slideId: slide.slideId,
                     slotId: visual.id,

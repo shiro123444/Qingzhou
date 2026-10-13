@@ -1,10 +1,27 @@
 import { parseString } from '../../../../packages/file-loaders/src/utils/parser-utils';
 import type { PresentationSlidePlan } from '../../../../packages/runtime-contracts/src';
+import { assetPlacementBox, overlayAssetAnnotations } from './asset-annotations';
 import { isNativeVisual, readVisualAssetBindings, visualRequirementSchema } from './content-intent';
 import { semanticBlockSchema } from './semantic-blocks';
 import { measureSlideText } from './text-measurement';
 
 const canonicalRef = (ref: string) => ref.replace(/\?raw=true$/u, '');
+
+/** A self-contained diagram never keeps a second set of vector labels on retry. */
+export function reconcileEmbeddedVisualAnnotations(
+  slide: PresentationSlidePlan,
+): PresentationSlidePlan {
+  if (!Array.isArray(slide.metadata?.visualRequirements)) return slide;
+  const assets = slide.metadata.visualRequirements.flatMap((value) => {
+    const parsed = visualRequirementSchema.safeParse(value);
+    return parsed.success && parsed.data.annotationMode === 'embedded'
+      ? [{ annotationMode: 'embedded' as const, visualId: parsed.data.id }]
+      : [];
+  });
+  if (!assets.length) return slide;
+  const svg = overlayAssetAnnotations(slide.svg, [], assets);
+  return svg === slide.svg ? slide : { ...slide, svg };
+}
 
 /** One visual ID has one representation. A verified native replacement retires its old bitmap. */
 export function reconcileNativeVisualAssets(slide: PresentationSlidePlan): PresentationSlidePlan {
@@ -72,7 +89,10 @@ export function reconcileNativeVisualAssets(slide: PresentationSlidePlan): Prese
 }
 
 /** Shared occupied regions: semantic nodes, foreground images and authored text. */
-export function inspectVisualOccupancy(slide: PresentationSlidePlan): string[] {
+export function inspectVisualOccupancy(
+  slide: PresentationSlidePlan,
+  imageSizes: ReadonlyMap<string, { width: number; height: number }> = new Map(),
+): string[] {
   const document = parseString(slide.svg);
   const raw = slide.metadata?.contentBlocks;
   const blocks = (Array.isArray(raw) ? raw : []).flatMap((value) => {
@@ -104,7 +124,25 @@ export function inspectVisualOccupancy(slide: PresentationSlidePlan): string[] {
         return [key, /^-?\d+(?:\.\d+)?(?:px)?$/u.test(value) ? Number.parseFloat(value) : NaN];
       }),
     ) as Region;
-    return Object.values(rect).every(Number.isFinite) ? [{ id: binding.visualId, rect }] : [];
+    if (!Object.values(rect).every(Number.isFinite)) return [];
+    const size = imageSizes.get(canonicalRef(ref));
+    const painted = size
+      ? assetPlacementBox(
+          [0, 0, 1, 1],
+          rect,
+          size,
+          image.getAttribute('preserveAspectRatio') || undefined,
+        )
+      : rect;
+    // A cover image is cropped to the viewport; contain margins are unoccupied.
+    const occupied = {
+      x: Math.max(rect.x, painted.x),
+      y: Math.max(rect.y, painted.y),
+      width: Math.min(rect.x + rect.width, painted.x + painted.width) - Math.max(rect.x, painted.x),
+      height:
+        Math.min(rect.y + rect.height, painted.y + painted.height) - Math.max(rect.y, painted.y),
+    };
+    return [{ id: binding.visualId, rect: occupied }];
   });
   const issues: string[] = [];
   for (const image of images)

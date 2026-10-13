@@ -10,7 +10,6 @@ import ArchitectureDrawer from './ArchitectureDrawer';
 import CapsuleHeader from './CapsuleHeader';
 import PanoramaGrid from './PanoramaGrid';
 import SlideFocusStage from './SlideFocusStage';
-import { revealSrcsForSlide } from './slidePaint';
 import { styles } from './style';
 import type { CompletedViewMode, CompletedWorkspaceProps } from './types';
 
@@ -128,7 +127,6 @@ export const CompletedWorkspace = memo<CompletedWorkspaceProps>(
         : undefined;
     const focusPainting =
       painting && (!paintingSlideNumber || paintingSlideNumber === currentIndex + 1);
-    const focusRevealSrcs = revealSrcsForSlide(selectedSlide, selectedJobSlots, resolveArtifactUri);
 
     return (
       <div className={styles.workspaceRoot} data-testid="presentation-completed-workspace">
@@ -231,7 +229,6 @@ export const CompletedWorkspace = memo<CompletedWorkspaceProps>(
               jobId={selectedJob.jobId}
               paintInterrupted={paintInterrupted}
               painting={focusPainting}
-              revealSrcs={focusRevealSrcs}
               selectedSlide={selectedSlide}
               totalSlides={totalSlides}
               versionId={selectedJob.versionId}
@@ -246,10 +243,8 @@ export const CompletedWorkspace = memo<CompletedWorkspaceProps>(
               paintInterrupted={paintInterrupted}
               painting={painting}
               paintingSlideNumber={paintingSlideNumber}
-              resolveArtifactUri={resolveArtifactUri}
               selectedArtifactId={effectiveSelectedArtifactId}
               slides={slideArtifacts}
-              slots={selectedJobSlots}
               onSelectSlide={handleBentoSelect}
             />
           )}

@@ -142,7 +142,7 @@ describe('visual stabilizer', () => {
     } as PresentationPlan;
     expect(reconcileTypedFormulaReview(short, wrong).issues).toHaveLength(1);
   });
-  it('adjudicates in-bitmap arrow complaints when the server owns those annotations', () => {
+  it('retains arrow direction complaints even when the server owns annotations', () => {
     const plan = {
       planId: 'p',
       title: 'annotated',
@@ -201,16 +201,9 @@ describe('visual stabilizer', () => {
       ],
     };
     const result = reconcileEvidenceBasedVisualReview(review, plan);
-    // Arrow direction is server-owned now; the missing object is still actionable.
-    expect(result.review.issues).toHaveLength(1);
-    expect(result.review.issues[0].evidence).toContain('缺少约束集合');
-    expect(result.adjudications).toEqual([
-      expect.objectContaining({
-        reason: 'server-drawn-annotations',
-        slideId: 'slide-9',
-        visualId: 'visual-1',
-      }),
-    ]);
+    expect(result.review.issues).toEqual(review.issues);
+    expect(result.review.passed).toBe(false);
+    expect(result.adjudications).toEqual([]);
   });
   it('adjudicates only a certified native radar collision, retaining altered geometry', () => {
     const block = semanticBlockSchema.parse({

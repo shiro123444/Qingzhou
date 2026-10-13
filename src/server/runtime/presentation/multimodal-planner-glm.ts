@@ -627,6 +627,18 @@ export class GLMPresentationPlanner implements PresentationPlanner {
     const trustedImages = trustedInputs.length
       ? createTrustedChatImages(trustedInputs, scope)
       : undefined;
+    const imageSizes = new Map<string, { width: number; height: number }>();
+    if (trustedInputs.length) {
+      const sharp = (await import('sharp')).default;
+      for (const image of trustedInputs) {
+        const metadata = await sharp(Buffer.from(image.base64, 'base64')).metadata();
+        if (metadata.width && metadata.height)
+          imageSizes.set(presentationAssetHref(image.ref), {
+            width: metadata.width,
+            height: metadata.height,
+          });
+      }
+    }
     trustedImages?.urls.forEach((url, index) => {
       contentParts.push({
         text: `以下图片是已验证的真实资产 ${presentationAssetHref(trustedInputs[index].ref)}，请观察主体、色彩、留白与比例后排版。`,
@@ -847,7 +859,7 @@ export class GLMPresentationPlanner implements PresentationPlanner {
             });
             composedSvg = ownedComposition.svg;
             const beforeReflow = composedSvg;
-            if (currentIntent && inspectVisualOccupancy(ownedComposition).length) {
+            if (currentIntent && inspectVisualOccupancy(ownedComposition, imageSizes).length) {
               const stage = teachingStages.find((item) => item.slideId === slideId);
               content = await recoverSemanticSlideLayout({
                 aspectRatio,
@@ -873,18 +885,26 @@ export class GLMPresentationPlanner implements PresentationPlanner {
             }
             // Read the declarations straight from the compiled intents: `intent` is declared
             // later in this scope, so referencing it here would be a temporal dead zone.
-            const annotationsFor = (visualId: string) =>
+            const visualFor = (visualId: string) =>
               contentIntents
                 .find((item) => item.slideId === slideId)
-                ?.visuals?.find((visual) => visual.id === visualId)?.annotations;
+                ?.visuals?.find((visual) => visual.id === visualId);
             const annotatedAssets = slideAssets.flatMap((asset) => {
-              const annotations = asset.binding
-                ? annotationsFor(asset.binding.visualId)
-                : undefined;
-              return annotations?.length
+              const visual = asset.binding ? visualFor(asset.binding.visualId) : undefined;
+              const image = Array.from(parseString(composedSvg).getElementsByTagName('image')).find(
+                (image) =>
+                  (image.getAttribute('href') ?? image.getAttribute('xlink:href'))?.replace(
+                    /\?raw=true$/u,
+                    '',
+                  ) === presentationAssetHref(asset.ref),
+              );
+              return visual && (visual.annotationMode === 'embedded' || visual.annotations?.length)
                 ? [
                     {
-                      annotations,
+                      annotationMode: visual.annotationMode,
+                      annotations: visual.annotations,
+                      intrinsicSize: imageSizes.get(presentationAssetHref(asset.ref)),
+                      preserveAspectRatio: image?.getAttribute('preserveAspectRatio') ?? undefined,
                       layout: actualAssetPlacement(composedSvg, asset) ?? asset.layout,
                       visualId: asset.binding!.visualId,
                     },

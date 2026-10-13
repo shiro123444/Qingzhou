@@ -17,7 +17,7 @@ import type {
   PresentationMessageInput,
 } from '../../../../packages/runtime-contracts/src/index';
 import { SlideAnnotation } from '../annotation/SlideAnnotation';
-import SlidePaintOverlay from './SlidePaintOverlay';
+import SlideGenerationOverlay from './SlideGenerationOverlay';
 import { styles } from './style';
 
 export interface SlideFocusStageProps {
@@ -31,7 +31,6 @@ export interface SlideFocusStageProps {
   onToggleConversation?: () => void;
   painting?: boolean;
   paintInterrupted?: boolean;
-  revealSrcs?: string[];
   selectedSlide: ArtifactSnapshot | null;
   totalSlides: number;
   versionId?: string;
@@ -70,7 +69,6 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
     onToggleConversation,
     paintInterrupted = false,
     painting = false,
-    revealSrcs,
     selectedSlide,
     totalSlides,
     versionId,
@@ -155,10 +153,10 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
               </div>
             )}
 
-            <SlidePaintOverlay
+            <SlideGenerationOverlay
               active={painting}
+              hasPreview={ready}
               interrupted={paintInterrupted}
-              revealSrcs={revealSrcs}
             />
 
             {annotating && ready && jobId && versionId && onSendMessage && (

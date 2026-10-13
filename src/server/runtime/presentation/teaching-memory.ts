@@ -391,24 +391,6 @@ export class TeachingLearning {
         agent: { contexts: ['presentation.intake'], maxCalls: 1 },
         execute: (input, ctx) => this.analyze(ctx.scope, input, ctx.signal),
       },
-      {
-        name: 'presentation.teaching.search',
-        description:
-          'Retrieve teacher-confirmed teaching patterns in the selected course. Empty course permits account-wide patterns only.',
-        input: z
-          .object({ query: z.string().max(2000), course: z.string().max(120).default('') })
-          .strict(),
-        agent: { contexts: ['presentation.intake'], maxCalls: 3 },
-        execute: ({ query, course }, ctx) => this.memory.search(ctx.scope, query, course),
-      },
-      {
-        name: 'presentation.teaching.compose',
-        description:
-          'Compose up to six confirmed conditional teaching patterns. Current teacher brief and locked beats take precedence; no effect claims.',
-        input: teachingSelectionSchema,
-        agent: { contexts: ['presentation.intake'], maxCalls: 2 },
-        execute: (input, ctx) => this.memory.compose(ctx.scope, input),
-      },
     ];
   }
 }

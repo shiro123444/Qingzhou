@@ -137,6 +137,67 @@ describe('asset annotation rendering', () => {
     ).toEqual({ height: 270, width: 480, x: 480, y: 135 });
   });
 
+  it('projects onto the painted bitmap after contain letterboxing and alignment', () => {
+    const layout = { height: 0.6, width: 0.88, x: 0.06, y: 0.22 };
+    const painted = assetPlacementBox([0, 0, 960, 540], layout, { width: 1536, height: 1024 });
+    // A 3:2 image in the actual 844.8 × 324 viewport occupies only 486 × 324.
+    expect(painted.x).toBeCloseTo(237);
+    expect(painted).toMatchObject({ y: 118.8, width: 486, height: 324 });
+    const aligned = assetPlacementBox(
+      [10, 20, 960, 540],
+      layout,
+      { width: 1536, height: 1024 },
+      'xMaxYMin meet',
+    );
+    expect(aligned.x).toBeCloseTo(426.4);
+    expect(aligned.y).toBeCloseTo(138.8);
+    const stretched = assetPlacementBox(
+      [0, 0, 960, 540],
+      layout,
+      { width: 1536, height: 1024 },
+      'none',
+    );
+    expect(stretched.x).toBeCloseTo(57.6);
+    expect(stretched.width).toBeCloseTo(844.8);
+    expect(stretched).toMatchObject({ y: 118.8, height: 324 });
+  });
+
+  it('retains one annotation owner and removes stale overlays from an embedded diagram', () => {
+    const svg =
+      '<svg viewBox="0 0 960 540"><image href="owned"/><g data-asset-annotations="v"><text>重复标签</text></g><text>正文</text></svg>';
+    const assets = [
+      {
+        visualId: 'v',
+        annotationMode: 'embedded' as const,
+        annotations: [{ type: 'label' as const, at: { x: 0.5, y: 0.5 }, text: '重复标签' }],
+        layout: { x: 0, y: 0, width: 1, height: 1 },
+      },
+    ];
+    const result = overlayAssetAnnotations(svg, [0, 0, 960, 540], assets);
+    expect(result).not.toContain('data-asset-annotations');
+    expect(result).not.toContain('重复标签');
+    expect(result).toContain('正文');
+    expect(result).toContain('href="owned"');
+  });
+
+  it('replaces an earlier overlay rather than adding a second copy on retry', () => {
+    const assets = [
+      {
+        visualId: 'v',
+        annotations: [{ type: 'label' as const, at: { x: 0.5, y: 0.5 }, text: '保留标签' }],
+        layout: { x: 0, y: 0, width: 1, height: 1 },
+      },
+    ];
+    const once = overlayAssetAnnotations(
+      '<svg viewBox="0 0 960 540"></svg>',
+      [0, 0, 960, 540],
+      assets,
+    );
+    const twice = overlayAssetAnnotations(once, [0, 0, 960, 540], assets);
+    expect(twice.match(/data-asset-annotations=/gu)).toHaveLength(1);
+    expect(twice.match(/保留标签/gu)).toHaveLength(1);
+  });
+
   it('overlays annotations only for placed assets and leaves other pages untouched', () => {
     const svg =
       '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><image href="/api/runtime/presentation/artifacts/a" x="480" y="135" width="480" height="270"/></svg>';

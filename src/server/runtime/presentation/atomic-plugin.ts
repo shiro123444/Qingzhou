@@ -1,11 +1,9 @@
 import { type PluginProfile } from '@lobechat/cordis-runtime';
 import { z } from 'zod';
 
-import { lessonPlanSchema, teacherBriefSchema } from '@/types/presentationLesson';
-import { teachingSelectionSchema } from '@/types/presentationTeaching';
-
 import type {
   PlannerContext,
+  PresentationJobInput,
   PresentationPlan,
   PresentationPlanner,
   RuntimeScope,
@@ -19,21 +17,23 @@ import {
   createAtomicRuntimeFromProfile,
 } from '../atomic-runtime';
 import { createSkillsPlugin } from '../skills-plugin';
+import { createTeachingPlugin, type TeachingMemory } from '../teaching/atomic-plugin';
+import type { CompiledLesson } from '../teaching/lesson';
 import type { PresentationArtifactStore } from './artifact-store';
 import type { PresentationContentCompiler } from './content-intent';
 import type { PresentationGenerationPort } from './generation-port';
 import type { ImageGenerationCapability } from './image-generation-capability';
 import {
   assertLessonPublishable,
-  assertLessonRevision,
   bindLessonPlan,
   compileLessonInput,
-  proposeLesson,
+  readLessonPlan,
 } from './lesson';
 import type { GLMMultimodalChatPort } from './multimodal-chat-provider-glm';
 import { validatePresentationPlan } from './planner';
+import { presentationSkillsOptions } from './recipes';
 import type { PresentationRevisionAssetPlanner } from './revision-assets';
-import type { FileTeachingMemory } from './teaching-memory';
+import type { TeachingLearning } from './teaching-memory';
 import type { FilePresentationTemplateLibrary, TemplateApplication } from './templates';
 import { nativeTemplateOperations } from './templates/native-operations';
 import { presentationVectorOperations } from './vector-operations';
@@ -96,71 +96,68 @@ export const createPresentationAtomicRuntime = (options: {
   visualStoryboardPlanner?: PresentationVisualStoryboardPlanner;
   visualCritic?: PresentationVisualCritic;
   contentCompiler?: PresentationContentCompiler;
-  teachingMemory?: FileTeachingMemory;
+  teachingMemory?: TeachingMemory;
+  teachingLearning?: TeachingLearning;
   worker: Pick<InMemoryPresentationPlanWorker, 'run'>;
   artifactStore: PresentationArtifactStore;
   imageGenerationCapability?: ImageGenerationCapability;
   operations?: AtomicOperation[];
   profile?: PluginProfile;
 }) => {
+  const teaching = createTeachingPlugin({
+    chat: options.chatPort,
+    memory: options.teachingMemory ?? options.teachingLearning?.memory,
+  });
+  const compileTeachingInput = async (
+    input: PresentationJobInput,
+    context: AtomicInvocation,
+  ): Promise<PresentationJobInput> => {
+    const lesson = readLessonPlan(input);
+    if (!lesson) return input;
+    const compiled = await runtime.invoke<CompiledLesson>(
+      'teaching.lesson.compile',
+      { plan: lesson },
+      context,
+    );
+    return compileLessonInput(input, compiled);
+  };
   const operations: AtomicOperation[] = [
-    ...(options.chatPort
-      ? [
-          {
-            name: 'presentation.lesson.plan',
-            description:
-              'Propose a teacher-led lesson with separate visible stages, private cues and student tasks. This is a proposal, not teacher approval.',
-            input: z
-              .object({
-                brief: teacherBriefSchema,
-                topic: z.string().min(1),
-                material: z.unknown().optional(),
-                current: lessonPlanSchema.optional(),
-                instruction: z.string().trim().max(4000).optional(),
-                teachingSelection: teachingSelectionSchema.optional(),
-              })
-              .strict(),
-            execute: async (input: any, ctx: AtomicInvocation) => {
-              if (input.teachingSelection?.ids.length && !options.teachingMemory)
-                throw new Error('Teaching memory is not configured');
-              const patterns =
-                input.teachingSelection && options.teachingMemory
-                  ? await options.teachingMemory.compose(ctx.scope, input.teachingSelection)
-                  : [];
-              return proposeLesson(
-                options.chatPort!,
-                { ...input, patterns },
-                { scope: ctx.scope, signal: ctx.signal },
-              );
-            },
-          },
-        ]
-      : []),
+    // Compatibility entry points delegate through Cordis, including its leases and events.
+    ...teaching.operations
+      .filter(({ name }) => !['teaching.lesson.compile', 'teaching.lesson.validate'].includes(name))
+      .map(
+        (operation): AtomicOperation => ({
+          ...operation,
+          name: operation.name
+            .replace('teaching.lesson.', 'presentation.lesson.')
+            .replace('teaching.memory.', 'presentation.teaching.'),
+          agent: operation.name.startsWith('teaching.memory.')
+            ? { contexts: ['presentation.intake'], maxCalls: operation.agent?.maxCalls }
+            : undefined,
+          execute: (input, context) => runtime.invoke(operation.name, input, context),
+        }),
+      ),
+    ...(options.teachingLearning?.operations() ?? []),
     {
       name: 'presentation.lesson.compile',
       description:
         'Compile a supplied lesson into ordered, teacher-advanced public stages, retaining private cues separately in the owned input.',
       input: z.object({ input: inputSchema }).strict(),
-      execute: ({ input }) => compileLessonInput(input),
-    },
-    {
-      name: 'presentation.lesson.revise',
-      description:
-        'Validate a proposed lesson revision. Locked teacher beats cannot be changed, deleted or reordered. Does not confirm the proposal.',
-      input: z.object({ previous: lessonPlanSchema, next: lessonPlanSchema }).strict(),
-      execute: ({ previous, next }) => {
-        assertLessonRevision(previous, next);
-        return next;
-      },
+      execute: ({ input }, context) => compileTeachingInput(input, context),
     },
     {
       name: 'presentation.lesson.validate',
       description:
         'Validate stage identity, withheld literal content and reserved boardwork region. Does not certify learning outcomes or raster-image semantics.',
       input: z.object({ plan: presentationPlanSchema }).strict(),
-      execute: ({ plan }) => {
+      execute: async ({ plan }, context) => {
         if (!plan.designSpec?.lessonPlan)
           throw new Error('A teaching plan is required for lesson validation');
+        await runtime.invoke(
+          'teaching.lesson.validate',
+          { plan: plan.designSpec.lessonPlan },
+          context,
+        );
         assertLessonPublishable(plan);
         return { passed: true };
       },
@@ -192,7 +189,7 @@ export const createPresentationAtomicRuntime = (options: {
       output: presentationPlanSchema,
       execute: async ({ input }, ctx) =>
         bindLessonPlan(
-          await options.planner.plan(compileLessonInput(input), {
+          await options.planner.plan(await compileTeachingInput(input, ctx), {
             ...(ctx.services?.plannerContext as PlannerContext),
             scope: ctx.scope,
             abortSignal: ctx.signal,
@@ -554,23 +551,56 @@ export const createPresentationAtomicRuntime = (options: {
     ...(options.operations ?? []),
   ];
   const plugins: AtomicPlugin[] = [
+    teaching,
     {
       id: 'presentation',
-      version: '2.1.0',
-      operations: operations.map((operation) =>
-        [
+      version: '3.0.0',
+      operations: operations.map((operation) => {
+        const contexts = new Set(operation.agent?.contexts);
+        const intake = [
           'presentation.template.list',
           'presentation.template.resolve',
           'presentation.template.inspectNative',
           'presentation.template.extractAssets',
           'presentation.template.extractMedia',
-        ].includes(operation.name)
-          ? { ...operation, agent: { contexts: ['presentation.intake'], maxCalls: 4 } }
-          : operation,
-      ),
+        ].includes(operation.name);
+        if (intake) contexts.add('presentation.intake');
+        if (
+          [
+            'presentation.memory.search',
+            'presentation.memory.load',
+            'presentation.memory.compose',
+            'presentation.content.compile',
+            'presentation.formula.render',
+            'presentation.formula.measure',
+            'presentation.diagram.measure',
+            'presentation.diagram.render',
+            'presentation.template.extractAssets',
+            'presentation.template.extractMedia',
+            'presentation.template.inspectNative',
+            'presentation.template.listNativeOutputs',
+            'presentation.template.fillNative',
+            'presentation.template.restoreNative',
+            'presentation.job.list',
+            'presentation.page.read',
+            'presentation.page.replace',
+          ].includes(operation.name)
+        )
+          contexts.add('skills');
+        return contexts.size
+          ? {
+              ...operation,
+              agent: {
+                ...operation.agent,
+                contexts: [...contexts],
+                ...(intake ? { maxCalls: 4 } : {}),
+              },
+            }
+          : operation;
+      }),
     },
     createAssetPlugin(options.artifactStore, options.imageGenerationCapability),
-    createSkillsPlugin(() => runtime, options.chatPort),
+    createSkillsPlugin(() => runtime, options.chatPort, presentationSkillsOptions),
   ];
   const runtime: AtomicRuntime = createAtomicRuntimeFromProfile({
     bundles: { presentation: { entries: plugins.map(({ id }) => ({ id, use: id })) } },

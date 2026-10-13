@@ -15,6 +15,15 @@ describe('PPT SVG compatibility', () => {
     expect(result).toContain('<rect opacity="0.1"');
     expect(result).toContain('<text opacity="0.5">A &amp; B</text>');
   });
+  it('canonicalizes single-quoted attributes without shifting geometry or corrupting text', () => {
+    const result = normalizePresentationSvg(
+      `<svg viewBox='0 0 960 540'><text x='48' data-label='A "quote" &amp; B'>学习方式与实验安排 &amp; 项目</text></svg>`,
+    );
+    expect(result).toContain('viewBox="0 0 960 540"');
+    expect(result).toContain('x="48"');
+    expect(result).toContain('data-label="A &quot;quote&quot; &amp; B"');
+    expect(result).toContain('学习方式与实验安排 &amp; 项目');
+  });
 });
 
 it('bakes image opacity through the asset processor and preserves shape opacity', async () => {

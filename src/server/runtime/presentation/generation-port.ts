@@ -11,6 +11,7 @@ import type {
   RuntimeScope,
 } from '../../../../packages/runtime-contracts/src';
 import type { AtomicInvocation, AtomicRuntime } from '../atomic-runtime';
+import type { ExecutionLimiter } from '../execution-limiter';
 import { presentationActivity } from './activity';
 import { validateAnnotation } from './annotation';
 import type { PresentationArtifactStore, StoredArtifact } from './artifact-store';
@@ -94,6 +95,8 @@ export interface PresentationGenerationPortOptions {
   readonly contentCompiler?: PresentationContentCompiler;
   readonly contextFactory: PresentationGenerationContextFactory;
   readonly eventPublisherFactory?: PresentationGenerationEventPublisherFactory;
+  /** Shared by account ports in one production composition. */
+  readonly executionLimiter?: ExecutionLimiter;
   readonly idFactory?: () => string;
   readonly imageGenerationCapability?: ImageGenerationCapability;
   readonly now?: () => string;
@@ -963,7 +966,8 @@ export class PresentationGenerationPort implements PresentationPort {
   ): Promise<PresentationJobInput> {
     if (!this.options.contentCompiler) return input;
     const previous = input.options?.contentIntents as
-      Awaited<ReturnType<PresentationContentCompiler['compile']>> | undefined;
+      | Awaited<ReturnType<PresentationContentCompiler['compile']>>
+      | undefined;
     if (previous?.inputFingerprint === contentInputFingerprint(input)) return input;
     const canCompile = (await this.options.atomicRuntime?.catalog())?.some(
       (tool) => tool.name === 'presentation.content.compile',
@@ -974,7 +978,8 @@ export class PresentationGenerationPort implements PresentationPort {
         >('presentation.content.compile', { input }, { scope: this.scope, signal, jobId })
       : await this.options.contentCompiler.compile(input, { scope: this.scope, signal });
     const revision = input.options?.contentRevision as
-      { target?: PresentationMessageInput['target'] } | undefined;
+      | { target?: PresentationMessageInput['target'] }
+      | undefined;
     const target = revision?.target;
     const slides = compiled.slides.map((slide, index) =>
       target?.type === 'slide' && target.slideNumber !== index + 1
@@ -1001,7 +1006,8 @@ export class PresentationGenerationPort implements PresentationPort {
     if (!template.visual?.designProgram || !this.options.visualStoryboardPlanner) return input;
     if (!confirmedDeckLength(input)) return input;
     const existing = input.options?.visualStoryboard as
-      Partial<PresentationVisualStoryboard> | undefined;
+      | Partial<PresentationVisualStoryboard>
+      | undefined;
     if (
       existing?.templateId === template.templateId &&
       existing.versionId === template.versionId &&
@@ -1164,9 +1170,9 @@ export class PresentationGenerationPort implements PresentationPort {
         previous?.planFingerprint === planVisualFingerprint(plan) ? previous.final : undefined,
       ),
     );
-    // A minor inconsistency can become a major defect once the obvious blockers
-    // are fixed. Address the reported set together, then review the changed deck.
-    let corrections = initial.issues;
+    // Keep advisory style findings visible without regenerating an already publishable
+    // page. Unnecessary rewrites can introduce new layout defects and repeat paid work.
+    let corrections = initial.issues.filter((issue) => issue.severity !== 'minor');
     let repaired = plan;
     const repairedSlideIds: string[] = [];
     const repairFailures: Array<{ code: string; slideId: string }> = [];
@@ -1629,10 +1635,17 @@ export class PresentationGenerationPort implements PresentationPort {
       update({ state: 'cancelled' });
       return;
     }
-    update({ state: 'running' });
     const entry = this.jobs.get(jobId)!;
     let release: (() => void) | undefined;
+    let releaseCapacity: (() => void) | undefined;
     try {
+      releaseCapacity = await this.options.executionLimiter?.acquire(controller.signal);
+      if (controller.signal.aborted) {
+        update({ state: 'cancelled' });
+        await this.save(entry);
+        return;
+      }
+      update({ state: 'running' });
       release = await this.options.atomicRuntime?.acquire('presentation');
       const context = this.options.contextFactory(jobId);
       const publisher = this.options.eventPublisherFactory
@@ -1662,7 +1675,8 @@ export class PresentationGenerationPort implements PresentationPort {
           for (const id of pinnedCapabilityIds)
             if (typeof id === 'string') learnedCapabilityIds.add(id);
         const pinnedMemory = generationInput.options?.learnedCapabilities as
-          { capsules?: Array<{ id?: unknown }> } | undefined;
+          | { capsules?: Array<{ id?: unknown }> }
+          | undefined;
         for (const capsule of pinnedMemory?.capsules ?? [])
           if (typeof capsule.id === 'string') learnedCapabilityIds.add(capsule.id);
         let templateCapsules: CapabilityCapsule[] = [];
@@ -1986,6 +2000,65 @@ export class PresentationGenerationPort implements PresentationPort {
           const draftFingerprint = createHash('sha256')
             .update(JSON.stringify(generationInput))
             .digest('hex');
+          const publishSlideDraft = async (slide: PresentationPlan['slides'][number]) => {
+            slide = prepareLessonDraft(slide, generationInput);
+            if (controller.signal.aborted) return;
+            const previousDrafts =
+              entry.draftCheckpoint?.fingerprint === draftFingerprint
+                ? entry.draftCheckpoint.slides
+                : [];
+            const embedded = await this.embedOwnedAssets({
+              planId: 'draft',
+              title: input.title,
+              aspectRatio: input.aspectRatio ?? '16:9',
+              sourceVersionIds: [...input.sourceVersionIds],
+              slides: [slide],
+            });
+            const draftDigest = createHash('sha256').update(slide.svg).digest('hex').slice(0, 16);
+            // Artifacts are immutable. A revised preview needs a new identity and event.
+            const artifactId = `${jobId}:${versionId}:draft:${slide.slideId}:${draftDigest}`;
+            const artifact = await this.options.artifactStore.put(this.scope, {
+              artifactId,
+              bytes: new TextEncoder().encode(embedded.slides[0].svg),
+              type: 'svg',
+              mimeType: 'image/svg+xml',
+              name: `${slide.slideId}.svg`,
+              status: 'ready',
+              metadata: {
+                ...slide.metadata,
+                notes: slide.notes,
+                jobId,
+                versionId,
+                slideId: slide.slideId,
+                order: slide.order,
+                slideNumber: slide.order,
+                aspectRatio: input.aspectRatio,
+                draft: true,
+              },
+            });
+            entry.draftCheckpoint = {
+              fingerprint: draftFingerprint,
+              slides: [
+                ...previousDrafts.filter((s) => s.slideId !== slide.slideId),
+                clone(slide),
+              ].sort((a, b) => a.order - b.order),
+            };
+            entry.job.artifactIds = [...new Set([...(entry.job.artifactIds ?? []), artifactId])];
+            await this.save(entry);
+            progressPublisher?.publish({
+              jobId,
+              type: PRESENTATION_JOB_EVENT_TYPES.artifactReady,
+              idempotencyKey: `draft:${slide.slideId}:${draftDigest}`,
+              data: {
+                artifact,
+                artifactIds: entry.job.artifactIds,
+                activity: `第 ${slide.order} 页草稿已就绪`,
+                currentSlide: slide.order,
+                totalSlides: input.slideCount,
+                phase: 'planner',
+              },
+            });
+          };
           const produced = await this.options.capability.execute(this.scope, generationInput, {
             ...revisionContext,
             initialPlan: entry.plan,
@@ -2263,6 +2336,14 @@ export class PresentationGenerationPort implements PresentationPort {
               plan = bindLessonPlan(plan, generationInput);
               entry.plan = clone(plan);
               await this.save(entry);
+              // Publish the repaired draft even when final quality review still blocks export.
+              // Otherwise the stage keeps showing the original, visibly broken composition.
+              for (const slide of plan.slides) {
+                const shown = entry.draftCheckpoint?.slides.find(
+                  (draft) => draft.slideId === slide.slideId,
+                );
+                if (shown && shown.svg !== slide.svg) await publishSlideDraft(slide);
+              }
               assertPresentationPublishable(plan);
               return await this.embedOwnedAssets(plan);
             },
@@ -2285,65 +2366,7 @@ export class PresentationGenerationPort implements PresentationPort {
                   },
                 });
               },
-              onSlideDraft: async (slide: PresentationPlan['slides'][number]) => {
-                slide = prepareLessonDraft(slide, generationInput);
-                if (controller.signal.aborted) return;
-                const previousDrafts =
-                  entry.draftCheckpoint?.fingerprint === draftFingerprint
-                    ? entry.draftCheckpoint.slides
-                    : [];
-                const embedded = await this.embedOwnedAssets({
-                  planId: 'draft',
-                  title: input.title,
-                  aspectRatio: input.aspectRatio ?? '16:9',
-                  sourceVersionIds: [...input.sourceVersionIds],
-                  slides: [slide],
-                });
-                const artifactId = `${jobId}:${versionId}:draft:${slide.slideId}`;
-                const artifact = await this.options.artifactStore.put(this.scope, {
-                  artifactId,
-                  bytes: new TextEncoder().encode(embedded.slides[0].svg),
-                  type: 'svg',
-                  mimeType: 'image/svg+xml',
-                  name: `${slide.slideId}.svg`,
-                  status: 'ready',
-                  metadata: {
-                    ...slide.metadata,
-                    notes: slide.notes,
-                    jobId,
-                    versionId,
-                    slideId: slide.slideId,
-                    order: slide.order,
-                    slideNumber: slide.order,
-                    aspectRatio: input.aspectRatio,
-                    draft: true,
-                  },
-                });
-                entry.draftCheckpoint = {
-                  fingerprint: draftFingerprint,
-                  slides: [
-                    ...previousDrafts.filter((s) => s.slideId !== slide.slideId),
-                    clone(slide),
-                  ].sort((a, b) => a.order - b.order),
-                };
-                entry.job.artifactIds = [
-                  ...new Set([...(entry.job.artifactIds ?? []), artifactId]),
-                ];
-                await this.save(entry);
-                progressPublisher?.publish({
-                  jobId,
-                  type: PRESENTATION_JOB_EVENT_TYPES.artifactReady,
-                  idempotencyKey: `draft:${slide.slideId}`,
-                  data: {
-                    artifact,
-                    artifactIds: entry.job.artifactIds,
-                    activity: `第 ${slide.order} 页草稿已就绪`,
-                    currentSlide: slide.order,
-                    totalSlides: input.slideCount,
-                    phase: 'planner',
-                  },
-                });
-              },
+              onSlideDraft: publishSlideDraft,
               template,
               trustedImages: await this.readTrustedImages([
                 ...imageArtifactIds,
@@ -2467,6 +2490,7 @@ export class PresentationGenerationPort implements PresentationPort {
       ).catch(() => undefined);
     } finally {
       release?.();
+      releaseCapacity?.();
     }
   }
 }

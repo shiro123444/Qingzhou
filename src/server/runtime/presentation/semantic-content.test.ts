@@ -505,7 +505,7 @@ describe('semantic presentation content', () => {
       ).rejects.toThrow('no embedded');
     },
   );
-  it('draws declared relations over the generated artwork and excludes them from blocking review', async () => {
+  it('draws declared relations while retaining unverified direction complaints', async () => {
     const ref = '/api/runtime/presentation/artifacts/landscape';
     const annotated = {
       ...intent,
@@ -623,15 +623,11 @@ describe('semantic presentation content', () => {
       },
       result,
     );
-    // The relation is server-drawn now, so the direction claim cannot block the deck.
-    expect(reconciled.review.issues.map((issue) => issue.evidence)).toEqual(['图中缺少可行域边界']);
-    expect(reconciled.adjudications).toEqual([
-      expect.objectContaining({
-        reason: 'server-drawn-annotations',
-        slideId: 'slide-1',
-        visualId: 'landscape',
-      }),
+    expect(reconciled.review.issues.map((issue) => issue.evidence)).toEqual([
+      '图中箭头方向与公式相反，指向可行域内部',
+      '图中缺少可行域边界',
     ]);
+    expect(reconciled.adjudications).toEqual([]);
   });
 
   it('renders actual math vectors with retained LaTeX and rasterizes without fonts or remote resources', async () => {

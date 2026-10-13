@@ -193,9 +193,9 @@ export async function recoverSemanticSlideLayout(input: {
     if (current.trim()) lines.push(current.trimEnd());
     return lines;
   };
-  const contentLines = (input.visibleContent ?? []).flatMap((item) =>
-    wrap(`• ${item}`, columnWidth - 16),
-  );
+  // An outline is content, not a request for a bullet list. Preserve an authored
+  // marker when present, but never introduce one during layout recovery.
+  const contentLines = (input.visibleContent ?? []).flatMap((item) => wrap(item, columnWidth - 16));
   const overflowLines: string[] = [];
   const textBottom = bounds.y + bounds.height - reservedImage;
   if (contentLines.length && y + 4 < textBottom) {

@@ -49,7 +49,7 @@ const createHarness = async () => {
     {} as MultimodalChatPort,
   );
   const runtime = createPresentationAtomicRuntime({
-    operations: teaching.operations(),
+    teachingLearning: teaching,
     artifactStore: storage,
     planner,
     worker: new InMemoryPresentationPlanWorker(),
@@ -142,7 +142,7 @@ const createHarness = async () => {
 
 describe('public presentation atomic tools', () => {
   it('exposes teaching retrieval/composition but never an approval tool', async () => {
-    const { call } = await createHarness();
+    const { call, runtime } = await createHarness();
     const catalog = JSON.stringify((await call(undefined)).body);
     expect(catalog).toContain('presentation.teaching.analyze');
     expect(catalog).toContain('presentation.teaching.search');
@@ -150,6 +150,11 @@ describe('public presentation atomic tools', () => {
     expect(catalog).not.toContain('presentation.teaching.review');
     expect((await call('presentation.teaching.search', { query: '教学' })).status).toBe(200);
     expect((await call('presentation.teaching.compose', { ids: [] })).status).toBe(200);
+    expect(
+      (await runtime.snapshot(owner)).operations
+        .filter(({ state }) => state === 'completed')
+        .map(({ name }) => name),
+    ).toEqual(expect.arrayContaining(['teaching.memory.search', 'teaching.memory.compose']));
     expect((await call('presentation.teaching.review', { action: 'confirm' })).status).not.toBe(
       200,
     );

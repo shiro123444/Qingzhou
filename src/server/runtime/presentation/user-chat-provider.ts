@@ -40,7 +40,7 @@ export const userChatEndpoint = (baseURL: string): string => {
  */
 export const createUserChatProvider = (options: {
   readonly fetcher: MultimodalChatFetcher;
-  /** Text-only capabilities can reuse the saved provider without requiring vision. */
+  /** Text-only capabilities reject image input even when the selected model supports vision. */
   readonly requiresVision?: boolean;
   readonly resolve: (scope: RuntimeScope) => Promise<UserChatConnection>;
 }): MultimodalChatPort => ({
@@ -66,15 +66,19 @@ export const createUserChatProvider = (options: {
       // DB/decryption/configuration errors can contain secrets. Never surface their text.
       throw new MultimodalChatProviderError(
         'CHAT_PROVIDER_REJECTED',
-        '请在模型服务设置中配置并启用主页面使用的 OpenAI 兼容模型',
+        '当前选择的模型服务不可用，请检查服务是否启用、API Key、服务地址及接口协议配置',
       );
     }
     if (context.signal?.aborted)
       throw new MultimodalChatProviderError('CHAT_CANCELLED', '模型请求已取消');
-    if (options.requiresVision !== false && !connection.supportsVision) {
+    const hasImages = request.messages.some(
+      (message) =>
+        Array.isArray(message.content) && message.content.some((part) => part.type === 'image_url'),
+    );
+    if (hasImages && (options.requiresVision === false || !connection.supportsVision)) {
       throw new MultimodalChatProviderError(
         'CHAT_REQUEST_INVALID',
-        'PPT 需要视觉模型，请在主页面选择已启用视觉能力的模型',
+        '此步骤需要读取图片，请在 PPT 模型选择中选择已启用视觉能力的模型；纯文字对话和大纲可使用当前模型',
       );
     }
     const port = createMultimodalChatPort({

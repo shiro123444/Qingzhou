@@ -65,6 +65,7 @@ describe('measured semantic layout recovery', () => {
     expect(result.svg).toContain('/api/runtime/presentation/artifacts/owned-figure');
     expect(result.svg).toContain('比较每步计算成本');
     expect(result.svg).toContain('观察不同方法的下降轨迹');
+    expect(result.svg).not.toContain('•');
     const plot = result.blocks.find((block) => block.id === 'visual-2');
     expect(plot?.rect.height).toBeGreaterThanOrEqual(224);
   });

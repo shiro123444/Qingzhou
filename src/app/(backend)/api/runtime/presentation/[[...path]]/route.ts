@@ -50,9 +50,7 @@ import {
   type PresentationJobEventSerializer,
 } from '@/server/runtime/presentation/sse';
 import { handleTeachingRequest } from '@/server/runtime/presentation/teaching-handler';
-import {
-  userChatEndpoint,
-} from '@/server/runtime/presentation/user-chat-provider';
+import { userChatEndpoint } from '@/server/runtime/presentation/user-chat-provider';
 
 import type { RuntimeScope } from '../../../../../../../packages/runtime-contracts/src';
 
@@ -573,7 +571,8 @@ const toReadinessResponse = async (
           scope.userId,
         );
         userChatEndpoint(provider.baseURL);
-        if (!provider.supportsVision) throw new Error('Vision required');
+        // Text planning does not need vision. Image-bearing operations validate
+        // the current model's vision ability at the user-scoped chat port.
       } catch {
         return NextResponse.json(
           { ...readiness, available: false, code: 'PROVIDER_UNAVAILABLE', state: 'unavailable' },

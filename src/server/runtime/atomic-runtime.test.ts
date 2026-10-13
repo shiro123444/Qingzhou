@@ -18,6 +18,22 @@ const plugin = (version: string): AtomicPlugin => ({
   ],
 });
 describe('AtomicRuntime', () => {
+  it('keeps trusted composition metadata separate from mutable catalog responses', async () => {
+    const capability = plugin('1');
+    capability.operations[0].agent = { contexts: ['example.intake'], maxCalls: 2 };
+    const runtime = new AtomicRuntime([capability]);
+    try {
+      const [tool] = await runtime.catalog();
+      tool.agent!.contexts.push('skills');
+      expect((await runtime.catalog())[0].agent).toEqual({
+        contexts: ['example.intake'],
+        maxCalls: 2,
+      });
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
   it('mounts real Cordis tools, validates input and isolates trusted invocation context and audit history', async () => {
     const runtime = new AtomicRuntime([plugin('1')]);
     expect((await runtime.catalog())[0]).toMatchObject({
@@ -186,6 +202,47 @@ describe('AtomicRuntime', () => {
       });
     } finally {
       activation.mockRestore();
+      await runtime.dispose();
+    }
+  });
+
+  it('bounds per-scope history and evicts the least recently active scope without affecting leases', async () => {
+    const runtime = new AtomicRuntime([plugin('1')], {
+      maxEventScopes: 2,
+      maxEventsPerScope: 3,
+    });
+    const bob = { userId: 'bob', sessionId: 'session-b' };
+    const charlie = { userId: 'charlie', sessionId: 'session-c' };
+    const release = await runtime.acquire('example');
+    try {
+      await runtime.invoke('example.echo', { text: 'first' }, { scope });
+      await runtime.invoke('example.echo', { text: 'second' }, { scope: bob });
+      await runtime.invoke('example.echo', { text: 'recent' }, { scope });
+      await runtime.invoke('example.echo', { text: 'new scope' }, { scope: charlie });
+      expect((await runtime.snapshot(scope)).operations.map((event) => event.state)).toEqual([
+        'completed',
+        'started',
+        'completed',
+      ]);
+      expect((await runtime.snapshot(bob)).operations).toEqual([]);
+      expect((await runtime.snapshot(charlie)).operations).toHaveLength(2);
+      await expect(runtime.remove('example')).rejects.toMatchObject({ code: 'PLUGIN_BUSY' });
+      release();
+      await runtime.remove('example');
+    } finally {
+      release();
+      await runtime.dispose();
+    }
+  });
+
+  it('can disable retained diagnostics while continuing to emit live operation events', async () => {
+    const runtime = new AtomicRuntime([plugin('1')], { maxEventScopes: 0 });
+    const onEvent = vi.fn();
+    try {
+      await runtime.invoke('example.echo', { text: 'live' }, { scope, onEvent });
+      expect(onEvent.mock.calls.map(([event]) => event.state)).toEqual(['started', 'completed']);
+      expect((await runtime.snapshot(scope)).operations).toEqual([]);
+    } finally {
       await runtime.dispose();
     }
   });

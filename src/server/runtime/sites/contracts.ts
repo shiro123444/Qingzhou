@@ -28,6 +28,14 @@ export const siteSchema = z.object({
 export type Site = z.infer<typeof siteSchema>;
 export type SiteSnapshot = z.infer<typeof siteSnapshotSchema>;
 
+/** Small mutation result for native recipes; content remains addressable through sites.read. */
+export const siteEditReceiptSchema = z.object({
+  id: siteIdSchema,
+  draft: z.object({ revision: revisionSchema, createdAt: z.string() }),
+  changedPaths: z.array(contentPathSchema).min(1).max(100),
+});
+export type SiteEditReceipt = z.infer<typeof siteEditReceiptSchema>;
+
 export class SiteError extends Error {
   constructor(
     public readonly code: string,

@@ -69,6 +69,17 @@ export function defineConfig(config: CustomNextConfig) {
       emotion: true,
     },
     compress: isProd,
+    ...(process.env.QINGZHOU_BUILD_PROFILE &&
+      ({
+        // The compact compiler uses Webpack. Match the existing Turbopack Markdown rule.
+        webpack: (webpackConfig) => {
+          // Prefer bounded cold builds over retaining a second copy of module data in cache.
+          webpackConfig.cache = false;
+          webpackConfig.parallelism = process.env.QINGZHOU_BUILD_PROFILE === '4c4g' ? 4 : 8;
+          webpackConfig.module.rules.push({ test: /\.md$/, type: 'asset/source' });
+          return webpackConfig;
+        },
+      } satisfies Pick<NextConfig, 'webpack'>)),
     experimental: {
       optimizePackageImports: [
         'emoji-mart',
@@ -361,6 +372,8 @@ export function defineConfig(config: CustomNextConfig) {
       '@napi-rs/canvas',
       '@lobehub/editor',
       'discord.js',
+      // Keep the adapter's optional native compression dependency out of Webpack's graph.
+      '@chat-adapter/discord',
       'ffmpeg-static',
       'pdfjs-dist',
       'ajv',
@@ -370,7 +383,7 @@ export function defineConfig(config: CustomNextConfig) {
     transpilePackages: ['mermaid', 'better-auth-harmony'],
     turbopack: {
       rules: {
-        ...(isTest
+        ...(isTest || isProd
           ? void 0
           : codeInspectorPlugin({
               bundler: 'turbopack',

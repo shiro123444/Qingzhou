@@ -10,6 +10,144 @@ const scope = { request: new Request('https://example.test'), userId: 'u1', sess
 const input = { notebookId: 'n1', title: '演示', sourceVersionIds: ['v1'] };
 
 describe('PresentationGenerationPort', () => {
+  it('retains minor review findings without rewriting a publishable deck', async () => {
+    const initial = { ...samplePlan, designSpec: { contentPolicyVersion: 1 } };
+    const capability = {
+      execute: vi.fn(),
+      plan: vi.fn(),
+    } as unknown as PresentationGenerationCapability;
+    vi.mocked(capability.execute).mockImplementation(
+      async (_scope, _input, context) =>
+        ({
+          artifacts: [],
+          plan: await context.preparePlan!(initial),
+        }) as never,
+    );
+    const review = vi.fn().mockResolvedValue({
+      schemaVersion: 1,
+      passed: true,
+      summary: 'Readable, with a minor style suggestion',
+      issues: [
+        {
+          category: 'continuity',
+          severity: 'minor',
+          slideId: initial.slides[0].slideId,
+          evidence: '页脚标记风格略有差异',
+          instruction: '统一页脚标记',
+        },
+      ],
+    });
+    const port = new PresentationGenerationPort(
+      {
+        artifactStore: new InMemoryPresentationArtifactStore(),
+        capability,
+        idFactory: () => 'job-minor-advice',
+        contextFactory: () => ({
+          plannerContext: {},
+          workerContext: {
+            convert: vi.fn(),
+            jobId: 'ignored',
+            qualityCheck: vi.fn(),
+            workspace: { path: '/tmp', write: vi.fn() },
+          },
+        }),
+        visualCritic: { review },
+      },
+      scope,
+    );
+    await port.createJob(input);
+    await vi.waitFor(async () =>
+      expect((await port.getJob('job-minor-advice'))?.state).toBe('completed'),
+    );
+    expect(capability.plan).not.toHaveBeenCalled();
+    expect(review).toHaveBeenCalledTimes(1);
+    const { plan } = await port.readPlan('job-minor-advice');
+    expect(plan.designSpec?.templateVisualReview).toMatchObject({
+      final: { passed: true, issues: [expect.objectContaining({ severity: 'minor' })] },
+    });
+  });
+
+  it('updates the visible draft after visual repair even when export remains blocked', async () => {
+    const store = new InMemoryPresentationArtifactStore();
+    const original = {
+      ...samplePlan,
+      designSpec: { contentPolicyVersion: 1 },
+      slides: [
+        {
+          ...samplePlan.slides[0],
+          svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><text x="48" y="100" font-size="30">原始错位标题</text></svg>',
+        },
+      ],
+    };
+    const corrected = {
+      ...original,
+      slides: [
+        {
+          ...original.slides[0],
+          svg: original.slides[0].svg.replace('原始错位标题', '修正后的标题'),
+        },
+      ],
+    };
+    const capability = {
+      execute: vi.fn(),
+      plan: vi.fn(),
+    } as unknown as PresentationGenerationCapability;
+    vi.mocked(capability.execute).mockImplementation(async (_scope, _input, context) => {
+      const onDraft = context.plannerContext.onSlideDraft as (
+        slide: (typeof original.slides)[number],
+      ) => Promise<void>;
+      await onDraft(original.slides[0]);
+      await context.preparePlan!(original);
+      return { artifacts: [] } as never;
+    });
+    vi.mocked(capability.plan).mockResolvedValue(corrected);
+    const port = new PresentationGenerationPort(
+      {
+        artifactStore: store,
+        capability,
+        idFactory: () => 'job-visible-repair',
+        contextFactory: () => ({
+          plannerContext: {},
+          workerContext: {
+            convert: vi.fn(),
+            jobId: 'ignored',
+            qualityCheck: vi.fn(),
+            workspace: { path: '/tmp', write: vi.fn() },
+          },
+        }),
+        visualCritic: {
+          review: vi.fn().mockResolvedValue({
+            schemaVersion: 1,
+            passed: false,
+            summary: 'Review still requires repair',
+            issues: [
+              {
+                category: 'composition',
+                severity: 'major',
+                slideId: original.slides[0].slideId,
+                evidence: '文字遮挡',
+                instruction: '移动文字',
+              },
+            ],
+          }),
+        },
+      },
+      scope,
+    );
+    await port.createJob(input);
+    await vi.waitFor(async () =>
+      expect((await port.getJob('job-visible-repair'))?.state).toBe('failed'),
+    );
+    const job = await port.getJob('job-visible-repair');
+    const draftId = job!.artifactIds!.findLast((id) => id.includes(':draft:'))!;
+    const draft = await store.get(scope, draftId);
+    const svg = new TextDecoder().decode(draft!.bytes);
+    expect(svg).toContain('修正后的标题');
+    expect(svg).not.toContain('原始错位标题');
+    expect(draft!.metadata?.draft).toBe(true);
+    expect(job!.error?.code).toBe('PRESENTATION_QUALITY_FAILED');
+  });
+
   it('returns queued immediately and completes through the generation capability', async () => {
     const store = new InMemoryPresentationArtifactStore(() => '2026-01-01T00:00:00.000Z');
     const capability = {

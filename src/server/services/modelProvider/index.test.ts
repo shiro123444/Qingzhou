@@ -66,12 +66,16 @@ describe('resolveUserChatProvider', () => {
     mocks.getAiProviderModelList.mockResolvedValue([modelMetadata]);
     mocks.getLLMConfig.mockReturnValue({
       ANTHROPIC_API_KEY: 'anthropic-secret',
+      DEEPSEEK_API_KEY: 'deepseek-server-secret',
+      NEXUS_API_KEY: 'nexus-server-secret',
       OPENAI_API_KEY: 'server-secret',
       TINI_API_KEY: 'unused-tini-secret',
     });
     mocks.getServerGlobalConfig.mockResolvedValue({ aiProvider: serverProviders });
     vi.stubEnv('OPENAI_PROXY_URL', 'https://server.example/v1');
     vi.stubEnv('TINI_PROXY_URL', 'https://unused-tini.example/v1');
+    vi.stubEnv('DEEPSEEK_PROXY_URL', '');
+    vi.stubEnv('NEXUS_PROXY_URL', '');
     vi.stubEnv('API_KEY_SELECT_MODE', 'turn');
   });
 
@@ -105,6 +109,116 @@ describe('resolveUserChatProvider', () => {
       apiKey: 'server-secret',
       baseURL: 'https://server.example/v1',
     });
+  });
+
+  it('resolves builtin DeepSeek using its user credentials and own default endpoint', async () => {
+    mocks.getAgentConfig.mockResolvedValue({ model: 'deepseek-chat', provider: 'deepseek' });
+    mocks.getAiProviderById.mockResolvedValue({
+      ...providerConfig,
+      keyVaults: { apiKey: 'ds-user-secret' },
+      settings: {},
+    });
+    mocks.getAiProviderModelList.mockResolvedValue([{ ...modelMetadata, id: 'deepseek-chat' }]);
+    await expect(resolveUserChatProvider(db, userId)).resolves.toMatchObject({
+      apiKey: 'ds-user-secret',
+      baseURL: 'https://api.deepseek.com/v1',
+      model: 'deepseek-chat',
+      provider: 'deepseek',
+    });
+  });
+
+  it.each(['deepseek-v4.1-flash', 'gemini-3.8-flash-high', 'claude-sonnet-4-6'])(
+    'uses the selected Nexus model %s with Nexus user credentials and endpoint',
+    async (model) => {
+      mocks.getAgentConfig.mockResolvedValue({ model, provider: 'nexus' });
+      mocks.getAiProviderById.mockResolvedValue({
+        ...providerConfig,
+        keyVaults: { apiKey: 'nexus-user-secret', baseURL: 'https://gateway.example/v1' },
+      });
+      mocks.getAiProviderModelList.mockResolvedValue([{ ...modelMetadata, id: model }]);
+      await expect(resolveUserChatProvider(db, userId)).resolves.toMatchObject({
+        apiKey: 'nexus-user-secret',
+        baseURL: 'https://gateway.example/v1',
+        model,
+        provider: 'nexus',
+      });
+    },
+  );
+
+  it('uses the Nexus default endpoint and its own server key', async () => {
+    mocks.getAgentConfig.mockResolvedValue({ ...selection, provider: 'nexus' });
+    mocks.getAiProviderById.mockResolvedValue({ ...providerConfig, keyVaults: {}, settings: {} });
+    await expect(resolveUserChatProvider(db, userId)).resolves.toMatchObject({
+      apiKey: 'nexus-server-secret',
+      baseURL: 'https://app.soruxgpt.com/api/codex/v1',
+      provider: 'nexus',
+    });
+  });
+
+  it('does not use an OpenAI key when Nexus credentials are missing', async () => {
+    mocks.getAgentConfig.mockResolvedValue({ ...selection, provider: 'nexus' });
+    mocks.getAiProviderById.mockResolvedValue({ ...providerConfig, keyVaults: {}, settings: {} });
+    mocks.getLLMConfig.mockReturnValue({ NEXUS_API_KEY: '', OPENAI_API_KEY: 'unrelated-secret' });
+    await expect(resolveUserChatProvider(db, userId)).rejects.toBeInstanceOf(
+      UserChatProviderConfigurationError,
+    );
+  });
+
+  it('uses DeepSeek environment credentials and endpoint rather than OpenAI defaults', async () => {
+    mocks.getAgentConfig.mockResolvedValue({ ...selection, provider: 'deepseek' });
+    mocks.getAiProviderById.mockResolvedValue({ ...providerConfig, keyVaults: {}, settings: {} });
+    vi.stubEnv('DEEPSEEK_PROXY_URL', 'https://ds-gateway.example/v1');
+    await expect(resolveUserChatProvider(db, userId)).resolves.toMatchObject({
+      apiKey: 'deepseek-server-secret',
+      baseURL: 'https://ds-gateway.example/v1',
+    });
+  });
+
+  it('preserves a DeepSeek OpenAI transport user endpoint and text-only model metadata', async () => {
+    mocks.getAgentConfig.mockResolvedValue({ ...selection, provider: 'deepseek' });
+    mocks.getAiProviderModelList.mockResolvedValue([
+      { ...modelMetadata, abilities: { vision: false } },
+    ]);
+    await expect(resolveUserChatProvider(db, userId)).resolves.toMatchObject({
+      apiKey: 'user-secret',
+      baseURL: 'https://tini.example/v1',
+      supportsVision: false,
+    });
+  });
+
+  it.each(['anthropic', 'unknown-sdk'])('rejects DeepSeek %s transport', async (sdkType) => {
+    mocks.getAgentConfig.mockResolvedValue({ ...selection, provider: 'deepseek' });
+    mocks.getAiProviderById.mockResolvedValue({ ...providerConfig, settings: { sdkType } });
+    await expect(resolveUserChatProvider(db, userId)).rejects.toBeInstanceOf(
+      UserChatProviderConfigurationError,
+    );
+    expect(mocks.getLLMConfig).not.toHaveBeenCalled();
+  });
+
+  it.each(['https://api.deepseek.com/anthropic', 'https://gateway.example/anthropic/v1/messages'])(
+    'does not send DeepSeek OpenAI requests to an Anthropic endpoint: %s',
+    async (baseURL) => {
+      mocks.getAgentConfig.mockResolvedValue({ ...selection, provider: 'deepseek' });
+      mocks.getAiProviderById.mockResolvedValue({
+        ...providerConfig,
+        keyVaults: { apiKey: 'ds-user-secret', baseURL },
+      });
+      await expect(resolveUserChatProvider(db, userId)).rejects.toBeInstanceOf(
+        UserChatProviderConfigurationError,
+      );
+    },
+  );
+
+  it('does not use an OpenAI key when DeepSeek credentials are missing', async () => {
+    mocks.getAgentConfig.mockResolvedValue({ ...selection, provider: 'deepseek' });
+    mocks.getAiProviderById.mockResolvedValue({ ...providerConfig, keyVaults: {}, settings: {} });
+    mocks.getLLMConfig.mockReturnValue({
+      DEEPSEEK_API_KEY: '',
+      OPENAI_API_KEY: 'unrelated-openai-secret',
+    });
+    await expect(resolveUserChatProvider(db, userId)).rejects.toBeInstanceOf(
+      UserChatProviderConfigurationError,
+    );
   });
 
   it('keeps user key with server endpoint, and server key with user endpoint', async () => {
@@ -160,7 +274,7 @@ describe('resolveUserChatProvider', () => {
     },
   );
 
-  it.each(['anthropic', 'google', 'azure', 'nexus'])(
+  it.each(['anthropic', 'google', 'azure'])(
     'does not let settings.sdkType disguise builtin %s credentials as OpenAI',
     async (provider) => {
       mocks.getAgentConfig.mockResolvedValue({ ...selection, provider });

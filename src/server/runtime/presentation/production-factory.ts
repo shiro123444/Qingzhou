@@ -613,8 +613,8 @@ export const createProductionPresentationGenerationComposition = (
         planner,
         contentCompiler,
         teachingMemory: options.teachingMemory,
+        teachingLearning,
         operations: [
-          ...(teachingLearning?.operations() ?? []),
           ...(templateVisualLearning?.operations() ?? []),
           ...(options.capabilityMemory
             ? capabilityMemoryOperations(options.capabilityMemory, options.jobRepository)
