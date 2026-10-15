@@ -11,6 +11,126 @@ import { prepareLessonDraft } from './lesson';
 import { recoverSemanticSlideLayout } from './semantic-layout-recovery';
 
 describe('measured semantic layout recovery', () => {
+  it('keeps an exact editable table and artwork in asymmetric columns when prose cannot fit', async () => {
+    const facts = ['详细资料'.repeat(30), '来源事实'.repeat(30), '完整说明'.repeat(30)];
+    const result = await recoverSemanticSlideLayout({
+      aspectRatio: '16:9',
+      title: '协作机制',
+      deckBody: { x: 48, y: 136, width: 864, height: 364 },
+      intent: {
+        slideId: 'slide-1',
+        claim: '协同育人',
+        formulas: [],
+        visualKind: 'chart',
+        visualReason: '真实来源',
+        visuals: [
+          { id: 'table', kind: 'chart', renderer: 'native', required: true, brief: '保留状态矩阵' },
+        ],
+      },
+      rawBlocks: [
+        {
+          id: 'table',
+          kind: 'scientific-diagram',
+          title: '协作',
+          rect: { x: 48, y: 136, width: 864, height: 300 },
+          provenance: { kind: 'source', reference: '用户材料' },
+          spec: {
+            type: 'table',
+            columns: ['方向', '机制'],
+            rows: [
+              ['企业导师', '共同指导'],
+              ['校内教师', '实践成果转化'],
+            ],
+          },
+        },
+      ],
+      imageRefs: ['/api/runtime/presentation/artifacts/owned-artwork'],
+      visibleContent: facts,
+    });
+    expect(result.svg).toContain('data-report-table');
+    expect(result.svg).toContain('owned-artwork');
+    expect(result.blocks[0].rect.width).toBeLessThan(864);
+    expect(result.blocks[0].rect.width).toBeGreaterThan(432);
+    expect('overflowNotes' in result && result.overflowNotes).toBe(facts.join('\n'));
+  });
+  it.each(['conceptual', undefined] as const)(
+    'keeps all source facts visible with graph fidelity %s and an image',
+    async (fidelity) => {
+      const facts = [
+        '区位：扎根中国车谷，对接汽车与智能装备产业，衔接区域人工智能产业建设。',
+        '办学：培养卓越现场工程师，强调商工融通、产教融合、现场育人和实践能力。',
+        '学科：电子信息专业硕士点牵引，聚焦具身智能及应用控制，衔接产业需求。',
+        '技术：端侧算力部署、工业机器人安全实时控制、机器视觉检测和软硬件集成。',
+      ];
+      const result = await recoverSemanticSlideLayout({
+        aspectRatio: '16:9',
+        title: '专业定位',
+        deckBody: { x: 48, y: 136, width: 864, height: 364 },
+        intent: {
+          slideId: 'slide-11',
+          claim: '产业与教学协同',
+          formulas: [],
+          visualKind: 'scientific-diagram',
+          visualReason: '结构说明',
+          visuals: [
+            {
+              id: 'structure',
+              kind: 'scientific-diagram',
+              renderer: 'native',
+              fidelity,
+              required: true,
+              brief: '产业、办学和学科三层定位',
+            },
+          ],
+        },
+        rawBlocks: [
+          {
+            id: 'structure',
+            kind: 'scientific-diagram',
+            title: '定位',
+            rect: { x: 48, y: 136, width: 400, height: 300 },
+            provenance: { kind: 'source', reference: '用户资料' },
+            spec: {
+              type: 'graph',
+              nodes: [
+                { id: 'a', label: '区位', x: 0.5, y: 0.2 },
+                { id: 'b', label: '办学', x: 0.5, y: 0.5 },
+                { id: 'c', label: '学科', x: 0.5, y: 0.8 },
+              ],
+              edges: [
+                { from: 'a', to: 'b' },
+                { from: 'b', to: 'c' },
+              ],
+            },
+          },
+        ],
+        visibleContent: facts,
+        imageRefs: ['image-original'],
+      });
+      expect(result.svg).toContain('image-original');
+      expect(result.blocks[0]).toMatchObject({
+        id: 'structure',
+        kind: 'scientific-diagram',
+        spec: { type: 'table', rows: facts.map((fact) => fact.split('：')) },
+      });
+      expect(
+        inspectPresentationContent({
+          planId: 'p',
+          title: '专业定位',
+          aspectRatio: '16:9',
+          sourceVersionIds: [],
+          slides: [
+            {
+              slideId: 'slide-11',
+              order: 11,
+              svg: result.svg,
+              metadata: { contentBlocks: result.blocks },
+            },
+          ],
+        }).passed,
+      ).toBe(true);
+    },
+  );
   it('reserves a full-width table before supplementary outline prose', async () => {
     const result = await recoverSemanticSlideLayout({
       aspectRatio: '16:9',

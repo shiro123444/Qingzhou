@@ -1,4 +1,11 @@
 export default {
+  'presentationVisualDecision.title': 'Agent visual plan',
+  'presentationVisualDecision.style': 'Shared image style: ',
+  'presentationVisualDecision.strategy.native': 'Editable content',
+  'presentationVisualDecision.strategy.source': 'Original source figure',
+  'presentationVisualDecision.strategy.reuse': 'Reuse owned material',
+  'presentationVisualDecision.strategy.generate': 'Generate artwork',
+  'presentationVisualDecision.strategy.mixed': 'Combine artwork and editable content',
   'presentationCollaboration.policy.ask':
     'Ask before further recovery, whether you are here or away. Your work stays saved until you decide. Quality checks stay in force.',
   'presentationCollaboration.policy.auto':

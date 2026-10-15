@@ -8,6 +8,7 @@ import type {
 import { resolvePresentationArtworkPolicy } from './artwork-pipeline';
 import { ImageGenerationEventPublisher, InMemoryImageGenerationEventJournal } from './asset-events';
 import { InMemoryPresentationAssetStore } from './asset-store';
+import { createDeckVisualSystem } from './deck-visual-system';
 import { createImageGenerationCapability } from './image-generation-capability';
 import type { ImageGenerationSlot } from './image-generation-planner';
 import type { GLMChatResult, GLMMultimodalChatPort } from './multimodal-chat-provider-glm';
@@ -138,6 +139,22 @@ it('keeps a complete illustration scene unless a cutout was explicitly requested
     jobInput: {
       ...input.jobInput,
       options: {
+        deckVisualSystem: createDeckVisualSystem({
+          ...input.jobInput,
+          options: { style: '学习水墨模板' },
+        }),
+        visualDirection: {
+          illustrationStyle: 'Soft ink-wash watercolor with shared paper texture',
+          continuityRules: ['Use the shared palette'],
+          slides: basePlan.slides.map((slide) => ({
+            slideId: slide.slideId,
+            strategy: 'native',
+            reason: 'Use editable facts',
+            priority: 0,
+            composition: 'Keep facts visible',
+            capabilityIds: [],
+          })),
+        },
         contentIntents: {
           slides: [
             {
@@ -162,6 +179,12 @@ it('keeps a complete illustration scene unless a cutout was explicitly requested
   });
   expect(processAssets).not.toHaveBeenCalled();
   expect(JSON.stringify(vi.mocked(port.generate).mock.calls[0])).toContain('Do not put words');
+  expect(JSON.stringify(vi.mocked(port.generate).mock.calls[0])).toContain(
+    'Soft ink-wash watercolor',
+  );
+  expect(JSON.stringify(vi.mocked(port.generate).mock.calls[0])).not.toContain(
+    'Clean 2D business illustration',
+  );
 });
 
 it('supplies composed historical style to asset planning without requiring a bound template', async () => {
@@ -684,7 +707,7 @@ describe('presentation revision assets', () => {
     expect(port.generate).toHaveBeenCalledWith(
       expect.objectContaining({
         count: 1,
-        prompt: replaceIntent.prompt,
+        prompt: expect.stringContaining(replaceIntent.prompt!),
         size: '1024x1536',
         idempotencyKey: expect.any(String),
       }),
@@ -930,6 +953,45 @@ it('places an owned asset made during intake without generating it again, and re
       request,
     ),
   ).rejects.toThrow('belonging to the selected slide');
+});
+
+it('binds an omitted source-figure intent to one verified original instead of regenerating it', async () => {
+  const ref = `document-image-${'b'.repeat(40)}`;
+  const chat = chatPort([]);
+  const generate = vi.fn();
+  const jobInput = {
+    ...input.jobInput,
+    options: {
+      availableAssetRefs: [ref],
+      contentIntents: {
+        slides: [
+          {
+            slideId: 'product',
+            claim: '原始统计',
+            formulas: [],
+            visualKind: 'source-figure',
+            visualReason: '保持原图',
+            visuals: [{ id: ref, kind: 'source-figure', required: true, brief: '原始统计图' }],
+          },
+        ],
+      },
+    },
+  };
+  const result = await createRevisionAssetPlanner({
+    chatPort: chat,
+    imageGenerationCapability: { generate },
+    readReusableAssets: async () => [{ ref }],
+  }).prepare({ ...input, jobInput });
+  expect(generate).not.toHaveBeenCalled();
+  expect(result.assetArtifactIds).toEqual([ref]);
+  expect(result.intents[0]).toMatchObject({ action: 'reuse', slotId: ref, ref });
+  await expect(
+    createRevisionAssetPlanner({
+      chatPort: chatPort([]),
+      imageGenerationCapability: { generate },
+      readReusableAssets: async () => [],
+    }).prepare({ ...input, jobInput }),
+  ).rejects.toMatchObject({ code: 'IMAGE_PLAN_INVALID' });
 });
 
 it('resumes ready generated figures and original document charts without calling the model or generator', async () => {

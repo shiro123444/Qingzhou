@@ -68,6 +68,7 @@ import { recoverSemanticSlideLayout } from './semantic-layout-recovery';
 import { composePresentationAssets } from './slide-asset-placement';
 import { completeStructuredJson } from './structured-json-chat';
 import { type TemplateApplication, templatePlannerInstructions } from './templates';
+import { presentationVisualDirectionSchema } from './visual-direction';
 import { inspectVisualOccupancy, reconcileNativeVisualAssets } from './visual-ownership';
 
 export interface GLMPresentationPlannerOptions {
@@ -546,15 +547,17 @@ export class GLMPresentationPlanner implements PresentationPlanner {
           : true,
     );
     if (relevantIntents.length) userPrompt += `\n内容编译结果：${JSON.stringify(relevantIntents)}`;
-    if (inputOptions.learnedCapabilities && !teachingStages.length && !deckVisualSystem)
-      userPrompt += `\n已验证的历史学习能力（仅为参考，当前用户指令、内容语义与字号预算优先）：${JSON.stringify(inputOptions.learnedCapabilities)}`;
     const learnedCapsules = teachingStages.length
       ? []
       : ((inputOptions.learnedCapabilities as { capsules?: CapabilityCapsule[] } | undefined)
           ?.capsules ?? []);
-    if (learnedCapsules.length && !deckVisualSystem)
-      userPrompt +=
-        '\n按 composition 组合不同来源的能力；在每页 metadata.capabilityUses 记录实际采用的 {capsuleId, reason}，reason说明具体设计位置与用途。不得将检索候选全部列为使用；未使用的能力不记录。';
+    if (learnedCapsules.length)
+      userPrompt += `\n已学模板能力：${JSON.stringify(learnedCapsules.map(({ id, kind, name, rules, layout, recipe }) => ({ id, kind, name, rules: rules.slice(0, 6), layout, recipe })))}\n可以组合不同来源的布局与渲染方法，但颜色、字体、画风遵守整稿视觉规范。在每页 metadata.capabilityUses 记录实际采用的 {capsuleId, reason}，说明设计位置与用途；未使用的能力不记录。`;
+    const autonomousDirection = presentationVisualDirectionSchema.safeParse(
+      inputOptions.visualDirection,
+    );
+    if (autonomousDirection.success)
+      userPrompt += `\n全稿自主视觉决策（根据真实素材尺寸落实图文比例，不能删减事实，不能覆盖主风格）：${JSON.stringify({ ...autonomousDirection.data, slides: autonomousDirection.data.slides.filter((page) => (context.pageSlideId ? page.slideId === context.pageSlideId : selectedSlides ? selectedSlides.some((slide) => slide.slideId === page.slideId) : true)) })}`;
     const visualStoryboard = inputOptions.visualStoryboard as
       { deckRationale?: unknown; rhythm?: unknown; slides?: unknown[] } | undefined;
     if (Array.isArray(visualStoryboard?.slides)) {
@@ -898,6 +901,42 @@ export class GLMPresentationPlanner implements PresentationPlanner {
                 );
               }
             }
+            const presentBeforeComposition = new Set(
+              presentationImageRefs(content.svg).map((ref) => ref.replace(/\?raw=true$/u, '')),
+            );
+            const missingUnplacedAsset = slideAssets.some(
+              (asset) =>
+                !asset.layout && !presentBeforeComposition.has(presentationAssetHref(asset.ref)),
+            );
+            const missingAssetIntent = contentIntents.find((item) => item.slideId === slideId);
+            if (deckVisualSystem && missingUnplacedAsset && missingAssetIntent) {
+              const native = visualRequirements(missingAssetIntent).some(isNativeVisual);
+              const recovered = await recoverSemanticSlideLayout({
+                aspectRatio,
+                intent: missingAssetIntent,
+                rawBlocks: content.blocks,
+                title: slideTitle,
+                deckBody: deckBodyRegion(
+                  deckVisualSystem,
+                  deckPageRole(input, slideId, outlineIndex + 1),
+                ),
+                imageRefs: [
+                  ...preservedRefs,
+                  ...slideAssets.map((asset) => presentationAssetHref(asset.ref)),
+                ],
+                visibleContent: native ? outlinePage?.keyPoints : undefined,
+              });
+              content = {
+                ...recovered,
+                overflowNotes: [
+                  ...(!native ? (outlinePage?.keyPoints ?? []) : []),
+                  ...('overflowNotes' in recovered && recovered.overflowNotes
+                    ? [recovered.overflowNotes]
+                    : []),
+                ].join('\n'),
+              };
+              layoutRecovered = true;
+            }
             let composedSvg = restorePreservedImages(
               attachGeneratedAssets(content.svg, slideAssets),
               originalSlide?.svg,
@@ -1003,6 +1042,14 @@ export class GLMPresentationPlanner implements PresentationPlanner {
               svg,
               metadata: {
                 contentBlocks: content.blocks,
+                ...(autonomousDirection.success
+                  ? {
+                      autonomousVisualDecision: autonomousDirection.data.slides.find(
+                        (page) => page.slideId === requestedId,
+                      ),
+                      illustrationStyle: autonomousDirection.data.illustrationStyle,
+                    }
+                  : {}),
                 visualRequirements: visualRequirements(intent),
                 visualAssets: allBindings,
               },
@@ -1134,6 +1181,14 @@ export class GLMPresentationPlanner implements PresentationPlanner {
                 contentBlocks: content.blocks,
                 ...(layoutRecovered ? { layoutRecovered: true } : {}),
                 ...(requestedStyle ? { style: requestedStyle } : {}),
+                ...(autonomousDirection.success
+                  ? {
+                      autonomousVisualDecision: autonomousDirection.data.slides.find(
+                        (page) => page.slideId === requestedId,
+                      ),
+                      illustrationStyle: autonomousDirection.data.illustrationStyle,
+                    }
+                  : {}),
                 ...(visualDirection && typeof visualDirection === 'object'
                   ? { visualDirection }
                   : {}),

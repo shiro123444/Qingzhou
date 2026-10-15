@@ -112,7 +112,7 @@ describe('GLMPresentationPlanner (C-106)', () => {
     expect(() => assertDeckVisualConsistency(result, system)).not.toThrow();
     expect(chat).toHaveBeenCalledTimes(2);
   });
-  it.each(['overlap', 'panel', 'transformed'] as const)(
+  it.each(['overlap', 'panel', 'transformed', 'omitted'] as const)(
     'keeps an owned figure large when recovering %s text inside the deck master',
     async (failure) => {
       const ref = '/api/runtime/presentation/artifacts/owned-figure';
@@ -133,11 +133,13 @@ describe('GLMPresentationPlanner (C-106)', () => {
                     slideId: 'slide-1',
                     order: 1,
                     svg:
-                      failure === 'overlap'
-                        ? `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><g data-deck-body="true"><image href="${ref}" x="48" y="144" width="864" height="328"/><text x="60" y="190" font-size="24">图内已有的数据被重复铺排</text></g></svg>`
-                        : failure === 'panel'
-                          ? `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><g data-deck-body="true"><image href="${ref}" x="48" y="144" width="400" height="300"/><rect x="480" y="150" width="120" height="280" fill="#BBD3EA"/><text x="490" y="190" font-size="24">图内已有的数据被重复铺排，文字伸出卡片边界</text></g></svg>`
-                          : `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><g data-deck-body="true"><g transform="translate(148,0)"><image href="${ref}" x="-100" y="144" width="864" height="328"/></g></g></svg>`,
+                      failure === 'omitted'
+                        ? '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><g data-deck-body="true"/></svg>'
+                        : failure === 'overlap'
+                          ? `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><g data-deck-body="true"><image href="${ref}" x="48" y="144" width="864" height="328"/><text x="60" y="190" font-size="24">图内已有的数据被重复铺排</text></g></svg>`
+                          : failure === 'panel'
+                            ? `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><g data-deck-body="true"><image href="${ref}" x="48" y="144" width="400" height="300"/><rect x="480" y="150" width="120" height="280" fill="#BBD3EA"/><text x="490" y="190" font-size="24">图内已有的数据被重复铺排，文字伸出卡片边界</text></g></svg>`
+                            : `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><g data-deck-body="true"><g transform="translate(148,0)"><image href="${ref}" x="-100" y="144" width="864" height="328"/></g></g></svg>`,
                   },
                 ],
               }),
@@ -197,7 +199,7 @@ describe('GLMPresentationPlanner (C-106)', () => {
         { ...input, options: { ...input.options, deckVisualSystem: system } },
         { scope: mockScope },
       );
-      expect(chat).toHaveBeenCalledTimes(failure === 'overlap' ? 1 : 2);
+      expect(chat).toHaveBeenCalledTimes(['overlap', 'omitted'].includes(failure) ? 1 : 2);
       expect(plan.slides[0].svg).toContain(`height="${system.body.height}"`);
       expect(plan.slides[0].svg).not.toContain('图内已有的数据被重复铺排');
       expect(plan.slides[0].notes).toContain('录取68人');
@@ -450,7 +452,7 @@ describe('GLMPresentationPlanner (C-106)', () => {
       },
       { scope: mockScope },
     );
-    expect(JSON.stringify(chat.mock.calls[0])).toContain('按 composition 组合不同来源的能力');
+    expect(JSON.stringify(chat.mock.calls[0])).toContain('已学模板能力');
     expect(result.slides[0].metadata?.capabilityUses).toEqual([
       { capsuleId, reason: '页标题和页脚采用学习所得的统一蓝色主风格' },
     ]);

@@ -25,6 +25,12 @@ import {
   rasterBudgetInstruction,
 } from './raster-budget';
 import { completeStructuredJson } from './structured-json-chat';
+import {
+  needsGeneratedVisual,
+  planPresentationVisualDirection,
+  type PresentationVisualDirection,
+  presentationVisualDirectionSchema,
+} from './visual-direction';
 
 export const formulaSourceSchema = z
   .object({
@@ -149,11 +155,14 @@ export const contentInputFingerprint = (input: PresentationJobInput): string =>
         slideCount: input.slideCount,
         title: input.title,
         revision: input.options?.contentRevision,
-        contractVersion: 8,
+        contractVersion: 10,
+        learnedCapabilities: input.options?.learnedCapabilities,
+        deckVisualSystem: input.options?.deckVisualSystem,
         visualEnrichment: input.options?.visualEnrichment,
         imageSlots: input.options?.imageSlots,
         lessonPlan: input.options?.lessonPlan,
         materials: input.options?.materials,
+        sourceDocumentVisuals: input.options?.sourceDocumentVisuals,
       }),
     )
     .digest('hex');
@@ -169,8 +178,13 @@ export interface PresentationContentCompiler {
     },
   ) => Promise<{
     inputFingerprint: string;
+    visualDirection?: PresentationVisualDirection;
     slides: SlideContentIntent[];
   }>;
+  prepareVisualDirection?: (
+    input: PresentationJobInput,
+    context: { scope: RuntimeScope; signal?: AbortSignal; rasterAllowance?: RasterAllowance },
+  ) => Promise<PresentationJobInput>;
 }
 
 export interface PresentationContentCompilerOptions {
@@ -187,7 +201,50 @@ export const createPresentationContentCompiler = (
 ): PresentationContentCompiler => {
   const maxRasterVisuals = options.maxRasterVisuals ?? DEFAULT_IMAGE_BUDGET;
   return {
+    async prepareVisualDirection(input, context) {
+      const outline = input.options?.outline;
+      const requested = input.options?.visualEnrichment as
+        { mode?: string; slideNumbers?: number[] } | undefined;
+      if (
+        !Array.isArray(outline) ||
+        !outline.length ||
+        outline.length > 100 ||
+        context.rasterAllowance ||
+        readLessonPlan(input) ||
+        options.imageGenerationAvailable !== true ||
+        requested?.mode === 'off' ||
+        requested?.slideNumbers?.length ||
+        input.options?.contentRevision ||
+        Array.isArray(input.options?.imageSlots)
+      )
+        return input;
+      const existing = presentationVisualDirectionSchema.safeParse(input.options?.visualDirection);
+      if (
+        existing.success &&
+        existing.data.slides.length === outline.length &&
+        input.options?.visualDirectionFingerprint === contentInputFingerprint(input)
+      )
+        return input;
+      const planned = await planPresentationVisualDirection(
+        chat,
+        input,
+        maxRasterVisuals,
+        context,
+        options.fallbackChat,
+      );
+      return {
+        ...input,
+        options: {
+          ...input.options,
+          contentIntents: undefined,
+          visualDirection: planned,
+          visualDirectionFingerprint: contentInputFingerprint(input),
+        },
+      };
+    },
     async compile(input, context) {
+      const directedInput = (await this.prepareVisualDirection?.(input, context)) ?? input;
+      if (directedInput !== input) return this.compile(directedInput, context);
       const allowance = context.rasterAllowance ?? createRasterAllowance(maxRasterVisuals);
       const lesson = readLessonPlan(input);
       if (lesson) {
@@ -198,6 +255,7 @@ export const createPresentationContentCompiler = (
           context.signal?.throwIfAborted();
           const compiled = await createPresentationContentCompiler(chat, 1, {
             fallbackChat: options.fallbackChat,
+            imageGenerationAvailable: options.imageGenerationAvailable,
             maxRasterVisuals,
           }).compile(
             {
@@ -227,6 +285,19 @@ export const createPresentationContentCompiler = (
       const count = outline.length || input.slideCount || defaultSlideCount;
       if (!count || count < 1 || count > 100)
         throw new Error('Content compilation requires 1–100 confirmed slides');
+      const requested = input.options?.visualEnrichment as
+        { mode?: string; slideNumbers?: number[] } | undefined;
+      const directionResult = presentationVisualDirectionSchema.safeParse(
+        input.options?.visualDirection,
+      );
+      const direction =
+        !input.options?.contentRevision &&
+        directionResult.success &&
+        directionResult.data.slides.length === count &&
+        (context.rasterAllowance ||
+          input.options?.visualDirectionFingerprint === contentInputFingerprint(input))
+          ? directionResult.data
+          : undefined;
       if (count > 4 && outline.length === count) {
         const slides: SlideContentIntent[] = [];
         const enrichment = input.options?.visualEnrichment as
@@ -250,6 +321,16 @@ export const createPresentationContentCompiler = (
                 ...input.options,
                 outline: outline.slice(start, start + numbers.length),
                 originalSlideNumbers: numbers,
+                ...(direction
+                  ? {
+                      visualDirection: {
+                        ...direction,
+                        slides: direction.slides
+                          .slice(start, start + numbers.length)
+                          .map((page, index) => ({ ...page, slideId: `slide-${index + 1}` })),
+                      },
+                    }
+                  : {}),
                 contentIntents: input.options?.contentIntents
                   ? {
                       slides: readContentIntents(input)
@@ -289,13 +370,35 @@ export const createPresentationContentCompiler = (
           throw Object.assign(new Error('当前分镜没有提供要求的生图素材，请确认视觉用途后继续'), {
             code: 'PRESENTATION_VISUAL_PLAN_FAILED',
           });
-        return { inputFingerprint: contentInputFingerprint(input), slides };
+        return {
+          inputFingerprint: contentInputFingerprint(input),
+          slides,
+          ...(direction ? { visualDirection: direction } : {}),
+        };
       }
       const { value } = await completeStructuredJson({
         chat,
         fallbackChat: options.fallbackChat,
         context,
         parse: async (candidate) => {
+          const numbers = input.options?.originalSlideNumbers;
+          if (
+            candidate &&
+            typeof candidate === 'object' &&
+            'slides' in candidate &&
+            Array.isArray(candidate.slides) &&
+            Array.isArray(numbers) &&
+            candidate.slides.length === numbers.length &&
+            candidate.slides.every((slide, index) => slide?.slideId === `slide-${numbers[index]}`)
+          ) {
+            candidate = {
+              ...candidate,
+              slides: candidate.slides.map((slide, index) => ({
+                ...slide,
+                slideId: `slide-${index + 1}`,
+              })),
+            };
+          }
           if (
             count === 1 &&
             candidate &&
@@ -347,6 +450,45 @@ export const createPresentationContentCompiler = (
           for (const [index, slide] of result.slides.entries()) {
             if (slide.slideId !== `slide-${index + 1}`)
               throw new Error('Content intents must preserve slide order and identity');
+            const pageDirection = direction?.slides[index];
+            const disabled =
+              requested?.mode === 'off' || options.imageGenerationAvailable === false;
+            if (pageDirection || disabled) {
+              // The whole-deck decision owns artwork allocation; batches cannot
+              // consume later pages' budget or silently omit a selected figure.
+              const native = slide.visuals.flatMap((visual) =>
+                !isRasterVisual(visual)
+                  ? [visual]
+                  : ['chart', 'scientific-diagram'].includes(visual.kind)
+                    ? [{ ...visual, renderer: 'native' as const }]
+                    : [],
+              );
+              if (!disabled && pageDirection && needsGeneratedVisual(pageDirection)) {
+                const proposed = slide.visuals.find(isRasterVisual);
+                const generated =
+                  proposed && !native.some((visual) => visual.id === proposed.id)
+                    ? proposed
+                    : undefined;
+                native.push({
+                  ...(generated ?? {
+                    id: 'autonomous-visual',
+                    kind: 'illustration',
+                    renderer: 'image',
+                    fidelity: 'conceptual',
+                  }),
+                  required: true,
+                  brief: [pageDirection.visualBrief!.slice(0, 1000), generated?.brief.slice(0, 600)]
+                    .filter(Boolean)
+                    .join('\n')
+                    .slice(0, 1600),
+                });
+              }
+              slide.visuals = native;
+              slide.visualKind = native[0]?.kind ?? 'none';
+              if (!native.length)
+                slide.visualReason =
+                  pageDirection?.reason ?? '保留可编辑表达与原始资料，不新增生成图片';
+            }
             if (new Set(slide.formulas.map((formula) => formula.id)).size !== slide.formulas.length)
               throw new Error('Formula ids must be unique per slide');
             if (
@@ -464,6 +606,9 @@ export const createPresentationContentCompiler = (
                         : '主动评估每页是否需要视觉补充：在应用场景、未来方案、概念解释、合作机制等适合页面，原始资料图不能充分表达时，规划1–3个有明确内容作用的原创插画或场景素材，并通过renderer:image调用生图。不要把所有工作汇报默认处理成纯表格；也不要为了凑数量每页生图。保留数字、表格与真实资料图，禁止虚构成果照片、机构标志或实测数据。整稿共享字体、配色和图像风格，生成素材只占内容区，禁止替换整张母版或将正文烘焙进背景。',
                 },
                 originalSlideNumbers: input.options?.originalSlideNumbers,
+                visualDirection: direction,
+                learnedCapabilities: input.options?.learnedCapabilities,
+                deckVisualSystem: input.options?.deckVisualSystem,
                 assetPolicy:
                   '若有requestedImageSlots，保留其slideId和slotId作为相应栅格visual的id；这些是用户明确要求的配图，也要纳入逐块规划。sourceDocumentVisuals是已验证的原始文档图表，已有匹配原图时优先用source-figure直接复用，不填renderer:image，不生成、不猜测重绘原图数据；brief写清原图引用和出处。',
                 revisionPolicy:
@@ -483,7 +628,11 @@ export const createPresentationContentCompiler = (
           ],
         },
       });
-      return { ...value, inputFingerprint: contentInputFingerprint(input) };
+      return {
+        ...value,
+        inputFingerprint: contentInputFingerprint(input),
+        ...(direction ? { visualDirection: direction } : {}),
+      };
     },
   };
 };

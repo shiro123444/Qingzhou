@@ -81,6 +81,8 @@ describe('presentation collaboration hook', () => {
     ['adaptive', true, 0, 'CHAT_EMPTY_RESPONSE', 'ask'],
     ['adaptive', false, 0, 'CHAT_EMPTY_RESPONSE', 'retry'],
     ['adaptive', false, 2, 'CHAT_EMPTY_RESPONSE', 'ask'],
+    ['adaptive', false, 0, 'IMAGE_PLAN_INVALID', 'retry'],
+    ['adaptive', false, 2, 'IMAGE_PLAN_INVALID', 'ask'],
     ['ask', false, 0, 'VISUAL_QUALITY_FAILED', 'ask'],
     ['auto', true, 0, 'VISUAL_QUALITY_FAILED', 'retry'],
     ['auto', false, 0, 'PRESENTATION_CONFLICT', 'ask'],

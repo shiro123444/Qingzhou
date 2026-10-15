@@ -10,6 +10,7 @@ import {
   X,
 } from 'lucide-react';
 import { memo, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type {
   ArtifactSnapshot,
@@ -94,8 +95,14 @@ export const ArchitectureDrawer = memo<ArchitectureDrawerProps>(
     selectedSlide,
     showInspector = true,
   }) => {
+    const { t } = useTranslation('common');
     // Current slide outline extraction from metadata
     const metadata = selectedSlide?.metadata as Record<string, unknown> | undefined;
+    const decision = metadata?.autonomousVisualDecision as
+      { strategy?: unknown; reason?: unknown; composition?: unknown } | undefined;
+    const strategy = (['native', 'source', 'reuse', 'generate', 'mixed'] as const).find(
+      (value) => value === decision?.strategy,
+    );
     const slideTitle =
       (typeof metadata?.title === 'string' && metadata.title.trim()) ||
       selectedSlide?.name ||
@@ -238,6 +245,27 @@ export const ArchitectureDrawer = memo<ArchitectureDrawerProps>(
           </section>
 
           {/* Section 2: Assets & Slots (strictly for current slide) */}
+          {strategy && typeof decision?.reason === 'string' && (
+            <section className={styles.drawerSection} data-testid="drawer-visual-decision-section">
+              <div className={styles.drawerSectionHeader}>
+                <Icon icon={Layers} size={14} />
+                <span>{t('presentationVisualDecision.title')}</span>
+                <Tag bordered={false} size="small">
+                  {t(`presentationVisualDecision.strategy.${strategy}`)}
+                </Tag>
+              </div>
+              <div className={styles.drawerSectionContent}>
+                <p>{decision.reason}</p>
+                {typeof decision.composition === 'string' && <p>{decision.composition}</p>}
+                {typeof metadata?.illustrationStyle === 'string' && (
+                  <p>
+                    {t('presentationVisualDecision.style')}
+                    {metadata.illustrationStyle}
+                  </p>
+                )}
+              </div>
+            </section>
+          )}
           <section className={styles.drawerSection} data-testid="drawer-assets-section">
             <div className={styles.drawerSectionHeader}>
               <Icon icon={ImageIcon} size={14} />

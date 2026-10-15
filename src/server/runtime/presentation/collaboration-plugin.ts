@@ -39,7 +39,7 @@ export function decidePresentationCollaboration(
         ? 'conflict'
         : 'input';
   const recoverable =
-    /QUALITY|LEGIBILITY|VISUAL|REVIEW|CHAT|IMAGE_UNAVAILABLE|PROVIDER_UNAVAILABLE|TIMEOUT|EMPTY|CONFLICT|INTERRUPTED|INPUT_REQUIRED/.test(
+    /QUALITY|LEGIBILITY|VISUAL|REVIEW|CHAT|IMAGE_UNAVAILABLE|PLAN_INVALID|PROVIDER_UNAVAILABLE|TIMEOUT|EMPTY|CONFLICT|INTERRUPTED|INPUT_REQUIRED/.test(
       input.code,
     );
   if (!recoverable) return { action: 'fail', category };

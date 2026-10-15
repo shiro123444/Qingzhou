@@ -50,6 +50,7 @@ import { validatePresentationPlan } from './planner';
 import { DEFAULT_IMAGE_BUDGET } from './raster-budget';
 import { completeStructuredJson, extractModelJson } from './structured-json-chat';
 import type { TemplateVisualProfile } from './templates/visual-types';
+import { presentationVisualDirectionSchema } from './visual-direction';
 
 export { extractModelJson } from './structured-json-chat';
 
@@ -597,6 +598,7 @@ class RevisionAssetPlanner implements PresentationRevisionAssetPlanner {
         capabilityPolicy:
           '按learnedCapabilities.composition的主风格统一生图的色板、笔触和材质；按本页任务借用其他来源的布局与渲染方法。学习记录不提供可直接粘贴的素材引用，不能编造来源。用户指定的模板、风格和内容优先。',
         visualStoryboard: input.jobInput.options?.visualStoryboard,
+        visualDirection: input.jobInput.options?.visualDirection,
         outline: input.jobInput.options?.outline,
         contentIntents: readContentIntents(input.jobInput),
         teachingStages: publicLessonStages(
@@ -911,6 +913,39 @@ class RevisionAssetPlanner implements PresentationRevisionAssetPlanner {
                       (Boolean(i.prompt) || Boolean(i.ref) || Boolean(i.componentId)),
                   );
                   if (existing || supplied) continue;
+                  if (visual.kind === 'source-figure') {
+                    // Source ownership is already verified by readReusableAssets.
+                    // A model may name the real document ref as the visual ID,
+                    // or omit its reuse intent; neither warrants redrawing a chart.
+                    const sourceRefs = [
+                      ...new Set(
+                        [visual.id, ...visual.brief.matchAll(/document-image-[a-f\d]{40}/gu)]
+                          .map((value) => (typeof value === 'string' ? value : value[0]))
+                          .filter(
+                            (ref) =>
+                              /^document-image-[a-f\d]{40}$/u.test(ref) && reusableRefs.has(ref),
+                          ),
+                      ),
+                    ];
+                    if (sourceRefs.length === 1) {
+                      const prior = intents.find(
+                        (intent) =>
+                          intent.slideId === slide.slideId &&
+                          intent.action === 'reuse' &&
+                          intent.ref === sourceRefs[0],
+                      );
+                      if (prior) intents[intents.indexOf(prior)] = { ...prior, slotId: visual.id };
+                      else
+                        intents.push({
+                          action: 'reuse',
+                          slideId: slide.slideId,
+                          slotId: visual.id,
+                          ref: sourceRefs[0],
+                          layout: { fit: 'contain', x: 0.08, y: 0.22, width: 0.84, height: 0.64 },
+                        });
+                      continue;
+                    }
+                  }
                   if (reuseOnly)
                     return invalid(
                       `Reuse the existing owned asset for ${slide.slideId}/${visual.id}; new image generation is forbidden by this instruction.`,
@@ -1142,6 +1177,9 @@ class RevisionAssetPlanner implements PresentationRevisionAssetPlanner {
         intent.slideId,
       );
       const deckVisualSystem = readDeckVisualSystem(input.jobInput);
+      const directedStyle = presentationVisualDirectionSchema.safeParse(
+        input.jobInput.options?.visualDirection,
+      );
       const scientific = readContentIntents(input.jobInput)
         .find((page) => page.slideId === intent.slideId)
         ?.visuals?.some(
@@ -1200,15 +1238,15 @@ class RevisionAssetPlanner implements PresentationRevisionAssetPlanner {
           [
             {
               count: 1,
-              ...(processing ? { background: style.background ?? 'opaque' } : {}),
+              background: style.background ?? 'opaque',
               idempotencyKey: `${operationKey}:${intent.slideId}:${intent.slotId}`,
               prompt: lockArtworkPrompt(
                 deckVisualSystem
-                  ? `One deck visual system ${deckVisualSystem.id}. Use only this palette: ${deckVisualSystem.palette.join(', ')}. Clean 2D business illustration on a white background, consistent line weights and sans-serif labels. Draw only the requested figure, no slide heading, footer, motto, institution name or whole-slide layout. `
+                  ? `One deck visual system ${deckVisualSystem.id}. Use only this palette: ${deckVisualSystem.palette.join(', ')}. ${directedStyle.success ? directedStyle.data.illustrationStyle : style.promptPrefix} Keep the shared medium, texture and line weights across every image. Draw only the requested figure, no slide heading, footer, motto, institution name or whole-slide layout. `
                   : scientific
                     ? 'Formal academic figure. Flat 2D, restrained palette, light background. '
                     : style.promptPrefix,
-                `${intent.prompt}${/不[用放要].{0,12}(?:文字|标签)|无文字|no\s+(?:text|labels)/iu.test(input.revision.content) ? '\nDo not put words, letters, labels, digits, captions, watermarks or logos inside the image. All text is supplied as editable slide content.' : ''}`,
+                `${intent.prompt.slice(0, 3200)}\nRender an opaque complete background appropriate to the requested medium. Never draw checkerboard squares, transparency-preview grids or a fake alpha background. Transparency is applied by the asset-processing tool when needed.${/不[用放要].{0,12}(?:文字|标签)|无文字|no\s+(?:text|labels)/iu.test(input.revision.content) ? '\nDo not put words, letters, labels, digits, captions, watermarks or logos inside the image. All text is supplied as editable slide content.' : ''}`,
               ),
               ...(!scientific && approvedReferences.length
                 ? {

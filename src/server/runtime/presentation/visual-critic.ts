@@ -440,7 +440,7 @@ export const createPresentationVisualCritic = (options: {
             ? '对照实际模板截图审查信息承载能力：比较图表与正文占比、表格行列、阅读层次和重点。统一风格不等于固定一种空白页框。不能仅因没有越界就判定通过；报告主体缩成小图、长段落缺少结构、关键事实只在备注、尾页缺少明确收束均需指出。封面/章节留白可以合理。不要为追求密度虚构事实或要求复制旧品牌。'
             : '无模板参考，只审查内容正确表达、可读性、留白与整稿一致性，不要求模板保真。',
           semanticReviewRules:
-            '检查公式排版与截断（formula）、科研图箭头坐标与论点一致性（scientific-semantics）、为塞内容而缩小正文（density）。贴纸/装饰（kind sticker）：检查是否带白底方块、是否越出卡片边框或压住正文与公式；visualAssets 里 transparency 为 opaque 表示服务端已实测该图没有可用透明像素（渲染出来就是白底方块），这是缺陷；轻微出血不算缺陷，遮挡可读内容才算。由服务端矢量叠加的标注（visualRequirements[].annotations 声明的箭头、引线与标签）不是生图内容：图内箭头方向、引线或这些标签的拼写不要作为意见提出，只评判生图对象是否覆盖 brief 指定的部件与关系、风格、留白与越界。对照visualRequirements逐块检查renderer:image的科研图是否呈现brief指定对象、部件、必要图内标签和关系，而不是无关印象图；不得把概念图冒充论文原图或实测结果，也不要求普通概念图标注“示意图”。科学方向判断须先与本页已批准公式和visualRequirements核对；例如约束g≤0且λ≥0时，KKT驻点关系∇f+λ∇g=0，不能把相反方向误报为同向。检查生成插图、精确矢量图与公式混排时的遮挡、卡片内越界和留白。只报告有像素及结构证据的问题。',
+            '检查公式排版与截断（formula）、科研图箭头坐标与论点一致性（scientific-semantics）、为塞内容而缩小正文（density）。所有生成素材还需检查背景：若能看到被画入图片的灰白棋盘格、透明预览网格，这是伪透明背景，应以artwork-style重大问题报告并让Image重绘完整自然背景，不能把整张白底概念插画误判为必须抠图。贴纸/装饰（kind sticker）：检查是否带白底方块、是否越出卡片边框或压住正文与公式；visualAssets 里 transparency 为 opaque 表示服务端已实测该图没有可用透明像素（渲染出来就是白底方块），这是缺陷；轻微出血不算缺陷，遮挡可读内容才算。由服务端矢量叠加的标注（visualRequirements[].annotations 声明的箭头、引线与标签）不是生图内容：图内箭头方向、引线或这些标签的拼写不要作为意见提出，只评判生图对象是否覆盖 brief 指定的部件与关系、风格、留白与越界。对照visualRequirements逐块检查renderer:image的科研图是否呈现brief指定对象、部件、必要图内标签和关系，而不是无关印象图；不得把概念图冒充论文原图或实测结果，也不要求普通概念图标注“示意图”。科学方向判断须先与本页已批准公式和visualRequirements核对；例如约束g≤0且λ≥0时，KKT驻点关系∇f+λ∇g=0，不能把相反方向误报为同向。检查生成插图、精确矢量图与公式混排时的遮挡、卡片内越界和留白。只报告有像素及结构证据的问题。',
           storyboard: plan.slides.map((slide) => ({
             slideId: slide.slideId,
             visualDirection: slide.metadata?.visualDirection,

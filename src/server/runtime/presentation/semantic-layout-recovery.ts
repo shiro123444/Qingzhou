@@ -1,6 +1,8 @@
 import { isNativeVisual, type SlideContentIntent, visualRequirements } from './content-intent';
 import { contentLayout } from './content-layout';
 import { fitFormula } from './formula-renderer';
+import { PresentationPlanError } from './planner';
+import { layoutReportTable, type ReportTable } from './report-table';
 import { layoutScientificGraph } from './scientific-graph-layout';
 import {
   escapeSvgText,
@@ -86,6 +88,45 @@ export async function recoverSemanticSlideLayout(input: {
   const canvasHeight = (960 * ratioHeight) / ratioWidth;
   const formulas = input.intent.formulas.filter((formula) => formula.placement !== 'notes');
   const imageRefs = [...new Set(input.imageRefs ?? [])];
+  if (
+    input.deckBody &&
+    !formulas.length &&
+    imageRefs.length === 1 &&
+    diagram?.kind === 'scientific-diagram' &&
+    diagram.spec.type === 'graph' &&
+    required?.fidelity !== 'computed' &&
+    (input.visibleContent?.length ?? 0) >= 3
+  ) {
+    const table: ReportTable = {
+      type: 'table',
+      columns: ['要点', '资料内容'],
+      columnWeights: [1, 4],
+      fontSize: 18,
+      headerFill: '#1D3E6B',
+      rows: input.visibleContent!.map((fact, index) => {
+        const split = fact.indexOf('：');
+        return split > 0 && split <= 12
+          ? [fact.slice(0, split), fact.slice(split + 1)]
+          : [String(index + 1), fact];
+      }),
+    };
+    try {
+      for (const ratio of [0.65, 0.7, 0.75]) {
+        const width = Math.floor((bounds.width - 24) * ratio);
+        if (layoutReportTable(table, width, bounds.height).height <= bounds.height) {
+          const block: SemanticBlock = {
+            ...diagram,
+            rect: { x: bounds.x, y: bounds.y, width, height: bounds.height },
+            spec: table,
+          };
+          const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 ${canvasHeight}"><g data-deck-body="true"><g data-content-id="${block.id}"/><image href="${escapeSvgText(imageRefs[0])}" x="${bounds.x + width + 24}" y="${bounds.y}" width="${bounds.width - width - 24}" height="${bounds.height}" preserveAspectRatio="xMidYMid meet"/></g></svg>`;
+          return await renderSemanticBlocks(svg, [block], input.intent);
+        }
+      }
+    } catch {
+      // Keep the exact structured diagram when the full source table cannot fit.
+    }
+  }
   const layout = async (width: number) => {
     const fitted: SemanticBlock[] = [];
     for (const formula of formulas) {
@@ -120,6 +161,32 @@ export async function recoverSemanticSlideLayout(input: {
     }
   };
   const sideColumn = (bounds.width - 24) / 2;
+  // A diagram can need more than half of the body. Preserve its exact source
+  // in an asymmetric column before stacking it above an unusably short image.
+  if (
+    input.deckBody &&
+    !formulas.length &&
+    imageRefs.length === 1 &&
+    diagram?.kind === 'scientific-diagram'
+  ) {
+    for (const ratio of [0.65, 0.7, 0.75]) {
+      const width = Math.floor((bounds.width - 24) * ratio);
+      if (!diagramFits(width, bounds.height)) continue;
+      const block = {
+        ...diagram,
+        rect: { x: bounds.x, y: bounds.y, width, height: bounds.height },
+      };
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 ${canvasHeight}"><g data-deck-body="true"><g data-content-id="${block.id}"/><image href="${escapeSvgText(imageRefs[0])}" x="${bounds.x + width + 24}" y="${bounds.y}" width="${bounds.width - width - 24}" height="${bounds.height}" preserveAspectRatio="xMidYMid meet"/></g></svg>`;
+      try {
+        return {
+          ...(await renderSemanticBlocks(svg, [block], input.intent)),
+          overflowNotes: (input.visibleContent ?? []).join('\n'),
+        };
+      } catch {
+        // Try the next measured width without changing source values or labels.
+      }
+    }
+  }
   // A comparison graph keeps its full label width. Half a slide is not used when
   // that would force the labels to shrink or the page to fail.
   const twoColumns = Boolean(
@@ -157,7 +224,7 @@ export async function recoverSemanticSlideLayout(input: {
   const sideBySide = formulaWidth < bounds.width;
   const imageCount = imageRefs.length;
   const reservedImage =
-    imageCount && !sideBySide ? 96 * imageCount + 12 * Math.max(0, imageCount - 1) : 0;
+    imageCount && (!sideBySide || diagram) ? 96 * imageCount + 12 * Math.max(0, imageCount - 1) : 0;
   const formulaHeight = fitted.reduce((sum, formula) => sum + formula.rect.height, 0);
   const formulaGaps = Math.max(0, fitted.length - 1);
   const freeForGaps = bounds.height - formulaHeight - reservedImage;
@@ -262,7 +329,10 @@ export async function recoverSemanticSlideLayout(input: {
     const imageWidth = diagram && sideBySide ? (bounds.width - 24) / 2 : bounds.width;
     const gap = 12;
     const imageHeight = (remainingHeight - gap * (imageRefs.length - 1)) / imageRefs.length;
-    if (imageHeight < 96) throw new Error('This stage needs separate pages for its images');
+    if (imageHeight + 0.1 < 96)
+      throw new PresentationPlanError(
+        'This stage needs more space for its images; revise the diagram and image composition without dropping source facts',
+      );
     for (const [index, href] of imageRefs.entries())
       imageMarkup.push(
         `<image href="${escapeSvgText(href)}" x="${bounds.x}" y="${y + index * (imageHeight + gap)}" width="${imageWidth}" height="${imageHeight}" preserveAspectRatio="xMidYMid meet"/>`,

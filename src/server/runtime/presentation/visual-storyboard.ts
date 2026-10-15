@@ -73,6 +73,7 @@ export const presentationStoryboardInputFingerprint = (input: PresentationJobInp
         contentFingerprint: (
           input.options?.contentIntents as { inputFingerprint?: string } | undefined
         )?.inputFingerprint,
+        visualDirection: input.options?.visualDirection,
         templateSources: input.options?.templateSources,
         materials: input.options?.materials,
       }),
@@ -428,6 +429,7 @@ export const createPresentationVisualStoryboardPlanner = (options: {
                 }),
               ),
               contentIntents,
+              visualDirection: jobInput.options?.visualDirection,
               materials: materialContextForSlides(jobInput.options?.materials, outline),
               teachingStages: publicLessonStages(jobInput),
               teachingPolicy: publicLessonStages(jobInput).length
