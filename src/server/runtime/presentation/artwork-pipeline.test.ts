@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { InMemoryPresentationArtifactStore } from './artifact-store';
 import {
   createArtworkStyleAtlas,
+  isReusableTemplateComponent,
   lockArtworkPrompt,
   mapPool,
   presentationArtworkStyle,
@@ -33,6 +34,29 @@ const visual = {
 } as unknown as TemplateVisualProfile;
 
 describe('presentation artwork pipeline', () => {
+  it('allows verified relevant subject artwork but rejects baked text and redraw candidates', () => {
+    const component = {
+      role: 'artwork',
+      containsText: false,
+      treatment: 'reuse',
+    } as TemplateVisualProfile['components'][number];
+    expect(isReusableTemplateComponent(component)).toBe(true);
+    expect(isReusableTemplateComponent({ ...component, containsText: true })).toBe(false);
+    expect(isReusableTemplateComponent({ ...component, treatment: 'redraw' })).toBe(false);
+  });
+  it('uses another sample from the same family when the chosen archetype has no exact sample', () => {
+    const chosen = {
+      ...visual,
+      designProgram: { archetypes: [{ id: 'a2', familyId: 'wash', evidencePages: [2] }] },
+    } as TemplateVisualProfile;
+    expect(
+      presentationArtworkStyle(
+        chosen,
+        { slides: [{ slideId: 's', archetypeId: 'a2', familyId: 'wash' }] },
+        's',
+      ).referenceAssetRefs,
+    ).toEqual(['template-style-1']);
+  });
   it('crops style pixels without reintroducing full-slide headers and rejects text-bearing samples', async () => {
     const store = new InMemoryPresentationArtifactStore();
     const scope = { userId: 'artist', sessionId: 'session' };
@@ -213,6 +237,11 @@ describe('presentation artwork pipeline', () => {
     const measured = await verifyCutoutTransparency(bytes);
     expect(measured).toMatchObject({ checked: true, hasAlphaChannel: true, transparentRatio: 0 });
     expect(measured.verified).toBe(false);
+  });
+
+  it('rejects an empty transparent segmentation result instead of treating the missing subject as success', async () => {
+    const bytes = await sharp({ create: { width: 64, height: 64, channels: 4, background: { r:0,g:0,b:0,alpha:0 } } }).png().toBuffer();
+    expect(await verifyCutoutTransparency(bytes)).toMatchObject({ checked:true,transparentRatio:1,visibleRatio:0,verified:false });
   });
 
   it('accepts a real cutout and reports how much of it is transparent', async () => {

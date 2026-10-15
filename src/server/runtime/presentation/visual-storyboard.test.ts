@@ -374,6 +374,35 @@ it.each([
   ).rejects.toThrow('must stay bound');
 });
 
+it('allows subject artwork only when its relevance is explained for this slide', async () => {
+  const artworkTemplate = {
+    ...template,
+    visual: { ...template.visual!, components: [{ ...component, role: 'artwork' as const }] },
+  };
+  const chat = chatPort(['p1-leaf'], undefined, {
+    assetBrief: 'This leaf illustrates the same plant discussed on this page.',
+  });
+  const storyboard = await createPresentationVisualStoryboardPlanner({ chat }).plan(
+    { jobInput, template: artworkTemplate },
+    { scope },
+  );
+  expect(storyboard.slides[0].componentIds).toEqual(['p1-leaf']);
+  await expect(
+    createPresentationVisualStoryboardPlanner({ chat: chatPort(['p1-leaf']) }).plan(
+      { jobInput, template: artworkTemplate },
+      { scope },
+    ),
+  ).rejects.toThrow('subject-relevance');
+});
+
+it('requires an explicit new-artwork brief for mixed compositions', async () => {
+  await expect(
+    createPresentationVisualStoryboardPlanner({
+      chat: chatPort([], undefined, { assetMode: 'mixed' }),
+    }).plan({ jobInput, template }, { scope }),
+  ).rejects.toThrow('assetBrief');
+});
+
 it('refuses baked or unknown components instead of letting the model invent reusable assets', async () => {
   const chat = chatPort(['unknown-decoration']);
   await expect(

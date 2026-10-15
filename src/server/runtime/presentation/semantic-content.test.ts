@@ -69,6 +69,17 @@ const chat = (responses: unknown[]): MultimodalChatPort => ({
 });
 
 describe('semantic presentation content', () => {
+  it('keeps offered asset refs out of semantic requirements so the owned asset phase controls binding', async () => {
+    const provider = chat([{ slides: [{ ...intent, formulas: [], visualKind: 'illustration',
+      visuals: [{ id: 'visual-1', kind: 'illustration', brief: '校园插画', required: true, ref: 'owned-artwork' }],
+    }] }]);
+    const result = await createPresentationContentCompiler(provider, 1).compile({
+      title: '高校教学', notebookId: 'studio', sourceVersionIds: [], slideCount: 1,
+      options: { availableAssetRefs: ['owned-artwork'] },
+    }, { scope });
+    expect(result.slides[0].visuals?.[0]).not.toHaveProperty('ref');
+    expect(result.slides[0].visuals?.[0].brief).toBe('校园插画');
+  });
   it('keeps a short graph edge label when a node sits on the right edge', () => {
     const block = semanticBlockSchema.parse({
       id: 'visual-1',

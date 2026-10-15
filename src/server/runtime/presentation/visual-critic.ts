@@ -246,11 +246,14 @@ export const createPresentationVisualCritic = (options: {
     const renderedSlides = await Promise.all(
       slides.map((slide) => renderSlide(slide.svg, context.scope, options.store)),
     );
+    const sourcePageRefs = new Set(slides.flatMap((slide) => {
+      const direction = slide.metadata?.visualDirection as { archetypeId?: string } | undefined;
+      return template?.visual?.designProgram.archetypes.find((item) => item.id === direction?.archetypeId)?.sourcePageRefs?.slice(0, 1) ?? [];
+    }));
     const evidencePages = new Set(
       slides.flatMap((slide) => {
         const direction = slide.metadata?.visualDirection as
-          | { familyId?: string; archetypeId?: string }
-          | undefined;
+          { familyId?: string; archetypeId?: string } | undefined;
         const archetype = template?.visual?.designProgram.archetypes.find(
           (item) => item.id === direction?.archetypeId,
         );
@@ -259,7 +262,7 @@ export const createPresentationVisualCritic = (options: {
       }),
     );
     const matchingPages =
-      template?.visual?.pages.filter((page) => evidencePages.has(page.page)) ?? [];
+      template?.visual?.pages.filter((page) => sourcePageRefs.size ? sourcePageRefs.has(page.ref) : evidencePages.has(page.page)) ?? [];
     const templatePages = (
       matchingPages.length
         ? matchingPages
@@ -323,6 +326,10 @@ export const createPresentationVisualCritic = (options: {
               : undefined,
           })),
           templateId: template?.templateId,
+          compositionPolicy: template?.compositionPolicy,
+          compositionReview: template?.compositionPolicy
+            ? '这是跨模板能力组合，原稿只提供可迁移的结构与素材证据。优先验收主风格统一、主体与当前主题匹配、跨来源结构适配和图文可读性；不能要求每一页重建其他模板的整幅背景、原色板或原字体，也不能把有意留白当作缺失原稿装饰。旧标识、旧文字或旧活动事实混入新素材必须指出。'
+            : undefined,
           versionId: template?.versionId,
         }),
         type: 'text',
@@ -399,6 +406,7 @@ export const createPresentationVisualCritic = (options: {
               ].join('\n'),
               role: 'system',
             },
+            ...(template?.compositionPolicy ? [{ role: 'system' as const, content: '能力组合验收以当前任务为最高优先级：原稿机构身份不继承。不得因未复制原校徽、英文院名、版权页脚或品牌占位槽而报告缺陷；也不要要求补空的机构标识占位框。主风格和布局仅为设计参考，允许适配当前内容。应报告旧机构文字/标识混入、真实的遮挡、错误关系、难以阅读的标签和图文越界。不要把有意留白误报成缺失原稿元素。' }] : []),
             { content, role: 'user' },
           ],
           model: options.chat.manifest.model,

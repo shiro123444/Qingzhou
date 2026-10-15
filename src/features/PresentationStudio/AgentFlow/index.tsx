@@ -8,7 +8,11 @@ import { ChatList, ConversationProvider, MessageItem } from '@/features/Conversa
 import { QingzhouPresentationScene } from '@/features/QingzhouBrand';
 import { ServerConfigStoreProvider } from '@/store/serverConfig/Provider';
 import type { LessonPlan } from '@/types/presentationLesson';
+import type { PresentationMaterials } from '@/types/presentationMaterial';
+import type { TeachingSelection } from '@/types/presentationTeaching';
 
+import { CreationContextBar, type PresentationCreationMode } from './CreationContextBar';
+import { MaterialContextPanel } from './MaterialContextPanel';
 import OutlineWorkspace, { type OutlineSlide } from './OutlineWorkspace';
 import {
   AgentQuestionCard,
@@ -47,6 +51,7 @@ export interface PresentationAgentFlowProps {
   }) => Promise<void> | void;
   /** Server-backed outline refinement through presentation.outline. */
   onOutlineAiRewrite: (input: {
+    materials?: PresentationMaterials;
     allSlides: OutlineSlide[];
     index?: number;
     mode: 'all' | 'slide';
@@ -197,6 +202,11 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
     const editorRef = useRef<ChatInputEditor | null>(null);
     const flowScrollerRef = useRef<HTMLDivElement | null>(null);
     const [step, setStep] = useState<FlowStep>('topic');
+    const [creationMode, setCreationMode] = useState<PresentationCreationMode>('presentation');
+    const [teachingSelection, setTeachingSelection] = useState<TeachingSelection>({
+      course: '',
+      ids: [],
+    });
     const [selectedTopic, setSelectedTopic] = useState('');
     const [selectedReferences, setSelectedReferences] = useState<PresentationReferenceInput[]>([]);
     const [selectedAudience, setSelectedAudience] = useState('');
@@ -346,7 +356,10 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
                   }
                 : undefined,
               messages: agentConversation.map((message) => ({
-                content: message.content,
+                content:
+                  message === modelUserMessage && creationMode === 'lesson'
+                    ? `${message.content}\n\n创作场景：备课。请围绕学生的学习目标、已有知识和教学环节规划；保留提问、练习和揭示答案的节奏，避免直接把全部答案铺在页面上。`
+                    : message.content,
                 role: message.sender === 'agent' ? 'assistant' : 'user',
               })),
               references: allReferences,
@@ -427,6 +440,7 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
         agentBrief,
         agentBusy,
         agentClient,
+        creationMode,
         applyAgentBrief,
         messages,
         nextMessageId,
@@ -637,6 +651,7 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
             audience: selectedAudience,
             outline: slidesToUse,
             availableAssetRefs: agentBrief.assets,
+            materials: agentBrief.materials,
             references: selectedReferences
               .filter((reference) => reference.status === 'ready' && reference.assetRef)
               .map((reference) => ({
@@ -654,6 +669,7 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
       },
       [
         agentBrief.assets,
+        agentBrief.materials,
         agentBrief.research,
         agentBrief.plan,
         confirmedSlides,
@@ -740,15 +756,23 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
                 audience={selectedAudience}
                 creating={creating}
                 initialSlides={agentOutline ?? []}
+                materials={agentBrief.materials}
+                memorySelection={teachingSelection}
+                teachingMode={creationMode === 'lesson'}
                 template={selectedTemplate}
+                initialLessonInstruction={
+                  messages.find((message) => message.sender === 'user' && !message.hidden)?.content
+                }
                 onBack={() => setStep('intake')}
                 onConfirm={(data) => handleOutlineConfirm(data)}
+                onMemorySelectionChange={setTeachingSelection}
                 onAiRewrite={(input) =>
                   onOutlineAiRewrite({
                     ...input,
                     audience: selectedAudience,
                     style: selectedStyle,
                     topic: selectedTopic,
+                    materials: agentBrief.materials,
                   })
                 }
                 onPlanLesson={async (
@@ -768,6 +792,9 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
                     throw new Error('Lesson provider did not return a teaching plan');
                   return result.lessonPlan;
                 }}
+                onTeachingModeChange={(teaching) =>
+                  setCreationMode(teaching ? 'lesson' : 'presentation')
+                }
               />
             );
           }
@@ -847,6 +874,9 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
       },
       [
         step,
+        creationMode,
+        teachingSelection,
+        messages,
         selectedAudience,
         selectedSlideCount,
         selectedStyle,
@@ -889,6 +919,14 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
         height={'100%'}
         width={'100%'}
       >
+        <CreationContextBar
+          disabled={creating || Boolean(agentBusy)}
+          mode={creationMode}
+          selection={teachingSelection}
+          template={selectedTemplate}
+          onModeChange={setCreationMode}
+          onSelectionChange={setTeachingSelection}
+        />
         <ConversationProvider
           skipFetch
           context={conversationContext}
@@ -909,6 +947,7 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
                   <div className={styles.capabilityBar}>
                     <PresentationTools value={tools} onChange={setTools} />
                   </div>
+                  <MaterialContextPanel materials={agentBrief.materials} />
                   <ServerConfigStoreProvider>
                     <ChatList
                       itemContent={(index, id) => {

@@ -138,6 +138,7 @@ export type TemplateVisualProfile = Omit<TemplateVisualAnalysis, 'designProgram'
     iteration: number;
     questions: TemplateLearningQuestion[];
     status: 'needs_input' | 'ready';
+    purpose?: 'template' | 'capabilities';
   };
   media: TemplateMediaAnalysis[];
   pages: TemplateRenderedPage[];
@@ -145,6 +146,16 @@ export type TemplateVisualProfile = Omit<TemplateVisualAnalysis, 'designProgram'
 };
 
 const storedTemplateVisualProfileSchema = templateVisualAnalysisSchema.extend({
+  // Observations accumulate across batches; per-model-response limits remain strict above.
+  families: z
+    .array(
+      templateVisualAnalysisSchema.shape.families.element.extend({
+        pages: z.array(z.number().int().positive()).min(1).max(100),
+      }),
+    )
+    .min(1)
+    .max(24),
+  components: z.array(templateVisualAnalysisSchema.shape.components.element).max(256),
   analyzedAt: z.string().min(1),
   model: z.string().min(1),
   learning: z
@@ -160,6 +171,7 @@ const storedTemplateVisualProfileSchema = templateVisualAnalysisSchema.extend({
       iteration: z.number().int().nonnegative().max(32),
       questions: z.array(templateLearningQuestionSchema).max(3),
       status: z.enum(['needs_input', 'ready']),
+      purpose: z.enum(['template', 'capabilities']).optional(),
     })
     .optional(),
   media: z.array(templateMediaAnalysisSchema).max(32).optional(),

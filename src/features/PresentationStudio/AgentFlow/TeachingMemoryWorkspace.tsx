@@ -169,6 +169,7 @@ export function TeachingMemoryWorkspace({
   const [windowEnd, setWindowEnd] = useState<number | null>(null);
   const [visual, setVisual] = useState(false);
   const [pageList, setPageList] = useState('');
+  const [query, setQuery] = useState('');
   const active = useRef(true);
   const requestVersion = useRef(0);
   useEffect(() => {
@@ -194,13 +195,27 @@ export function TeachingMemoryWorkspace({
     const version = ++requestVersion.current;
     setBusy(true);
     setError(undefined);
-    onChange({ ...selection, ids: [] });
     try {
       const next = await action();
       if (active.current && requestVersion.current === version) {
         setRecords(next);
-        // Any change of source/review invalidates the current selection and lesson confirmation.
-        onChange({ ...selection, ids: [] });
+        // A refresh keeps unchanged selections; a changed/revoked source must be reviewed again.
+        onChange({
+          ...selection,
+          ids: selection.ids.filter((id) => {
+            const before = records.find((record) => record.id === id);
+            const after = next.find((record) => record.id === id);
+            return (
+              before &&
+              after &&
+              before.revision === after.revision &&
+              before.source.versionId === after.source.versionId &&
+              after.status === 'confirmed' &&
+              after.review &&
+              (!after.review.course || after.review.course === selection.course.trim())
+            );
+          }),
+        });
       }
     } catch (cause) {
       if (active.current && requestVersion.current === version)
@@ -209,7 +224,24 @@ export function TeachingMemoryWorkspace({
       if (active.current && requestVersion.current === version) setBusy(false);
     }
   };
-  const eligible = records.filter(
+  const visibleRecords = records.filter(
+    (record) =>
+      !query.trim() ||
+      [
+        record.pattern.name,
+        record.pattern.observation,
+        record.pattern.applicability,
+        record.pattern.teacherAction,
+        record.pattern.learnerAction,
+        record.source.name,
+        record.review?.course,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLocaleLowerCase()
+        .includes(query.trim().toLocaleLowerCase()),
+  );
+  const eligible = visibleRecords.filter(
     (record) =>
       record.status === 'confirmed' &&
       record.review &&
@@ -301,6 +333,12 @@ export function TeachingMemoryWorkspace({
         {t('presentationTeaching.refresh')}
       </Button>
       {error && <Alert message={error} role="alert" type="error" />}
+      <Input.Search
+        aria-label={t('presentationTeaching.search')}
+        placeholder={t('presentationTeaching.search')}
+        value={query}
+        onChange={(event) => setQuery(event.target.value)}
+      />
       {eligible.map((record) => (
         <Checkbox
           checked={selection.ids.includes(record.id)}
@@ -321,7 +359,10 @@ export function TeachingMemoryWorkspace({
         </Checkbox>
       ))}
       {records.length === 0 && <span>{t('presentationTeaching.empty')}</span>}
-      {records.map((record) => (
+      {!!records.length && !visibleRecords.length && (
+        <span>{t('presentationTeaching.noMatches')}</span>
+      )}
+      {visibleRecords.map((record) => (
         <details key={`${record.id}:${record.revision}`}>
           <summary>
             {record.pattern.name} · {t(`presentationTeaching.status.${record.status}`)}

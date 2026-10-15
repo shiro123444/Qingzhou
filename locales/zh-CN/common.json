@@ -396,6 +396,11 @@
   "presentationConversation.target": "修改范围",
   "presentationConversation.title": "与演示文稿对话",
   "presentationConversation.version": "已保存 {{count}} 个版本",
+  "presentationCreation.lesson": "备课",
+  "presentationCreation.memories": "借鉴教学记忆",
+  "presentationCreation.memoriesSelected": "已选 {{count}} 条教学记忆",
+  "presentationCreation.mode": "创作场景",
+  "presentationCreation.presentation": "演示",
   "presentationLesson.accept": "采用这版安排",
   "presentationLesson.audience": "授课对象",
   "presentationLesson.audienceUnknown": "可在对话中说明听众",
@@ -455,7 +460,6 @@
   "presentationRecovery.paused": "制作已暂停",
   "presentationRecovery.preserved": "创作要求和已完成的步骤已保留。可以从这里继续，也可以在下方补充要求。",
   "presentationRecovery.resume": "继续制作",
-
   "presentationStoryboard.claim": "这一页，只讲清楚",
   "presentationStoryboard.create": "开始制作",
   "presentationStoryboard.notes": "讲稿",
@@ -480,6 +484,7 @@
   "presentationTeaching.inference": "可能的目的——由教师判断",
   "presentationTeaching.learnerAction": "学生行动",
   "presentationTeaching.limitations": "限制／不适用场景（可修改）",
+  "presentationTeaching.noMatches": "没有匹配的教学记忆",
   "presentationTeaching.observation": "观察到的安排",
   "presentationTeaching.openImage": "打开完整原页截图",
   "presentationTeaching.page": "第 {{page}} 页",
@@ -487,6 +492,8 @@
   "presentationTeaching.prerequisites": "先备知识",
   "presentationTeaching.refresh": "刷新记忆",
   "presentationTeaching.revoke": "撤销后续复用",
+  "presentationTeaching.search": "按教法、适用条件或课程搜索",
+  "presentationTeaching.selectionChanged": "教学记忆已变化，请继续规划并确认更新后的教案",
   "presentationTeaching.sourceImage": "原始 PPTX 第 {{page}} 页——静态截图",
   "presentationTeaching.sourceVersion": "来源版本",
   "presentationTeaching.status.confirmed": "教师已确认",
@@ -652,5 +659,7 @@
   "userPanel.setting": "应用设置",
   "userPanel.upgradePlan": "升级套餐",
   "userPanel.usages": "用量",
-  "version": "版本"
+  "version": "版本",
+  "presentationStoryboard.materials": "资料来源与转换文件",
+  "presentationStoryboard.materialCoverage": "已读取 {{read}} / {{total}} 段"
 }

@@ -29,25 +29,33 @@ const decode = (text: string) =>
     .replaceAll('&amp;', '&');
 const attribute = (xml: string, name: string) =>
   new RegExp(`\\b${name}=["']([^"']*)["']`).exec(xml)?.[1];
-export function openNativePptx(bytes: Uint8Array) {
-  if (!bytes.length || bytes.length > PRESENTATION_PPTX_MAX_UPLOAD_BYTES)
+export function openNativePptx(bytes: Uint8Array, metadataOnly = false) {
+  if (
+    !bytes.length ||
+    bytes.length > (metadataOnly ? 512 * 1024 * 1024 : PRESENTATION_PPTX_MAX_UPLOAD_BYTES)
+  )
     throw fail('Native PPTX exceeds upload budget');
   let size = 0;
   let count = 0;
+  const mediaNames: string[] = [];
   const files = unzipSync(bytes, {
     filter: (entry) => {
-      size += entry.originalSize;
+      const metadata = /\.(?:xml|rels)$/u.test(entry.name);
+      if (!metadataOnly || metadata) size += entry.originalSize;
       if (
         ++count > 5000 ||
-        size > MAX_NATIVE_UNCOMPRESSED_BYTES ||
-        entry.originalSize > MAX_NATIVE_ENTRY_BYTES ||
+        size > (metadataOnly ? 64 * 1024 * 1024 : MAX_NATIVE_UNCOMPRESSED_BYTES) ||
+        ((!metadataOnly || metadata) &&
+          entry.originalSize > (metadataOnly ? 16 * 1024 * 1024 : MAX_NATIVE_ENTRY_BYTES)) ||
         entry.name.split('/').includes('..') ||
         entry.name.startsWith('/')
       )
         throw fail('Invalid native PPTX archive');
-      return true;
+      if (metadataOnly && entry.name.startsWith('ppt/media/')) mediaNames.push(entry.name);
+      return !metadataOnly || metadata;
     },
   });
+  for (const name of mediaNames) files[name] = new Uint8Array();
   if (!files['ppt/presentation.xml'] || !files['[Content_Types].xml'])
     throw fail('Invalid native PPTX');
   return files;
@@ -111,8 +119,8 @@ function shapes(xml: string) {
     };
   });
 }
-export function inspectNativePptx(bytes: Uint8Array) {
-  const files = openNativePptx(bytes);
+export function inspectNativePptx(bytes: Uint8Array, metadataOnly = false) {
+  const files = openNativePptx(bytes, metadataOnly);
   return {
     sha256: createHash('sha256').update(bytes).digest('hex'),
     pages: slidePaths(files).map((path, index) => ({

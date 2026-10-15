@@ -3,6 +3,11 @@ import type { PresentationActivity } from '@/types/presentationActivity';
 import type { AtomicOperationEvent } from '../atomic-runtime';
 
 const labels: Record<string, string> = {
+  'context.document.fromText': '保存文字资料',
+  'context.document.inspect': '查看资料的页段目录',
+  'context.document.read': '读取分镜所需的原文',
+  'context.document.convert': '转换资料为文字版',
+  'context.document.splitPdf': '按页拆分 PDF 资料',
   'presentation.teaching.analyze': '读取连续页并提出待审阅的教学模式',
   'presentation.teaching.search': '检索教师确认的教学模式',
   'presentation.teaching.compose': '组合有条件的教学模式',

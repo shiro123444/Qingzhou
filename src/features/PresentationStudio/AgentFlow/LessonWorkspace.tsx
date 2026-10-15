@@ -23,8 +23,11 @@ import { TeachingMemoryWorkspace } from './TeachingMemoryWorkspace';
 export interface LessonWorkspaceProps {
   audience?: string;
   busy?: boolean;
+  initialInstruction?: string;
   initialSlides?: OutlineSlide[];
+  memorySelection?: TeachingSelection;
   onChange: (plan: LessonPlan | undefined) => void;
+  onMemorySelectionChange?: (selection: TeachingSelection) => void;
   onPlan: (
     brief: TeacherBrief,
     current?: LessonPlan,
@@ -39,6 +42,9 @@ export function LessonWorkspace({
   audience = '',
   topic = '',
   initialSlides = [],
+  initialInstruction = '',
+  memorySelection,
+  onMemorySelectionChange,
   busy = false,
   onChange,
   onPlan,
@@ -48,19 +54,32 @@ export function LessonWorkspace({
   const [plan, setPlan] = useState<LessonPlan>();
   const [proposal, setProposal] = useState<LessonPlan>();
   const [history, setHistory] = useState<LessonPlan[]>([]);
-  const [instruction, setInstruction] = useState('');
+  const [instruction, setInstruction] = useState(initialInstruction);
   const [duration, setDuration] = useState(45);
   const [opening, setOpening] = useState<'cover' | 'direct'>('cover');
   const [planning, setPlanning] = useState(false);
   const [memoryOpened, setMemoryOpened] = useState(false);
-  const [teachingSelection, setTeachingSelection] = useState<TeachingSelection>({
+  const [localSelection, setLocalSelection] = useState<TeachingSelection>({
     course: '',
     ids: [],
   });
+  const teachingSelection = memorySelection ?? localSelection;
+  const setTeachingSelection = onMemorySelectionChange ?? setLocalSelection;
   const [selected, setSelected] = useState<string>();
   const [error, setError] = useState<string>();
   const active = useRef(true);
   const requestBusy = useRef(false);
+  const memoryKey = JSON.stringify(teachingSelection);
+  const memoryKeyRef = useRef(memoryKey);
+  useEffect(() => {
+    if (memoryKeyRef.current === memoryKey) return;
+    memoryKeyRef.current = memoryKey;
+    if (plan || proposal || requestBusy.current) {
+      setProposal(undefined);
+      onChange(undefined);
+      setError(t('presentationTeaching.selectionChanged'));
+    }
+  }, [memoryKey, onChange, plan, proposal, t]);
   useEffect(() => {
     active.current = true;
     return () => {
@@ -108,12 +127,12 @@ export function LessonWorkspace({
         ? `${instruction.trim()}\n本轮选择：环节 ${selectedBeat.id}${selectedFrame ? `，页面 ${selectedFrame.id}` : ''}。除必要衔接外保留其他环节。`
         : instruction.trim();
       const next = lessonPlanSchema.parse(await onPlan(brief, plan, teachingSelection, request));
-      if (active.current) {
+      if (active.current && memoryKeyRef.current === memoryKey) {
         setProposal(next);
         setInstruction('');
       }
     } catch (cause) {
-      if (active.current) {
+      if (active.current && memoryKeyRef.current === memoryKey) {
         setError(cause instanceof Error ? cause.message : t('presentationLesson.failed'));
         onChange(plan);
       }

@@ -234,7 +234,7 @@ export function createAssetPlugin(
           .png()
           .toBuffer();
         const script =
-          'import sys,os\nfrom pathlib import Path\nfrom rembg import remove,new_session\nmodel=sys.argv[1]\nassert (Path(os.environ.get("U2NET_HOME",str(Path.home()/".u2net")))/(model+".onnx")).is_file(), "Segmentation model is not installed"\nsys.stdout.buffer.write(remove(sys.stdin.buffer.read(),session=new_session(model,providers=["CPUExecutionProvider"])))';
+          'import sys,os\nfrom pathlib import Path\nfrom rembg import remove,new_session\nmodel=sys.argv[1]\nroots=[Path(os.environ.get("U2NET_HOME",str(Path.home()/".u2net"))),Path.home()/".rembg"]\nassert any((root/(model+".onnx")).is_file() or (root/"models"/model/(model+".onnx")).is_file() for root in roots), "Segmentation model is not installed"\nsys.stdout.buffer.write(remove(sys.stdin.buffer.read(),session=new_session(model,providers=["CPUExecutionProvider"])))';
         const bytes = await new Promise<Buffer>((resolve, reject) => {
           const child = spawn(python, ['-c', script, input.model], {
             stdio: ['pipe', 'pipe', 'pipe'],

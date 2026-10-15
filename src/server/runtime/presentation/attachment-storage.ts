@@ -11,6 +11,7 @@ import {
   type RuntimeScope,
 } from '../../../../packages/runtime-contracts/src';
 import { FilePresentationStorage } from './file-storage';
+import { createMaterialDocument } from './material-document';
 import { readPresentationUploadForm } from './upload-form';
 
 export const presentationAttachmentStorage = () =>
@@ -74,6 +75,34 @@ export async function uploadPresentationAttachment(request: Request, scope: Runt
   });
   return { id: artifactId, url: output.uri, name: output.name };
 }
+export async function loadPresentationMaterial(id: string, scope: RuntimeScope) {
+  const file = await presentationAttachmentStorage().get(scope, id);
+  if (!file?.bytes || !file.name || !supported.test(file.name) || file.type !== 'file')
+    throw new Error('文档不存在或不属于当前账号');
+  if (/\.(?:txt|md|csv|tsv)$/i.test(file.name))
+    return createMaterialDocument({
+      sourceId: id,
+      name: file.name,
+      content: Buffer.from(file.bytes).toString('utf8'),
+    });
+  const directory = await mkdtemp(path.join(tmpdir(), 'qingzhou-material-'));
+  try {
+    const filename = path.join(directory, `source${path.extname(file.name).toLowerCase()}`);
+    await writeFile(filename, file.bytes, { mode: 0o600 });
+    const { loadFile } = await import('@lobechat/file-loaders');
+    const document = await loadFile(filename);
+    if (document.metadata?.error) throw new Error('附件解析失败，请转换格式后重试');
+    return createMaterialDocument({
+      sourceId: id,
+      name: file.name,
+      content: document.content,
+      pages: document.pages,
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
 export async function readPresentationAttachment(id: string, scope: RuntimeScope) {
   const file = await presentationAttachmentStorage().get(scope, id);
   if (!file?.bytes || !file.name || !supported.test(file.name))
@@ -91,17 +120,15 @@ export async function readPresentationAttachment(id: string, scope: RuntimeScope
       name: file.name,
       content: `这是已保存的${file.type === 'video' ? '视频' : '音频'}附件；受信媒体引用为 ${id}。需要替换原生 PPTX 媒体时，将此引用作为 mediaRef。`,
     };
-  if (/\.(?:txt|md|csv|tsv)$/i.test(file.name))
-    return { name: file.name, content: Buffer.from(file.bytes).toString('utf8').slice(0, 36000) };
-  const directory = await mkdtemp(path.join(tmpdir(), 'jumi-attachment-'));
-  try {
-    const filename = path.join(directory, `source${path.extname(file.name).toLowerCase()}`);
-    await writeFile(filename, file.bytes, { mode: 0o600 });
-    const { loadFile } = await import('@lobechat/file-loaders');
-    const document = await loadFile(filename);
-    if (!document.content.trim()) throw new Error('附件没有可读取的正文');
-    return { name: file.name, content: document.content.slice(0, 36000) };
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  const document = await loadPresentationMaterial(id, scope);
+  return {
+    name: file.name,
+    content: document.segments
+      .slice(0, 8)
+      .map((segment) => segment.text)
+      .join('\n'),
+    document: { ...document.manifest, segments: document.manifest.segments.slice(0, 40) },
+    segments: document.segments.slice(0, 8),
+    truncated: document.segments.length > 8,
+  };
 }

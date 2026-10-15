@@ -37,6 +37,60 @@ const send = (message: string) => {
   fireEvent.click(screen.getByTestId('lesson-plan-propose'));
 };
 describe('conversational teacher workspace', () => {
+  it('rejects a late proposal after the selected teaching memories change', async () => {
+    let resolvePlan!: (plan: LessonPlan) => void;
+    let requestedBrief!: TeacherBrief;
+    const onChange = vi.fn();
+    const onPlan = vi.fn((brief: TeacherBrief) => {
+      requestedBrief = brief;
+      return new Promise<LessonPlan>((resolve) => {
+        resolvePlan = resolve;
+      });
+    });
+    const { rerender } = render(
+      <LessonWorkspace
+        initialInstruction="先预测"
+        memorySelection={{ course: '', ids: [] }}
+        onChange={onChange}
+        onPlan={onPlan}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('lesson-plan-propose'));
+    rerender(
+      <LessonWorkspace
+        memorySelection={{ course: '', ids: ['teaching-' + 'a'.repeat(40)] }}
+        onChange={onChange}
+        onPlan={onPlan}
+      />,
+    );
+    resolvePlan(fixture(requestedBrief));
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent('presentationTeaching.selectionChanged'),
+    );
+    expect(screen.queryByTestId('lesson-accept')).not.toBeInTheDocument();
+    expect(onChange).toHaveBeenLastCalledWith(undefined);
+  });
+  it('continues the original teaching request and carries memories selected before the outline', async () => {
+    const briefSelection = { course: '最优化', ids: ['teaching-' + 'a'.repeat(40)] };
+    const onPlan = vi.fn(async (brief: TeacherBrief) => fixture(brief));
+    render(
+      <LessonWorkspace
+        initialInstruction="先让学生预测，再用图揭示"
+        memorySelection={briefSelection}
+        onChange={vi.fn()}
+        onPlan={onPlan}
+      />,
+    );
+    expect(screen.getByRole('textbox')).toHaveValue('先让学生预测，再用图揭示');
+    fireEvent.click(screen.getByTestId('lesson-plan-propose'));
+    await screen.findByTestId('lesson-accept');
+    expect(onPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ intention: '先让学生预测，再用图揭示' }),
+      undefined,
+      briefSelection,
+      '先让学生预测，再用图揭示',
+    );
+  });
   it('uses one composer and requires acceptance before generating; supports focused revisions and undo', async () => {
     const onChange = vi.fn();
     const onPlan = vi.fn(async (brief: TeacherBrief, current?: LessonPlan) =>

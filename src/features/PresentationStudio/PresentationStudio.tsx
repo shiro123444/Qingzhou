@@ -8,6 +8,7 @@ import ToggleLeftPanelButton from '@/features/NavPanel/ToggleLeftPanelButton';
 import type { PresentationTemplateSummary } from '@/services/runtime/templateClient';
 import { useGlobalStore } from '@/store/global';
 import { systemStatusSelectors } from '@/store/global/selectors';
+import type { PresentationMaterials } from '@/types/presentationMaterial';
 
 import type {
   ArtifactSnapshot,
@@ -377,6 +378,7 @@ export const PresentationStudio = memo<PresentationStudioProps>(
     };
 
     const handleOutlineAiRewrite = async (input: {
+      materials?: PresentationMaterials;
       allSlides: OutlineSlide[];
       index?: number;
       mode: 'all' | 'slide';

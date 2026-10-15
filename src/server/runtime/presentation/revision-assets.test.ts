@@ -108,6 +108,32 @@ const imageCapability = () => {
   };
 };
 
+it('supplies composed historical style to asset planning without requiring a bound template', async () => {
+  const chat = chatPort([]);
+  const capability = imageCapability();
+  const learnedCapabilities = {
+    capsules: [
+      { id: 'learned-watercolor', kind: 'style', rules: ['水彩笔触、绿色层次和纸张纹理'] },
+    ],
+    composition: {
+      styleCapsuleId: 'learned-watercolor',
+      layoutCapsuleIds: ['layout-other-template'],
+    },
+  };
+  await createRevisionAssetPlanner({
+    chatPort: chat,
+    imageGenerationCapability: capability.capability,
+  }).prepare({
+    ...input,
+    jobInput: { ...input.jobInput, options: { learnedCapabilities } },
+  });
+  const request = vi.mocked(chat.chat).mock.calls[0][0];
+  const payload = JSON.parse(request.messages[1].content as string);
+  expect(payload.visualTemplate).toBeUndefined();
+  expect(payload.learnedCapabilities).toEqual(learnedCapabilities);
+  expect(payload.capabilityPolicy).toContain('统一生图的色板、笔触和材质');
+});
+
 describe('presentation revision assets', () => {
   const mixedInput = (kind = 'scientific-illustration'): PresentationRevisionAssetInput => ({
     ...input,
@@ -959,6 +985,52 @@ const visualJobInput = {
   },
 };
 
+it('extracts approved component references and combines them with the primary style when generating new artwork', async () => {
+  const extract = vi.fn(async () => ({
+    ref: 'template-component-ribbon',
+    needsTransparency: false,
+  }));
+  const generate = vi.fn(async (_scope: RuntimeScope, slots: readonly ImageGenerationSlot[]) => ({
+    scope,
+    jobId: input.jobId,
+    slots: slots.map((slot) => ({
+      slideId: slot.slideId,
+      slotId: slot.slotId,
+      state: 'ready' as const,
+      assetRefs: [{ ref: 'new-owned-image' }],
+    })),
+  }));
+  await createRevisionAssetPlanner({
+    chatPort: chatPort([
+      { ...replaceIntent, action: 'generate', referenceComponentIds: ['ribbon'] },
+    ]),
+    extractTemplateComponent: extract,
+    imageGenerationCapability: { generate },
+  }).prepare(visualJobInput);
+  expect(extract).toHaveBeenCalledWith('ribbon', expect.objectContaining({ scope }));
+  expect(generate.mock.calls[0][1][0].referenceAssetRefs).toEqual([
+    'template-style-1',
+    'template-component-ribbon',
+  ]);
+  expect(generate.mock.calls[0][1][0].prompt).toContain('STYLE REFERENCE ONLY');
+});
+
+it('rejects burned-in template text as a generation reference before extracting or generating it', async () => {
+  const extract = vi.fn();
+  const generate = vi.fn();
+  await expect(
+    createRevisionAssetPlanner({
+      chatPort: chatPort([
+        { ...replaceIntent, action: 'generate', referenceComponentIds: ['old-title'] },
+      ]),
+      extractTemplateComponent: extract,
+      imageGenerationCapability: { generate },
+    }).prepare(visualJobInput),
+  ).rejects.toThrow('approved text-free');
+  expect(extract).not.toHaveBeenCalled();
+  expect(generate).not.toHaveBeenCalled();
+});
+
 it('uses initial art-direction rules when applying a template, not conservative empty edits', async () => {
   const templateChat = chatPort([]);
   const wordingChat = chatPort([]);
@@ -992,6 +1064,29 @@ it('shows owned template page pixels to asset direction instead of relying on pr
   expect(context.trustedImages?.urls).toHaveLength(3);
   expect(Array.isArray(request.messages[1].content)).toBe(true);
   expect(JSON.stringify(request.messages[1].content)).toContain('模板视觉证据');
+});
+
+it('excludes a mislabeled template crop after actual pixel review and records the rejection for composition', async () => {
+  const validateReferenceAssets = vi.fn(async () => [] as string[]);
+  const result = await createRevisionAssetPlanner({
+    chatPort: chatPort([{ action: 'reuse', componentId: 'ribbon', slideId: 'cover', slotId: 'ribbon-slot' }]),
+    extractTemplateComponent: async () => ({ needsTransparency: false, ref: 'old-wording-in-crop' }),
+    validateReferenceAssets,
+  }).prepare(visualJobInput);
+  expect(validateReferenceAssets).toHaveBeenCalledWith(['old-wording-in-crop'], visualJobInput);
+  expect(result.assetArtifactIds).toEqual([]);
+  expect(result.input.options?.rejectedTemplateComponents).toEqual([{ slideId: 'cover', componentId: 'ribbon' }]);
+});
+
+it('excludes an inseparable frame but preserves provider failures as resumable errors', async () => {
+  const create = (code: string) => createRevisionAssetPlanner({
+    chatPort: chatPort([{ action: 'reuse', componentId: 'ribbon', slideId: 'cover', slotId: 'ribbon-slot' }]),
+    extractTemplateComponent: async () => { throw Object.assign(new Error('Cannot extract'), { code }); },
+  });
+  const excluded = await create('PRESENTATION_COMPONENT_UNSAFE').prepare(visualJobInput);
+  expect(excluded.assetArtifactIds).toEqual([]);
+  expect(excluded.input.options?.rejectedTemplateComponents).toHaveLength(1);
+  await expect(create('CHAT_UNAVAILABLE').prepare(visualJobInput)).rejects.toMatchObject({ code: 'CHAT_UNAVAILABLE' });
 });
 
 it('defaults template component reuse to the learned box and rejects text, redraw, native, or unprocessed cutouts', async () => {
@@ -1093,6 +1188,7 @@ it('defaults template component reuse to the learned box and rejects text, redra
   expect(processed.intents[0].layout).toEqual({
     ...templateVisual.components[4].box,
     fit: 'contain',
+    layer: 'content',
   });
 });
 
@@ -1102,7 +1198,8 @@ it('tells initial art direction to generate new subjects instead of pasting temp
   const templateSystem = vi.mocked(templateChat.chat).mock.calls[0][0].messages[0]
     .content as string;
   expect(templateSystem).toContain('style lock');
-  expect(templateSystem).toContain('Never paste original template photographs');
+  expect(templateSystem).toContain('explicitly selected its componentId');
+  expect(templateSystem).toContain('never pass old event photographs off as new evidence');
 });
 
 it('draws with learned style references then cuts out overlapping slots', async () => {
@@ -1184,7 +1281,46 @@ it('preserves complete photographs instead of automatically cutting them out dur
   expect(result.assetArtifactIds).toEqual(['image:session-1:speaker']);
 });
 
-it('rejects old subject artwork even if the visual model marked it reusable', async () => {
+it('reuses a relevant template subject approved for this page without generating a replacement', async () => {
+  const extractTemplateComponent = vi.fn(async () => ({
+    ref: 'owned-template-artwork',
+    needsTransparency: false,
+  }));
+  const changedVisual = {
+    ...templateVisual,
+    components: templateVisual.components.map((component) =>
+      component.id === 'hero-photo' ? { ...component, treatment: 'reuse' as const } : component,
+    ),
+  };
+  const result = await createRevisionAssetPlanner({
+    chatPort: chatPort([
+      { action: 'reuse', componentId: 'hero-photo', slideId: 'cover', slotId: 'hero' },
+    ]),
+    extractTemplateComponent,
+  }).prepare({
+    ...visualJobInput,
+    jobInput: {
+      ...visualJobInput.jobInput,
+      options: {
+        templateVisual: changedVisual,
+        visualStoryboard: {
+          slides: [
+            {
+              slideId: 'cover',
+              assetMode: 'reuse',
+              componentIds: ['hero-photo'],
+              assetBrief: 'The supplied subject is the subject of this page.',
+            },
+          ],
+        },
+      },
+    },
+  });
+  expect(extractTemplateComponent).toHaveBeenCalledOnce();
+  expect(result.assetArtifactIds).toEqual(['owned-template-artwork']);
+});
+
+it('rejects old subject artwork without approval for the selected page', async () => {
   const extractTemplateComponent = vi.fn(async () => ({
     ref: 'old-photo',
     needsTransparency: false,
@@ -1209,24 +1345,27 @@ it('rejects old subject artwork even if the visual model marked it reusable', as
   expect(extractTemplateComponent).not.toHaveBeenCalled();
 });
 
-it('repairs an empty asset plan when the storyboard requires a new subject', async () => {
-  const chat = chatPort([{ ...replaceIntent, action: 'generate', ref: undefined }]);
-  vi.mocked(chat.chat).mockResolvedValueOnce(response([]));
-  const { capability } = imageCapability();
-  const result = await createRevisionAssetPlanner({
-    chatPort: chat,
-    imageGenerationCapability: capability,
-  }).prepare({
-    ...input,
-    jobInput: {
-      ...input.jobInput,
-      options: { visualStoryboard: { slides: [{ slideId: 'product', assetMode: 'generate' }] } },
-    },
-    revision: { ...input.revision, requestId: 'initial-assets' },
-  });
-  expect(chat.chat).toHaveBeenCalledTimes(2);
-  expect(result.assetArtifactIds).toHaveLength(1);
-});
+it.each(['generate', 'mixed'])(
+  'repairs an empty asset plan when the %s storyboard requires a new subject',
+  async (assetMode) => {
+    const chat = chatPort([{ ...replaceIntent, action: 'generate', ref: undefined }]);
+    vi.mocked(chat.chat).mockResolvedValueOnce(response([]));
+    const { capability } = imageCapability();
+    const result = await createRevisionAssetPlanner({
+      chatPort: chat,
+      imageGenerationCapability: capability,
+    }).prepare({
+      ...input,
+      jobInput: {
+        ...input.jobInput,
+        options: { visualStoryboard: { slides: [{ slideId: 'product', assetMode }] } },
+      },
+      revision: { ...input.revision, requestId: 'initial-assets' },
+    });
+    expect(chat.chat).toHaveBeenCalledTimes(2);
+    expect(result.assetArtifactIds).toHaveLength(1);
+  },
+);
 
 it('reuses completed siblings and source images when retrying failed cutout work', async () => {
   const intents = ['one', 'two'].map((slotId) => ({

@@ -16,11 +16,13 @@ import { presentationActivity } from './activity';
 import { validateAnnotation } from './annotation';
 import type { PresentationArtifactStore, StoredArtifact } from './artifact-store';
 import { createArtworkStyleAtlas } from './artwork-pipeline';
+import { appliedLearnedCapabilityIds } from './capability-composition';
 import {
   appliedTemplateCapsuleIds,
   type CapabilityCapsule,
   type CapabilityMemory,
 } from './capability-memory';
+import type { PresentationCapabilitySelector } from './capability-selection';
 import type { PresentationGenerationContextFactory } from './composition';
 import {
   contentInputFingerprint,
@@ -63,6 +65,7 @@ import type {
   TemplateVisualProfile,
 } from './templates';
 import { templateVisualNeedsInput, templateVisualNeedsRefresh } from './templates';
+import { composeTemplateApplications } from './templates/composition';
 import {
   type PresentationVisualCritic,
   type PresentationVisualReview,
@@ -92,6 +95,7 @@ export interface PresentationGenerationPortOptions {
   readonly atomicRuntime?: AtomicRuntime;
   readonly capability: PresentationGenerationCapability;
   readonly capabilityMemory?: CapabilityMemory;
+  readonly capabilitySelector?: PresentationCapabilitySelector;
   readonly contentCompiler?: PresentationContentCompiler;
   readonly contextFactory: PresentationGenerationContextFactory;
   readonly eventPublisherFactory?: PresentationGenerationEventPublisherFactory;
@@ -100,6 +104,7 @@ export interface PresentationGenerationPortOptions {
   readonly idFactory?: () => string;
   readonly imageGenerationCapability?: ImageGenerationCapability;
   readonly now?: () => string;
+  readonly prepareCapabilityLibrary?: (scope: RuntimeScope) => Promise<void>;
   readonly repository?: PresentationJobRepository;
   readonly revisionAssetPlanner?: PresentationRevisionAssetPlanner;
   readonly templateLibrary?: FilePresentationTemplateLibrary;
@@ -186,6 +191,8 @@ const bindTemplateApplication = (
     ...input.options,
     templateVersionId: template.versionId,
     templateVisual: template.visual,
+    templateComponentSources: template.componentSources,
+    templateSources: template.sources,
   },
 });
 
@@ -966,8 +973,7 @@ export class PresentationGenerationPort implements PresentationPort {
   ): Promise<PresentationJobInput> {
     if (!this.options.contentCompiler) return input;
     const previous = input.options?.contentIntents as
-      | Awaited<ReturnType<PresentationContentCompiler['compile']>>
-      | undefined;
+      Awaited<ReturnType<PresentationContentCompiler['compile']>> | undefined;
     if (previous?.inputFingerprint === contentInputFingerprint(input)) return input;
     const canCompile = (await this.options.atomicRuntime?.catalog())?.some(
       (tool) => tool.name === 'presentation.content.compile',
@@ -978,8 +984,7 @@ export class PresentationGenerationPort implements PresentationPort {
         >('presentation.content.compile', { input }, { scope: this.scope, signal, jobId })
       : await this.options.contentCompiler.compile(input, { scope: this.scope, signal });
     const revision = input.options?.contentRevision as
-      | { target?: PresentationMessageInput['target'] }
-      | undefined;
+      { target?: PresentationMessageInput['target'] } | undefined;
     const target = revision?.target;
     const slides = compiled.slides.map((slide, index) =>
       target?.type === 'slide' && target.slideNumber !== index + 1
@@ -1006,8 +1011,7 @@ export class PresentationGenerationPort implements PresentationPort {
     if (!template.visual?.designProgram || !this.options.visualStoryboardPlanner) return input;
     if (!confirmedDeckLength(input)) return input;
     const existing = input.options?.visualStoryboard as
-      | Partial<PresentationVisualStoryboard>
-      | undefined;
+      Partial<PresentationVisualStoryboard> | undefined;
     if (
       existing?.templateId === template.templateId &&
       existing.versionId === template.versionId &&
@@ -1422,6 +1426,7 @@ export class PresentationGenerationPort implements PresentationPort {
   }
 
   async listTemplates() {
+    await this.options.prepareCapabilityLibrary?.(this.scope);
     if (!this.options.templateLibrary) return [];
     return this.options.atomicRuntime
       ? this.options.atomicRuntime.invoke('presentation.template.list', {}, { scope: this.scope })
@@ -1661,6 +1666,8 @@ export class PresentationGenerationPort implements PresentationPort {
           type: PRESENTATION_JOB_EVENT_TYPES.progress,
         });
         let generationInput = clone(input);
+        if (!entry.plan && !entry.draftCheckpoint)
+          await this.options.prepareCapabilityLibrary?.(this.scope);
         if (
           Array.isArray(input.options?.imageSlots) &&
           input.options.imageSlots.length > 0 &&
@@ -1669,16 +1676,9 @@ export class PresentationGenerationPort implements PresentationPort {
           throw Object.assign(new Error('Image generation provider is not configured'), {
             code: 'PROVIDER_UNAVAILABLE',
           });
-        const learnedCapabilityIds = new Set<string>();
-        const pinnedCapabilityIds = entry.plan?.designSpec?.learnedCapabilityIds;
-        if (Array.isArray(pinnedCapabilityIds))
-          for (const id of pinnedCapabilityIds)
-            if (typeof id === 'string') learnedCapabilityIds.add(id);
         const pinnedMemory = generationInput.options?.learnedCapabilities as
-          | { capsules?: Array<{ id?: unknown }> }
-          | undefined;
-        for (const capsule of pinnedMemory?.capsules ?? [])
-          if (typeof capsule.id === 'string') learnedCapabilityIds.add(capsule.id);
+          { capsules?: CapabilityCapsule[] } | undefined;
+        let learnedCapsules = pinnedMemory?.capsules ?? [];
         let templateCapsules: CapabilityCapsule[] = [];
         if (this.options.capabilityMemory && !entry.plan && !entry.draftCheckpoint) {
           const requestedIds = input.options?.capabilityIds;
@@ -1690,20 +1690,36 @@ export class PresentationGenerationPort implements PresentationPort {
               new Error('capabilityIds must be a list of learned capability ids'),
               { code: 'PRESENTATION_INVALID' },
             );
+          const query = [
+            input.title,
+            input.options?.style,
+            JSON.stringify(input.options?.outline ?? []),
+          ]
+            .filter(Boolean)
+            .join(' ')
+            .slice(0, 12_000);
           const capsules = requestedIds
             ? []
-            : await this.options.capabilityMemory.search(
-                this.scope,
-                [input.title, input.prompt, JSON.stringify(input.options?.outline ?? [])]
-                  .filter(Boolean)
-                  .join(' ')
-                  .slice(0, 12_000),
-              );
+            : this.options.capabilitySelector && this.options.capabilityMemory.candidates
+              ? [...new Map((await Promise.all([
+                  this.options.capabilityMemory.candidates(this.scope, String(input.options?.style ?? '')),
+                  this.options.capabilityMemory.candidates(this.scope, query),
+                ])).flat().map((capsule) => [capsule.id, capsule])).values()]
+              : await this.options.capabilityMemory.search(this.scope, query, 6, true);
+          const selectedIds =
+            (requestedIds as string[] | undefined) ??
+            (this.options.capabilitySelector
+              ? await this.options.capabilitySelector.select(input, capsules, {
+                  scope: this.scope,
+                  signal: controller.signal,
+                })
+              : capsules.map(({ id }) => id));
           const composed = await this.options.capabilityMemory.compose(
             this.scope,
-            (requestedIds as string[] | undefined) ?? capsules.map((capsule) => capsule.id),
+            selectedIds,
+            true,
           );
-          composed.capsules.forEach((capsule) => learnedCapabilityIds.add(capsule.id));
+          learnedCapsules = composed.capsules;
           generationInput = {
             ...generationInput,
             options: { ...generationInput.options, learnedCapabilities: composed },
@@ -1721,21 +1737,52 @@ export class PresentationGenerationPort implements PresentationPort {
         }
         // These Cordis capabilities consume the same confirmed input but do not
         // depend on one another. Join before the storyboard, which needs both.
-        const [compiledInput, loadedTemplate] = await Promise.all([
+        const [compiledInput, loadedTemplates] = await Promise.all([
           this.options.contentCompiler
             ? this.ensureContentIntents(uncompiledInput, jobId, controller.signal)
             : Promise.resolve(uncompiledInput),
-          uncompiledInput.template
-            ? this.ensureTemplateApplication(
-                {
-                  templateId: uncompiledInput.template,
-                  versionId: uncompiledInput.options?.templateVersionId as string | undefined,
-                },
-                jobId,
-                controller.signal,
-                publisher,
-              )
-            : Promise.resolve(undefined),
+          (async () => {
+            const references: TemplateReference[] = [];
+            if (uncompiledInput.template)
+              references.push({
+                templateId: uncompiledInput.template,
+                versionId: uncompiledInput.options?.templateVersionId as string | undefined,
+              });
+            if (this.options.templateLibrary)
+              for (const capsule of learnedCapsules.toSorted(
+                (a, b) => Number(b.kind === 'style') - Number(a.kind === 'style'),
+              )) {
+                const { templateId, versionId } = capsule.source;
+                if (
+                  !templateId ||
+                  !versionId ||
+                  references.some((ref) => ref.templateId === templateId)
+                )
+                  continue;
+                const visual = await this.options.templateLibrary
+                  .getVisual(this.scope, { templateId, versionId })
+                  .catch(() => null);
+                if (
+                  !visual ||
+                  templateVisualNeedsInput(visual) ||
+                  templateVisualNeedsRefresh(visual)
+                )
+                  continue;
+                references.push({ templateId, versionId });
+                if (references.length >= 4) break;
+              }
+            const templates: TemplateApplication[] = [];
+            for (const reference of references)
+              templates.push(
+                await this.ensureTemplateApplication(
+                  reference,
+                  jobId,
+                  controller.signal,
+                  publisher,
+                ),
+              );
+            return templates;
+          })(),
         ]);
         generationInput = rebalanceMixedLessonStages(compiledInput);
         if (generationInput !== compiledInput) {
@@ -1752,15 +1799,35 @@ export class PresentationGenerationPort implements PresentationPort {
           entry.input = clone(generationInput);
           await this.save(entry);
         }
-        let template: TemplateApplication | undefined = loadedTemplate;
+        const selectedFamilies: Record<string, string> = {};
+        for (const capsule of learnedCapsules.toSorted(
+          (a, b) => Number(b.kind === 'style') - Number(a.kind === 'style'),
+        ))
+          if (
+            capsule.source.templateId &&
+            capsule.source.familyId &&
+            !selectedFamilies[capsule.source.templateId]
+          )
+            selectedFamilies[capsule.source.templateId] = capsule.source.familyId;
+        const composedTemplate = loadedTemplates.length
+          ? composeTemplateApplications(loadedTemplates, selectedFamilies)
+          : undefined;
+        let template: TemplateApplication | undefined = composedTemplate?.application;
         if (template) {
           generationInput = bindTemplateApplication(generationInput, template);
-          if (template.visual && this.options.capabilityMemory) {
+          if (loadedTemplates[0]?.visual && this.options.capabilityMemory) {
             templateCapsules = await this.options.capabilityMemory.learn(
               this.scope,
-              template.visual,
+              loadedTemplates[0].visual,
             );
           }
+          generationInput = {
+            ...generationInput,
+            options: {
+              ...generationInput.options,
+              templateStyleVisual: composedTemplate?.styleVisual ?? loadedTemplates[0]?.visual,
+            },
+          };
           generationInput = await this.ensureVisualStoryboard(
             generationInput,
             template,
@@ -2325,9 +2392,10 @@ export class PresentationGenerationPort implements PresentationPort {
                   ...plan,
                   designSpec: {
                     ...plan.designSpec,
+                    retrievedCapabilityIds: learnedCapsules.map(({ id }) => id),
                     learnedCapabilityIds: [
                       ...new Set([
-                        ...learnedCapabilityIds,
+                        ...appliedLearnedCapabilityIds(learnedCapsules, plan),
                         ...appliedTemplateCapsuleIds(templateCapsules, plan),
                       ]),
                     ],

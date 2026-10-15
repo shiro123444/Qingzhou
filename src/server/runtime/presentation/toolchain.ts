@@ -1,4 +1,4 @@
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import path from 'node:path';
 
 import type {
   PresentationRunner,
@@ -16,6 +16,7 @@ export interface PresentationToolchain {
 
 export interface PresentationToolchainOptions {
   allowedRunnerIds: readonly string[];
+  convertArgs?: readonly string[];
   convertScriptPath: string;
   maxOutputBytes?: number;
   pptMasterRoot: string;
@@ -47,15 +48,15 @@ export class PresentationToolchainError extends Error {
 }
 
 const inside = (candidate: string, root: string): boolean => {
-  const rel = relative(root, candidate);
-  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+  const rel = path.relative(root, candidate);
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
 };
 
-const canonical = (path: string, root: string, label: string): string => {
-  if (typeof path !== 'string' || !path.trim())
+const canonical = (candidate: string, root: string, label: string): string => {
+  if (typeof candidate !== 'string' || !candidate.trim())
     throw new PresentationToolchainError('PROVIDER_UNAVAILABLE', `${label} is required`);
-  const value = resolve(path);
-  const base = resolve(root);
+  const value = path.resolve(candidate);
+  const base = path.resolve(root);
   if (!inside(value, base))
     throw new PresentationToolchainError(
       'PROVIDER_UNAVAILABLE',
@@ -90,8 +91,8 @@ export class PptMasterToolchain implements PresentationToolchain {
         'PRESENTATION_RUNNER_NOT_ALLOWED',
         `Runner is not allow-listed: ${options.runnerId}`,
       );
-    this.pptMasterRoot = resolve(options.pptMasterRoot);
-    this.workspaceRoot = resolve(options.workspaceRoot);
+    this.pptMasterRoot = path.resolve(options.pptMasterRoot);
+    this.workspaceRoot = path.resolve(options.workspaceRoot);
     this.qualityScriptPath = canonical(
       options.qualityScriptPath,
       this.pptMasterRoot,
@@ -193,7 +194,13 @@ export class PptMasterToolchain implements PresentationToolchain {
         // The converter's default auto mode cycles effects across the whole
         // deck. A fixed effect keeps untouched slides stable after page edits.
         ...(kind === 'convert'
-          ? ['--output', 'exports/presentation.pptx', '--animation', 'fade']
+          ? [
+              '--output',
+              'exports/presentation.pptx',
+              '--animation',
+              'fade',
+              ...(this.options.convertArgs ?? []),
+            ]
           : []),
       ],
       cwd: workspace,

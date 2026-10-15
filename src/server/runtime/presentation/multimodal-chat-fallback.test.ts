@@ -28,6 +28,33 @@ const port = (chat: MultimodalChatPort['chat'], providerId: string): MultimodalC
 });
 
 describe('presentation multimodal chat fallback', () => {
+  it('temporarily uses the healthy fallback after repeated primary failures and probes the primary after cooldown', async () => {
+    let now = 1000;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const primaryChat = vi
+        .fn<MultimodalChatPort['chat']>()
+        .mockRejectedValue(
+          new MultimodalChatProviderError('CHAT_UNAVAILABLE', 'temporary failure'),
+        );
+      const fallbackChat = vi
+        .fn<MultimodalChatPort['chat']>()
+        .mockResolvedValue(result('fallback'));
+      const composed = createFallbackMultimodalChatPort(
+        port(primaryChat, 'primary'),
+        port(fallbackChat, 'fallback'),
+        { retryDelayMs: 0, primaryCooldownMs: 5000 },
+      );
+      for (let i = 0; i < 4; i++) await composed.chat(request, { scope });
+      expect(primaryChat).toHaveBeenCalledTimes(3);
+      expect(fallbackChat).toHaveBeenCalledTimes(4);
+      now += 5001;
+      primaryChat.mockResolvedValue(result('recovered'));
+      expect((await composed.chat(request, { scope })).id).toBe('recovered');
+    } finally {
+      clock.mockRestore();
+    }
+  });
   it('uses the primary provider while it is healthy', async () => {
     const primary = port(
       vi.fn(async () => result('primary')),

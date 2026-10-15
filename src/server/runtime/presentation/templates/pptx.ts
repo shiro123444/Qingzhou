@@ -73,19 +73,25 @@ interface Transform {
   sy: number;
   tx: number;
   ty: number;
+  unsafeNative?: boolean;
 }
 
 /** Read OOXML as data only. Embedded programs, external relations and macros are never executed. */
 export const extractPptxTemplate = (
   bytes: Uint8Array,
   observe?: (page: TeachingPageObservation) => void,
+  options?: { trustedLocalSource?: boolean },
 ): {
   constraints: TemplateConstraints;
   layouts: TemplateLayout[];
   media: TemplateMediaReference[];
   warnings: string[];
 } => {
-  if (!bytes.byteLength || bytes.byteLength > PRESENTATION_PPTX_MAX_UPLOAD_BYTES)
+  if (
+    !bytes.byteLength ||
+    bytes.byteLength >
+      (options?.trustedLocalSource ? 512 * 1024 * 1024 : PRESENTATION_PPTX_MAX_UPLOAD_BYTES)
+  )
     throw new PresentationTemplateError(
       `PPTX upload must be between 1 byte and ${PRESENTATION_PPTX_MAX_UPLOAD_MIB} MiB`,
     );
@@ -104,7 +110,10 @@ export const extractPptxTemplate = (
         if (entry.name.split('/').includes('..') || entry.name.startsWith('/'))
           throw new PresentationTemplateError('PPTX contains an invalid entry path');
         archiveTotal += entry.originalSize;
-        if (entry.originalSize > MAX_ARCHIVE_ENTRY || archiveTotal > MAX_ARCHIVE_UNCOMPRESSED)
+        if (
+          !options?.trustedLocalSource &&
+          (entry.originalSize > MAX_ARCHIVE_ENTRY || archiveTotal > MAX_ARCHIVE_UNCOMPRESSED)
+        )
           throw new PresentationTemplateError('PPTX expanded content exceeds the import budget');
         const media = /^ppt\/media\/[^/]+$/u.test(entry.name) ? embeddedMedia(entry.name) : null;
         if (media)
@@ -118,7 +127,10 @@ export const extractPptxTemplate = (
         )
           return false;
         xmlTotal += entry.originalSize;
-        if (entry.originalSize > 8 * 1024 * 1024 || xmlTotal > MAX_XML)
+        if (
+          entry.originalSize > (options?.trustedLocalSource ? 16 : 8) * 1024 * 1024 ||
+          xmlTotal > MAX_XML
+        )
           throw new PresentationTemplateError('PPTX XML exceeds the import budget');
         return true;
       },
@@ -290,6 +302,11 @@ export const extractPptxTemplate = (
             const sy =
               number(attribute(ext, 'cy'), 1) / (number(attribute(childExt, 'cy'), 1) || 1);
             visit(shape, {
+              unsafeNative:
+                transform.unsafeNative ||
+                Boolean(attribute(xfrm, 'rot')) ||
+                ['1', 'true'].includes(attribute(xfrm, 'flipH') ?? '') ||
+                ['1', 'true'].includes(attribute(xfrm, 'flipV') ?? ''),
               sx: transform.sx * sx,
               sy: transform.sy * sy,
               tx:
@@ -372,11 +389,44 @@ export const extractPptxTemplate = (
           const blip = descendants(shape, 'blip')[0] ?? {};
           const poster = relations.find((relation) => relation.id === attribute(blip, 'embed'));
           if (kind === 'pic') {
+            const crop = descendants(shape, 'srcRect')[0];
             assetSlots.push({
               aspectRatio: round((box.width * width) / Math.max(1, box.height * height)),
               box,
               fit: descendants(shape, 'srcRect').length ? 'cover' : 'contain',
               reference: poster ? `pptx:${poster.path}` : undefined,
+              ...(crop
+                ? {
+                    sourceCrop: {
+                      bottom: number(attribute(crop, 'b')) / 100_000,
+                      left: number(attribute(crop, 'l')) / 100_000,
+                      right: number(attribute(crop, 'r')) / 100_000,
+                      top: number(attribute(crop, 't')) / 100_000,
+                    },
+                  }
+                : {}),
+              sourceTransform: {
+                approximate:
+                  transform.unsafeNative ||
+                  [
+                    'alphaModFix',
+                    'alpha',
+                    'lum',
+                    'duotone',
+                    'clrChange',
+                    'clrRepl',
+                    'grayscl',
+                    'hsl',
+                    'tint',
+                  ].some((effect) => descendants(blip, effect).length > 0) ||
+                  Boolean(object(object(shape.spPr).custGeom).pathLst) ||
+                  !['rect', ''].includes(
+                    attribute(object(object(shape.spPr).prstGeom), 'prst') ?? '',
+                  ),
+                flipH: ['1', 'true'].includes(attribute(xfrm, 'flipH') ?? ''),
+                flipV: ['1', 'true'].includes(attribute(xfrm, 'flipV') ?? ''),
+                rotation: number(attribute(xfrm, 'rot')) / 60_000,
+              },
               slotId: `${sourceSlideId}:image:${assetSlots.length + 1}`,
             });
           }

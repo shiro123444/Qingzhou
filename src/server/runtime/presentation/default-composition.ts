@@ -4,6 +4,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import nodePath from 'node:path';
 
+import type { RuntimeScope } from '../../../../packages/runtime-contracts/src';
 import { createPresentationArtifactAssetStoreBridge } from './asset-store';
 import { FileCapabilityCapsuleStore } from './capability-memory';
 import type {
@@ -17,6 +18,7 @@ import {
 import { FilePresentationStorage } from './file-storage';
 import { createPresentationImageGenerationEventPublisher } from './image-event-bridge';
 import { createImageGenerationCapability } from './image-generation-capability';
+import { createLocalCorpusSeeder } from './local-corpus';
 import { createResilientMultimodalChatPort } from './multimodal-chat-fallback';
 import type { ProductionProviderReadiness } from './production-command';
 import { PRODUCTION_PRESENTATION_ENV_KEYS } from './production-config';
@@ -41,6 +43,7 @@ let configurationError: unknown;
 const createDefaultGenerationContextFactory = (
   pptMasterRoot: string,
   pythonCommand: string,
+  quickGenerate = false,
 ): PresentationGenerationContextFactory => {
   const runnerId = 'ppt-master-generation-toolchain';
   const runner = createProcessPresentationRunner({
@@ -57,7 +60,11 @@ const createDefaultGenerationContextFactory = (
     providerCommand: [pythonCommand],
     pptMasterRoot,
     qualityScriptPath: nodePath.join(scriptsRoot, 'svg_quality_checker.py'),
-    qualityArgs: ['--canonical-authoring', '--stage', 'final', '--json'],
+    qualityArgs: [
+      ...(quickGenerate ? ['--quick-generate'] : ['--canonical-authoring']),
+      '--stage', 'final', '--json',
+    ],
+    convertArgs: quickGenerate ? ['--quick-generate', '--with-notes'] : undefined,
     runner,
     runnerId,
     timeoutMs: 120_000,
@@ -140,16 +147,25 @@ const assemble = (): PresentationRuntimeComposition | undefined => {
     });
     const journalBindings = createPresentationRouteJournalBindings(journalCache);
 
+    const resolveChatConnection = async (scope: RuntimeScope) => {
+      const { getServerDB } = await import('@/database/core/db-adaptor');
+      const { resolveUserChatProvider } = await import('@/server/services/modelProvider');
+      return resolveUserChatProvider(await getServerDB(), scope.userId);
+    };
     const multimodalChatPort = createResilientMultimodalChatPort(
       createUserChatProvider({
         fetcher: createPresentationChatFetch(globalThis.fetch),
-        resolve: async (scope) => {
-          const { getServerDB } = await import('@/database/core/db-adaptor');
-          const { resolveUserChatProvider } = await import('@/server/services/modelProvider');
-          return resolveUserChatProvider(await getServerDB(), scope.userId);
-        },
+        resolve: resolveChatConnection,
       }),
     );
+    const visionModel = process.env.CORDIS_PRESENTATION_VISION_MODEL?.trim();
+    const scopedVisionChatPort = visionModel ? createResilientMultimodalChatPort(createUserChatProvider({
+      fetcher: createPresentationChatFetch(globalThis.fetch),
+      resolve: async (scope) => ({ ...await resolveChatConnection(scope), model: visionModel, supportsVision: true }),
+    })) : multimodalChatPort;
+    const visionChatPort = visionModel ? { ...scopedVisionChatPort,
+      manifest: Object.freeze({ ...scopedVisionChatPort.manifest, model: visionModel }),
+    } : scopedVisionChatPort;
 
     const imageGenerationCapability = imageApiKey
       ? createImageGenerationCapability({
@@ -189,6 +205,7 @@ const assemble = (): PresentationRuntimeComposition | undefined => {
     const contextFactory = createDefaultGenerationContextFactory(
       root,
       process.env.CORDIS_PPT_PYTHON ?? 'python3',
+      process.env.CORDIS_PPT_AUTHORING_MODE === 'quick',
     );
 
     let audioTranscriber: ReturnType<typeof createOpenAICompatibleAudioTranscriber> | undefined;
@@ -207,15 +224,25 @@ const assemble = (): PresentationRuntimeComposition | undefined => {
       }
     }
 
+    const capabilityMemory = new FileCapabilityCapsuleStore(
+      nodePath.join(dataRoot, 'capability-memory'),
+    );
+    const templateLibrary = new FilePresentationTemplateLibrary({
+      root: nodePath.join(dataRoot, 'templates'),
+    });
     const result = createProductionPresentationGenerationComposition({
       teachingMemory: new FileTeachingMemory(nodePath.join(dataRoot, 'teaching-memory')),
-      capabilityMemory: new FileCapabilityCapsuleStore(
-        nodePath.join(dataRoot, 'capability-memory'),
-      ),
+      capabilityMemory,
+      prepareCapabilityLibrary: process.env.CORDIS_PRESENTATION_LOCAL_CORPUS_USER_ID
+        ? createLocalCorpusSeeder({
+            sourceUserId: process.env.CORDIS_PRESENTATION_LOCAL_CORPUS_USER_ID,
+            library: templateLibrary,
+            store: artifactStore,
+            memory: capabilityMemory,
+          })
+        : undefined,
       audioTranscriber,
-      templateLibrary: new FilePresentationTemplateLibrary({
-        root: nodePath.join(dataRoot, 'templates'),
-      }),
+      templateLibrary,
       artifactStore,
       jobRepository: artifactStore,
       contextFactory,
@@ -223,6 +250,7 @@ const assemble = (): PresentationRuntimeComposition | undefined => {
       imageGenerationCapability,
       journalCache,
       multimodalChatPort,
+      visionChatPort,
       runnerFactory,
     });
 

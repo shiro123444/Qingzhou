@@ -46,6 +46,7 @@ import {
 } from './artwork-pipeline';
 import { atomicPlanner, atomicWorker, createPresentationAtomicRuntime } from './atomic-plugin';
 import { type CapabilityMemory, capabilityMemoryOperations } from './capability-memory';
+import { createPresentationCapabilitySelector } from './capability-selection';
 import {
   createPresentationRuntimeComposition,
   type PresentationGenerationContextFactory,
@@ -77,12 +78,14 @@ import {
 } from './production-command';
 import type { ProductionPresentationEnv } from './production-config';
 import { loadProductionPresentationProviderOptions } from './production-config';
+import { createPresentationReferenceValidator } from './reference-validation';
 import { createRevisionAssetPlanner } from './revision-assets';
 import { createProcessPresentationRunner, type ProcessPresentationRunnerOptions } from './runner';
 import type { FileTeachingMemory } from './teaching-memory';
 import { TeachingLearning } from './teaching-memory';
 import type { FilePresentationTemplateLibrary } from './templates';
 import type { PresentationAudioTranscriber } from './templates/audio-transcription';
+import { prepareFrameAperture } from './templates/frame-aperture';
 import { TemplateVisualLearning } from './templates/visual-learning';
 import { createPresentationVisualCritic } from './visual-critic';
 import { createPresentationVisualStoryboardPlanner } from './visual-storyboard';
@@ -423,9 +426,12 @@ export interface ProductionPresentationGenerationCompositionOptions {
   readonly multimodalChatPort?: MultimodalChatPort;
   readonly now?: () => string;
   readonly planner?: PresentationPlanner;
+  readonly prepareCapabilityLibrary?: (scope: RuntimeScope) => Promise<void>;
   readonly runnerFactory?: (provider: ProductionPresentationProvider) => PresentationRunner;
   readonly teachingMemory?: FileTeachingMemory;
   readonly templateLibrary?: FilePresentationTemplateLibrary;
+  /** Optional dedicated pixel observer; the content planner retains the user's primary model. */
+  readonly visionChatPort?: MultimodalChatPort;
   readonly worker?: Pick<InMemoryPresentationPlanWorker, 'run'>;
   readonly workspaceFactory?: (jobId: string) => PresentationWorkerWorkspace;
 }
@@ -451,6 +457,7 @@ export const createProductionPresentationGenerationComposition = (
     throw invalid('Production presentation generation composition options are required', 'options');
   }
 
+  const visionChatPort = options.visionChatPort ?? options.multimodalChatPort;
   const planner =
     options.planner ??
     (options.multimodalChatPort
@@ -498,18 +505,22 @@ export const createProductionPresentationGenerationComposition = (
           audioTranscriber: options.audioTranscriber,
           library: options.templateLibrary,
           store: artifactStore,
-          chat: options.multimodalChatPort,
+          chat: visionChatPort!,
         })
       : undefined;
   const visualStoryboardPlanner = options.multimodalChatPort
     ? createPresentationVisualStoryboardPlanner({ chat: options.multimodalChatPort })
     : undefined;
   const visualCritic = options.multimodalChatPort
-    ? createPresentationVisualCritic({ chat: options.multimodalChatPort, store: artifactStore })
+    ? createPresentationVisualCritic({ chat: visionChatPort!, store: artifactStore })
     : undefined;
   const revisionAssetPlanner = options.multimodalChatPort
     ? createRevisionAssetPlanner({
         chatPort: options.multimodalChatPort,
+        validateReferenceAssets: createPresentationReferenceValidator({
+          store: artifactStore,
+          chat: visionChatPort!,
+        }),
         ...(imageBudget === undefined ? {} : { maxGeneratedSlots: imageBudget }),
         readReusableAssets: async (refs, input) => {
           const assets = await Promise.all(
@@ -547,12 +558,21 @@ export const createProductionPresentationGenerationComposition = (
           ? async (componentId, input) => {
               if (!input.jobInput.template || !atomicRuntime)
                 throw new Error('Template runtime unavailable');
-              return atomicRuntime.invoke(
+              const extracted = await atomicRuntime.invoke(
                 'presentation.template.extractComponent',
                 {
-                  templateId: input.jobInput.template,
-                  versionId: input.jobInput.options?.templateVersionId,
-                  componentId,
+                  ...((
+                    input.jobInput.options?.templateComponentSources as
+                      | Record<
+                          string,
+                          { templateId: string; versionId: string; componentId: string }
+                        >
+                      | undefined
+                  )?.[componentId] ?? {
+                    templateId: input.jobInput.template,
+                    versionId: input.jobInput.options?.templateVersionId,
+                    componentId,
+                  }),
                 },
                 {
                   scope: input.scope,
@@ -560,7 +580,10 @@ export const createProductionPresentationGenerationComposition = (
                   signal: input.signal,
                   onEvent: input.onEvent,
                 },
-              );
+              ) as { ref: string; needsTransparency: boolean; component: { role: string } };
+              return extracted.component.role === 'frame'
+                  ? prepareFrameAperture({ ...input, ref: extracted.ref, store: artifactStore, chat: visionChatPort! })
+                : extracted;
             }
           : undefined,
         imageGenerationCapability,
@@ -672,6 +695,10 @@ export const createProductionPresentationGenerationComposition = (
     atomicRuntime,
     contentCompiler,
     capabilityMemory: options.capabilityMemory,
+    capabilitySelector: options.multimodalChatPort
+      ? createPresentationCapabilitySelector(options.multimodalChatPort)
+      : undefined,
+    prepareCapabilityLibrary: options.prepareCapabilityLibrary,
     teachingMemory: options.teachingMemory,
     teachingLearning,
     templateLibrary: options.templateLibrary,

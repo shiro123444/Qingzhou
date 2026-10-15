@@ -6,9 +6,10 @@ import type {
   PresentationJobInput,
   RuntimeScope,
 } from '../../../../packages/runtime-contracts/src';
-import { isReusableTemplateDecoration } from './artwork-pipeline';
+import { isReusableTemplateComponent } from './artwork-pipeline';
 import { isRasterVisual, readContentIntents, visualRequirements } from './content-intent';
 import { LESSON_RENDERING_INSTRUCTIONS, publicLessonStages } from './lesson';
+import { materialContextForSlides } from './material-document';
 import type { GLMMultimodalChatPort } from './multimodal-chat-provider-glm';
 import { formulasFitWithFigure } from './page-budget';
 import { completeStructuredJson } from './structured-json-chat';
@@ -72,6 +73,8 @@ export const presentationStoryboardInputFingerprint = (input: PresentationJobInp
         contentFingerprint: (
           input.options?.contentIntents as { inputFingerprint?: string } | undefined
         )?.inputFingerprint,
+        templateSources: input.options?.templateSources,
+        materials: input.options?.materials,
       }),
     )
     .digest('hex')
@@ -81,6 +84,7 @@ interface OutlineSlide {
   readonly claim?: string;
   readonly keyPoints?: unknown;
   readonly objective?: string;
+  readonly sourceRefs?: unknown;
   readonly title?: string;
   readonly visualSuggestion?: string;
 }
@@ -193,6 +197,7 @@ export const createPresentationVisualStoryboardPlanner = (options: {
       slideId: `slide-${index + 1}`,
       title: outline[index]?.title ?? (index === 0 ? jobInput.title : `第 ${index + 1} 页`),
       visualSuggestion: outline[index]?.visualSuggestion,
+      sourceRefs: outline[index]?.sourceRefs,
     }));
     const familyIds = new Set(template.visual!.families.map((family) => family.id));
     const archetypes = new Map(design.archetypes.map((item) => [item.id, item]));
@@ -248,7 +253,7 @@ export const createPresentationVisualStoryboardPlanner = (options: {
               slide.assetBrief = undefined;
             }
           }
-          if (slide.assetMode === 'generate' && !slide.assetBrief) {
+          if (['generate', 'mixed'].includes(slide.assetMode) && !slide.assetBrief) {
             return storyboardError(
               `第 ${index + 1} 页需要生成素材，请补充主体、画风与留白方向（assetBrief）`,
             );
@@ -303,11 +308,17 @@ export const createPresentationVisualStoryboardPlanner = (options: {
             const component = exact ?? (suffixMatches.length === 1 ? suffixMatches[0] : undefined);
             if (
               !component ||
-              component.familyId !== archetype.familyId ||
-              !isReusableTemplateDecoration(component)
+              (component.familyId !== archetype.familyId &&
+                !template.componentSources?.[component.id]) ||
+              !isReusableTemplateComponent(component)
             ) {
               return storyboardError(
                 'Visual storyboard attempted to reuse an unsafe template component',
+              );
+            }
+            if (component.role === 'artwork' && !slide.assetBrief) {
+              return storyboardError(
+                'Reusing template artwork requires a subject-relevance explanation (assetBrief)',
               );
             }
             return component.id;
@@ -333,7 +344,7 @@ export const createPresentationVisualStoryboardPlanner = (options: {
         messages: [
           {
             content:
-              '你是整稿视觉导演。模板观察结果是证据，不是逐页照抄命令。请先理解这份演示的叙事弧线，再为每页选择一个有证据的视觉族和构图原型。封面、章节、正文、数据和收束页应形成节奏；相邻页面保持锚点连续，同时避免机械重复。只有无旧文字、已获准复用的组件才可放入 componentIds。需要新画的插画、水彩或装饰主体时，assetMode 必须是 generate，并把画风、主体、留白方向写进 assetBrief；不要因为模板里已有旧主题照片就把 assetMode 设为 reuse。reuse 仅用于无旧文字的装饰组件。准确图表、流程和文字结构使用 native。模板的卡片尺寸和文字密度只能是软参考；公式真实测量尺寸、科研图图例空间、24px正文与已批准素材槽位是硬预算，不能为了模仿模板压缩它们。embeddedMedia 来自真实视频抽帧或媒体元数据：可用于理解节奏、画风和槽位，静态 SVG 生成不能假装已经保留动态播放；需要动态保真时在构图意图中明确要求走原稿保真路径。不要因为模板有图片就强迫每页生图。严格返回 JSON。',
+              '你是整稿视觉导演。模板观察结果是证据，不是逐页照抄命令。请先理解这份演示的叙事弧线，再为每页选择一个有证据的视觉族和构图原型。封面、章节、正文、数据和收束页应形成节奏；相邻页面保持锚点连续，同时避免机械重复。只有无旧文字、已获准复用的组件才可放入 componentIds。先在 reusableComponents 中寻找能服务本页内容的已有素材：背景、边框、装饰可以保持视觉连续；主体插画只有语义适合本页且明确获准 reuse/crop/removeBackground 时才复用，并在 assetBrief 解释其内容适配理由。不要把旧活动照片、数据证据或不相关人物替换成当前事实。只有缺少合适素材才生图。需要新画的插画、水彩或装饰主体时，assetMode 必须是 generate；已有素材与新素材组合时用 mixed，并把新增主体、画风、留白方向和前后层级写进 assetBrief。compositionIntent 必须说明文本与素材的相对位置、遮挡关系、尺度和裁切，不把整页拍平。准确图表、流程和文字结构使用 native。模板的卡片尺寸和文字密度只能是软参考；公式真实测量尺寸、科研图图例空间、24px正文与已批准素材槽位是硬预算，不能为了模仿模板压缩它们。embeddedMedia 来自真实视频抽帧或媒体元数据：可用于理解节奏、画风和槽位，静态 SVG 生成不能假装已经保留动态播放；需要动态保真时在构图意图中明确要求走原稿保真路径。不要因为模板有图片就强迫每页生图。严格返回 JSON。',
             role: 'system',
           },
           {
@@ -352,7 +363,7 @@ export const createPresentationVisualStoryboardPlanner = (options: {
                     compositionIntent: '本页构图意图（字符串，最多 1600 字符）',
                     continuity: '与前后页的连续关系（字符串，最多 1000 字符）',
                     assetBrief:
-                      'assetMode 为 generate 时必填，说明主体、画风与留白方向（最多 1600 字符）；不需要时省略此字段',
+                      'generate/mixed 时必填：新增主体、画风、留白方向与复用素材的组合关系；复用 artwork 时解释其与本页内容的适配理由（最多 1600 字符）',
                     layoutId: '可选，输入 layouts 中的真实 layoutId；未选时省略此字段',
                   },
                 ],
@@ -367,6 +378,13 @@ export const createPresentationVisualStoryboardPlanner = (options: {
           {
             content: JSON.stringify({
               designProgram: design,
+              userStyle: jobInput.options?.style,
+              componentSelectionPolicy: '每个被选中的 artwork 主体必须在本页 assetBrief 解释和当前主题的内容联系，无论assetMode取值是什么。纯native流程页无需位图主体时，componentIds返回[]；不要为凑复用数量搬入旧照片。已提供的availableAssetRefs由后续素材规划绑定，不写进componentIds。',
+              primaryStyle: template.compositionPolicy ? design.tokens : undefined,
+              templateSources: template.sources,
+              compositionPolicy: template.sources?.length
+                ? '这是多个已学习模板的组合目录。跨来源借用几何关系与组件，userStyle和primaryStyle统一整稿。不能把其他来源原有红条、纯蓝品牌场或旧字体当作本稿的画风；所有结构都改用主风格的色板、材质和笔触，不做红蓝风格交替。'
+                : undefined,
               embeddedMedia: template.visual!.media,
               goal: jobInput.prompt ?? jobInput.title,
               inputFingerprint,
@@ -377,6 +395,7 @@ export const createPresentationVisualStoryboardPlanner = (options: {
                 textCapacity,
               })),
               contentIntents,
+              materials: materialContextForSlides(jobInput.options?.materials, outline),
               teachingStages: publicLessonStages(jobInput),
               teachingPolicy: publicLessonStages(jobInput).length
                 ? LESSON_RENDERING_INSTRUCTIONS
@@ -384,14 +403,15 @@ export const createPresentationVisualStoryboardPlanner = (options: {
               rendererPolicy:
                 '按visuals.renderer逐块路由，不能由图的主题决定工具：renderer:image的框架图、实验装置图、科研机制图也使用Image生成；renderer:native的精确数据与计算轨迹使用结构化渲染。混合页使用mixed。source-figure复用有来源原图。预留公式measurement真实尺寸与板书空间，正文至少24px。教学封面只放课程标题和引入，不把问题正文页冒充封面。',
               reusableComponents: template
-                .visual!.components.filter(isReusableTemplateDecoration)
-                .map(({ box, familyId, id, name, role, treatment }) => ({
+                .visual!.components.filter(isReusableTemplateComponent)
+                .map(({ box, familyId, id, name, role, treatment, rationale }) => ({
                   box,
                   familyId,
                   id,
                   name,
                   role,
                   treatment,
+                  rationale,
                 })),
               slides: briefs,
               templateId: template.templateId,

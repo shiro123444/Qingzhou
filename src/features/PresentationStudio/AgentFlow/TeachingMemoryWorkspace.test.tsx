@@ -37,6 +37,45 @@ const record: TeachingRecord = {
   },
 };
 describe('teaching memory review', () => {
+  it('keeps unchanged memory selections on refresh and supports searching by teaching action', async () => {
+    const confirmed: TeachingRecord = {
+      ...record,
+      status: 'confirmed',
+      revision: 1,
+      review: { at: 'now', course: '', applicability: '已确认条件', limitations: '已确认限制' },
+    };
+    const client = {
+      list: vi.fn(async () => [confirmed]),
+      analyze: vi.fn(async () => []),
+      review: vi.fn(async () => confirmed),
+    };
+    const onChange = vi.fn();
+    render(
+      <TeachingMemoryWorkspace
+        client={client}
+        selection={{ course: '', ids: [record.id] }}
+        onChange={onChange}
+      />,
+    );
+    const use = await screen.findByRole('checkbox', {
+      name: 'presentationTeaching.use: 先观察后解释',
+    });
+    await waitFor(() => expect(use).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'presentationTeaching.refresh' }));
+    await waitFor(() =>
+      expect(onChange).toHaveBeenLastCalledWith({ course: '', ids: [record.id] }),
+    );
+    fireEvent.change(screen.getByRole('searchbox', { name: 'presentationTeaching.search' }), {
+      target: { value: '等待回应' },
+    });
+    expect(
+      screen.getByRole('checkbox', { name: 'presentationTeaching.use: 先观察后解释' }),
+    ).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('searchbox', { name: 'presentationTeaching.search' }), {
+      target: { value: '无匹配方法' },
+    });
+    expect(screen.getByText('presentationTeaching.noMatches')).toBeInTheDocument();
+  });
   it('does not confirm on load, requires acknowledgment, and passes explicit revision and edited conditions', async () => {
     const client = {
       list: vi.fn(async () => [record]),

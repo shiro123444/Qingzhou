@@ -1,6 +1,7 @@
 import type { PresentationLearningStatus } from '@/types/presentationLearning';
 
 import type { PresentationPlan } from '../../../../../packages/runtime-contracts/src';
+import type { TemplateComponentSource } from './composition';
 import type { TemplateVisualProfile } from './visual-types';
 
 /** Geometry is relative to the slide viewport, independent of PPTX/SVG units. */
@@ -27,6 +28,9 @@ export interface TemplateAssetSlot {
   fit: 'contain' | 'cover';
   reference?: string;
   slotId: string;
+  /** Native OOXML source crop; retain it instead of cropping a flattened slide. */
+  sourceCrop?: { bottom: number; left: number; right: number; top: number };
+  sourceTransform?: { approximate?: boolean; flipH: boolean; flipV: boolean; rotation: number };
 }
 
 /** Embedded media is recorded as evidence; source bytes remain inside the owned PPTX. */
@@ -97,10 +101,18 @@ export interface TemplateReference {
 }
 
 export interface TemplateApplication {
+  componentSources?: Record<string, TemplateComponentSource>;
+  compositionPolicy?: {
+    mode: 'capabilities';
+    primaryTemplateId: string;
+    palette: string[];
+    typography: string;
+  };
   constraints: TemplateConstraints;
   layouts: TemplateLayout[];
   media?: TemplateMediaReference[];
   name: string;
+  sources?: Array<{ name: string; templateId: string; versionId: string }>;
   templateId: string;
   versionId: string;
   visual?: TemplateVisualProfile;

@@ -17,6 +17,84 @@ const mockScope: RuntimeScope = {
 };
 
 describe('GLMPresentationPlanner (C-106)', () => {
+  it('passes cross-template composition to the planner and retains only offered per-page attribution', async () => {
+    const capsuleId = `capsule-${'a'.repeat(40)}`;
+    const chat = vi.fn(async () => ({
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: 'assistant' as const,
+            content: JSON.stringify({
+              planId: 'composed',
+              title: '能力组合',
+              slides: [
+                {
+                  slideId: 'slide-1',
+                  order: 1,
+                  svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><text x="40" y="60" font-size="32">组合设计</text></svg>',
+                  metadata: {
+                    capabilityUses: [
+                      { capsuleId, reason: '页标题和页脚采用学习所得的统一蓝色主风格' },
+                      { capsuleId: 'not-offered', reason: '模型声称采用但本任务从未提供的能力' },
+                    ],
+                  },
+                },
+              ],
+            }),
+          },
+        },
+      ],
+      created: 1,
+      id: 'composed',
+      model: 'test',
+    }));
+    const planner = createGLMPresentationPlanner({
+      chatPort: {
+        chat,
+        providerId: 'test',
+        manifest: {
+          displayName: 'test',
+          model: 'test',
+          providerId: 'test',
+          supportsIdempotency: true,
+          supportsVision: true,
+        },
+      },
+    });
+    const result = await planner.plan(
+      {
+        notebookId: 'nb',
+        sourceVersionIds: [],
+        slideCount: 1,
+        title: '能力组合',
+        options: {
+          learnedCapabilities: {
+            capsules: [
+              {
+                id: capsuleId,
+                kind: 'style',
+                name: '学术',
+                schemaVersion: 1,
+                createdAt: '2026-10-14',
+                source: { templateId: 'template-a', versionId: 'v1', evidencePages: [1] },
+                triggers: ['学术'],
+                palette: ['#2563eb'],
+                rules: ['统一蓝色'],
+              },
+            ],
+            composition: { styleCapsuleId: capsuleId, layoutCapsuleIds: [], recipeCapsuleIds: [] },
+          },
+        },
+      },
+      { scope: mockScope },
+    );
+    expect(JSON.stringify(chat.mock.calls[0])).toContain('按 composition 组合不同来源的能力');
+    expect(result.slides[0].metadata?.capabilityUses).toEqual([
+      { capsuleId, reason: '页标题和页脚采用学习所得的统一蓝色主风格' },
+    ]);
+  });
+
   it('fails closed when authenticated planner scope is missing', async () => {
     const chat = vi.fn();
     const planner = createGLMPresentationPlanner({

@@ -100,6 +100,7 @@ robots.txt
 
 # Documents and media
 *.pdf
+!packages/file-loaders/src/loaders/pdf/fixtures/chinese-cid.pdf
 
 # Cloud service keys
 vertex-ai-key.json

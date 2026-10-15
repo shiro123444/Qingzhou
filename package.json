@@ -395,6 +395,7 @@
     "pdf-parse": "^1.1.4",
     "pdfjs-dist": "5.4.530",
     "pdfkit": "^0.17.2",
+    "pdf-lib": "^1.17.1",
     "pg": "^8.17.2",
     "plaiceholder": "^3.0.0",
     "polished": "^4.3.1",

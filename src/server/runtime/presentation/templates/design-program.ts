@@ -22,6 +22,7 @@ export const templateDesignProgramSchema = z
             assetPolicy: z.array(z.string().min(1).max(500)).max(12),
             compositionRules: z.array(z.string().min(1).max(500)).min(1).max(16),
             evidencePages: z.array(z.number().int().positive()).min(1).max(24),
+            sourcePageRefs: z.array(z.string().min(1).max(200)).max(24).optional(),
             familyId: z.string().min(1).max(60),
             header: z
               .object({
@@ -205,7 +206,7 @@ const layoutSignatures = (
       ),
       500,
     ).slice(0, 12),
-    evidencePages: uniq(family.pages),
+    evidencePages: uniq(family.pages).slice(0, 24),
     familyId: family.id,
     readingFlow: boundedText(
       family.composition || 'Title band, then the page claim, then the close.',
@@ -222,7 +223,7 @@ const layoutSignatures = (
       compositionRules: ['封面只保留锁定通栏、标题和留白，不堆正文卡片。'],
       id: signatureId(family.id, 'cover'),
       name: `${family.name} · 封面`,
-      regions: header.map(regionFor),
+      regions: header.slice(0, 24).map(regionFor),
       roles: ['cover'],
     },
   ];
@@ -232,7 +233,7 @@ const layoutSignatures = (
       compositionRules: ['正文保留锁定通栏和底部结论条。公式保持实测字号，放不下时拆页。'],
       id: signatureId(family.id, 'content'),
       name: `${family.name} · 正文`,
-      regions: [...header, ...footer].map(regionFor),
+      regions: [...header, ...footer].slice(0, 24).map(regionFor),
       roles: ['content', 'section'],
     });
   signatures.push({
@@ -251,7 +252,7 @@ const layoutSignatures = (
       compositionRules: ['收束页保留通栏和结论条，用一张总图或三五个结论，不重复正文密度。'],
       id: signatureId(family.id, 'closing'),
       name: `${family.name} · 收束`,
-      regions: [...header, ...footer].map(regionFor),
+      regions: [...header, ...footer].slice(0, 24).map(regionFor),
       roles: ['closing'],
     });
   return signatures;
@@ -295,7 +296,7 @@ export const compileTemplateDesignProgram = (
         ? compositionRules
         : ['Preserve the observed hierarchy and anchor relationships.']
       ).slice(0, 16),
-      evidencePages: uniq(family.pages),
+      evidencePages: uniq(family.pages).slice(0, 24),
       familyId: family.id,
       id: `archetype-${family.id}`.replaceAll(/[^\w-]/gu, '-').slice(0, 80),
       name: family.name,
@@ -303,7 +304,7 @@ export const compileTemplateDesignProgram = (
         family.composition || 'Follow the observed title, content and artwork anchors.',
         800,
       ),
-      regions: components.map(regionFor),
+      regions: components.slice(0, 24).map(regionFor),
       roles,
       whitespace: boundedText(
         `Preserve the negative-space rhythm described by: ${family.composition || 'the observed reference pages'}`,
@@ -326,7 +327,7 @@ export const compileTemplateDesignProgram = (
         orderedFamilies
           .filter((family) => family.id !== opening?.id && family.id !== closing?.id)
           .map((family) => family.id),
-      ),
+      ).slice(0, 12),
       ...(closing ? { closingFamilyId: closing.id } : {}),
       ...(opening ? { openingFamilyId: opening.id } : {}),
       rules: [

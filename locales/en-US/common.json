@@ -396,6 +396,11 @@
   "presentationConversation.target": "Change scope",
   "presentationConversation.title": "Chat with your presentation",
   "presentationConversation.version": "{{count}} saved versions",
+  "presentationCreation.lesson": "Teach a lesson",
+  "presentationCreation.memories": "Use teaching memory",
+  "presentationCreation.memoriesSelected": "{{count}} teaching memories selected",
+  "presentationCreation.mode": "Creation context",
+  "presentationCreation.presentation": "Present",
   "presentationLesson.accept": "Use this arrangement",
   "presentationLesson.audience": "Learners",
   "presentationLesson.audienceUnknown": "Learners to be clarified in your message",
@@ -455,7 +460,6 @@
   "presentationRecovery.paused": "Creation paused",
   "presentationRecovery.preserved": "Your request and completed steps are saved. Continue from here, or refine your request below.",
   "presentationRecovery.resume": "Continue creating",
-
   "presentationStoryboard.claim": "Core message",
   "presentationStoryboard.create": "Start creating",
   "presentationStoryboard.notes": "Speaker notes",
@@ -480,6 +484,7 @@
   "presentationTeaching.inference": "Possible purpose — awaiting teacher judgment",
   "presentationTeaching.learnerAction": "Learner action",
   "presentationTeaching.limitations": "Limits / when not to use (editable)",
+  "presentationTeaching.noMatches": "No matching teaching memories",
   "presentationTeaching.observation": "Observed arrangement",
   "presentationTeaching.openImage": "Open full source image",
   "presentationTeaching.page": "Page {{page}}",
@@ -487,6 +492,8 @@
   "presentationTeaching.prerequisites": "Prerequisites",
   "presentationTeaching.refresh": "Refresh memory",
   "presentationTeaching.revoke": "Revoke future reuse",
+  "presentationTeaching.search": "Find a teaching method, condition or course",
+  "presentationTeaching.selectionChanged": "Teaching memories changed. Continue planning and confirm the updated lesson.",
   "presentationTeaching.sourceImage": "Original PPTX page {{page}} — static snapshot",
   "presentationTeaching.sourceVersion": "Source version",
   "presentationTeaching.status.confirmed": "Teacher confirmed",
@@ -652,5 +659,7 @@
   "userPanel.setting": "Settings",
   "userPanel.upgradePlan": "Upgrade Plan",
   "userPanel.usages": "Usage",
-  "version": "Version"
+  "version": "Version",
+  "presentationStoryboard.materials": "Source materials and converted files",
+  "presentationStoryboard.materialCoverage": "{{read}} of {{total}} segments read"
 }

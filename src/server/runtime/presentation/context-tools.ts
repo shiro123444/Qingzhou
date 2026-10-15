@@ -1,12 +1,17 @@
 import { z } from 'zod';
 
 import { AtomicRuntime } from '../atomic-runtime';
+import {
+  presentationDocumentOperations,
+  type PresentationDocumentServices,
+} from './document-tools';
 
 export const presentationToolOptions = z.object({
   search: z.boolean().default(false),
   skillIds: z.array(z.string().min(1).max(160)).max(12).default([]),
 });
 export interface PresentationContextServices {
+  documents?: PresentationDocumentServices;
   fetchPages?: (urls: string[]) => Promise<unknown>;
   listSkills: () => Promise<{ id: string; name: string }[]>;
   readFile: (id: string) => Promise<{ name: string; content?: string; imageUrl?: string }>;
@@ -19,6 +24,7 @@ export function createPresentationContextRuntime(services: PresentationContextSe
       id: 'context',
       version: '1.0.0',
       operations: [
+        ...(services.documents ? presentationDocumentOperations(services.documents) : []),
         {
           agent: { contexts: ['presentation.intake'] },
           name: 'context.readFile',

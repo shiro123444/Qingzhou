@@ -1,12 +1,17 @@
 import { z } from 'zod';
 
 import type { PresentationActivity } from '@/types/presentationActivity';
+import {
+  type PresentationMaterials,
+  presentationMaterialsSchema,
+} from '@/types/presentationMaterial';
 import type { PresentationCreativePlan } from '@/types/presentationPlan';
 
 import { type AtomicOperationEvent, AtomicRuntime } from '../atomic-runtime';
 import { presentationActivity } from './activity';
 import { presentationToolOptions } from './context-tools';
 import { creativeBriefSchema, creativePlanSchema } from './creative-plan';
+import { MATERIAL_GROUNDING_INSTRUCTIONS, mergePresentationMaterials } from './material-document';
 import type { MultimodalChatMessage, MultimodalChatPort } from './multimodal-chat-provider';
 import { MultimodalChatProviderError } from './multimodal-chat-provider';
 import {
@@ -33,6 +38,7 @@ export interface PresentationConversationBrief {
   readonly assets?: string[];
   readonly audience?: string;
   readonly language?: string;
+  readonly materials?: PresentationMaterials;
   readonly plan?: PresentationCreativePlan;
   readonly research?: string;
   readonly slideCount?: number;
@@ -197,6 +203,7 @@ const briefFrom = (value: unknown): PresentationConversationBrief => {
       ? { plan: creativePlanSchema.parse(value.plan) }
       : {}),
     ...(nonEmpty(value.research) ? { research: value.research.slice(0, 48000) } : {}),
+    ...(value.materials ? { materials: presentationMaterialsSchema.parse(value.materials) } : {}),
     ...(nonEmpty(value.topic) ? { topic: value.topic.trim() } : {}),
     ...(nonEmpty(value.audience) ? { audience: value.audience.trim() } : {}),
     ...(nonEmpty(value.style) ? { style: value.style.trim() } : {}),
@@ -318,6 +325,16 @@ export const createPresentationConversationCapability = (options: {
       )
         throw new Error('附件、技能与搜索服务尚未就绪');
       let brief = briefFrom(command.brief);
+      let materials = brief.materials;
+      const readableReferences = (command.references ?? []).filter(
+        (ref) =>
+          ref.id &&
+          ref.status !== 'uploading' &&
+          ref.status !== 'failed' &&
+          !['image', 'pptx'].includes(ref.kind),
+      );
+      const allowedDocuments = new Set((command.references ?? []).map((ref) => ref.id));
+      for (const artifact of materials?.artifacts ?? []) allowedDocuments.add(artifact.id);
       let slides: PresentationOutlineSlide[] | undefined;
       const previousEvidence = researchEvidence(command.brief?.research);
       const evidence: unknown[] = [...previousEvidence];
@@ -345,6 +362,7 @@ export const createPresentationConversationCapability = (options: {
       };
       const currentBrief = () => ({
         ...brief,
+        ...(materials ? { materials } : {}),
         assets: [...availableAssets].slice(-12),
         research: JSON.stringify({
           userInstructions: command.messages
@@ -421,6 +439,16 @@ export const createPresentationConversationCapability = (options: {
                   );
                 if (selected.skillIds.some((id) => !loadedSkills.has(id)))
                   throw new Error('请先读取用户选中的技能');
+                const catalog = await context.tools?.catalog();
+                if (catalog?.some((tool) => tool.name === 'context.document.read')) {
+                  const unread = readableReferences.filter(
+                    (ref) => !materials?.segments.some((segment) => segment.sourceId === ref.id),
+                  );
+                  if (unread.length)
+                    throw new Error(
+                      `请先检查并读取这些资料的相关正文，再制作分镜：${unread.map((ref) => ref.name).join('、')}`,
+                    );
+                }
                 const result = await createPresentationOutlineCapability(options).execute(
                   {
                     operation: slides ? 'rewrite' : 'propose',
@@ -468,6 +496,10 @@ export const createPresentationConversationCapability = (options: {
                 temperature: 0.2,
                 response_format: { type: 'json_object' },
                 messages: [
+                  {
+                    role: 'system',
+                    content: `${MATERIAL_GROUNDING_INSTRUCTIONS} 同时提供多份文档时，先逐份 context.document.inspect 查看目录，再 context.document.read 阅读与目标相关的段落，不能只读第一份或前几页。长文按主题章节拆解为分镜；需要实际拆出PDF时调用 context.document.splitPdf，需要文字版时调用 context.document.convert，返回的附件可继续 inspect/read 后组合进分镜。粘贴的长文字可用 context.document.fromText 保存为资料；不要将未读取或空白扫描页当作事实。`,
+                  },
                   {
                     role: 'system',
                     content:
@@ -648,14 +680,29 @@ export const createPresentationConversationCapability = (options: {
           )
             input.versionId = command.template.versionId;
           if (
-            operation === 'context.readFile' &&
-            !command.references?.some((ref) => ref.id === input.id)
+            (operation === 'context.readFile' ||
+              (operation.startsWith('context.document.') &&
+                operation !== 'context.document.fromText')) &&
+            (!nonEmpty(input.id) || !allowedDocuments.has(input.id))
           )
             throw new Error('Agent requested an attachment outside this conversation');
           if (operation === 'assets.generate')
             input.requestId = `${command.threadId}:${crypto.randomUUID()}`;
           try {
             let result = await entry.runtime.invoke<unknown>(operation, input, invocation);
+            if (operation === 'context.readFile' || operation.startsWith('context.document.')) {
+              materials = mergePresentationMaterials(materials, result);
+              if (isRecord(result)) {
+                const artifacts = Array.isArray(result.artifacts)
+                  ? result.artifacts
+                  : result.artifact
+                    ? [result.artifact]
+                    : [];
+                for (const artifact of artifacts)
+                  if (isRecord(artifact) && nonEmpty(artifact.id))
+                    allowedDocuments.add(artifact.id);
+              }
+            }
             if (
               operation === 'presentation.template.analyzeVisual' &&
               command.template &&

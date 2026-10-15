@@ -1,4 +1,6 @@
 import { readFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
+import path from 'node:path';
 
 import debug from 'debug';
 import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist';
@@ -11,6 +13,7 @@ import type { DocumentPage, FileLoaderInterface } from '../../types';
 import { promptTemplate } from './prompt';
 
 const log = debug('file-loaders:pdf');
+const pdfResources = path.dirname(createRequire(import.meta.url).resolve('pdfjs-dist/package.json'));
 
 /**
  * Loads PDF files page by page using the official pdfjs-dist library.
@@ -30,6 +33,11 @@ export class PdfLoader implements FileLoaderInterface {
     const loadingTask = getDocument({
       data: new Uint8Array(dataBuffer.buffer, dataBuffer.byteOffset, dataBuffer.length),
       useSystemFonts: true,
+      // CID fonts commonly used by Chinese PDFs need packaged character maps.
+      // Keep extraction local and independent of a public font/CDN service.
+      cMapUrl: path.join(pdfResources, 'cmaps').replaceAll('\\', '/') + '/',
+      cMapPacked: true,
+      standardFontDataUrl: path.join(pdfResources, 'standard_fonts').replaceAll('\\', '/') + '/',
     });
 
     log('PDF document loading task created');

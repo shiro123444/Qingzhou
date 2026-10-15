@@ -14,6 +14,7 @@ import {
   publicLessonStages,
   readLessonPlan,
 } from './lesson';
+import { MATERIAL_GROUNDING_INSTRUCTIONS, materialContextForSlides } from './material-document';
 import type { MultimodalChatPort } from './multimodal-chat-provider';
 import {
   applyRasterBudget,
@@ -148,9 +149,10 @@ export const contentInputFingerprint = (input: PresentationJobInput): string =>
         slideCount: input.slideCount,
         title: input.title,
         revision: input.options?.contentRevision,
-        contractVersion: 5,
+        contractVersion: 6,
         imageSlots: input.options?.imageSlots,
         lessonPlan: input.options?.lessonPlan,
+        materials: input.options?.materials,
       }),
     )
     .digest('hex');
@@ -230,7 +232,10 @@ export const createPresentationContentCompiler = (
               slides: z
                 .array(
                   slideContentIntentSchema.extend({
-                    visuals: z.array(visualRequirementSchema).max(6),
+                    visuals: z.array(visualRequirementSchema.extend({
+                      // Echoed refs are not bindings. The asset phase verifies ownership/routing.
+                      ref: z.string().refine((ref) => Array.isArray(input.options?.availableAssetRefs) && input.options.availableAssetRefs.includes(ref), 'Only an offered asset ref may be echoed').optional(),
+                    }).transform(({ ref: _ref, ...requirement }) => requirement)).max(6),
                   }),
                 )
                 .length(count),
@@ -306,6 +311,8 @@ export const createPresentationContentCompiler = (
           response_format: { type: 'json_object' },
           temperature: 0,
           messages: [
+            { role: 'system', content: '资料处理阶段的操作要求（例如“本轮只做分镜、不生图”）用于安排工具，不是报告正文，不作为页面事实或讲稿内容。当前制作阶段以当前prompt的交付要求为准；保留主题事实、来源、预算/计划口径与必要样例性质。' },
+            { role: 'system', content: MATERIAL_GROUNDING_INSTRUCTIONS },
             {
               role: 'system',
               content: `你是演示内容编译器。把已确认大纲逐页转换为内容意图，保留页序、事实与核心教学内容。提取正确LaTeX，不编造数据、公式与来源。输出JSON {slides:[{slideId:"slide-1",claim:"当前标题或问题",formulas:[{id:"formula-1",latex:"LaTeX",explanation:"变量说明",fontSize:28,placement:"slide"}],visualKind:"none|illustration|photograph|scientific-illustration|scientific-diagram|chart|source-figure",visualReason:"视觉目的",visuals:[{id:"visual-1",kind:"scientific-diagram",renderer:"image",fidelity:"conceptual",brief:"可验证的视觉需求",required:true}]}]}。最多4个公式。不要Markdown。`,
@@ -321,6 +328,7 @@ export const createPresentationContentCompiler = (
                 title: input.title,
                 prompt: input.prompt,
                 outline,
+                materials: materialContextForSlides(input.options?.materials, outline),
                 slideCount: count,
                 revision: input.options?.contentRevision,
                 previousContent: input.options?.contentIntents,

@@ -17,9 +17,11 @@ import { memo, useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { lessonOutline, type LessonPlan, type TeacherBrief } from '@/types/presentationLesson';
+import type { MaterialSourceRef, PresentationMaterials } from '@/types/presentationMaterial';
 import type { TeachingSelection } from '@/types/presentationTeaching';
 
 import { LessonWorkspace } from './LessonWorkspace';
+import { MaterialContextPanel } from './MaterialContextPanel';
 import { styles } from './storyboardStyle';
 
 export interface OutlineSlide {
@@ -27,6 +29,7 @@ export interface OutlineSlide {
   id: string;
   keyPoints: string[];
   objective?: string;
+  sourceRefs?: MaterialSourceRef[];
   speakerNotes?: string;
   title: string;
   visualSuggestion?: string;
@@ -35,7 +38,10 @@ export interface OutlineSlide {
 export interface OutlineWorkspaceProps {
   audience?: string;
   creating?: boolean;
+  initialLessonInstruction?: string;
   initialSlides: OutlineSlide[];
+  materials?: PresentationMaterials;
+  memorySelection?: TeachingSelection;
   onAiRewrite: (input: {
     allSlides: OutlineSlide[];
     index?: number;
@@ -44,12 +50,15 @@ export interface OutlineWorkspaceProps {
   }) => Promise<Partial<OutlineSlide> | OutlineSlide[] | void>;
   onBack: () => void;
   onConfirm: (data: { slides: OutlineSlide[]; versionId: string; lessonPlan?: LessonPlan }) => void;
+  onMemorySelectionChange?: (selection: TeachingSelection) => void;
   onPlanLesson?: (
     brief: TeacherBrief,
     current?: LessonPlan,
     teachingSelection?: TeachingSelection,
     instruction?: string,
   ) => Promise<LessonPlan>;
+  onTeachingModeChange?: (teaching: boolean) => void;
+  teachingMode?: boolean;
   template?: { templateId: string; versionId?: string };
 }
 
@@ -70,6 +79,12 @@ const mergeAiSlides = (
 export const OutlineWorkspace = memo<OutlineWorkspaceProps>(
   ({
     initialSlides,
+    initialLessonInstruction,
+    teachingMode,
+    onTeachingModeChange,
+    memorySelection,
+    materials,
+    onMemorySelectionChange,
     onAiRewrite,
     onBack,
     onConfirm,
@@ -85,7 +100,9 @@ export const OutlineWorkspace = memo<OutlineWorkspaceProps>(
     const [aiBusy, setAiBusy] = useState<'all' | number | null>(null);
     const [aiError, setAiError] = useState<string | null>(null);
     const [slides, setSlides] = useState<OutlineSlide[]>(() => initialSlides);
-    const [teaching, setTeaching] = useState(false);
+    const [localTeaching, setLocalTeaching] = useState(false);
+    const teaching = teachingMode ?? localTeaching;
+    const setTeaching = onTeachingModeChange ?? setLocalTeaching;
     const [lessonPlan, setLessonPlan] = useState<LessonPlan>();
 
     const bumpVersion = useCallback(() => {
@@ -367,15 +384,19 @@ export const OutlineWorkspace = memo<OutlineWorkspaceProps>(
           </Flexbox>
         </div>
         {aiError && <div role="alert">{aiError}</div>}
+        <MaterialContextPanel materials={materials} />
         {onPlanLesson && (
           <div hidden={!teaching}>
             <LessonWorkspace
               audience={audience}
               busy={creating}
+              initialInstruction={initialLessonInstruction}
               initialSlides={initialSlides}
+              memorySelection={memorySelection}
               template={template}
               topic={initialSlides[0]?.title ?? ''}
               onChange={setLessonPlan}
+              onMemorySelectionChange={onMemorySelectionChange}
               onPlan={onPlanLesson}
             />
           </div>

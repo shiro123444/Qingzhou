@@ -279,7 +279,10 @@ export function defineConfig(config: CustomNextConfig) {
       outputFileTracingExcludes: config.outputFileTracingExcludes,
     }),
     ...(config.outputFileTracingIncludes && {
-      outputFileTracingIncludes: config.outputFileTracingIncludes,
+      outputFileTracingIncludes: {
+        ...(isStandaloneMode ? standaloneConfig.outputFileTracingIncludes : {}),
+        ...config.outputFileTracingIncludes,
+      },
     }),
     reactStrictMode: true,
     redirects: async () => [

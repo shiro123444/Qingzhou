@@ -1,5 +1,6 @@
 import type { PresentationActivity } from '@/types/presentationActivity';
 import type { LessonPlan, TeacherBrief } from '@/types/presentationLesson';
+import type { PresentationMaterials } from '@/types/presentationMaterial';
 import type { PresentationCreativePlan } from '@/types/presentationPlan';
 import type { TeachingSelection } from '@/types/presentationTeaching';
 
@@ -16,6 +17,7 @@ export interface PresentationAgentBrief {
   assets?: string[];
   audience?: string;
   language?: string;
+  materials?: PresentationMaterials;
   plan?: PresentationCreativePlan;
   research?: string;
   slideCount?: number;

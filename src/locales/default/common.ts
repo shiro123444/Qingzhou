@@ -1,4 +1,13 @@
 export default {
+  'presentationTeaching.selectionChanged':
+    'Teaching memories changed. Continue planning and confirm the updated lesson.',
+  'presentationTeaching.search': 'Find a teaching method, condition or course',
+  'presentationTeaching.noMatches': 'No matching teaching memories',
+  'presentationCreation.lesson': 'Teach a lesson',
+  'presentationCreation.memories': 'Use teaching memory',
+  'presentationCreation.memoriesSelected': '{{count}} teaching memories selected',
+  'presentationCreation.mode': 'Creation context',
+  'presentationCreation.presentation': 'Present',
   'presentationTeaching.visualMode': 'Compare actual PPTX pages',
   'presentationTeaching.pageList':
     'Or compare non-adjacent pages (e.g. 36,37,49,56; clear the consecutive range)',
@@ -125,6 +134,8 @@ export default {
   'presentationStoryboard.claim': 'Core message',
   'presentationStoryboard.points': 'Key points',
   'presentationStoryboard.visual': 'Visual direction',
+  'presentationStoryboard.materials': 'Source materials and converted files',
+  'presentationStoryboard.materialCoverage': '{{read}} of {{total}} segments read',
   'presentationStoryboard.notes': 'Speaker notes',
 
   'presentationTemplates.nativeClose': 'Close native editing',

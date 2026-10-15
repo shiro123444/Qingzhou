@@ -20,9 +20,12 @@ it('persists real attachment bytes, reads their content and isolates accounts', 
       new Request('http://localhost/upload', { method: 'POST', body }),
       scope,
     );
-    expect(await readPresentationAttachment(result.id, scope)).toEqual({
+    expect(await readPresentationAttachment(result.id, scope)).toMatchObject({
       name: 'budget.txt',
       content: '预算37万元，12家门店，8周。',
+      document: { sourceId: result.id, totalSegments: 1 },
+      segments: [{ sourceId: result.id, locator: { section: 1, chunk: 1 } }],
+      truncated: false,
     });
     await expect(
       readPresentationAttachment(result.id, {

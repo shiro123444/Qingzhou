@@ -7,6 +7,9 @@ import {
 } from './scientific-graph-layout';
 
 describe('scientific graph layout', () => {
+  it('balances a trailing single Chinese character without dropping label text', () => {
+    expect(graphLabelLines('共享研究工具与案例', 136)).toEqual(['共享研究工具与', '案例']);
+  });
   it('keeps scientific Latin names intact when wrapping a mixed-script node', () => {
     expect(graphLabelLines('自适应AdamW', 70)).toEqual(['自适应', 'AdamW']);
   });

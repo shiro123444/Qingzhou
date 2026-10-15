@@ -42,6 +42,9 @@ const getLocalIPs = () => {
 
 const nextConfig = defineConfig({
   ...(isVercel ? vercelConfig : {}),
+  outputFileTracingIncludes: {
+    '/api/**': ['node_modules/pdfjs-dist/cmaps/**', 'node_modules/pdfjs-dist/standard_fonts/**'],
+  },
   experimental: {
     ...getBuildBudget(),
     // Activate route modules on demand on small servers. Warm routes stay cached.

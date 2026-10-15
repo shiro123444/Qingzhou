@@ -10,6 +10,7 @@ export interface TemplateLearningInput {
   choiceId?: string;
   guidance?: string;
   pages?: number[];
+  purpose?: 'template' | 'capabilities';
   questionId?: string;
   refresh?: boolean;
   templateId: string;
@@ -21,7 +22,7 @@ export interface TemplateLearningJob extends PresentationLearningStatus {
   input: TemplateLearningInput;
   inputKey: string;
   media?: TemplateMediaAnalysis[];
-  observation?: { analysis: TemplateVisualAnalysis; pages: TemplateRenderedPage[] };
+  observation?: { analysis: TemplateVisualAnalysis; pages: TemplateRenderedPage[]; model?: string };
 }
 
 /** Do not expose source summaries or user answers in a progress/status response. */

@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import sharp from 'sharp';
 
 import { AgentSkillModel } from '@/database/models/agentSkill';
@@ -13,8 +15,13 @@ import {
   PRESENTATION_PPTX_MAX_UPLOAD_MIB,
 } from '../../../../packages/runtime-contracts/src';
 import { presentationAccountScope } from './account-workspace';
-import { readPresentationAttachment } from './attachment-storage';
+import {
+  loadPresentationMaterial,
+  presentationAttachmentStorage,
+  readPresentationAttachment,
+} from './attachment-storage';
 import type { PresentationContextServices } from './context-tools';
+import { createMaterialDocument, type MaterialDocument } from './material-document';
 
 const builtin = [
   {
@@ -43,7 +50,57 @@ export function createPresentationContextServices(
   const files = new FileModel(db, userId);
   const skills = new AgentSkillModel(db, userId);
   const storage = new FileService(db, userId);
+  const account = presentationAccountScope(userId);
+  const loaded = new Map<string, Promise<MaterialDocument>>();
+  const loadDocument = (id: string): Promise<MaterialDocument> => {
+    const existing = loaded.get(id);
+    if (existing) return existing;
+    const pending = (async () => {
+      if (id.startsWith('attachment-')) return loadPresentationMaterial(id, account);
+      const file = await files.findById(id);
+      if (!file) throw new Error('文档不存在或不属于当前账号');
+      if (file.size > PRESENTATION_ATTACHMENT_MAX_UPLOAD_BYTES)
+        throw new Error('文档超过读取大小限制');
+      const { DocumentService } = await import('@/server/services/document');
+      const document = await new DocumentService(db, userId).parseFile(id);
+      return createMaterialDocument({
+        sourceId: id,
+        name: file.name,
+        content: document.content ?? '',
+        pages: document.pages ?? undefined,
+      });
+    })();
+    loaded.set(id, pending);
+    void pending.catch(() => loaded.delete(id));
+    return pending;
+  };
   return {
+    documents: {
+      load: loadDocument,
+      loadPdf: async (id) => {
+        if (id.startsWith('attachment-')) {
+          const file = await presentationAttachmentStorage().get(account, id);
+          if (!file?.bytes || !file.name?.toLowerCase().endsWith('.pdf'))
+            throw new Error('PDF 不存在或不属于当前账号');
+          return { name: file.name, bytes: file.bytes };
+        }
+        const file = await files.findById(id);
+        if (!file || !file.name.toLowerCase().endsWith('.pdf'))
+          throw new Error('PDF 不存在或不属于当前账号');
+        if (file.size > PRESENTATION_ATTACHMENT_MAX_UPLOAD_BYTES)
+          throw new Error('PDF 超过读取大小限制');
+        return { name: file.name, bytes: await storage.getFileByteArray(file.url) };
+      },
+      save: async (input) => {
+        const id = `attachment-${randomUUID()}`;
+        const artifact = await presentationAttachmentStorage().put(account, {
+          artifactId: id,
+          ...input,
+          type: 'file',
+        });
+        return { id, name: artifact.name!, url: artifact.uri! };
+      },
+    },
     listSkills: async () => [
       ...builtin.map(({ id, name }) => ({ id, name })),
       ...(await skills.findAll()).data.map(({ id, name }) => ({ id, name })),
@@ -82,11 +139,19 @@ export function createPresentationContextServices(
           name: file.name,
           content: `这是已保存的${file.fileType.startsWith('video/') ? '视频' : '音频'}附件；受信媒体引用为 ${id}。需要替换原生 PPTX 媒体时，将此引用作为 mediaRef。`,
         };
-      const { DocumentService } = await import('@/server/services/document');
-      const document = await new DocumentService(db, userId).parseFile(id);
-      if (!document.content?.trim())
+      const document = await loadDocument(id);
+      if (!document.segments.length)
         throw new Error(`无法从 ${file.name} 提取正文，请提供可读取的文件`);
-      return { name: file.name, content: document.content.slice(0, 36000) };
+      return {
+        name: file.name,
+        content: document.segments
+          .slice(0, 8)
+          .map((segment) => segment.text)
+          .join('\n'),
+        document: { ...document.manifest, segments: document.manifest.segments.slice(0, 40) },
+        segments: document.segments.slice(0, 8),
+        truncated: document.segments.length > 8,
+      };
     },
     search: async (query) => {
       const result = await new SearchService().webSearch({ query });

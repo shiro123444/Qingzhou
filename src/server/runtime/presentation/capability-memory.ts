@@ -6,6 +6,7 @@ import { z } from 'zod';
 
 import type { PresentationPlan, RuntimeScope } from '../../../../packages/runtime-contracts/src';
 import type { AtomicOperation } from '../atomic-runtime';
+import { composeCapabilityPolicy } from './capability-composition';
 import { PRESENTATION_CONTENT_BUDGET } from './content-intent';
 import { assertPresentationPublishable, inspectPresentationContent } from './content-quality';
 import type { PresentationJobRepository } from './file-storage';
@@ -85,11 +86,14 @@ const outcomeSchema = z
   .strict();
 type Outcome = z.infer<typeof outcomeSchema>;
 export interface CapabilityMemory {
+  candidates?: (scope: RuntimeScope, query: string) => Promise<CapabilityCapsule[]>;
   compose: (
     scope: RuntimeScope,
     ids: string[],
+    includeObserved?: boolean,
   ) => Promise<{
     capsules: CapabilityCapsule[];
+    composition?: ReturnType<typeof composeCapabilityPolicy>;
     contentBudget: typeof PRESENTATION_CONTENT_BUDGET;
   }>;
   learn: (scope: RuntimeScope, visual: TemplateVisualProfile) => Promise<CapabilityCapsule[]>;
@@ -108,7 +112,12 @@ export interface CapabilityMemory {
       result: Outcome['result'];
     },
   ) => Promise<Outcome>;
-  search: (scope: RuntimeScope, query: string, limit?: number) => Promise<CapabilityCapsule[]>;
+  search: (
+    scope: RuntimeScope,
+    query: string,
+    limit?: number,
+    includeObserved?: boolean,
+  ) => Promise<CapabilityCapsule[]>;
 }
 
 const tokens = (text: string): Set<string> =>
@@ -116,6 +125,22 @@ const tokens = (text: string): Set<string> =>
     [...new Intl.Segmenter('zh', { granularity: 'word' }).segment(text.toLowerCase())]
       .filter((part) => part.isWordLike)
       .map((part) => part.segment),
+  );
+
+const layoutRoleTerms = {
+  closing: 'closing 结尾 总结',
+  comparison: 'comparison compare 对比 比较 双栏',
+  content: 'content 内容 正文',
+  cover: 'cover 封面 开场',
+  data: 'data chart 数据 图表 指标',
+  process: 'process timeline 流程 步骤 时间线',
+  section: 'section chapter 章节 过渡',
+};
+
+const observedTemplateAtom = (capsule: CapabilityCapsule) =>
+  capsule.kind !== 'render-recipe' &&
+  Boolean(
+    capsule.source.templateId && capsule.source.versionId && capsule.source.evidencePages.length,
   );
 
 /** User-scoped immutable evidence on the same persistent volume as presentations. */
@@ -222,20 +247,26 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
     const capsules: CapabilityCapsule[] = [];
     for (const draft of drafts) {
       const id = `capsule-${hash(draft).slice(0, 40)}`;
-      const existing = await this.load(scope, id);
+      const existing = await this.read(path.join(this.directory(scope, 'capsules'), `${hash(id)}.json`), capsuleSchema);
       const capsule =
         existing ?? capsuleSchema.parse({ ...draft, id, schemaVersion: 1, createdAt: this.now() });
       if (!existing) await this.save(scope, 'capsules', id, capsule);
       capsules.push(capsule);
     }
+    const currentIds = new Set(capsules.map(({ id }) => id));
+    for (const previous of await this.list(scope, 'capsules', capsuleSchema)) {
+      if (previous.kind === 'render-recipe' || previous.source.templateId !== visual.templateId ||
+          previous.source.versionId !== visual.versionId || currentIds.has(previous.id)) continue;
+      const file = path.join(this.directory(scope, 'capsules'), `${hash(previous.id)}.json`);
+      // Preserve historical evidence; superseded observations leave automatic selection.
+      await rename(file, `${file}.retired`).catch((error) => { if (!missing(error)) throw error; });
+    }
     return capsules;
   }
 
   load(scope: RuntimeScope, id: string): Promise<CapabilityCapsule | null> {
-    return this.read(
-      path.join(this.directory(scope, 'capsules'), `${hash(id)}.json`),
-      capsuleSchema,
-    );
+    const file = path.join(this.directory(scope, 'capsules'), `${hash(id)}.json`);
+    return this.read(file, capsuleSchema).then((current) => current ?? this.read(`${file}.retired`, capsuleSchema));
   }
 
   async learnRecipes(
@@ -337,8 +368,8 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
     return capsules;
   }
 
-  private async promoted(scope: RuntimeScope): Promise<Set<string>> {
-    const outcomes = (await this.list(scope, 'outcomes', outcomeSchema)).sort(
+  private async promoted(scope: RuntimeScope, evidence?: Outcome[]) {
+    const outcomes = [...(evidence ?? (await this.list(scope, 'outcomes', outcomeSchema)))].sort(
       (a, b) => a.recordedAt.localeCompare(b.recordedAt) || a.id.localeCompare(b.id),
     );
     const active = new Set<string>();
@@ -356,34 +387,113 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
         if (outcome.result === 'passed' && !rejected.has(id)) active.add(id);
         // Failed uses remain evidence; never promote an unverified candidate.
       }
-    return active;
+    return { active, rejected };
   }
 
-  async search(scope: RuntimeScope, query: string, limit = 6): Promise<CapabilityCapsule[]> {
-    const active = await this.promoted(scope);
+  private async rankedCandidates(scope: RuntimeScope, query: string, includeObserved = false) {
+    const outcomes = await this.list(scope, 'outcomes', outcomeSchema);
+    const { active, rejected } = await this.promoted(scope, outcomes);
+    const reliability = new Map<string, number>();
+    for (const outcome of outcomes)
+      for (const id of outcome.capsuleIds)
+        reliability.set(
+          id,
+          (reliability.get(id) ?? 0) +
+            ({ accepted: 3, passed: 1, failed: -2, rejected: -3 } as const)[outcome.result],
+        );
     const terms = tokens(query);
     const scored = (await this.list(scope, 'capsules', capsuleSchema))
-      .filter((capsule) => active.has(capsule.id))
+      .filter(
+        (capsule) =>
+          active.has(capsule.id) ||
+          (includeObserved && !rejected.has(capsule.id) && observedTemplateAtom(capsule)),
+      )
       .map((capsule) => {
-        const words = tokens([capsule.name, ...capsule.triggers].join(' '));
-        return { capsule, score: [...terms].filter((term) => words.has(term)).length };
+        const words = tokens(
+          [
+            capsule.name,
+            ...capsule.triggers,
+            ...(capsule.layout?.roles.map((role) => layoutRoleTerms[role]) ?? []),
+          ].join(' '),
+        );
+        return {
+          capsule,
+          score: [...terms].filter((term) => words.has(term)).length,
+          reliability: Math.max(-5, Math.min(5, reliability.get(capsule.id) ?? 0)),
+          verified: Number(active.has(capsule.id)),
+        };
       });
     return scored
       .filter((item) => item.score > 0)
-      .sort((a, b) => b.score - a.score || a.capsule.id.localeCompare(b.capsule.id))
-      .slice(0, Math.max(1, Math.min(limit, 6)))
-      .map((item) => item.capsule);
+      .sort(
+        (a, b) =>
+          b.score - a.score ||
+          b.verified - a.verified ||
+          b.reliability - a.reliability ||
+          a.capsule.id.localeCompare(b.capsule.id),
+      );
   }
 
-  async compose(scope: RuntimeScope, ids: string[]) {
+  async candidates(scope: RuntimeScope, query: string) {
+    const ranked = await this.rankedCandidates(scope, query, true);
+    return ['style', 'layout', 'render-recipe'].flatMap((kind) =>
+      ranked
+        .filter(({ capsule }) => capsule.kind === kind)
+        .slice(0, 8)
+        .map(({ capsule }) => capsule),
+    );
+  }
+
+  async search(
+    scope: RuntimeScope,
+    query: string,
+    limit = 6,
+    includeObserved = false,
+  ): Promise<CapabilityCapsule[]> {
+    const candidates = await this.rankedCandidates(scope, query, includeObserved);
+    const selected: CapabilityCapsule[] = [];
+    const kinds = new Set<CapabilityCapsule['kind']>();
+    // Reserve space for complementary skills before filling the remaining ranked slots.
+    for (const candidate of candidates) {
+      if (selected.length >= Math.max(1, Math.min(limit, 6))) break;
+      if (kinds.has(candidate.capsule.kind)) continue;
+      selected.push(candidate.capsule);
+      kinds.add(candidate.capsule.kind);
+    }
+    const sourceIds = new Set(selected.map((capsule) => capsule.source.templateId));
+    for (const newSourceOnly of [true, false])
+      for (const candidate of candidates) {
+        if (selected.length >= Math.max(1, Math.min(limit, 6))) break;
+        if (candidate.capsule.kind === 'style' || selected.includes(candidate.capsule)) continue;
+        if (newSourceOnly && sourceIds.has(candidate.capsule.source.templateId)) continue;
+        selected.push(candidate.capsule);
+        sourceIds.add(candidate.capsule.source.templateId);
+      }
+    return selected;
+  }
+
+  async compose(scope: RuntimeScope, ids: string[], includeObserved = false) {
     if (ids.length > 6 || new Set(ids).size !== ids.length)
       throw new Error('Compose up to six distinct capabilities');
-    const active = await this.promoted(scope);
+    const { active, rejected } = await this.promoted(scope);
+    const available = new Set((await this.list(scope, 'capsules', capsuleSchema)).map(({ id }) => id));
     const capsules = await Promise.all(ids.map((id) => this.load(scope, id)));
-    if (capsules.some((capsule) => !capsule || !active.has(capsule.id)))
+    if (
+      capsules.some(
+        (capsule) =>
+          !capsule ||
+          !available.has(capsule.id) ||
+          (!active.has(capsule.id) &&
+            !(includeObserved && !rejected.has(capsule.id) && observedTemplateAtom(capsule))),
+      )
+    )
       throw new Error('Only owned, verified capabilities can be composed');
     return {
       capsules: capsules as CapabilityCapsule[],
+      observedCapabilityIds: capsules
+        .filter((capsule) => capsule && !active.has(capsule.id))
+        .map((capsule) => capsule!.id),
+      composition: composeCapabilityPolicy(capsules as CapabilityCapsule[]),
       contentBudget: PRESENTATION_CONTENT_BUDGET,
     };
   }
@@ -400,8 +510,7 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
     if (input.result === 'passed' || input.result === 'accepted') {
       assertPresentationPublishable(input.plan);
       const visual = input.plan.designSpec?.templateVisualReview as
-        | { final?: { passed?: boolean } }
-        | undefined;
+        { final?: { passed?: boolean } } | undefined;
       if (!visual?.final?.passed || !inspectPresentationContent(input.plan).passed)
         throw new Error('Promotion requires both visual and semantic quality evidence');
     }
@@ -453,9 +562,11 @@ export function capabilityMemoryOperations(
         .object({
           query: z.string().min(1).max(2000),
           limit: z.number().int().min(1).max(6).optional(),
+          includeObserved: z.boolean().optional(),
         })
         .strict(),
-      execute: ({ query, limit }, ctx) => memory.search(ctx.scope, query, limit),
+      execute: ({ query, limit, includeObserved }, ctx) =>
+        memory.search(ctx.scope, query, limit, includeObserved),
     },
     {
       name: 'presentation.memory.load',
@@ -467,10 +578,12 @@ export function capabilityMemoryOperations(
     {
       name: 'presentation.memory.compose',
       description:
-        'Compose up to six verified learning atoms; current task and fixed content budgets take precedence over learned styling.',
+        'Compose verified atoms across templates: one style anchor, task-specific layouts and rendering recipes. Current task and content budgets take precedence; record only actual per-page use.',
       agent: { contexts: ['presentation.intake', 'skills'], maxCalls: 2 },
-      input: z.object({ ids: z.array(z.string()).max(6) }).strict(),
-      execute: ({ ids }, ctx) => memory.compose(ctx.scope, ids),
+      input: z
+        .object({ ids: z.array(z.string()).max(6), includeObserved: z.boolean().optional() })
+        .strict(),
+      execute: ({ ids, includeObserved }, ctx) => memory.compose(ctx.scope, ids, includeObserved),
     },
     ...(repository
       ? [

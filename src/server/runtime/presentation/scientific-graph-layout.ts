@@ -43,6 +43,14 @@ export function minimumGraphLabelWidth(text: string, maxLines = 2): number {
 }
 export function graphLabelLines(text: string, width: number): string[] {
   const lines = wrapGraphLabel(text, width);
+  if (lines.length === 2 && [...lines[1]].length === 1) {
+    const previous = labelTokens(lines[0]);
+    const moved = previous.pop();
+    if (moved && previous.length && textWidth(moved + lines[1]) <= width) {
+      lines[0] = previous.join('');
+      lines[1] = moved + lines[1];
+    }
+  }
   if (lines.length > 2)
     throw new Error(
       `Graph label "${text}" needs ${minimumGraphLabelWidth(text)}px at full size; enlarge the diagram or move the explanation into the body, never shrink the font`,

@@ -12,17 +12,23 @@ export interface PresentationArtworkPolicy {
   readonly role: 'subject' | 'decoration' | 'scene' | 'background' | 'texture';
 }
 
-export const isReusableTemplateDecoration = (
+export const isReusableTemplateComponent = (
   component: TemplateVisualProfile['components'][number],
 ): boolean =>
-  ['background', 'decoration', 'frame'].includes(component.role) &&
+  ['background', 'decoration', 'frame', 'artwork'].includes(component.role) &&
   !component.containsText &&
   !['redraw', 'native'].includes(component.treatment);
+
+/** Kept for consumers that specifically request decorative assets. */
+export const isReusableTemplateDecoration = (
+  component: TemplateVisualProfile['components'][number],
+): boolean => component.role !== 'artwork' && isReusableTemplateComponent(component);
 
 export interface PresentationArtworkStoryboardSlide {
   readonly archetypeId?: string;
   readonly assetBrief?: string;
   readonly assetMode?: 'generate' | 'mixed' | 'native' | 'none' | 'reuse';
+  readonly componentIds?: readonly string[];
   readonly familyId?: string;
   readonly slideId: string;
 }
@@ -107,6 +113,8 @@ export interface CutoutTransparency {
   readonly transparentRatio: number;
   /** True only when the bitmap carries alpha and enough of it is actually transparent. */
   readonly verified: boolean;
+  /** Measured visible foreground; near-empty segmentation results are not usable cutouts. */
+  readonly visibleRatio?: number;
 }
 
 /**
@@ -121,6 +129,7 @@ export const verifyCutoutTransparency = async (
     readonly minTransparentRatio?: number;
     readonly sampleEdge?: number;
     readonly transparentAlphaMax?: number;
+    readonly minVisibleRatio?: number;
   },
 ): Promise<CutoutTransparency> => {
   const unchecked: CutoutTransparency = {
@@ -149,14 +158,19 @@ export const verifyCutoutTransparency = async (
     const pixels = info.width * info.height;
     if (!pixels) return unchecked;
     let transparent = 0;
-    for (let offset = 3; offset < data.length; offset += info.channels)
+    let visible = 0;
+    for (let offset = 3; offset < data.length; offset += info.channels) {
       if (data[offset]! <= transparentAlphaMax) transparent += 1;
+      if (data[offset]! >= 128) visible += 1;
+    }
     const transparentRatio = transparent / pixels;
+    const visibleRatio = visible / pixels;
     return {
       checked: true,
       hasAlphaChannel: true,
       transparentRatio,
-      verified: transparentRatio >= minTransparentRatio,
+      visibleRatio,
+      verified: transparentRatio >= minTransparentRatio && visibleRatio >= (options?.minVisibleRatio ?? 0.01),
     };
   } catch {
     return unchecked;
@@ -182,9 +196,9 @@ export const presentationArtworkStyle = (
       [],
   );
   const pageRefs = (visual.styleAtlas ?? [])
-    .filter(
-      (page) =>
-        page.familyId === family?.id && (!evidencePages.size || evidencePages.has(page.sourcePage)),
+    .filter((page) => page.familyId === family?.id)
+    .toSorted(
+      (a, b) => Number(evidencePages.has(b.sourcePage)) - Number(evidencePages.has(a.sourcePage)),
     )
     .map((page) => page.ref)
     .filter(ownedRasterId)

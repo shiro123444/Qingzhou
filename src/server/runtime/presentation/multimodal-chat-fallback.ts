@@ -19,24 +19,42 @@ const isStructuredContinuation = (idempotencyKey?: string): boolean =>
 export const createFallbackMultimodalChatPort = (
   primary: MultimodalChatPort,
   fallback?: MultimodalChatPort,
-  options: { retryDelayMs?: number } = {},
+  options: { retryDelayMs?: number; primaryCooldownMs?: number } = {},
 ): MultimodalChatPort => {
   let fallbackRejected = false;
+  let primaryFailures = 0;
+  let primaryUnavailableUntil = 0;
   return {
     manifest: primary.manifest,
     providerId: primary.providerId,
     chat: async (request, context) => {
-      const attempts = [primary, fallbackRejected ? primary : (fallback ?? primary), primary];
+      const first =
+        fallback && !fallbackRejected && Date.now() < primaryUnavailableUntil ? fallback : primary;
+      const attempts = [first, fallbackRejected ? primary : (fallback ?? primary), primary];
       for (const [index, provider] of attempts.entries()) {
         if (context.signal?.aborted)
           throw new MultimodalChatProviderError('CHAT_CANCELLED', '模型请求已取消');
         try {
           const result = await provider.chat(request, context);
+          if (provider === primary) {
+            primaryFailures = 0;
+            primaryUnavailableUntil = 0;
+          }
           if (hasAssistantContent(result)) return result;
           if (hasAssistantReasoning(result) && !isStructuredContinuation(context.idempotencyKey))
             return result;
           throw new MultimodalChatProviderError('CHAT_PAYLOAD_INVALID', '模型未返回完整回复');
         } catch (error) {
+          if (
+            provider === primary &&
+            fallback &&
+            options.primaryCooldownMs &&
+            isRecoverable(error)
+          ) {
+            primaryFailures += 1;
+            if (primaryFailures >= 3)
+              primaryUnavailableUntil = Date.now() + options.primaryCooldownMs;
+          }
           const rejectedFallback =
             provider !== primary &&
             error instanceof MultimodalChatProviderError &&

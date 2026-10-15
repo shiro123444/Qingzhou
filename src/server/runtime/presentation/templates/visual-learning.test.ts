@@ -645,6 +645,26 @@ it('reports malformed component coordinates as a content defect without shrinkin
   ).toEqual([6, 6]);
 });
 
+it('reduces autonomous capability observations to one page while retaining truthful coverage', async () => {
+  const { library, profile, renderer } = await imageHeavyTemplate();
+  const chat = vi.fn<GLMMultimodalChatPort['chat']>(async (request) => {
+    const pages = sentPages(request as unknown as ProbeRequest);
+    const analysis = analysisFor(pages);
+    if (pages.length > 1)
+      analysis.components[0].box = { height: 40, width: 30, x: 10, y: 20 };
+    return { choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify(analysis) } }],
+      created: 1, id: 'vision', model: 'vision-test' };
+  });
+  const result = await learningWith(chat, library, renderer).analyze(
+    { templateId: profile.templateId, purpose: 'capabilities' }, { scope },
+  );
+  expect(result.pages).toHaveLength(1);
+  expect(result.learning.coverage?.observedPages).toEqual(result.pages.map(({ page }) => page));
+  expect(result.learning.coverage?.remainingPages.length).toBeGreaterThan(0);
+  expect(chat.mock.calls.map(([request]) => sentPages(request as unknown as ProbeRequest).length))
+    .toEqual([6, 6, 3, 3, 1]);
+});
+
 it('resumes a persisted observation after a worker restart without repeating vision work', async () => {
   const root = await mkdtemp(nodePath.join(tmpdir(), 'ppt-learning-resume-'));
   directories.push(root);

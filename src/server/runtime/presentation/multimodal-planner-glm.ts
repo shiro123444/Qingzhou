@@ -15,6 +15,8 @@ import type {
 } from '../../../../packages/runtime-contracts/src';
 import { reviseAnnotation } from './annotation';
 import { overlayAssetAnnotations } from './asset-annotations';
+import { normalizeCapabilityUses } from './capability-composition';
+import type { CapabilityCapsule } from './capability-memory';
 import {
   CONTENT_RENDERING_INSTRUCTIONS,
   isNativeVisual,
@@ -54,6 +56,7 @@ import {
   semanticAuthoringSvg,
 } from './semantic-blocks';
 import { recoverSemanticSlideLayout } from './semantic-layout-recovery';
+import { composePresentationAssets } from './slide-asset-placement';
 import { completeStructuredJson } from './structured-json-chat';
 import { type TemplateApplication, templatePlannerInstructions } from './templates';
 import { inspectVisualOccupancy, reconcileNativeVisualAssets } from './visual-ownership';
@@ -219,24 +222,23 @@ const authoredBodyText = (svg: string, title: string): string[] =>
 
 /** Fill only a region explicitly designed for this asset; never guess fixed coordinates. */
 const attachGeneratedAssets = (svg: string, assets: readonly PlannedVisualAsset[]): string => {
-  let result = svg;
-  for (const asset of assets) {
-    const href = presentationAssetHref(asset.ref);
-    if (presentationImageRefs(result).includes(href)) continue;
-    if (!asset.layout)
-      throw new PresentationPlanError('The planner did not place a required image in its slide');
-    const [minX, minY, width, height] = svgViewBox(result);
-    const layout = validateAssetPlacement(asset.layout);
-    const escapedHref = href
-      .replaceAll('&', '&amp;')
-      .replaceAll('"', '&quot;')
-      .replaceAll('<', '&lt;');
-    const image = `<image href="${escapedHref}" x="${minX + layout.x * width}" y="${minY + layout.y * height}" width="${layout.width * width}" height="${layout.height * height}" preserveAspectRatio="xMidYMid ${layout.fit === 'cover' ? 'slice' : 'meet'}"/>`;
-    const firstText = result.search(/<text\b/iu);
-    const insertion = firstText >= 0 ? firstText : result.lastIndexOf('</svg>');
-    result = `${result.slice(0, insertion)}${image}${result.slice(insertion)}`;
-  }
-  return result;
+  const existing = new Set(
+    presentationImageRefs(svg).map((ref) => ref.replace(/\?raw=true$/u, '')),
+  );
+  const missing = assets.filter(
+    (asset) => asset.layout?.layer || !existing.has(presentationAssetHref(asset.ref)),
+  );
+  return composePresentationAssets(
+    svg,
+    missing.map((asset) => {
+      if (!asset.layout)
+        throw new PresentationPlanError('The planner did not place a required image in its slide');
+      return {
+        href: presentationAssetHref(asset.ref),
+        layout: validateAssetPlacement(asset.layout),
+      };
+    }),
+  );
 };
 
 /**
@@ -523,9 +525,15 @@ export class GLMPresentationPlanner implements PresentationPlanner {
     if (relevantIntents.length) userPrompt += `\n内容编译结果：${JSON.stringify(relevantIntents)}`;
     if (inputOptions.learnedCapabilities && !teachingStages.length)
       userPrompt += `\n已验证的历史学习能力（仅为参考，当前用户指令、内容语义与字号预算优先）：${JSON.stringify(inputOptions.learnedCapabilities)}`;
+    const learnedCapsules = teachingStages.length
+      ? []
+      : ((inputOptions.learnedCapabilities as { capsules?: CapabilityCapsule[] } | undefined)
+          ?.capsules ?? []);
+    if (learnedCapsules.length)
+      userPrompt +=
+        '\n按 composition 组合不同来源的能力；在每页 metadata.capabilityUses 记录实际采用的 {capsuleId, reason}，reason说明具体设计位置与用途。不得将检索候选全部列为使用；未使用的能力不记录。';
     const visualStoryboard = inputOptions.visualStoryboard as
-      | { deckRationale?: unknown; rhythm?: unknown; slides?: unknown[] }
-      | undefined;
+      { deckRationale?: unknown; rhythm?: unknown; slides?: unknown[] } | undefined;
     if (Array.isArray(visualStoryboard?.slides)) {
       const relevantDirections = visualStoryboard.slides.filter((item) => {
         if (!item || typeof item !== 'object') return false;
@@ -540,6 +548,8 @@ export class GLMPresentationPlanner implements PresentationPlanner {
     const revisionAssetIntents = (input.options?.revisionAssetIntents ??
       []) as RevisionAssetIntent[];
     if (revisionAssetIntents.length) {
+      if (input.options?.rejectedTemplateComponents)
+        userPrompt += `\n实际像素复核已排除以下旧文字/旧照片素材：${JSON.stringify(input.options.rejectedTemplateComponents)}。不能重新插入它们或编造URL。使用已批准的新插图和干净装饰，按主画风原生重建留白、标题区和底色；不要继承原稿烧录的标题。`;
       userPrompt += `\n\n已批准的资产操作：${JSON.stringify(revisionAssetIntents)}\n只执行这些图片增删替换；其他原有图片保留。根据新图片的比例和预留区域重新排布文字。remove/replace 操作的原图片引用必须从目标页移除；新图片必须使用下面提供的真实 href。`;
     }
 
@@ -991,6 +1001,10 @@ export class GLMPresentationPlanner implements PresentationPlanner {
               metadata: {
                 ...originalSlide?.metadata,
                 ...s?.metadata,
+                capabilityUses: normalizeCapabilityUses(
+                  s?.metadata?.capabilityUses ?? originalSlide?.metadata?.capabilityUses,
+                  learnedCapsules,
+                ),
                 generatedAssetRefs,
                 visualAssets,
                 visualRequirements: visualRequirements(intent),

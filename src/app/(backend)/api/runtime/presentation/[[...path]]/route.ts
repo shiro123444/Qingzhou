@@ -37,6 +37,7 @@ import {
 import type { ImageGenerationCapability } from '@/server/runtime/presentation/image-generation-capability';
 import { handleImageGenerationRequest } from '@/server/runtime/presentation/image-generation-handler';
 import { type PresentationJobEventJournalPort } from '@/server/runtime/presentation/job-event-journal';
+import { rehydratePresentationMaterials } from '@/server/runtime/presentation/material-document';
 import type { PresentationPipelineContext } from '@/server/runtime/presentation/pipeline';
 import type { ProductionProviderReadiness } from '@/server/runtime/presentation/production-command';
 import { PRODUCTION_PRESENTATION_ENV_KEYS } from '@/server/runtime/presentation/production-config';
@@ -51,6 +52,7 @@ import {
 } from '@/server/runtime/presentation/sse';
 import { handleTeachingRequest } from '@/server/runtime/presentation/teaching-handler';
 import { userChatEndpoint } from '@/server/runtime/presentation/user-chat-provider';
+import { presentationMaterialsSchema } from '@/types/presentationMaterial';
 
 import type { RuntimeScope } from '../../../../../../../packages/runtime-contracts/src';
 
@@ -898,6 +900,19 @@ const toImageGenerationResponse = async (
   }
 };
 
+const readOwnedMaterials = async (value: unknown, authenticated: PresentationAuthScope) => {
+  const parsed = presentationMaterialsSchema.parse(value);
+  if (typeof (authenticated.serverDB as LobeChatDatabase)?.select !== 'function') {
+    if (parsed.documents.length) throw new Error('文档服务尚未就绪，无法校验资料来源');
+    return parsed;
+  }
+  const services = createPresentationContextServices(
+    authenticated.serverDB as LobeChatDatabase,
+    authenticated.userId,
+  );
+  return rehydratePresentationMaterials(parsed, services.documents!.load);
+};
+
 const toOutlineResponse = async (
   request: Request,
   authenticated: PresentationAuthScope,
@@ -931,7 +946,14 @@ const toOutlineResponse = async (
     }
     const result = await capability.execute(
       {
-        brief: { audience, style, topic },
+        brief: {
+          audience,
+          style,
+          topic,
+          ...(body.materials
+            ? { materials: await readOwnedMaterials(body.materials, authenticated) }
+            : {}),
+        },
         currentSlides: slides as never,
         operation: 'rewrite',
       },
@@ -969,15 +991,24 @@ const toConversationResponse = async (
     if (request.headers.get('content-type')?.startsWith('multipart/form-data'))
       return NextResponse.json(await uploadPresentationAttachment(request, resolvedScope));
     const body = (await request.json()) as Record<string, unknown>;
-    const contextRuntime =
+    const contextServices =
       typeof (authenticated.serverDB as LobeChatDatabase)?.select === 'function'
-        ? createPresentationContextRuntime(
-            createPresentationContextServices(
-              authenticated.serverDB as LobeChatDatabase,
-              authenticated.userId,
-            ),
+        ? createPresentationContextServices(
+            authenticated.serverDB as LobeChatDatabase,
+            authenticated.userId,
           )
         : undefined;
+    if (body.brief && typeof body.brief === 'object' && !Array.isArray(body.brief)) {
+      const brief = body.brief as Record<string, unknown>;
+      if (brief.materials && contextServices?.documents)
+        brief.materials = await rehydratePresentationMaterials(
+          brief.materials,
+          contextServices.documents.load,
+        );
+    }
+    const contextRuntime = contextServices
+      ? createPresentationContextRuntime(contextServices)
+      : undefined;
     if (
       body.operation === 'turn' &&
       request.headers.get('accept')?.includes('application/x-ndjson')
@@ -1047,6 +1078,11 @@ const toOutlineProposalResponse = async (
       });
     }
     const body = (await request.json()) as Record<string, unknown>;
+    if (body.brief && typeof body.brief === 'object' && !Array.isArray(body.brief)) {
+      const brief = body.brief as Record<string, unknown>;
+      if (brief.materials)
+        brief.materials = await readOwnedMaterials(brief.materials, authenticated);
+    }
     const result = await capability.execute(body as never, { scope: resolvedScope });
     return NextResponse.json(result);
   } catch (error) {

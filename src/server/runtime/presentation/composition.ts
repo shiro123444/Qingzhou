@@ -5,6 +5,7 @@ import { getResourceBudget } from '../resource-budget';
 import type { PresentationArtifactStore } from './artifact-store';
 import type { PresentationAssetStore } from './asset-store';
 import type { CapabilityMemory } from './capability-memory';
+import type { PresentationCapabilitySelector } from './capability-selection';
 import type { PresentationContentCompiler } from './content-intent';
 import {
   createPresentationConversationCapability,
@@ -57,6 +58,7 @@ export interface PresentationRuntimeCompositionOptions {
   readonly atomicRuntime?: AtomicRuntime;
   readonly capability?: PresentationGenerationCapability;
   readonly capabilityMemory?: CapabilityMemory;
+  readonly capabilitySelector?: PresentationCapabilitySelector;
   readonly contentCompiler?: PresentationContentCompiler;
   readonly contextFactory?: PresentationGenerationContextFactory;
   /** Artifact store used by the asynchronous `/jobs` generation bridge. */
@@ -73,6 +75,7 @@ export interface PresentationRuntimeCompositionOptions {
   readonly multimodalChatPort?: MultimodalChatPort;
   readonly now?: () => string;
   readonly portFactory?: PresentationPortFactory;
+  readonly prepareCapabilityLibrary?: (scope: RuntimeScope) => Promise<void>;
   readonly revisionAssetPlanner?: PresentationRevisionAssetPlanner;
   readonly teachingLearning?: TeachingLearning;
   readonly teachingMemory?: FileTeachingMemory;
@@ -82,8 +85,7 @@ export interface PresentationRuntimeCompositionOptions {
 }
 
 export type PresentationRuntimeCompositionErrorCode =
-  | 'PRESENTATION_COMPOSITION_DEPENDENCY_MISSING'
-  | 'PRESENTATION_COMPOSITION_OPTIONS_INVALID';
+  'PRESENTATION_COMPOSITION_DEPENDENCY_MISSING' | 'PRESENTATION_COMPOSITION_OPTIONS_INVALID';
 
 export class PresentationRuntimeCompositionError extends Error {
   constructor(
@@ -320,6 +322,8 @@ export const createPresentationRuntimeComposition = (
               executionLimiter,
               contentCompiler: compositionOptions.contentCompiler,
               capabilityMemory: compositionOptions.capabilityMemory,
+              capabilitySelector: compositionOptions.capabilitySelector,
+              prepareCapabilityLibrary: compositionOptions.prepareCapabilityLibrary,
               templateLibrary: compositionOptions.templateLibrary,
               revisionAssetPlanner: compositionOptions.revisionAssetPlanner,
               visualStoryboardPlanner: compositionOptions.visualStoryboardPlanner,
@@ -358,8 +362,7 @@ export const createPresentationRuntimeComposition = (
   const dispose = (): Promise<void> => {
     if (disposePromise) return disposePromise;
     const disposableImageCapability = resolvedImageGenerationCapability as
-      | (ImageGenerationCapability & { readonly dispose?: () => void | Promise<void> })
-      | undefined;
+      (ImageGenerationCapability & { readonly dispose?: () => void | Promise<void> }) | undefined;
     disposePromise = firstFailure([
       () => cache.dispose(),
       ...[...generationPorts.values()].map((port) => () => port.dispose()),
