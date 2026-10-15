@@ -69,18 +69,18 @@ export function defineConfig(config: CustomNextConfig) {
       emotion: true,
     },
     compress: isProd,
-    ...(process.env.QINGZHOU_BUILD_PROFILE &&
-      ({
-        // The compact compiler uses Webpack. Match the existing Turbopack Markdown rule.
-        webpack: (webpackConfig) => {
-          // Prefer bounded cold builds over retaining a second copy of module data in cache.
-          webpackConfig.cache = false;
-          webpackConfig.parallelism = process.env.QINGZHOU_BUILD_PROFILE === '4c4g' ? 4 : 8;
-          webpackConfig.module.rules.push({ test: /\.md$/, type: 'asset/source' });
-          return webpackConfig;
-        },
-      } satisfies Pick<NextConfig, 'webpack'>)),
+    webpack: (webpackConfig) => {
+      if (process.env.QINGZHOU_BUILD_PROFILE) {
+        // Prefer bounded cold builds over retaining a second copy of module data in cache.
+        webpackConfig.cache = false;
+        webpackConfig.parallelism = process.env.QINGZHOU_BUILD_PROFILE === '4c4g' ? 4 : 8;
+      }
+      // Both development and compact builds need the same Markdown support as Turbopack.
+      webpackConfig.module.rules.push({ test: /\.md$/, type: 'asset/source' });
+      return webpackConfig;
+    },
     experimental: {
+      ...(process.env.NODE_ENV === 'development' && { webpackMemoryOptimizations: true }),
       optimizePackageImports: [
         'emoji-mart',
         '@emoji-mart/react',

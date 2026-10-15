@@ -77,7 +77,11 @@ export function appliedLearnedCapabilityIds(capsules: CapabilityCapsule[], plan:
                       (block) =>
                         block?.kind === 'scientific-diagram' &&
                         block.spec?.type ===
-                          (capsule.recipe === 'scientific-plot' ? 'plot' : 'graph'),
+                          (capsule.recipe === 'report-table'
+                            ? 'table'
+                            : capsule.recipe === 'scientific-plot'
+                              ? 'plot'
+                              : 'graph'),
                     );
         if (!matched) continue;
       }

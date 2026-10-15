@@ -197,7 +197,11 @@ describe('C-88 OpenAI-compatible ImageGenerationPort adapter', () => {
     const result = await port.generate({ prompt: 'image' }, context());
 
     expect(result[0]?.asset.ref).toBe('asset://session-1/x');
-    expect(resolveAssetUri).toHaveBeenCalledWith(scope, 'https://cdn.example.test/x.png');
+    expect(resolveAssetUri).toHaveBeenCalledWith(
+      scope,
+      'https://cdn.example.test/x.png',
+      undefined,
+    );
     expect(await port.resolveAsset(scope, result[0]!.asset)).toEqual(result[0]?.metadata);
     expect(await port.resolveAsset(otherScope, result[0]!.asset)).toBeNull();
   });

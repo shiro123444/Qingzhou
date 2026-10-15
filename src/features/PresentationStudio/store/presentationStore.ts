@@ -3,10 +3,12 @@ import { create, type StoreApi, type UseBoundStore } from 'zustand';
 import type {
   ArtifactSnapshot,
   ExportResult,
+  PresentationDecisionAnswer,
   PresentationExportFormat,
   PresentationJob,
   PresentationJobInput,
   PresentationMessageInput,
+  PresentationPresenceInput,
 } from '../../../../packages/runtime-contracts/src/index';
 import {
   type PresentationJobEvent,
@@ -90,13 +92,7 @@ export type PresentationStreamClient = RuntimePresentationStreamClient;
 export type PresentationTransportMode = 'http' | 'demo';
 
 export type PresentationPendingAction =
-  | 'cancel'
-  | 'create'
-  | 'delete'
-  | 'export'
-  | 'refresh'
-  | 'retry'
-  | undefined;
+  'cancel' | 'create' | 'delete' | 'export' | 'refresh' | 'retry' | 'decision' | undefined;
 
 /**
  * Per-job live stream status (C-66): null/absent = not determined,
@@ -206,8 +202,7 @@ export interface PresentationStudioState {
    * keyboard-reachable retry. Cleared only by a successful export or dismiss.
    */
   exportError:
-    | (PresentationErrorInfo & { artifactId: string; format: PresentationExportFormat })
-    | null;
+    (PresentationErrorInfo & { artifactId: string; format: PresentationExportFormat }) | null;
   exporting: string | null;
   /**
    * Real-time generation progress projected per job from backend events/snapshots (R1-B).
@@ -252,6 +247,7 @@ export interface PresentationStudioState {
 }
 
 export interface PresentationStudioActions {
+  answerDecision: (jobId: string, input: PresentationDecisionAnswer) => Promise<boolean>;
   /** Applies one wire-safe job event (frozen C-60 semantics, seq-deduplicated). */
   applyPresentationEvent: (event: PresentationJobEvent) => void;
   /**
@@ -287,6 +283,7 @@ export interface PresentationStudioActions {
   setStreamStatus: (status: PresentationStreamStatus) => void;
   /** Idempotent per-job setter (C-66); also recomputes the aggregate. */
   setStreamStatusForJob: (jobId: string, status: PresentationStreamStatus) => void;
+  updatePresence: (jobId: string, input: PresentationPresenceInput) => Promise<boolean>;
 }
 
 export type PresentationStudioStore = PresentationStudioState &
@@ -403,6 +400,8 @@ export const aggregateJobStreamStatus = (
  * ------------------------------------------------------------------------ */
 
 const JOB_FIELDS = [
+  'recovery',
+  'heartbeatAt',
   'jobId',
   'state',
   'createdAt',
@@ -415,6 +414,7 @@ const JOB_FIELDS = [
   'versionId',
   'messages',
   'revisions',
+  'collaboration',
   'slideCount',
 ] as const;
 const ARTIFACT_FIELDS = [
@@ -1130,6 +1130,36 @@ export const createPresentationStudioStore = (
       } catch (error) {
         set({ clientError: toPresentationError(error) });
         return false;
+      }
+    },
+
+    updatePresence: async (jobId, input) => {
+      if (!client.updatePresentationPresence) return false;
+      try {
+        await client.updatePresentationPresence(jobId, input);
+        if (input.mode) await get().refreshJob(jobId);
+        return true;
+      } catch (error) {
+        // Heartbeats are best effort. Explicit preference changes must report failure.
+        if (input.mode) set({ clientError: toPresentationError(error) });
+        return false;
+      }
+    },
+
+    answerDecision: async (jobId, input) => {
+      if (get().pendingActions[jobId] === 'decision') return false;
+      set((s) => ({ pendingActions: { ...s.pendingActions, [jobId]: 'decision' } }));
+      try {
+        if (!client.answerPresentationDecision)
+          throw new Error('Collaboration decisions are unavailable');
+        const job = await client.answerPresentationDecision(jobId, input);
+        set((s) => ({ jobs: { ...s.jobs, [jobId]: job }, clientError: null }));
+        return true;
+      } catch (error) {
+        set({ clientError: toPresentationError(error) });
+        return false;
+      } finally {
+        set((s) => ({ pendingActions: { ...s.pendingActions, [jobId]: undefined } }));
       }
     },
 

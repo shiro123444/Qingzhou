@@ -13,6 +13,10 @@ const artifactTime = (artifact: ArtifactSnapshot): string =>
 /** Keep one visible artifact per logical page while a new revision streams in. */
 export const currentSlideArtifacts = (artifacts: ArtifactSnapshot[]): ArtifactSnapshot[] => {
   const byPage = new Map<string, ArtifactSnapshot>();
+  const latestStyle = artifacts
+    .filter((artifact) => artifact.status === 'ready' && artifact.type === 'svg')
+    .toSorted((a, b) => artifactTime(b).localeCompare(artifactTime(a)))[0]
+    ?.metadata?.deckVisualSystemId;
 
   for (const artifact of artifacts) {
     if (
@@ -21,6 +25,8 @@ export const currentSlideArtifacts = (artifacts: ArtifactSnapshot[]): ArtifactSn
     ) {
       continue;
     }
+    if (typeof latestStyle === 'string' && artifact.metadata?.deckVisualSystemId !== latestStyle)
+      continue;
 
     const key = slideKey(artifact);
     const existing = byPage.get(key);

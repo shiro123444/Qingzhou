@@ -12,6 +12,28 @@ export interface PresentationArtworkPolicy {
   readonly role: 'subject' | 'decoration' | 'scene' | 'background' | 'texture';
 }
 
+/** Scene illustrations contain several meaningful subjects; automatic foreground
+ * segmentation can erase mentors, equipment or connectors. Keep the full scene
+ * unless the user actually requested a cutout. Stickers retain their own policy. */
+export const resolvePresentationArtworkPolicy = (input: {
+  artwork?: PresentationArtworkPolicy;
+  kind?: string;
+  instruction?: string;
+  brief?: string;
+}): PresentationArtworkPolicy | undefined => {
+  const description = `${input.instruction ?? ''}\n${input.brief ?? ''}`;
+  if (
+    input.kind === 'illustration' &&
+    input.artwork?.background === 'transparent' &&
+    /场景|协同|共同指导|协作|多人物|完整画面|scene|teachers? and students?|mentors?.{0,30}students?/iu.test(
+      description,
+    ) &&
+    !/透明背景|抠图|贴纸|立绘|孤立主体|transparent\s+background|cut.?out/iu.test(description)
+  )
+    return { role: 'scene', background: 'preserve' };
+  return input.artwork;
+};
+
 export const isReusableTemplateComponent = (
   component: TemplateVisualProfile['components'][number],
 ): boolean =>
@@ -170,7 +192,9 @@ export const verifyCutoutTransparency = async (
       hasAlphaChannel: true,
       transparentRatio,
       visibleRatio,
-      verified: transparentRatio >= minTransparentRatio && visibleRatio >= (options?.minVisibleRatio ?? 0.01),
+      verified:
+        transparentRatio >= minTransparentRatio &&
+        visibleRatio >= (options?.minVisibleRatio ?? 0.01),
     };
   } catch {
     return unchecked;

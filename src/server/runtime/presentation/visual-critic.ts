@@ -8,6 +8,11 @@ import { lessonPlanSchema, lessonStages } from '@/types/presentationLesson';
 import type { PresentationPlan, RuntimeScope } from '../../../../packages/runtime-contracts/src';
 import type { PresentationArtifactStore } from './artifact-store';
 import {
+  assertDeckVisualConsistency,
+  type DeckVisualSystem,
+  deckVisualSystemSchema,
+} from './deck-visual-system';
+import {
   createTrustedChatImages,
   type GLMChatContentPart,
   type GLMMultimodalChatPort,
@@ -59,6 +64,17 @@ export const presentationVisualReviewSchema = z
   .strict();
 
 export type PresentationVisualReview = z.infer<typeof presentationVisualReviewSchema>;
+
+/** Severity is the gate; a redundant model boolean cannot waive defects or block minor advice. */
+export function adjudicateVisualReviewStatus(
+  review: PresentationVisualReview,
+): PresentationVisualReview {
+  if (review.issues.some((issue) => issue.severity !== 'minor'))
+    return { ...review, passed: false };
+  if (review.issues.length) return { ...review, passed: true };
+  if (!review.passed) throw new Error('A failed visual review must identify its blocking issues');
+  return review;
+}
 
 /** Retry only transport/provider outages; malformed reviews and content defects are not transient. */
 export async function retryTransientVisualReview<T>(
@@ -216,6 +232,93 @@ const renderSlide = async (
   return { base64: bytes.toString('base64'), mimeType: 'image/jpeg' };
 };
 
+async function reviewWholeDeck(
+  plan: PresentationPlan,
+  system: DeckVisualSystem,
+  options: { chat: GLMMultimodalChatPort; store: PresentationArtifactStore },
+  context: { scope: RuntimeScope; signal?: AbortSignal },
+): Promise<PresentationVisualReview> {
+  assertDeckVisualConsistency(plan, system);
+  const tiles = await Promise.all(
+    plan.slides.map(async (slide, index) => {
+      const rendered = await renderSlide(slide.svg, context.scope, options.store);
+      const label = Buffer.from(
+        `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="24"><rect width="512" height="24" fill="#E2E8F0"/><text x="8" y="18" font-family="Arial" font-size="16">${index + 1} / ${plan.slides.length}</text></svg>`,
+      );
+      const tile = await sharp(Buffer.from(rendered.base64, 'base64'))
+        .resize(512, 288, { fit: 'contain', background: '#FFFFFF' })
+        .extend({ bottom: 24, top: 0, left: 0, right: 0, background: '#E2E8F0' })
+        .composite([{ input: label, left: 0, top: 288 }])
+        .jpeg({ quality: 82 })
+        .toBuffer();
+      return { input: tile, left: (index % 3) * 512, top: Math.floor(index / 3) * 312 };
+    }),
+  );
+  const bytes = await sharp({
+    create: {
+      width: 1536,
+      height: Math.ceil(plan.slides.length / 3) * 312,
+      channels: 3,
+      background: '#FFFFFF',
+    },
+  })
+    .composite(tiles)
+    .jpeg({ quality: 85 })
+    .toBuffer();
+  const trusted = createTrustedChatImages(
+    [{ base64: bytes.toString('base64'), mimeType: 'image/jpeg' }],
+    context.scope,
+  );
+  const ids = new Set(plan.slides.map((slide) => slide.slideId));
+  const fingerprint = createHash('sha256').update(bytes).digest('hex').slice(0, 20);
+  return (
+    await completeStructuredJson<PresentationVisualReview>({
+      chat: options.chat,
+      context: {
+        ...context,
+        trustedImages: trusted,
+        idempotencyKey: `deck-continuity:${plan.planId}:${fingerprint}`,
+      },
+      request: {
+        model: options.chat.manifest.model,
+        temperature: 0,
+        max_tokens: 8000,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content:
+              '检查整份演示的统一视觉系统，而非单页文案。缩略图按页序排列，页号在每张下方。检查页眉页脚、字体、标题锚点、配色及插图处理是否连续。封面和章节深蓝底、正文白底是同一规范的批准变体；各页内容区布局变化是正常的。真实原图source-figure允许保留原有数据配色，只检查它在统一容器内是否协调，禁止要求改写原图。只报告有明确像素证据的风格跳变，不要求重建不同源模板。返回JSON {schemaVersion:1,passed,summary,issues:[{slideId,severity:"blocking|major|minor",category:"continuity|artwork-style|template-fidelity",evidence,instruction}]}。仅有minor或无问题时passed=true。',
+          },
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  visualSystem: system,
+                  pages: plan.slides.map((slide) => ({
+                    slideId: slide.slideId,
+                    order: slide.order,
+                    visualAssets: slide.metadata?.visualAssets,
+                  })),
+                }),
+              },
+              { type: 'image_url', image_url: { url: trusted.urls[0], detail: 'high' } },
+            ],
+          },
+        ],
+      },
+      parse: (value) => {
+        const review = presentationVisualReviewSchema.parse(normalizeVisualReviewCandidate(value));
+        if (review.issues.some((issue) => !ids.has(issue.slideId)))
+          throw new Error('Whole-deck review referenced an unknown slide');
+        return adjudicateVisualReviewStatus(review);
+      },
+    })
+  ).value;
+}
+
 export const createPresentationVisualCritic = (options: {
   readonly chat: GLMMultimodalChatPort;
   readonly store: PresentationArtifactStore;
@@ -232,6 +335,15 @@ export const createPresentationVisualCritic = (options: {
           ),
         );
       }
+      if (plan.designSpec?.deckVisualSystem)
+        batches.push(
+          await reviewWholeDeck(
+            plan,
+            deckVisualSystemSchema.parse(plan.designSpec.deckVisualSystem),
+            options,
+            context,
+          ),
+        );
       return {
         schemaVersion: 1,
         passed: batches.every((batch) => batch.passed),
@@ -246,10 +358,16 @@ export const createPresentationVisualCritic = (options: {
     const renderedSlides = await Promise.all(
       slides.map((slide) => renderSlide(slide.svg, context.scope, options.store)),
     );
-    const sourcePageRefs = new Set(slides.flatMap((slide) => {
-      const direction = slide.metadata?.visualDirection as { archetypeId?: string } | undefined;
-      return template?.visual?.designProgram.archetypes.find((item) => item.id === direction?.archetypeId)?.sourcePageRefs?.slice(0, 1) ?? [];
-    }));
+    const sourcePageRefs = new Set(
+      slides.flatMap((slide) => {
+        const direction = slide.metadata?.visualDirection as { archetypeId?: string } | undefined;
+        return (
+          template?.visual?.designProgram.archetypes
+            .find((item) => item.id === direction?.archetypeId)
+            ?.sourcePageRefs?.slice(0, 1) ?? []
+        );
+      }),
+    );
     const evidencePages = new Set(
       slides.flatMap((slide) => {
         const direction = slide.metadata?.visualDirection as
@@ -262,7 +380,9 @@ export const createPresentationVisualCritic = (options: {
       }),
     );
     const matchingPages =
-      template?.visual?.pages.filter((page) => sourcePageRefs.size ? sourcePageRefs.has(page.ref) : evidencePages.has(page.page)) ?? [];
+      template?.visual?.pages.filter((page) =>
+        sourcePageRefs.size ? sourcePageRefs.has(page.ref) : evidencePages.has(page.page),
+      ) ?? [];
     const templatePages = (
       matchingPages.length
         ? matchingPages
@@ -298,9 +418,26 @@ export const createPresentationVisualCritic = (options: {
     const content: GLMChatContentPart[] = [
       {
         text: JSON.stringify({
-          designProgram: template?.visual?.designProgram,
+          currentTask: { title: plan.title },
+          designProgram: plan.designSpec?.deckVisualSystem
+            ? undefined
+            : template?.visual?.designProgram,
+          referenceStructures: plan.designSpec?.deckVisualSystem
+            ? template?.visual?.designProgram.archetypes.map((archetype) => ({
+                id: archetype.id,
+                roles: archetype.roles,
+                evidencePages: archetype.evidencePages,
+                regions: archetype.regions
+                  .filter((region) => ['artwork', 'frame'].includes(region.role))
+                  .map((region) => ({ box: region.box, role: region.role })),
+              }))
+            : undefined,
+          deckVisualSystem: plan.designSpec?.deckVisualSystem,
+          deckPolicy: plan.designSpec?.deckVisualSystem
+            ? '优先级：当前任务事实 > deckVisualSystem整稿规范 > 故事板内容区意图 > 模板结构参考。整稿规范是唯一的字体、标题、背景与装饰硬约束。referenceStructures和模板截图只提供内容区几何及信息密度证据，不是必须照搬的完整页面契约。不得要求恢复其他模板的天空背景、光晕、衬线字体或标题位置。封面/章节/尾页允许规范声明的深浅变体。若当前任务标题或本页内容明确包含机构名称，该名称是本次事实，不能仅因它也出现在模板中就判为旧机构残留；不确定时不要猜测。真实原图保留原始数据色彩，重点检查外部容器统一与可读性。'
+            : undefined,
           referencePolicy: template?.visual
-            ? '对照模板与内容质量审查。'
+            ? '对照实际模板截图审查信息承载能力：比较图表与正文占比、表格行列、阅读层次和重点。统一风格不等于固定一种空白页框。不能仅因没有越界就判定通过；报告主体缩成小图、长段落缺少结构、关键事实只在备注、尾页缺少明确收束均需指出。封面/章节留白可以合理。不要为追求密度虚构事实或要求复制旧品牌。'
             : '无模板参考，只审查内容正确表达、可读性、留白与整稿一致性，不要求模板保真。',
           semanticReviewRules:
             '检查公式排版与截断（formula）、科研图箭头坐标与论点一致性（scientific-semantics）、为塞内容而缩小正文（density）。贴纸/装饰（kind sticker）：检查是否带白底方块、是否越出卡片边框或压住正文与公式；visualAssets 里 transparency 为 opaque 表示服务端已实测该图没有可用透明像素（渲染出来就是白底方块），这是缺陷；轻微出血不算缺陷，遮挡可读内容才算。由服务端矢量叠加的标注（visualRequirements[].annotations 声明的箭头、引线与标签）不是生图内容：图内箭头方向、引线或这些标签的拼写不要作为意见提出，只评判生图对象是否覆盖 brief 指定的部件与关系、风格、留白与越界。对照visualRequirements逐块检查renderer:image的科研图是否呈现brief指定对象、部件、必要图内标签和关系，而不是无关印象图；不得把概念图冒充论文原图或实测结果，也不要求普通概念图标注“示意图”。科学方向判断须先与本页已批准公式和visualRequirements核对；例如约束g≤0且λ≥0时，KKT驻点关系∇f+λ∇g=0，不能把相反方向误报为同向。检查生成插图、精确矢量图与公式混排时的遮挡、卡片内越界和留白。只报告有像素及结构证据的问题。',
@@ -391,10 +528,7 @@ export const createPresentationVisualCritic = (options: {
             )
               throw new Error('Visual review referenced an unknown visual block');
           }
-          if (review.passed !== !review.issues.some((issue) => issue.severity !== 'minor')) {
-            throw new Error('Visual review pass state contradicts its issues');
-          }
-          return review;
+          return adjudicateVisualReviewStatus(review);
         },
         request: {
           max_tokens: 8000,
@@ -406,7 +540,15 @@ export const createPresentationVisualCritic = (options: {
               ].join('\n'),
               role: 'system',
             },
-            ...(template?.compositionPolicy ? [{ role: 'system' as const, content: '能力组合验收以当前任务为最高优先级：原稿机构身份不继承。不得因未复制原校徽、英文院名、版权页脚或品牌占位槽而报告缺陷；也不要要求补空的机构标识占位框。主风格和布局仅为设计参考，允许适配当前内容。应报告旧机构文字/标识混入、真实的遮挡、错误关系、难以阅读的标签和图文越界。不要把有意留白误报成缺失原稿元素。' }] : []),
+            ...(template?.compositionPolicy
+              ? [
+                  {
+                    role: 'system' as const,
+                    content:
+                      '能力组合验收以当前任务为最高优先级：原稿机构身份不继承。不得因未复制原校徽、英文院名、版权页脚或品牌占位槽而报告缺陷；也不要要求补空的机构标识占位框。主风格和布局仅为设计参考，允许适配当前内容。应报告旧机构文字/标识混入、真实的遮挡、错误关系、难以阅读的标签和图文越界。不要把有意留白误报成缺失原稿元素。',
+                  },
+                ]
+              : []),
             { content, role: 'user' },
           ],
           model: options.chat.manifest.model,

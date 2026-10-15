@@ -4,7 +4,7 @@
  * Handles all group agent builder tool calls for configuring groups and their agents.
  * Extends AgentBuilder functionality with group-specific operations.
  */
-import { AgentManagerRuntime } from '@lobechat/agent-manager-runtime';
+import type { AgentManagerRuntime } from '@lobechat/agent-manager-runtime';
 import type {
   GetAvailableModelsParams,
   InstallPluginParams,
@@ -32,10 +32,13 @@ import type {
 } from './types';
 import { GroupAgentBuilderApiName, GroupAgentBuilderIdentifier } from './types';
 
-const agentManagerRuntime = new AgentManagerRuntime({
-  agentService,
-  discoverService,
-});
+// The runtime imports the tool store and its executors. Construct it after
+// module initialization to avoid reading the class inside that import cycle.
+let agentManagerRuntime: AgentManagerRuntime | undefined;
+const getAgentManagerRuntime = async () => {
+  const { AgentManagerRuntime } = await import('@lobechat/agent-manager-runtime');
+  return (agentManagerRuntime ??= new AgentManagerRuntime({ agentService, discoverService }));
+};
 const groupAgentBuilderRuntime = new GroupAgentBuilderExecutionRuntime();
 
 class GroupAgentBuilderExecutor extends BaseExecutor<typeof GroupAgentBuilderApiName> {
@@ -162,11 +165,11 @@ class GroupAgentBuilderExecutor extends BaseExecutor<typeof GroupAgentBuilderApi
   // ==================== Inherited Operations (for supervisor agent) ====================
 
   getAvailableModels = async (params: GetAvailableModelsParams): Promise<BuiltinToolResult> => {
-    return agentManagerRuntime.getAvailableModels(params);
+    return (await getAgentManagerRuntime()).getAvailableModels(params);
   };
 
   searchMarketTools = async (params: SearchMarketToolsParams): Promise<BuiltinToolResult> => {
-    return agentManagerRuntime.searchMarketTools(params);
+    return (await getAgentManagerRuntime()).searchMarketTools(params);
   };
 
   updateConfig = async (
@@ -186,7 +189,7 @@ class GroupAgentBuilderExecutor extends BaseExecutor<typeof GroupAgentBuilderApi
       };
     }
 
-    return agentManagerRuntime.updateAgentConfig(agentId, restParams);
+    return (await getAgentManagerRuntime()).updateAgentConfig(agentId, restParams);
   };
 
   installPlugin = async (
@@ -203,7 +206,7 @@ class GroupAgentBuilderExecutor extends BaseExecutor<typeof GroupAgentBuilderApi
       };
     }
 
-    return agentManagerRuntime.installPlugin(agentId, params);
+    return (await getAgentManagerRuntime()).installPlugin(agentId, params);
   };
 }
 

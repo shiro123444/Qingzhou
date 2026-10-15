@@ -54,6 +54,7 @@ export type OpenAIImageAssetSink =
 export type OpenAIImageUriResolver = (
   scope: RuntimeScope,
   uri: string,
+  signal?: AbortSignal,
 ) => AssetRef | string | null | Promise<AssetRef | string | null>;
 
 export type OpenAIImageReferenceReader = (
@@ -578,7 +579,7 @@ export class OpenAIImageGenerationPort implements ImageGenerationPort {
       }
     } else if (source.source === 'url' && this.resolveAssetUri) {
       try {
-        const resolved = await this.resolveAssetUri(scope, source.uri);
+        const resolved = await this.resolveAssetUri(scope, source.uri, signal);
         if (resolved === null)
           throw payloadInvalid('asset URI resolver returned no ref', `data.${index}`);
         asset = normalizeRef(resolved, `data.${index}`);

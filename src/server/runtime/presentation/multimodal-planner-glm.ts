@@ -30,6 +30,15 @@ import {
 import { contentLayout } from './content-layout';
 import { inspectPresentationContent, promoteReadablePlainText } from './content-quality';
 import {
+  assertDeckBodyFits,
+  assertDeckVisualConsistency,
+  deckBodyRegion,
+  deckPageRole,
+  deckVisualInstructions,
+  readDeckVisualSystem,
+  renderDeckVisualFrame,
+} from './deck-visual-system';
+import {
   LESSON_RENDERING_INSTRUCTIONS,
   prepareLessonDraft,
   publicLessonStages,
@@ -64,6 +73,7 @@ import { inspectVisualOccupancy, reconcileNativeVisualAssets } from './visual-ow
 export interface GLMPresentationPlannerOptions {
   readonly chatPort: GLMMultimodalChatPort;
   readonly defaultSlideCount?: number;
+  readonly fallbackChatPort?: GLMMultimodalChatPort;
   readonly systemPrompt?: string;
 }
 
@@ -84,6 +94,7 @@ Return clean JSON matching the PresentationPlan schema:
       "slideId": string,
       "order": number (starting at 1),
       "svg": string (valid SVG),
+      "contentBlocks": array (required for compiled native visuals/formulas; use exact IDs and the semantic block schema below),
       "notes": string (optional)
     }
   ]
@@ -335,6 +346,7 @@ const validatePlacedAssets = (
 
 export class GLMPresentationPlanner implements PresentationPlanner {
   private readonly chatPort: GLMMultimodalChatPort;
+  private readonly fallbackChatPort?: GLMMultimodalChatPort;
   private readonly defaultSlideCount: number;
   private readonly systemPrompt: string;
 
@@ -343,6 +355,7 @@ export class GLMPresentationPlanner implements PresentationPlanner {
       throw new Error('PresentationPlanner requires chatPort');
     }
     this.chatPort = options.chatPort;
+    this.fallbackChatPort = options.fallbackChatPort;
     this.defaultSlideCount = options.defaultSlideCount ?? 8;
     this.systemPrompt = options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
   }
@@ -421,7 +434,16 @@ export class GLMPresentationPlanner implements PresentationPlanner {
         title: input.title,
         aspectRatio: input.aspectRatio ?? '16:9',
         sourceVersionIds: [...input.sourceVersionIds],
-        ...(input.options?.contentIntents ? { designSpec: { contentPolicyVersion: 1 } } : {}),
+        ...(input.options?.contentIntents || input.options?.deckVisualSystem
+          ? {
+              designSpec: {
+                ...(input.options?.contentIntents ? { contentPolicyVersion: 1 } : {}),
+                ...(input.options?.deckVisualSystem
+                  ? { deckVisualSystem: input.options.deckVisualSystem }
+                  : {}),
+              },
+            }
+          : {}),
         slides: composed,
       };
     }
@@ -496,9 +518,10 @@ export class GLMPresentationPlanner implements PresentationPlanner {
         svg: semanticAuthoringSvg(slide.svg, slide.metadata?.contentBlocks),
         contentBlocks: slide.metadata?.contentBlocks,
       }));
-      userPrompt = `请修改以下原稿页面，保留没有要求修改的内容、图片和布局。只返回这些页面，不添加其他页面。保持 slideId。公式与图形已恢复为空锚点和contentBlocks源；修改源与rect，由服务端重绘，不要在空锚点中手绘路径。\n修改要求：${revision.content}\n画幅：${aspectRatio}\n原稿：${JSON.stringify(editableSlides)}\n返回 ${selectedSlides.length} 页完整 SVG 与contentBlocks的 JSON PresentationPlan。`;
+      userPrompt = `请修改以下原稿页面，保留没有要求修改的内容、图片和布局。只返回这些页面，不添加其他页面。保持 slideId。当前只处理原稿页号 ${selectedSlides.map((slide) => slide.order).join('、')}；整稿修改要求中明确指向其他页号的文字、数字和图注不适用于当前页，不得复制过来。若当前页没有被要求修改，保持它已有的事实与可见文字。公式与图形已恢复为空锚点和contentBlocks源；修改源与rect，由服务端重绘，不要在空锚点中手绘路径。\n修改要求：${revision.content}\n画幅：${aspectRatio}\n原稿：${JSON.stringify(editableSlides)}\n返回 ${selectedSlides.length} 页完整 SVG 与contentBlocks的 JSON PresentationPlan。`;
     }
-    if (context.template) {
+    const deckVisualSystem = readDeckVisualSystem(input);
+    if (context.template && !deckVisualSystem) {
       userPrompt += `\n\n${templatePlannerInstructions(context.template as TemplateApplication)}`;
     }
     userPrompt += `\n\n${CONTENT_RENDERING_INSTRUCTIONS}\n${SEMANTIC_BLOCK_FORMAT}`;
@@ -523,13 +546,13 @@ export class GLMPresentationPlanner implements PresentationPlanner {
           : true,
     );
     if (relevantIntents.length) userPrompt += `\n内容编译结果：${JSON.stringify(relevantIntents)}`;
-    if (inputOptions.learnedCapabilities && !teachingStages.length)
+    if (inputOptions.learnedCapabilities && !teachingStages.length && !deckVisualSystem)
       userPrompt += `\n已验证的历史学习能力（仅为参考，当前用户指令、内容语义与字号预算优先）：${JSON.stringify(inputOptions.learnedCapabilities)}`;
     const learnedCapsules = teachingStages.length
       ? []
       : ((inputOptions.learnedCapabilities as { capsules?: CapabilityCapsule[] } | undefined)
           ?.capsules ?? []);
-    if (learnedCapsules.length)
+    if (learnedCapsules.length && !deckVisualSystem)
       userPrompt +=
         '\n按 composition 组合不同来源的能力；在每页 metadata.capabilityUses 记录实际采用的 {capsuleId, reason}，reason说明具体设计位置与用途。不得将检索候选全部列为使用；未使用的能力不记录。';
     const visualStoryboard = inputOptions.visualStoryboard as
@@ -543,8 +566,18 @@ export class GLMPresentationPlanner implements PresentationPlanner {
         if (selectedSlides) return selectedSlides.some((slide) => slide.slideId === slideId);
         return true;
       });
-      userPrompt += `\n\n整稿视觉故事板（这是排版与素材的共同决策，逐页执行但保持跨页节奏）：${JSON.stringify({ ...(teachingStages.length ? {} : { deckRationale: visualStoryboard.deckRationale, rhythm: visualStoryboard.rhythm }), slides: relevantDirections })}`;
+      userPrompt += `\n\n整稿视觉故事板（只组合内容区的布局与素材，页眉字体等由整稿规范管理）：${JSON.stringify({ ...(teachingStages.length || deckVisualSystem ? {} : { deckRationale: visualStoryboard.deckRationale, rhythm: visualStoryboard.rhythm }), slides: deckVisualSystem ? relevantDirections.map((direction: any) => ({ slideId: direction.slideId, role: direction.role, assetMode: direction.assetMode, archetypeId: direction.archetypeId, layoutId: direction.layoutId, componentIds: direction.componentIds, compositionIntent: direction.compositionIntent, continuity: direction.continuity })) : relevantDirections })}`;
     }
+    if (deckVisualSystem)
+      userPrompt += `\n${deckVisualInstructions(
+        deckVisualSystem,
+        deckPageRole(
+          input,
+          String(context.pageSlideId ?? selectedSlides?.[0]?.slideId ?? 'slide-1'),
+          Number(context.pageIndex ?? (selectedSlides?.[0]?.order ?? 1) - 1) + 1,
+        ),
+        context.template as TemplateApplication | undefined,
+      )}`;
     const revisionAssetIntents = (input.options?.revisionAssetIntents ??
       []) as RevisionAssetIntent[];
     if (revisionAssetIntents.length) {
@@ -662,10 +695,15 @@ export class GLMPresentationPlanner implements PresentationPlanner {
         text: `CURRENT PAGE OUTPUT CONTRACT — check every item before returning JSON:\n${JSON.stringify(
           relevantIntents.map((intent) => ({
             slideId: intent.slideId,
-            usableContentRect: contentLayout(
-              teachingStages.find((s) => s.slideId === intent.slideId)?.boardSpace,
-              aspectRatio,
-            ),
+            usableContentRect: deckVisualSystem
+              ? deckBodyRegion(
+                  deckVisualSystem,
+                  deckPageRole(input, intent.slideId, Number(context.pageIndex ?? 0) + 1),
+                )
+              : contentLayout(
+                  teachingStages.find((s) => s.slideId === intent.slideId)?.boardSpace,
+                  aspectRatio,
+                ),
             formulas: intent.formulas
               .filter((f) => f.placement !== 'notes')
               .map((f) => ({
@@ -678,6 +716,9 @@ export class GLMPresentationPlanner implements PresentationPlanner {
               .filter(isNativeVisual)
               .map((v) => ({
                 id: v.id,
+                kind: 'scientific-diagram',
+                brief: v.brief,
+                output: `Put a contentBlocks object with id="${v.id}" on this slide AND an empty <g data-content-id="${v.id}"/> in svg. Native SVG text/shapes alone do not satisfy this contract.`,
                 fidelity: v.fidelity,
                 minimumWidth: 280,
                 // Plot legends consume vertical space before the geometry. The
@@ -694,7 +735,9 @@ export class GLMPresentationPlanner implements PresentationPlanner {
         )}\ncontentBlocks has ONLY kind:"formula" or kind:"scientific-diagram". An illustration is NOT a contentBlock: place its real href with SVG <image>, do not add kind:illustration/image. Do not add explanation/placement/measurement to formula blocks. Never change exact LaTeX. Do not invent English subtitles, credits or headings. All body text ≥24px; only short labels ≤16 characters and footers may be 16px. Simplify words instead of shrinking. Scientific claims must state applicable assumptions. Do not repeat unqualified convergence or complexity guarantees from an outline; explain necessary conditions and limitations in notes.`,
       });
 
+    let parseAttempts = 0;
     const parsePlan = async (parsedPlan: any): Promise<PresentationPlan> => {
+      parseAttempts += 1;
       if (!parsedPlan || typeof parsedPlan !== 'object' || Array.isArray(parsedPlan))
         throw new PresentationPlanError('The planner must return a PresentationPlan object');
       const rawSlides = Array.isArray(parsedPlan.slides) ? parsedPlan.slides : [];
@@ -806,12 +849,20 @@ export class GLMPresentationPlanner implements PresentationPlanner {
               const stage = teachingStages.find((item) => item.slideId === slideId);
               if (
                 intent &&
-                /Formula .*reserve at least|Formula .*needs .*enlarge|Semantic blocks .*overlap|Plot requires at least|Scientific diagrams need at least|requires a reproducible quadratic\/taylor recipe|Graph (?:label|needs|layer|branches|nodes)|needs a wider node|Vertical graph labels/u.test(
+                /Formula .*reserve at least|Formula .*needs .*enlarge|Semantic blocks .*overlap|Plot requires at least|Table requires|Scientific diagrams need at least|requires a reproducible quadratic\/taylor recipe|Graph (?:label|needs|layer|branches|nodes)|needs a wider node|Vertical graph labels/u.test(
                   String(error),
                 )
               ) {
                 try {
                   content = await recoverSemanticSlideLayout({
+                    ...(deckVisualSystem
+                      ? {
+                          deckBody: deckBodyRegion(
+                            deckVisualSystem,
+                            deckPageRole(input, slideId, outlineIndex + 1),
+                          ),
+                        }
+                      : {}),
                     aspectRatio,
                     boardSpace: stage?.boardSpace,
                     intent,
@@ -871,18 +922,35 @@ export class GLMPresentationPlanner implements PresentationPlanner {
             const beforeReflow = composedSvg;
             if (currentIntent && inspectVisualOccupancy(ownedComposition, imageSizes).length) {
               const stage = teachingStages.find((item) => item.slideId === slideId);
+              const imageRefs = presentationImageRefs(composedSvg);
+              const visibleContent =
+                stage?.visibleContent ??
+                outlinePage?.keyPoints ??
+                authoredBodyText(composedSvg, slideTitle);
+              const figureOwnsBody = Boolean(
+                deckVisualSystem &&
+                imageRefs.length &&
+                !currentIntent.formulas.some((formula) => formula.placement !== 'notes') &&
+                !visualRequirements(currentIntent).some(isNativeVisual),
+              );
               content = await recoverSemanticSlideLayout({
+                ...(deckVisualSystem
+                  ? {
+                      deckBody: deckBodyRegion(
+                        deckVisualSystem,
+                        deckPageRole(input, slideId, outlineIndex + 1),
+                      ),
+                    }
+                  : {}),
                 aspectRatio,
                 boardSpace: stage?.boardSpace,
                 intent: currentIntent,
                 rawBlocks: content.blocks,
                 title: stage?.title ?? slideTitle,
-                visibleContent:
-                  stage?.visibleContent ??
-                  outlinePage?.keyPoints ??
-                  authoredBodyText(composedSvg, slideTitle),
-                imageRefs: presentationImageRefs(composedSvg),
+                visibleContent: figureOwnsBody ? undefined : visibleContent,
+                imageRefs,
               });
+              if (figureOwnsBody) content.overflowNotes = visibleContent?.join('\n');
               composedSvg = content.svg;
               for (const asset of slideAssets)
                 if (
@@ -940,6 +1008,61 @@ export class GLMPresentationPlanner implements PresentationPlanner {
               },
             });
             svg = reconciled.svg;
+            if (deckVisualSystem) {
+              const role = deckPageRole(input, slideId, outlineIndex + 1);
+              try {
+                svg = renderDeckVisualFrame(svg, deckVisualSystem, {
+                  title: slideTitle,
+                  role,
+                  order: outlineIndex + 1,
+                  total: Array.isArray(input.options?.outline)
+                    ? input.options.outline.length
+                    : (input.slideCount ?? slideCount),
+                });
+                await assertDeckBodyFits(svg, deckVisualSystem, role);
+                // Local coordinates can be negative inside a valid transform. The
+                // converter also needs a simple, in-canvas image viewport.
+                validatePlacedAssets(
+                  svg,
+                  slideAssets.filter((asset) =>
+                    presentationImageRefs(svg).includes(presentationAssetHref(asset.ref)),
+                  ),
+                  permittedRefs,
+                );
+              } catch (error) {
+                const required = contentIntents.find((item) => item.slideId === slideId);
+                if (parseAttempts < 2 || !required || !outlinePage?.keyPoints?.length) throw error;
+                const imageRefs = presentationImageRefs(svg);
+                const recovered = await recoverSemanticSlideLayout({
+                  aspectRatio,
+                  intent: required,
+                  rawBlocks: content.blocks,
+                  title: slideTitle,
+                  deckBody: deckBodyRegion(deckVisualSystem, role),
+                  imageRefs,
+                  visibleContent: imageRefs.length ? undefined : outlinePage.keyPoints,
+                });
+                content = {
+                  ...recovered,
+                  overflowNotes: [
+                    ...(imageRefs.length ? outlinePage.keyPoints : []),
+                    ...('overflowNotes' in recovered && recovered.overflowNotes
+                      ? [recovered.overflowNotes]
+                      : []),
+                  ].join('\n'),
+                };
+                svg = renderDeckVisualFrame(recovered.svg, deckVisualSystem, {
+                  title: slideTitle,
+                  role,
+                  order: outlineIndex + 1,
+                  total: Array.isArray(input.options?.outline)
+                    ? input.options.outline.length
+                    : (input.slideCount ?? slideCount),
+                });
+                await assertDeckBodyFits(svg, deckVisualSystem, role);
+                layoutRecovered = true;
+              }
+            }
             const remainingBindings = readVisualAssetBindings(reconciled.metadata?.visualAssets);
             const retiredRefs = new Set(
               allBindings
@@ -1015,6 +1138,7 @@ export class GLMPresentationPlanner implements PresentationPlanner {
                   ? { visualDirection }
                   : {}),
                 title: slideTitle,
+                ...(deckVisualSystem ? { deckVisualSystemId: deckVisualSystem.id } : {}),
                 ...(outlinePage
                   ? {
                       outline: outlinePage.keyPoints,
@@ -1063,7 +1187,107 @@ export class GLMPresentationPlanner implements PresentationPlanner {
       };
 
       if (contentIntents.length) {
-        const quality = inspectPresentationContent(fallbackPlan);
+        let quality = inspectPresentationContent(fallbackPlan);
+        // After the model's repair still uses unreadable card text, reflow the
+        // approved outline instead of pausing the entire deck on a typography error.
+        if (!quality.passed && parseAttempts > 1) {
+          for (const slide of fallbackPlan.slides) {
+            const issues = quality.issues.filter((issue) => issue.slideId === slide.slideId);
+            const intent = contentIntents.find((item) => item.slideId === slide.slideId);
+            const page = (input.options?.outline as any[] | undefined)?.[
+              (context.pageIndex as number | undefined) ?? slide.order - 1
+            ];
+            if (
+              !issues.length ||
+              issues.some(
+                (issue) =>
+                  issue.category !== 'legibility' &&
+                  !(
+                    issue.category === 'geometry' &&
+                    /^Text .*extends .*beyond (?:its panel|the slide)/u.test(issue.evidence)
+                  ),
+              ) ||
+              !intent ||
+              intent.formulas.some((formula) => formula.placement !== 'notes') ||
+              visualRequirements(intent).some(isNativeVisual) ||
+              !page?.keyPoints?.length
+            )
+              continue;
+            const imageRefs = presentationImageRefs(slide.svg);
+            const recovered = await recoverSemanticSlideLayout({
+              ...(deckVisualSystem
+                ? {
+                    deckBody: deckBodyRegion(
+                      deckVisualSystem,
+                      deckPageRole(
+                        input,
+                        slide.slideId,
+                        Number(context.pageIndex ?? slide.order - 1) + 1,
+                      ),
+                    ),
+                  }
+                : {}),
+              aspectRatio,
+              intent,
+              rawBlocks: [],
+              title: (slide.metadata?.title as string) || title,
+              imageRefs,
+              // Embedded figures already own their labels and explanatory text.
+              // Keep the approved full detail in notes rather than duplicating it in small cards.
+              visibleContent: imageRefs.length ? undefined : page.keyPoints,
+            });
+            const original = parseString(slide.svg);
+            const header = Array.from(original.getElementsByTagName('rect')).find(
+              (node) =>
+                Number(node.getAttribute('y')) === 0 &&
+                Number(node.getAttribute('width')) >= 950 &&
+                Number(node.getAttribute('height')) <= 80 &&
+                /^#[a-f\d]{6}$/iu.test(node.getAttribute('fill') ?? ''),
+            );
+            const document = parseString(recovered.svg);
+            const heading = document.getElementsByTagName('text')[0];
+            if (header && heading && !deckVisualSystem) {
+              const band = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+              for (const [key, value] of Object.entries({
+                x: '0',
+                y: '0',
+                width: '960',
+                height: '64',
+                fill: header.getAttribute('fill')!,
+              }))
+                band.setAttribute(key, value);
+              document.documentElement.insertBefore(band, heading);
+              heading.setAttribute('fill', '#ffffff');
+            }
+            slide.svg = deckVisualSystem
+              ? renderDeckVisualFrame(document.toString(), deckVisualSystem, {
+                  title: (slide.metadata?.title as string) || title,
+                  role: deckPageRole(
+                    input,
+                    slide.slideId,
+                    Number(context.pageIndex ?? slide.order - 1) + 1,
+                  ),
+                  order:
+                    (context.pageIndex as number | undefined) !== undefined
+                      ? Number(context.pageIndex) + 1
+                      : slide.order,
+                  total: Array.isArray(input.options?.outline)
+                    ? input.options.outline.length
+                    : (input.slideCount ?? slideCount),
+                })
+              : document.toString();
+            slide.metadata = {
+              ...slide.metadata,
+              contentBlocks: recovered.blocks,
+              layoutRecovered: true,
+            };
+            if (imageRefs.length)
+              slide.notes = `${slide.notes ?? ''}\n${page.keyPoints.join('\n')}`;
+            if ('overflowNotes' in recovered && recovered.overflowNotes)
+              slide.notes = `${slide.notes ?? ''}\n${recovered.overflowNotes}`;
+          }
+          quality = inspectPresentationContent(fallbackPlan);
+        }
         if (!quality.passed) throw new PresentationPlanError(JSON.stringify(quality.issues));
       }
 
@@ -1126,12 +1350,17 @@ export class GLMPresentationPlanner implements PresentationPlanner {
           slides: basePlan.slides.map((slide) => replacements.get(slide.slideId) ?? slide),
         });
       }
+      if (deckVisualSystem) {
+        fallbackPlan.designSpec = { ...fallbackPlan.designSpec, deckVisualSystem };
+        assertDeckVisualConsistency(fallbackPlan, deckVisualSystem);
+      }
       return validatePresentationPlan(fallbackPlan);
     };
 
     const { value: plan } = await completeStructuredJson<PresentationPlan>({
       parse: parsePlan,
       chat: this.chatPort,
+      fallbackChat: this.fallbackChatPort,
       context: {
         idempotencyKey: `${context.idempotencyKey || 'structured-json'}${context.pageSlideId ? `:${context.pageSlideId}` : selectedSlides?.length === 1 ? `:${selectedSlides[0].slideId}` : ''}`,
         scope,

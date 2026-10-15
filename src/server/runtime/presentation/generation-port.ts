@@ -3,11 +3,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import type {
   ArtifactSnapshot,
   ExportResult,
+  PresentationDecisionAnswer,
   PresentationJob,
   PresentationJobInput,
   PresentationMessageInput,
   PresentationPlan,
   PresentationPort,
+  PresentationPresenceInput,
   RuntimeScope,
 } from '../../../../packages/runtime-contracts/src';
 import type { AtomicInvocation, AtomicRuntime } from '../atomic-runtime';
@@ -23,6 +25,10 @@ import {
   type CapabilityMemory,
 } from './capability-memory';
 import type { PresentationCapabilitySelector } from './capability-selection';
+import {
+  createPresentationDecision,
+  type PresentationCollaborationHook,
+} from './collaboration-plugin';
 import type { PresentationGenerationContextFactory } from './composition';
 import {
   contentInputFingerprint,
@@ -32,6 +38,16 @@ import {
   readVisualAssetBindings,
 } from './content-intent';
 import { assertPresentationPublishable, inspectPresentationContent } from './content-quality';
+import {
+  assertDeckVisualConsistency,
+  bindDeckVisualSystem,
+  createDeckVisualSystem,
+  deckBodyRegion,
+  deckPageRole,
+  readDeckVisualSystem,
+  renderDeckVisualFrame,
+} from './deck-visual-system';
+import type { PresentationExecutionLease } from './execution-lease';
 import type { PresentationJobRepository, StoredPresentationJob } from './file-storage';
 import type { PresentationGenerationCapability } from './generation-capability';
 import type { PresentationGenerationEventPublisherFactory } from './generation-handler';
@@ -54,7 +70,10 @@ import type {
   PresentationRevisionAssetPlanner,
   PresentationRevisionAssetResult,
 } from './revision-assets';
+import { presentationImageRefs } from './revision-assets';
 import { renderSemanticBlocks, semanticAuthoringSvg } from './semantic-blocks';
+import { recoverSemanticSlideLayout } from './semantic-layout-recovery';
+import { attachSourceDocumentImages } from './source-document-images';
 import { rebalanceMixedLessonStages, rebasePlanForLessonStages } from './stage-capacity';
 import { normalizePresentationSvg, normalizeRasterOpacity } from './svg-compatibility';
 import type {
@@ -96,6 +115,7 @@ export interface PresentationGenerationPortOptions {
   readonly capability: PresentationGenerationCapability;
   readonly capabilityMemory?: CapabilityMemory;
   readonly capabilitySelector?: PresentationCapabilitySelector;
+  readonly collaborationHook?: PresentationCollaborationHook;
   readonly contentCompiler?: PresentationContentCompiler;
   readonly contextFactory: PresentationGenerationContextFactory;
   readonly eventPublisherFactory?: PresentationGenerationEventPublisherFactory;
@@ -103,6 +123,7 @@ export interface PresentationGenerationPortOptions {
   readonly executionLimiter?: ExecutionLimiter;
   readonly idFactory?: () => string;
   readonly imageGenerationCapability?: ImageGenerationCapability;
+  readonly maxExecutionMs?: number;
   readonly now?: () => string;
   readonly prepareCapabilityLibrary?: (scope: RuntimeScope) => Promise<void>;
   readonly repository?: PresentationJobRepository;
@@ -114,9 +135,23 @@ export interface PresentationGenerationPortOptions {
 
 interface JobEntry extends StoredPresentationJob {
   controller: AbortController;
+  lease?: PresentationExecutionLease;
+  localTask?: boolean;
+  passive?: boolean;
   persistence: Promise<void>;
+  retryTimer?: ReturnType<typeof setTimeout>;
   task: Promise<void>;
 }
+
+// versionId is written atomically with the composed editable plan, before final
+// review/export. An interrupted export must not replay that already saved edit.
+const revisionIsComposed = (
+  entry: StoredPresentationJob,
+  message: NonNullable<PresentationJob['messages']>[number],
+) =>
+  Boolean(
+    entry.plan && message.versionId && entry.revisionCheckpoint?.requestId !== message.requestId,
+  );
 
 const clone = <T>(value: T): T => {
   if (Array.isArray(value)) return value.map((item) => clone(item)) as T;
@@ -254,7 +289,7 @@ const normalizeInput = (value: PresentationJobInput): PresentationJobInput | und
   };
 };
 
-const errorSnapshot = (error: unknown): PresentationJob['error'] => ({
+const errorSnapshot = (error: unknown): NonNullable<PresentationJob['error']> => ({
   code:
     error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
       ? error.code
@@ -304,6 +339,25 @@ const requiresAssetPreparation = (
       ] as const;
     }),
   );
+  const preparedSlots = input.options?.generatedImageSlots as
+    | {
+        slideId: string;
+        state: string;
+        assetRefs?: { ref: string }[];
+        visualBinding?: { visualId: string };
+      }[]
+    | undefined;
+  for (const slot of Array.isArray(preparedSlots) ? preparedSlots : []) {
+    if (
+      slot.state !== 'ready' ||
+      !slot.assetRefs?.some((asset) => asset.ref?.trim()) ||
+      !slot.visualBinding?.visualId
+    )
+      continue;
+    const ids = bound.get(slot.slideId) ?? new Set<string>();
+    ids.add(slot.visualBinding.visualId);
+    bound.set(slot.slideId, ids);
+  }
   return readContentIntents(input).some((page) =>
     (page.visuals ?? []).some(
       (visual) =>
@@ -316,7 +370,9 @@ const requiresAssetPreparation = (
 
 export class PresentationGenerationPort implements PresentationPort {
   private readonly jobs = new Map<string, JobEntry>();
+  private readonly presence = new Map<string, Map<string, { seenAt: number; active: boolean }>>();
   private readonly loading = new Map<string, Promise<JobEntry | undefined>>();
+  private readonly mutations = new Map<string, Promise<unknown>>();
   private disposed = false;
   private readonly now: () => string;
   private readonly idFactory: () => string;
@@ -370,6 +426,11 @@ export class PresentationGenerationPort implements PresentationPort {
   }
 
   private save(entry: JobEntry): Promise<void> {
+    if (entry.passive)
+      throw Object.assign(new Error('任务正在其他执行器中运行，请稍后继续'), {
+        code: 'PRESENTATION_CONFLICT',
+      });
+    entry.lease?.signal.throwIfAborted();
     const snapshot = clone({
       input: entry.input,
       job: entry.job,
@@ -386,7 +447,15 @@ export class PresentationGenerationPort implements PresentationPort {
   }
 
   private async entry(jobId: string): Promise<JobEntry | undefined> {
-    if (this.jobs.has(jobId)) return this.jobs.get(jobId);
+    const cached = this.jobs.get(jobId);
+    if (
+      cached &&
+      (!this.options.repository?.acquireLease ||
+        cached.localTask ||
+        cached.lease ||
+        (cached.job.state === 'queued' && cached.retryTimer))
+    )
+      return cached;
     const pending = this.loading.get(jobId);
     if (pending) return pending;
     const load = (async () => {
@@ -399,29 +468,273 @@ export class PresentationGenerationPort implements PresentationPort {
         persistence: Promise.resolve(),
       };
       if (entry.job.state === 'running' || entry.job.state === 'queued') {
-        entry.job.state = 'failed';
-        entry.job.error = {
-          code: 'PRESENTATION_INTERRUPTED',
-          message:
-            'Generation was interrupted. Your saved pages and instructions are available; retry to continue.',
-        };
-        for (const message of entry.job.messages ?? [])
-          if (message.status === 'applying') message.status = 'queued';
+        if (this.disposed) entry.passive = true;
+        else if (this.options.repository?.acquireLease) {
+          entry.lease =
+            (await this.options.repository.acquireLease(this.scope, jobId)) ?? undefined;
+          entry.passive = !entry.lease;
+          if (entry.lease) {
+            const fresh = await this.options.repository.getJob(this.scope, jobId);
+            if (fresh) Object.assign(entry, fresh);
+            if (entry.job.state !== 'running' && entry.job.state !== 'queued') {
+              await entry.lease.release();
+              entry.lease = undefined;
+              entry.passive = false;
+            } else {
+              entry.job.recovery = {
+                attempts: (entry.job.recovery?.attempts ?? 0) + 1,
+                resumedAt: this.now(),
+                completedSlides:
+                  entry.plan?.slides.length ??
+                  entry.draftCheckpoint?.slides.length ??
+                  entry.revisionCheckpoint?.completedSlideIds.length ??
+                  0,
+              };
+              for (const message of entry.job.messages ?? [])
+                if (message.status === 'applying' || message.status === 'queued')
+                  message.status = revisionIsComposed(entry, message) ? 'applying' : 'queued';
+              entry.job.state = 'queued';
+              entry.job.error = undefined;
+            }
+          }
+        } else {
+          entry.job.state = 'failed';
+          entry.job.error = {
+            code: 'PRESENTATION_INTERRUPTED',
+            message:
+              'Generation was interrupted. Your saved pages and instructions are available; retry to continue.',
+          };
+          for (const message of entry.job.messages ?? [])
+            if (message.status === 'applying' && !revisionIsComposed(entry, message))
+              message.status = 'queued';
+        }
+      }
+      if (entry.job.state === 'waiting_input') {
+        const last = entry.job.collaboration?.decisions.at(-1);
+        // A saved answer without a queued continuation must remain actionable after restart.
+        if (last?.status === 'answered') last.status = 'pending';
       }
       await this.restoreOwnedAssetReferences(entry);
       this.jobs.set(jobId, entry);
+      if (entry.lease) {
+        if ((entry.job.recovery?.attempts ?? 0) > 3) {
+          entry.job.state = 'waiting_input';
+          entry.job.collaboration ??= { mode: 'adaptive', automaticAttempts: 0, decisions: [] };
+          entry.job.collaboration.decisions.push(
+            createPresentationDecision('conflict', randomUUID(), this.now()),
+          );
+          await this.save(entry);
+          await entry.lease.release();
+          entry.lease = undefined;
+        } else {
+          await this.save(entry);
+          entry.localTask = true;
+          entry.task = this.run(jobId, entry.input, entry.controller);
+        }
+      }
       return entry;
     })().finally(() => this.loading.delete(jobId));
     this.loading.set(jobId, load);
     return load;
   }
 
+  private async mutate<T>(jobId: string, action: () => Promise<T>): Promise<T> {
+    const previous = this.mutations.get(jobId) ?? Promise.resolve();
+    const task = previous
+      .catch(() => undefined)
+      .then(async () => {
+        if (this.disposed)
+          throw Object.assign(new Error('Presentation service is restarting'), {
+            code: 'PROVIDER_UNAVAILABLE',
+          });
+        const entry = await this.entry(jobId);
+        if (!entry) return action();
+        if (entry.passive)
+          throw Object.assign(new Error('任务由其他执行器处理，请刷新当前进度后继续'), {
+            code: 'PRESENTATION_CONFLICT',
+          });
+        let acquired = false;
+        if (this.options.repository?.acquireLease && !entry.lease) {
+          const lease = await this.options.repository.acquireLease(this.scope, jobId);
+          if (!lease)
+            throw Object.assign(new Error('任务已在继续，请刷新当前进度'), {
+              code: 'PRESENTATION_CONFLICT',
+            });
+          entry.lease = lease;
+          acquired = true;
+          const stored = await this.options.repository.getJob(this.scope, jobId);
+          if (stored) Object.assign(entry, stored);
+        }
+        try {
+          return await action();
+        } finally {
+          if (acquired && !entry.localTask) {
+            await entry.persistence.catch(() => undefined);
+            await entry.lease?.release();
+            entry.lease = undefined;
+          }
+        }
+      });
+    this.mutations.set(jobId, task);
+    try {
+      return await task;
+    } finally {
+      if (this.mutations.get(jobId) === task) this.mutations.delete(jobId);
+    }
+  }
+
+  async updatePresence(jobId: string, input: PresentationPresenceInput): Promise<void> {
+    if (input?.mode) return this.mutate(jobId, () => this.updatePresenceOwned(jobId, input));
+    return this.updatePresenceOwned(jobId, input);
+  }
+  private async updatePresenceOwned(
+    jobId: string,
+    input: PresentationPresenceInput,
+  ): Promise<void> {
+    if (
+      !input ||
+      typeof input.tabId !== 'string' ||
+      !/^[\w-]{1,100}$/.test(input.tabId) ||
+      typeof input.visible !== 'boolean' ||
+      typeof input.focused !== 'boolean' ||
+      (input.mode !== undefined && !['adaptive', 'ask', 'auto'].includes(input.mode))
+    )
+      throw Object.assign(new Error('Invalid presentation presence'), {
+        code: 'PRESENTATION_INVALID',
+      });
+    const entry = await this.entry(jobId);
+    if (!entry)
+      throw Object.assign(new Error('Presentation job does not exist'), {
+        code: 'PRESENTATION_NOT_FOUND',
+      });
+    const now = Date.parse(this.now());
+    const tabs = this.presence.get(jobId) ?? new Map();
+    for (const [id, tab] of tabs) if (now - tab.seenAt > 45_000) tabs.delete(id);
+    if (tabs.size >= 16 && !tabs.has(input.tabId)) tabs.delete(tabs.keys().next().value!);
+    tabs.set(input.tabId, { seenAt: now, active: input.visible && input.focused });
+    this.presence.set(jobId, tabs);
+    if (entry.passive) {
+      if (input.mode)
+        throw Object.assign(new Error('任务由其他执行器处理，请稍后重试偏好设置'), {
+          code: 'PRESENTATION_CONFLICT',
+        });
+      return;
+    }
+    if (input.mode && input.mode !== entry.job.collaboration?.mode) {
+      entry.job.collaboration = {
+        automaticAttempts: 0,
+        decisions: [],
+        ...entry.job.collaboration,
+        mode: input.mode ?? entry.job.collaboration?.mode ?? 'adaptive',
+      };
+      entry.job.updatedAt = this.now();
+      await this.save(entry);
+    }
+  }
+
+  async answerDecision(jobId: string, input: PresentationDecisionAnswer): Promise<PresentationJob> {
+    return this.mutate(jobId, () => this.answerDecisionOwned(jobId, input));
+  }
+  private async answerDecisionOwned(
+    jobId: string,
+    input: PresentationDecisionAnswer,
+  ): Promise<PresentationJob> {
+    if (
+      !input ||
+      typeof input.decisionId !== 'string' ||
+      typeof input.requestId !== 'string' ||
+      !input.requestId.trim() ||
+      input.requestId.length > 100 ||
+      !['retry', 'revise', 'defer'].includes(input.action) ||
+      (input.content !== undefined &&
+        (typeof input.content !== 'string' || input.content.length > 3000)) ||
+      (input.action === 'revise' && !input.content?.trim())
+    )
+      throw Object.assign(new Error('请填写有效的决定或补充要求'), {
+        code: 'PRESENTATION_INVALID',
+      });
+    const entry = await this.entry(jobId);
+    if (entry?.passive)
+      throw Object.assign(new Error('任务正在其他执行器中运行，请刷新当前进度'), {
+        code: 'PRESENTATION_CONFLICT',
+      });
+    const collaboration = entry?.job.collaboration;
+    const decision = collaboration?.decisions.find((item) => item.id === input.decisionId);
+    if (!entry || !decision || !collaboration)
+      throw Object.assign(new Error('This decision no longer exists'), {
+        code: 'PRESENTATION_NOT_FOUND',
+      });
+    if (decision.answer?.requestId === input.requestId) {
+      if (
+        decision.answer.action !== input.action ||
+        decision.answer.content !== input.content?.trim()
+      )
+        throw Object.assign(new Error('A response id cannot be reused'), {
+          code: 'PRESENTATION_CONFLICT',
+        });
+      // Recover a crash between persisting the answer and scheduling its continuation.
+      if (entry.job.state !== 'waiting_input') return clone(entry.job);
+      if (input.action === 'revise')
+        return this.sendMessageOwned(jobId, {
+          content: input.content!.trim(),
+          requestId: `decision:${input.requestId}`,
+          target: { type: 'deck' },
+        });
+      return this.retryJobOwned(jobId);
+    }
+    if (entry.job.state !== 'waiting_input' || decision.status === 'answered')
+      throw Object.assign(new Error('问题已更新，请查看当前待决定事项'), {
+        code: 'PRESENTATION_CONFLICT',
+      });
+    if (input.action === 'defer') {
+      decision.status = 'deferred';
+      entry.job.updatedAt = this.now();
+      await this.save(entry);
+      await this.publishSnapshot(entry, PRESENTATION_JOB_EVENT_TYPES.progress);
+      return clone(entry.job);
+    }
+    decision.status = 'answered';
+    decision.answer = {
+      action: input.action,
+      content: input.content?.trim(),
+      requestId: input.requestId,
+      answeredAt: this.now(),
+    };
+    collaboration.automaticAttempts = 0;
+    await this.save(entry);
+    try {
+      if (input.action === 'revise')
+        return await this.sendMessageOwned(jobId, {
+          content: input.content!.trim(),
+          requestId: `decision:${input.requestId}`,
+          target: { type: 'deck' },
+        });
+      return await this.retryJobOwned(jobId);
+    } catch (error) {
+      if (entry.job.state === 'waiting_input') {
+        decision.status = 'pending';
+        await this.save(entry);
+      }
+      throw error;
+    }
+  }
+
   async sendMessage(jobId: string, input: PresentationMessageInput): Promise<PresentationJob> {
+    return this.mutate(jobId, () => this.sendMessageOwned(jobId, input));
+  }
+  private async sendMessageOwned(
+    jobId: string,
+    input: PresentationMessageInput,
+  ): Promise<PresentationJob> {
     if (this.disposed)
       throw Object.assign(new Error('Presentation provider is disposed'), {
         code: 'PROVIDER_UNAVAILABLE',
       });
     const entry = await this.entry(jobId);
+    if (entry?.passive)
+      throw Object.assign(new Error('任务正在其他执行器中运行，请刷新当前进度'), {
+        code: 'PRESENTATION_CONFLICT',
+      });
     if (!entry)
       throw Object.assign(new Error('Presentation job does not exist'), {
         code: 'PRESENTATION_NOT_FOUND',
@@ -519,6 +832,19 @@ export class PresentationGenerationPort implements PresentationPort {
       { ...clone(input), content: input.content.trim(), createdAt: this.now(), status: 'queued' },
     ];
     const active = entry.job.state === 'running' || entry.job.state === 'queued';
+    if (entry.job.state === 'waiting_input') {
+      if (entry.job.collaboration) entry.job.collaboration.automaticAttempts = 0;
+      for (const decision of entry.job.collaboration?.decisions ?? []) {
+        if (decision.status === 'answered') continue;
+        decision.status = 'answered';
+        decision.answer = {
+          action: 'revise',
+          content: input.content.trim(),
+          requestId: input.requestId,
+          answeredAt: this.now(),
+        };
+      }
+    }
     if (!active) {
       entry.controller = new AbortController();
       entry.job.state = 'queued';
@@ -712,16 +1038,29 @@ export class PresentationGenerationPort implements PresentationPort {
   }
 
   async cancelJob(jobId: string): Promise<PresentationJob> {
+    return this.mutate(jobId, () => this.cancelJobOwned(jobId));
+  }
+  private async cancelJobOwned(jobId: string): Promise<PresentationJob> {
     const entry = await this.entry(jobId);
+    if (entry?.passive)
+      throw Object.assign(new Error('任务正在其他执行器中运行，请稍后取消'), {
+        code: 'PRESENTATION_CONFLICT',
+      });
     if (!entry)
       throw Object.assign(new Error(`Presentation job does not exist: ${jobId}`), {
         code: 'PRESENTATION_NOT_FOUND',
       });
-    if (entry.job.state === 'queued' || entry.job.state === 'running') {
+    if (
+      entry.job.state === 'queued' ||
+      entry.job.state === 'running' ||
+      entry.job.state === 'waiting_input'
+    ) {
+      clearTimeout(entry.retryTimer);
       entry.controller.abort();
       entry.job = { ...entry.job, state: 'cancelled', updatedAt: this.now() };
       for (const message of entry.job.messages ?? [])
-        if (message.status === 'applying') message.status = 'queued';
+        if (message.status === 'applying' && !revisionIsComposed(entry, message))
+          message.status = 'queued';
       await this.save(entry);
       await this.publishSnapshot(entry, PRESENTATION_JOB_EVENT_TYPES.cancelled);
     }
@@ -729,7 +1068,14 @@ export class PresentationGenerationPort implements PresentationPort {
   }
 
   async deleteJob(jobId: string): Promise<void> {
+    return this.mutate(jobId, () => this.deleteJobOwned(jobId));
+  }
+  private async deleteJobOwned(jobId: string): Promise<void> {
     const entry = await this.entry(jobId);
+    if (entry?.passive)
+      throw Object.assign(new Error('任务正在其他执行器中运行，请稍后删除'), {
+        code: 'PRESENTATION_CONFLICT',
+      });
     if (!entry)
       throw Object.assign(new Error(`Presentation job does not exist: ${jobId}`), {
         code: 'PRESENTATION_NOT_FOUND',
@@ -740,6 +1086,7 @@ export class PresentationGenerationPort implements PresentationPort {
       });
 
     entry.controller.abort();
+    clearTimeout(entry.retryTimer);
     await entry.task.catch(() => undefined);
     await entry.persistence.catch(() => undefined);
     const ownedArtifacts = (await this.options.artifactStore.listByJob?.(this.scope, jobId)) ?? [];
@@ -750,16 +1097,29 @@ export class PresentationGenerationPort implements PresentationPort {
     );
     await this.options.repository.removeJob(this.scope, jobId);
     this.jobs.delete(jobId);
+    this.presence.delete(jobId);
     this.loading.delete(jobId);
   }
 
   async retryJob(jobId: string): Promise<PresentationJob> {
+    return this.mutate(jobId, () => this.retryJobOwned(jobId));
+  }
+  private async retryJobOwned(jobId: string): Promise<PresentationJob> {
     const entry = await this.entry(jobId);
     if (!entry)
       throw Object.assign(new Error(`Presentation job does not exist: ${jobId}`), {
         code: 'PRESENTATION_NOT_FOUND',
       });
     if (entry.job.state === 'running' || entry.job.state === 'queued') return clone(entry.job);
+    if (entry.job.collaboration) {
+      entry.job.collaboration.automaticAttempts = 0;
+      for (const decision of entry.job.collaboration.decisions) {
+        if (decision.status === 'answered') continue;
+        decision.status = 'answered';
+        decision.answer = { action: 'retry', requestId: randomUUID(), answeredAt: this.now() };
+      }
+    }
+    const reexportCompleted = entry.job.state === 'completed';
     entry.controller = new AbortController();
     entry.job.state = 'queued';
     await entry.task;
@@ -771,11 +1131,20 @@ export class PresentationGenerationPort implements PresentationPort {
     // backlog would apply stale requests before the latest visible task.
     // A checkpointed revision is the exception: later instructions that died
     // on transport before changing a page must not discard the pages already laid out.
-    const unfinishedEdit = selectResumeMessage(
-      entry.job.messages,
-      entry.revisionCheckpoint?.requestId,
-    );
+    const unfinishedEdit = reexportCompleted
+      ? undefined
+      : selectResumeMessage(
+          entry.job.messages?.filter((message) => !revisionIsComposed(entry, message)),
+          entry.revisionCheckpoint?.requestId,
+        );
     for (const message of entry.job.messages ?? []) {
+      if (
+        revisionIsComposed(entry, message) &&
+        (message.status === 'queued' || message.status === 'applying')
+      ) {
+        message.status = 'applying';
+        continue;
+      }
       if (message === unfinishedEdit) {
         message.status = 'queued';
         delete message.error;
@@ -975,22 +1344,68 @@ export class PresentationGenerationPort implements PresentationPort {
     const previous = input.options?.contentIntents as
       Awaited<ReturnType<PresentationContentCompiler['compile']>> | undefined;
     if (previous?.inputFingerprint === contentInputFingerprint(input)) return input;
-    const canCompile = (await this.options.atomicRuntime?.catalog())?.some(
-      (tool) => tool.name === 'presentation.content.compile',
-    );
-    const compiled = canCompile
-      ? await this.options.atomicRuntime!.invoke<
-          Awaited<ReturnType<PresentationContentCompiler['compile']>>
-        >('presentation.content.compile', { input }, { scope: this.scope, signal, jobId })
-      : await this.options.contentCompiler.compile(input, { scope: this.scope, signal });
     const revision = input.options?.contentRevision as
       { target?: PresentationMessageInput['target'] } | undefined;
     const target = revision?.target;
-    const slides = compiled.slides.map((slide, index) =>
-      target?.type === 'slide' && target.slideNumber !== index + 1
-        ? (previous?.slides[index] ?? slide)
-        : slide,
+    const outline = input.options?.outline;
+    const scoped =
+      target?.type === 'slide' &&
+      Array.isArray(outline) &&
+      previous?.slides.length === outline.length;
+    const compileInput: PresentationJobInput = scoped
+      ? {
+          ...input,
+          slideCount: 1,
+          options: {
+            ...input.options,
+            outline: [outline[target.slideNumber - 1]],
+            originalSlideNumbers: [target.slideNumber],
+            contentIntents: {
+              slides: [{ ...previous!.slides[target.slideNumber - 1], slideId: 'slide-1' }],
+            },
+            contentRevision: { ...revision, target: { type: 'slide', slideNumber: 1 } },
+            imageSlots: Array.isArray(input.options?.imageSlots)
+              ? input.options.imageSlots.flatMap((slot: any) =>
+                  slot.slideId === `slide-${target.slideNumber}`
+                    ? [{ ...slot, slideId: 'slide-1' }]
+                    : [],
+                )
+              : undefined,
+          },
+        }
+      : input;
+    const canCompile = (await this.options.atomicRuntime?.catalog())?.some(
+      (tool) => tool.name === 'presentation.content.compile',
     );
+    let compiled: Awaited<ReturnType<PresentationContentCompiler['compile']>>;
+    try {
+      compiled = canCompile
+        ? await this.options.atomicRuntime!.invoke<
+            Awaited<ReturnType<PresentationContentCompiler['compile']>>
+          >(
+            'presentation.content.compile',
+            { input: compileInput },
+            { scope: this.scope, signal, jobId },
+          )
+        : await this.options.contentCompiler.compile(compileInput, { scope: this.scope, signal });
+    } catch (error) {
+      if (signal.aborted || (error as { code?: string }).code) throw error;
+      throw Object.assign(
+        new Error('内容规划尚未通过校验，资料和已完成页面已保留', { cause: error }),
+        { code: 'PRESENTATION_VISUAL_PLAN_FAILED' },
+      );
+    }
+    const slides = scoped
+      ? previous!.slides.map((slide, index) =>
+          index + 1 === target!.slideNumber
+            ? { ...compiled.slides[0], slideId: `slide-${index + 1}` }
+            : slide,
+        )
+      : compiled.slides.map((slide, index) =>
+          target?.type === 'slide' && target.slideNumber !== index + 1
+            ? (previous?.slides[index] ?? slide)
+            : slide,
+        );
     const normalized = { ...input, slideCount: slides.length };
     return {
       ...normalized,
@@ -1200,12 +1615,21 @@ export class PresentationGenerationPort implements PresentationPort {
       for (const [slideId, issues] of groups) {
         const slide = repaired.slides.find((item) => item.slideId === slideId);
         if (!slide) continue;
+        const editableArtwork = readVisualAssetBindings(slide.metadata?.visualAssets).filter(
+          (asset) => asset.kind !== 'source-figure',
+        );
         const repairArtwork = issues.some(
           (issue) =>
-            ['artwork-style', 'cutout'].includes(issue.category) ||
+            (['artwork-style', 'cutout'].includes(issue.category) &&
+              editableArtwork.some(
+                (asset) => !issue.visualId || asset.visualId === issue.visualId,
+              )) ||
             (issue.category === 'legibility' &&
               /图片|图像|插图|素材|image|raster/iu.test(`${issue.evidence} ${issue.instruction}`) &&
-              readVisualAssetBindings(slide.metadata?.visualAssets).some(
+              !/放大|扩大|加宽|提高.{0,8}(?:高度|宽度|占比)|增大|enlarge|viewport|display size|placement/iu.test(
+                issue.instruction,
+              ) &&
+              editableArtwork.some(
                 (asset) => !issue.visualId || asset.visualId === issue.visualId,
               )) ||
             ((issue.category === 'scientific-semantics' ||
@@ -1537,7 +1961,8 @@ export class PresentationGenerationPort implements PresentationPort {
   async listJobs() {
     const persisted = (await this.options.repository?.listJobs?.(this.scope)) ?? [];
     const jobs = new Map(persisted.map((job) => [job.jobId, job]));
-    for (const entry of this.jobs.values()) jobs.set(entry.job.jobId, entry.job);
+    for (const entry of this.jobs.values())
+      if (!entry.passive) jobs.set(entry.job.jobId, entry.job);
     return {
       jobs: [...jobs.values()]
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
@@ -1618,7 +2043,11 @@ export class PresentationGenerationPort implements PresentationPort {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
-    for (const entry of this.jobs.values()) entry.controller.abort();
+    for (const entry of this.jobs.values()) {
+      clearTimeout(entry.retryTimer);
+      entry.controller.abort();
+    }
+    this.presence.clear();
     await Promise.allSettled([...this.jobs.values()].map(({ task }) => task));
   }
 
@@ -1627,6 +2056,8 @@ export class PresentationGenerationPort implements PresentationPort {
     input: PresentationJobInput,
     controller: AbortController,
   ): Promise<void> {
+    const scheduledEntry = this.jobs.get(jobId);
+    if (scheduledEntry) scheduledEntry.localTask = true;
     const update = (patch: Partial<PresentationJob>): void => {
       const entry = this.jobs.get(jobId);
       if (!entry) return;
@@ -1638,12 +2069,35 @@ export class PresentationGenerationPort implements PresentationPort {
     await Promise.resolve();
     if (controller.signal.aborted) {
       update({ state: 'cancelled' });
+      if (scheduledEntry) scheduledEntry.localTask = false;
       return;
     }
     const entry = this.jobs.get(jobId)!;
     let release: (() => void) | undefined;
     let releaseCapacity: (() => void) | undefined;
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    const deadline = setTimeout(
+      () =>
+        controller.abort(
+          Object.assign(new Error('本轮执行超时，进度已保留，请决定如何继续'), {
+            code: 'PRESENTATION_TASK_TIMEOUT',
+          }),
+        ),
+      this.options.maxExecutionMs ?? 45 * 60_000,
+    );
+    const leaseLost = () => controller.abort(entry.lease?.signal.reason);
     try {
+      if (this.options.repository?.acquireLease && !entry.lease) {
+        entry.lease =
+          (await this.options.repository.acquireLease(this.scope, jobId, controller.signal)) ??
+          undefined;
+        if (!entry.lease) {
+          entry.passive = true;
+          return;
+        }
+      }
+      entry.lease?.signal.addEventListener('abort', leaseLost, { once: true });
+      entry.passive = false;
       releaseCapacity = await this.options.executionLimiter?.acquire(controller.signal);
       if (controller.signal.aborted) {
         update({ state: 'cancelled' });
@@ -1651,6 +2105,19 @@ export class PresentationGenerationPort implements PresentationPort {
         return;
       }
       update({ state: 'running' });
+      heartbeat = setInterval(() => {
+        if (controller.signal.aborted) return;
+        entry.job.heartbeatAt = this.now();
+        void this.save(entry)
+          .then(() => this.publishSnapshot(entry, PRESENTATION_JOB_EVENT_TYPES.progress))
+          .catch(() =>
+            controller.abort(
+              Object.assign(new Error('Task checkpoint storage is unavailable'), {
+                code: 'PRESENTATION_PERSIST_FAILED',
+              }),
+            ),
+          );
+      }, 15_000);
       release = await this.options.atomicRuntime?.acquire('presentation');
       const context = this.options.contextFactory(jobId);
       const publisher = this.options.eventPublisherFactory
@@ -1659,13 +2126,67 @@ export class PresentationGenerationPort implements PresentationPort {
       try {
         await this.save(entry);
         publisher?.publish({
-          data: { job: clone(entry.job) },
+          data: {
+            job: clone(entry.job),
+            ...(entry.job.recovery
+              ? {
+                  activity: `服务已恢复，保留 ${entry.job.recovery.completedSlides} 页检查点并继续制作`,
+                  phase: 'recovery',
+                }
+              : {}),
+          },
           idempotencyKey: `state:running:${entry.job.updatedAt}`,
           jobId,
           scope: this.scope,
           type: PRESENTATION_JOB_EVENT_TYPES.progress,
         });
         let generationInput = clone(input);
+        // An edit received while the initial deck is incomplete should shape that
+        // first render, rather than forcing a second complete 18-page pass afterwards.
+        const initialInstruction = !entry.plan
+          ? selectResumeMessage(entry.job.messages, entry.revisionCheckpoint?.requestId)
+          : undefined;
+        const initialInstructionApplied =
+          initialInstruction &&
+          !initialInstruction.patch &&
+          !initialInstruction.annotation &&
+          !initialInstruction.template
+            ? initialInstruction
+            : undefined;
+        if (initialInstructionApplied) {
+          generationInput = applyTeacherLessonInstruction(
+            generationInput,
+            initialInstructionApplied,
+          );
+          generationInput = {
+            ...generationInput,
+            options: {
+              ...generationInput.options,
+              contentRevision: {
+                content: initialInstructionApplied.content,
+                requestId: initialInstructionApplied.requestId,
+                target: initialInstructionApplied.target,
+              },
+            },
+          };
+          initialInstructionApplied.status = 'applying';
+          entry.input = clone(generationInput);
+          await this.save(entry);
+        }
+        // Keep an incomplete draft's fingerprint stable. Add source visuals on
+        // initial creation or a later revision of the completed plan.
+        if (!entry.draftCheckpoint || entry.plan) {
+          const sourceInput = generationInput;
+          generationInput = await attachSourceDocumentImages(generationInput, {
+            store: this.options.artifactStore,
+            scope: this.scope,
+            signal: controller.signal,
+          });
+          if (generationInput !== sourceInput) {
+            entry.input = clone(generationInput);
+            await this.save(entry);
+          }
+        }
         if (!entry.plan && !entry.draftCheckpoint)
           await this.options.prepareCapabilityLibrary?.(this.scope);
         if (
@@ -1701,10 +2222,21 @@ export class PresentationGenerationPort implements PresentationPort {
           const capsules = requestedIds
             ? []
             : this.options.capabilitySelector && this.options.capabilityMemory.candidates
-              ? [...new Map((await Promise.all([
-                  this.options.capabilityMemory.candidates(this.scope, String(input.options?.style ?? '')),
-                  this.options.capabilityMemory.candidates(this.scope, query),
-                ])).flat().map((capsule) => [capsule.id, capsule])).values()]
+              ? [
+                  ...new Map(
+                    (
+                      await Promise.all([
+                        this.options.capabilityMemory.candidates(
+                          this.scope,
+                          String(input.options?.style ?? ''),
+                        ),
+                        this.options.capabilityMemory.candidates(this.scope, query),
+                      ])
+                    )
+                      .flat()
+                      .map((capsule) => [capsule.id, capsule]),
+                  ).values(),
+                ]
               : await this.options.capabilityMemory.search(this.scope, query, 6, true);
           const selectedIds =
             (requestedIds as string[] | undefined) ??
@@ -1738,7 +2270,7 @@ export class PresentationGenerationPort implements PresentationPort {
         // These Cordis capabilities consume the same confirmed input but do not
         // depend on one another. Join before the storyboard, which needs both.
         const [compiledInput, loadedTemplates] = await Promise.all([
-          this.options.contentCompiler
+          this.options.contentCompiler && !entry.plan
             ? this.ensureContentIntents(uncompiledInput, jobId, controller.signal)
             : Promise.resolve(uncompiledInput),
           (async () => {
@@ -1828,6 +2360,10 @@ export class PresentationGenerationPort implements PresentationPort {
               templateStyleVisual: composedTemplate?.styleVisual ?? loadedTemplates[0]?.visual,
             },
           };
+          generationInput = bindDeckVisualSystem(
+            generationInput,
+            createDeckVisualSystem(generationInput, template),
+          );
           generationInput = await this.ensureVisualStoryboard(
             generationInput,
             template,
@@ -1849,6 +2385,11 @@ export class PresentationGenerationPort implements PresentationPort {
           entry.input = clone(generationInput);
           await this.save(entry);
         }
+        generationInput = bindDeckVisualSystem(
+          generationInput,
+          createDeckVisualSystem(generationInput, template),
+        );
+        const deckVisualSystem = readDeckVisualSystem(generationInput);
         // Compiled content changes invalidate prepared art even without a template.
         if (
           !(entry.plan && entry.initialAssetsComplete) &&
@@ -1860,6 +2401,18 @@ export class PresentationGenerationPort implements PresentationPort {
           delete preparedAssets.initial;
           entry.preparedAssets = preparedAssets;
           entry.initialAssetsComplete = false;
+        }
+        // Restore completed asset bindings before checking coverage. The original job input
+        // may predate asset preparation even though its checkpoint is already complete.
+        if (
+          !entry.plan &&
+          entry.initialAssetsComplete &&
+          preparedAssetsMatchLearnedTemplate(entry.preparedAssets?.initial, generationInput)
+        ) {
+          generationInput = bindDeckVisualSystem(
+            clone(entry.preparedAssets.initial.input),
+            deckVisualSystem,
+          );
         }
         // A resume can inherit compiled intents whose required raster slot never received an
         // asset (a page split or a compile after the initial asset pass). Re-run the assets
@@ -2043,9 +2596,11 @@ export class PresentationGenerationPort implements PresentationPort {
                 progressPublisher,
               ));
             entry.preparedAssets = { ...entry.preparedAssets, initial: prepared };
-            generationInput = prepared.input;
+            generationInput = bindDeckVisualSystem(prepared.input, deckVisualSystem);
+            entry.preparedAssets.initial = { ...prepared, input: clone(generationInput) };
             imageArtifactIds.push(...prepared.assetArtifactIds);
             entry.initialAssetsComplete = true;
+            entry.input = clone(generationInput);
             await this.save(entry);
           }
           // A resumed job may have finished asset preparation but failed before
@@ -2057,7 +2612,10 @@ export class PresentationGenerationPort implements PresentationPort {
             entry.preparedAssets?.initial &&
             preparedAssetsMatchLearnedTemplate(entry.preparedAssets.initial, generationInput)
           ) {
-            generationInput = clone(entry.preparedAssets.initial.input);
+            generationInput = bindDeckVisualSystem(
+              clone(entry.preparedAssets.initial.input),
+              deckVisualSystem,
+            );
           }
           const initialAssetPlanning =
             !entry.plan?.designSpec?.templateVisualReview &&
@@ -2369,12 +2927,72 @@ export class PresentationGenerationPort implements PresentationPort {
                     plan.slides.map(async (slide) => {
                       const blocks = slide.metadata?.contentBlocks;
                       if (!Array.isArray(blocks) || !blocks.length) return slide;
-                      const rendered = await renderSemanticBlocks(
-                        semanticAuthoringSvg(slide.svg, blocks),
-                        blocks,
-                      );
-                      return { ...slide, svg: rendered.svg };
+                      try {
+                        const rendered = await renderSemanticBlocks(
+                          semanticAuthoringSvg(slide.svg, blocks),
+                          blocks,
+                        );
+                        return { ...slide, svg: rendered.svg };
+                      } catch (error) {
+                        if (!/Cannot recover editable content anchor/u.test(String(error)))
+                          throw error;
+                        const intent = readContentIntents(generationInput).find(
+                          (item) => item.slideId === slide.slideId,
+                        );
+                        const system = readDeckVisualSystem(generationInput);
+                        if (!intent || !system) throw error;
+                        const role = deckPageRole(generationInput, slide.slideId, slide.order);
+                        const recovered = await recoverSemanticSlideLayout({
+                          aspectRatio: plan.aspectRatio,
+                          intent,
+                          rawBlocks: blocks,
+                          title: String(slide.metadata?.title ?? ''),
+                          deckBody: deckBodyRegion(system, role),
+                          visibleContent: Array.isArray(slide.metadata?.outline)
+                            ? (slide.metadata.outline as string[])
+                            : [],
+                          imageRefs: presentationImageRefs(slide.svg),
+                        });
+                        return {
+                          ...slide,
+                          svg: renderDeckVisualFrame(recovered.svg, system, {
+                            title: String(slide.metadata?.title ?? ''),
+                            role,
+                            order: slide.order,
+                            total: plan.slides.length,
+                          }),
+                          metadata: {
+                            ...slide.metadata,
+                            contentBlocks: recovered.blocks,
+                            layoutRecovered: true,
+                          },
+                          notes: [
+                            slide.notes,
+                            'overflowNotes' in recovered ? recovered.overflowNotes : undefined,
+                          ]
+                            .filter(Boolean)
+                            .join('\n'),
+                        };
+                      }
                     }),
+                  ),
+                };
+              const currentMaster = readDeckVisualSystem(generationInput);
+              if (currentMaster)
+                plan = {
+                  ...plan,
+                  slides: plan.slides.map((slide) =>
+                    slide.metadata?.deckVisualSystemId
+                      ? {
+                          ...slide,
+                          svg: renderDeckVisualFrame(slide.svg, currentMaster, {
+                            title: String(slide.metadata?.title ?? ''),
+                            role: deckPageRole(generationInput, slide.slideId, slide.order),
+                            order: slide.order,
+                            total: plan.slides.length,
+                          }),
+                        }
+                      : slide,
                   ),
                 };
               plan = bindLessonPlan(plan, generationInput);
@@ -2413,6 +3031,8 @@ export class PresentationGenerationPort implements PresentationPort {
                 if (shown && shown.svg !== slide.svg) await publishSlideDraft(slide);
               }
               assertPresentationPublishable(plan);
+              if (plan.designSpec?.deckVisualSystem && deckVisualSystem)
+                assertDeckVisualConsistency(plan, deckVisualSystem);
               return await this.embedOwnedAssets(plan);
             },
             plannerContext: {
@@ -2520,6 +3140,10 @@ export class PresentationGenerationPort implements PresentationPort {
             };
           }
         }
+        if (entry.job.collaboration) {
+          entry.job.collaboration.automaticAttempts = 0;
+          delete entry.job.collaboration.lastErrorCode;
+        }
         update({ state: 'completed' });
         await this.save(entry);
         await this.publishSnapshot(entry, PRESENTATION_JOB_EVENT_TYPES.completed);
@@ -2527,6 +3151,82 @@ export class PresentationGenerationPort implements PresentationPort {
         publisher?.dispose();
       }
     } catch (error) {
+      if (entry.lease?.signal.aborted) return;
+      if (controller.signal.reason?.code === 'PRESENTATION_TASK_TIMEOUT') {
+        entry.job.state = 'waiting_input';
+        entry.job.error = undefined;
+        entry.job.collaboration ??= { mode: 'adaptive', automaticAttempts: 0, decisions: [] };
+        entry.job.collaboration.lastErrorCode = 'PRESENTATION_TASK_TIMEOUT';
+        entry.job.collaboration.decisions = [
+          ...entry.job.collaboration.decisions.slice(-19),
+          createPresentationDecision('provider', randomUUID(), this.now()),
+        ];
+        for (const message of entry.job.messages ?? [])
+          if (message.status === 'applying' && !revisionIsComposed(entry, message))
+            message.status = 'queued';
+        await this.save(entry);
+        await this.publishSnapshot(entry, PRESENTATION_JOB_EVENT_TYPES.progress);
+        return;
+      }
+      if (this.disposed) {
+        entry.job = { ...entry.job, state: 'queued', error: undefined, updatedAt: this.now() };
+        for (const message of entry.job.messages ?? [])
+          if (message.status === 'applying' && !revisionIsComposed(entry, message))
+            message.status = 'queued';
+        await this.save(entry);
+        return;
+      }
+      if (!controller.signal.aborted && this.options.collaborationHook) {
+        const collaboration = entry.job.collaboration ?? {
+          mode: 'adaptive' as const,
+          automaticAttempts: 0,
+          decisions: [],
+        };
+        const now = Date.parse(this.now());
+        const foreground = [...(this.presence.get(jobId)?.values() ?? [])].some(
+          (tab) => tab.active && now - tab.seenAt < 45_000,
+        );
+        const resolution = await this.options
+          .collaborationHook(
+            {
+              code: errorSnapshot(error).code,
+              mode: collaboration.mode,
+              foreground,
+              automaticAttempts: collaboration.automaticAttempts,
+            },
+            { scope: this.scope, jobId },
+          )
+          .catch(() => undefined);
+        if (resolution && resolution.action !== 'fail' && !controller.signal.aborted) {
+          collaboration.lastErrorCode = errorSnapshot(error).code;
+          entry.job.collaboration = collaboration;
+          for (const message of entry.job.messages ?? [])
+            if (message.status === 'applying' && !revisionIsComposed(entry, message))
+              message.status = 'queued';
+          if (resolution.action === 'ask') {
+            collaboration.decisions = [
+              ...collaboration.decisions.slice(-19),
+              createPresentationDecision(resolution.category, randomUUID(), this.now()),
+            ];
+            update({ state: 'waiting_input', error: undefined });
+          } else {
+            collaboration.automaticAttempts++;
+            update({ state: 'queued', error: undefined });
+          }
+          await this.save(entry);
+          await this.publishSnapshot(entry, PRESENTATION_JOB_EVENT_TYPES.progress);
+          if (resolution.action === 'retry') {
+            entry.retryTimer = setTimeout(() => {
+              entry.retryTimer = undefined;
+              if (this.disposed || entry.controller.signal.aborted || entry.job.state !== 'queued')
+                return;
+              entry.controller = new AbortController();
+              entry.task = this.run(jobId, entry.input, entry.controller);
+            }, 1500 * collaboration.automaticAttempts);
+          }
+          return;
+        }
+      }
       if (this.options.capabilityMemory && entry.plan && !controller.signal.aborted) {
         const capsuleIds = entry.plan.designSpec?.learnedCapabilityIds;
         if (Array.isArray(capsuleIds))
@@ -2540,7 +3240,7 @@ export class PresentationGenerationPort implements PresentationPort {
             .catch(() => undefined);
       }
       for (const message of entry.job.messages ?? []) {
-        if (message.status === 'applying') {
+        if (message.status === 'applying' && !revisionIsComposed(entry, message)) {
           message.status = 'failed';
           message.error = error instanceof Error ? error.message : 'Revision failed';
         }
@@ -2557,8 +3257,15 @@ export class PresentationGenerationPort implements PresentationPort {
           : PRESENTATION_JOB_EVENT_TYPES.failed,
       ).catch(() => undefined);
     } finally {
+      clearTimeout(deadline);
+      clearInterval(heartbeat);
       release?.();
       releaseCapacity?.();
+      entry.lease?.signal.removeEventListener('abort', leaseLost);
+      await entry.persistence.catch(() => undefined);
+      await entry.lease?.release();
+      entry.lease = undefined;
+      entry.localTask = false;
     }
   }
 }

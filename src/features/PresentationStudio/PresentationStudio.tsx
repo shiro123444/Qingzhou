@@ -25,11 +25,13 @@ import {
 import AnnotationBar from './AnnotationBar';
 import ArtifactPanel from './ArtifactPanel';
 import AssetSlotPanel from './AssetSlotPanel';
+import CollaborationPanel from './CollaborationPanel';
 import CompletedWorkspace from './CompletedWorkspace';
 import TemplateLibraryButton from './CompletedWorkspace/TemplateLibraryButton';
 import { ConversationPanel } from './ConversationPanel';
 import { defaultPresentationDemoClient } from './demo/presentationDemoClient';
 import type { UseJobPollingOptions } from './hooks/useJobPolling';
+import { usePresentationPresence } from './hooks/usePresentationPresence';
 import { usePresentationStudio } from './hooks/usePresentationStudio';
 import PresentationComposer from './PresentationComposer';
 import PresentationGenerationWorkspace from './PresentationGenerationWorkspace';
@@ -51,8 +53,10 @@ const updatePresentationLocation = (jobId: string | null) => {
   if (typeof window === 'undefined') return;
   try {
     const url = new URL(window.location.href);
-    if (jobId) url.searchParams.set('jobId', jobId);
-    else url.searchParams.delete('jobId');
+    if (jobId) {
+      url.searchParams.set('jobId', jobId);
+      url.searchParams.delete('planningThreadId');
+    } else url.searchParams.delete('jobId');
     window.history.replaceState(null, '', url.toString());
   } catch {
     // Browser history can be unavailable in embedded or test environments.
@@ -156,6 +160,7 @@ export const PresentationStudio = memo<PresentationStudioProps>(
     );
     const generationProgressByJob = store((s) => s.generationProgressByJob);
     const selectedJob = store((s) => (s.selectedJobId ? s.jobs[s.selectedJobId] : undefined));
+    const presenceTabId = usePresentationPresence(store, selectedJob?.jobId);
     const artifacts = store((s) => s.artifacts);
     const selectedArtifactId = store((s) => s.selectedArtifactId);
     const exporting = store((s) => s.exporting);
@@ -409,6 +414,10 @@ export const PresentationStudio = memo<PresentationStudioProps>(
       ((jobState === 'completed' && selectedReady) ||
         ((jobState === 'failed' || jobState === 'cancelled') && hasReadyDeck));
     const handleNewPresentation = () => {
+      localStorage.removeItem('qingzhou:presentation:planning:active');
+      const location = new URL(window.location.href);
+      location.searchParams.delete('planningThreadId');
+      window.history.replaceState(null, '', location);
       selectJob(null);
       setShowQuickComposer(false);
       setSelectedTemplate(null);
@@ -692,6 +701,14 @@ export const PresentationStudio = memo<PresentationStudioProps>(
           ) : null}
         </div>
 
+        {selectedJob && (
+          <CollaborationPanel
+            job={selectedJob}
+            key={selectedJob.jobId}
+            store={store}
+            tabId={presenceTabId}
+          />
+        )}
         <div className={styles.conversationLayout}>
           <div className={`${styles.conversationMain} ${styles.conversationMainFill}`}>
             {emptyState ? (

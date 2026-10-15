@@ -37,6 +37,8 @@ export type {
 } from './factory';
 
 export type PresentationRouteOperation =
+  | 'presence'
+  | 'decision'
   | 'message'
   | 'templates'
   | 'deleteTemplate'
@@ -213,6 +215,8 @@ export const matchPresentationRoute = (request: Request): PresentationRouteMatch
     return { operation: 'deleteJob', id: segments[1] };
   }
   if (segments.length === 3 && segments[0] === 'jobs' && method === 'POST') {
+    if (segments[2] === 'presence') return { operation: 'presence', id: segments[1] };
+    if (segments[2] === 'decisions') return { operation: 'decision', id: segments[1] };
     if (segments[2] === 'cancel') return { operation: 'cancel', id: segments[1] };
     if (segments[2] === 'retry') return { operation: 'retry', id: segments[1] };
     if (segments[2] === 'template') return { operation: 'applyTemplate', id: segments[1] };
@@ -427,6 +431,31 @@ export const handlePresentationRequest = async (
       const job = await port.getJob(id);
       if (!job) throw notFound('job', id);
       return successResponse(job);
+    }
+    if (match.operation === 'presence' || match.operation === 'decision') {
+      const extended = port as unknown as PresentationGenerationPort;
+      if (
+        typeof extended.updatePresence !== 'function' ||
+        typeof extended.answerDecision !== 'function'
+      )
+        throw new PresentationRequestError(
+          'PROVIDER_UNAVAILABLE',
+          'Collaboration is not available',
+        );
+      const body = await readJsonObject(request);
+      if (match.operation === 'presence') {
+        await extended.updatePresence(
+          id,
+          body as unknown as Parameters<typeof extended.updatePresence>[1],
+        );
+        return successResponse({ received: true });
+      }
+      return successResponse(
+        await extended.answerDecision(
+          id,
+          body as unknown as Parameters<typeof extended.answerDecision>[1],
+        ),
+      );
     }
     if (match.operation === 'deleteJob') {
       const deleting = port as typeof port & { deleteJob?: (jobId: string) => Promise<void> };

@@ -1,4 +1,27 @@
 export default {
+  'presentationCollaboration.policy.ask':
+    'Ask before further recovery, whether you are here or away. Your work stays saved until you decide. Quality checks stay in force.',
+  'presentationCollaboration.policy.auto':
+    'Try up to two automatic recoveries, even while you are here. Then keep a question for you. Missing facts, version conflicts and missing provider configuration need your decision; quality checks stay in force.',
+  'presentationCollaboration.title': 'Collaboration',
+  'presentationCollaboration.pending': 'Your decision needed',
+  'presentationCollaboration.preference': 'When a step needs help',
+  'presentationCollaboration.mode.adaptive': 'Ask when I am here',
+  'presentationCollaboration.mode.ask': 'Always ask first',
+  'presentationCollaboration.mode.auto': 'Try automatic recovery first',
+  'presentationCollaboration.policy.adaptive':
+    'When this work is visible and focused, ask for your direction. In the background, try up to two recoveries, then keep a question here. Missing facts and version conflicts always need your decision. Quality checks stay in force.',
+  'presentationCollaboration.noQuestion': 'No decision needed right now',
+  'presentationCollaboration.noQuestionDetail':
+    'You can continue reviewing the slides. Questions and your decisions stay with this work.',
+  'presentationCollaboration.deferred':
+    'Saved for later. Work resumes only after your next decision.',
+  'presentationCollaboration.input':
+    'Describe the style, content or layout you want to keep or change',
+  'presentationCollaboration.history': 'Previous decisions ({{count}})',
+  'presentationCollaboration.retried': 'Continue repairing with the existing materials and outline',
+  'presentationCollaboration.waiting':
+    'Progress saved. Open “Your decision needed” above to continue.',
   'presentationTeaching.selectionChanged':
     'Teaching memories changed. Continue planning and confirm the updated lesson.',
   'presentationTeaching.search': 'Find a teaching method, condition or course',
@@ -122,6 +145,11 @@ export default {
   'presentationLesson.failed': 'Teaching plan could not be generated. Your draft is retained.',
   'presentationRecovery.paused': 'Creation paused',
   'presentationRecovery.interrupted': 'Creation was interrupted',
+  'presentationRecovery.imageUnavailable':
+    'The image service is unavailable. Visual asset generation could not finish. Try continuing after the service recovers. (IMAGE_UNAVAILABLE)',
+  'presentationRecovery.reason': 'This step failed: {{code}}',
+  'presentationRecovery.styleConflict':
+    'The template combination selected conflicting primary styles. Your creative progress is saved.',
   'presentationRecovery.preserved':
     'Your request and completed steps are saved. Continue from here, or refine your request below.',
   'presentationRecovery.resume': 'Continue creating',

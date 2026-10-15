@@ -516,7 +516,11 @@ describe('createProductionPresentationGenerationComposition (R2-A pipeline)', ()
         {
           message: {
             content: JSON.stringify(
-              request.messages[0].content.startsWith('你是演示内容编译器')
+              request.messages.some(
+                (message: any) =>
+                  typeof message.content === 'string' &&
+                  message.content.includes('你是演示内容编译器'),
+              )
                 ? {
                     slides: [1, 2].map((index) => ({
                       slideId: `slide-${index}`,
@@ -537,7 +541,10 @@ describe('createProductionPresentationGenerationComposition (R2-A pipeline)', ()
                           : [],
                     })),
                   }
-                : request.messages[0].content.includes('视觉总监')
+                : request.messages.some(
+                      (message: any) =>
+                        typeof message.content === 'string' && message.content.includes('视觉总监'),
+                    )
                   ? { schemaVersion: 1, passed: true, issues: [], summary: '逐页审查通过' }
                   : {
                       aspectRatio: '16:9',
@@ -601,7 +608,7 @@ describe('createProductionPresentationGenerationComposition (R2-A pipeline)', ()
     expect(imageCap.generate).not.toHaveBeenCalled();
     expect(
       (await result.composition.atomicRuntime!.snapshot(baseScope())).plugins.map(({ id }) => id),
-    ).toEqual(['teaching', 'presentation', 'assets', 'skills']);
+    ).toEqual(['presentation-collaboration', 'teaching', 'presentation', 'assets', 'skills']);
     await result.composition.dispose();
   });
 
@@ -618,7 +625,7 @@ describe('createProductionPresentationGenerationComposition (R2-A pipeline)', ()
     expect(vi.mocked(contentIntent.createPresentationContentCompiler)).toHaveBeenCalledWith(
       expect.anything(),
       undefined,
-      { maxRasterVisuals: 3 },
+      { maxRasterVisuals: 3, imageGenerationAvailable: true },
     );
 
     vi.mocked(contentIntent.createPresentationContentCompiler).mockClear();
@@ -630,12 +637,13 @@ describe('createProductionPresentationGenerationComposition (R2-A pipeline)', ()
     expect(vi.mocked(contentIntent.createPresentationContentCompiler)).toHaveBeenCalledWith(
       expect.anything(),
       undefined,
-      {},
+      { imageGenerationAvailable: true },
     );
   });
 
   it('runs complete planner -> image provider -> worker -> artifact pipeline end-to-end', async () => {
     const chatPort = makeMockChatPort();
+    const visionChatPort = makeMockChatPort();
     const imageCap = makeMockImageCapability();
     const scope = baseScope({ userId: 'u-gen', sessionId: 's-gen' });
     const artifactStore = new InMemoryPresentationArtifactStore();
@@ -680,6 +688,7 @@ describe('createProductionPresentationGenerationComposition (R2-A pipeline)', ()
       env: validPipelineEnv,
       imageGenerationCapability: imageCap as any,
       multimodalChatPort: chatPort as any,
+      visionChatPort: visionChatPort as any,
       worker: mockWorker,
     });
 
@@ -725,6 +734,17 @@ describe('createProductionPresentationGenerationComposition (R2-A pipeline)', ()
 
     // Check GLM chatPort was called to plan the presentation
     expect(chatPort.chat).toHaveBeenCalled();
+    expect(visionChatPort.chat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: expect.arrayContaining([
+          expect.objectContaining({
+            role: 'system',
+            content: expect.stringContaining('presentation designer'),
+          }),
+        ]),
+      }),
+      expect.anything(),
+    );
 
     // Check worker executed and produced artifacts
     expect(mockWorker.run).toHaveBeenCalled();
@@ -751,7 +771,7 @@ describe('createProductionPresentationGenerationComposition (R2-A pipeline)', ()
     await composition.dispose();
   });
 
-  it('fails with PROVIDER_UNAVAILABLE when image slots are requested but image capability is missing', async () => {
+  it('keeps a durable provider question when image slots need an unconfigured capability', async () => {
     const chatPort = makeMockChatPort();
     const { composition, readiness } = createProductionPresentationGenerationComposition({
       env: validPipelineEnv,
@@ -770,10 +790,13 @@ describe('createProductionPresentationGenerationComposition (R2-A pipeline)', ()
     });
 
     await new Promise((resolve) => setTimeout(resolve, 50));
-    const failedJob = await port.getJob(job.jobId);
-    expect(failedJob).toMatchObject({
-      error: expect.objectContaining({ code: 'PROVIDER_UNAVAILABLE' }),
-      state: 'failed',
+    const waitingJob = await port.getJob(job.jobId);
+    expect(waitingJob).toMatchObject({
+      collaboration: {
+        automaticAttempts: 0,
+        decisions: [expect.objectContaining({ category: 'provider', status: 'pending' })],
+      },
+      state: 'waiting_input',
     });
 
     await composition.dispose();

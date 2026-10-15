@@ -38,6 +38,16 @@ async function fixture(): Promise<PresentationSlidePlan> {
 }
 
 describe('visual representation ownership', () => {
+  it('detects translated multiline card labels over a native diagram', async () => {
+    const slide = await fixture();
+    slide.svg = slide.svg.replace(
+      '</svg>',
+      '<g transform="translate(41 101)"><text x="20" y="60" font-size="24"><tspan x="20" dy="0">重复卡片标题</tspan><tspan x="20" dy="30">重复说明</tspan></text></g></svg>',
+    );
+    expect(inspectVisualOccupancy(slide)).toContain('Text overlaps content block visual-1');
+    const moved = { ...slide, svg: slide.svg.replace('translate(41 101)', 'translate(41 420)') };
+    expect(inspectVisualOccupancy(moved)).not.toContain('Text overlaps content block visual-1');
+  });
   it('removes an embedded diagram overlay while retaining its original image and slide text', () => {
     const slide: PresentationSlidePlan = {
       slideId: 'slide-6',

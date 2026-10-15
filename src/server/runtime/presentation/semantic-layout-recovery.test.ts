@@ -1,11 +1,100 @@
 import { describe, expect, it } from 'vitest';
 
 import { inspectPresentationContent } from './content-quality';
+import {
+  assertDeckBodyFits,
+  createDeckVisualSystem,
+  renderDeckVisualFrame,
+} from './deck-visual-system';
 import { measureFormula } from './formula-renderer';
 import { prepareLessonDraft } from './lesson';
 import { recoverSemanticSlideLayout } from './semantic-layout-recovery';
 
 describe('measured semantic layout recovery', () => {
+  it('reserves a full-width table before supplementary outline prose', async () => {
+    const result = await recoverSemanticSlideLayout({
+      aspectRatio: '16:9',
+      title: '两大板块',
+      deckBody: { x: 48, y: 136, width: 864, height: 364 },
+      intent: {
+        slideId: 'slide-2',
+        claim: '工作概览',
+        formulas: [],
+        visualKind: 'chart',
+        visualReason: '指标比较',
+        visuals: [
+          {
+            id: 'summary',
+            kind: 'chart',
+            renderer: 'native',
+            fidelity: 'conceptual',
+            required: true,
+            brief: '两大板块指标表',
+          },
+        ],
+      },
+      visibleContent: ['招生与就业工作持续推进，完成招生任务并改进生源质量。'.repeat(20)],
+      rawBlocks: [
+        {
+          id: 'summary',
+          kind: 'scientific-diagram',
+          title: '工作概览',
+          rect: { x: 48, y: 136, width: 864, height: 300 },
+          provenance: { kind: 'source', reference: '用户材料' },
+          spec: {
+            type: 'table',
+            columns: ['板块', '进展', '下一步'],
+            rows: [
+              ['招生就业', '录取68人，第一志愿72人', '优化重点高中宣传'],
+              ['产教融合', '三家企业已签约合作', '深化课程与师资共建'],
+              ['平台建设', '两项申请等待学校审批', '推动实训条件改善'],
+              ['课程建设', '三类核心课程协同建设', '推动企业案例进课堂'],
+              ['教师发展', '校企双师团队协同育人', '落实实践教学安排'],
+            ],
+          },
+        },
+      ],
+    });
+    expect(result.svg).toContain('data-report-table');
+    expect(result.svg).toContain('录取68人');
+    expect(result.svg).toContain('等待学校审批');
+    expect('overflowNotes' in result && result.overflowNotes).toBeTruthy();
+  });
+  it('measures long Chinese paragraphs with the same font as the shared master', async () => {
+    const system = createDeckVisualSystem({
+      notebookId: 'n',
+      title: '学校支持申请',
+      sourceVersionIds: [],
+      options: { style: '商务' },
+    })!;
+    const result = await recoverSemanticSlideLayout({
+      aspectRatio: '16:9',
+      title: '难点堵点与学校支持申请',
+      rawBlocks: [],
+      deckBody: system.body,
+      intent: {
+        slideId: 'slide-17',
+        claim: '两项支持申请',
+        formulas: [],
+        visualKind: 'none',
+        visualReason: '申请事项',
+      },
+      visibleContent: [
+        '难点一：缺乏高精度机器视觉系统、协作机械臂与端侧算力设备，学生高阶算法工程调试与真机实操存在硬性瓶颈',
+        '申请①：立项建设“人工智能与具身智能综合实训实验室”，配置高精度视觉台架、协作机械臂与算力工作站（属申请事项，待学校审批）',
+        '申请②：设立校企协同育人与学科培育专项经费，支持重大产学研攻关、科技成果奖培育、产教教材出版及企业专家入校津贴（属申请事项，待学校审批）',
+      ],
+    });
+    const svg = renderDeckVisualFrame(result.svg, system, {
+      title: '难点堵点与学校支持申请',
+      role: 'content',
+      order: 17,
+      total: 18,
+    });
+    await expect(assertDeckBodyFits(svg, system, 'content')).resolves.toBeUndefined();
+    expect(svg).toContain('font-size="24"');
+    expect(svg).toContain('待学校审批');
+  });
   it('reserves the measured plot legend and keeps a generated image on the same page', async () => {
     const intent = {
       slideId: 'slide-11',

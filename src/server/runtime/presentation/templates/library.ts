@@ -166,7 +166,10 @@ export class FilePresentationTemplateLibrary {
       const basename = hash(source.versionId);
       const temporary = nodePath.join(destination, `${basename}.${randomUUID()}.tmp`);
       try {
-        const original = nodePath.join(this.versionDirectory(sourceScope, source.templateId), `${basename}.pptx`);
+        const original = nodePath.join(
+          this.versionDirectory(sourceScope, source.templateId),
+          `${basename}.pptx`,
+        );
         // Versioned source bytes are immutable. Logical ownership remains scoped;
         // same-volume links avoid copying the whole corpus for every local account.
         await link(original, temporary).catch(() => copyFile(original, temporary));
@@ -282,7 +285,35 @@ export class FilePresentationTemplateLibrary {
   async resolve(scope: RuntimeScope, reference: TemplateReference): Promise<TemplateApplication> {
     const profile = await this.get(scope, reference.templateId, reference.versionId);
     if (!profile) throw new PresentationTemplateError('Template does not exist in this scope');
-    const { constraints, layouts, media, name, templateId, versionId } = profile;
+    const { constraints, media, name, templateId, versionId } = profile;
+    let layouts = profile.layouts;
+    // Upgrade measured structure alongside immutable learned visual evidence.
+    // This does not rerun vision learning or replace a template's source version.
+    if (profile.source.kind === 'pptx' && layouts.some((layout) => !layout.evidence)) {
+      const cache = nodePath.join(
+        this.versionDirectory(scope, templateId),
+        `${hash(versionId)}.structure-v1.json`,
+      );
+      let evidence: Record<string, NonNullable<TemplateProfile['layouts'][number]['evidence']>>;
+      try {
+        evidence = JSON.parse(await readFile(cache, 'utf8'));
+      } catch (error) {
+        if (!missing(error)) throw error;
+        const source = await this.getSourcePptx(scope, { templateId, versionId });
+        evidence = source
+          ? Object.fromEntries(
+              extractPptxTemplate(source, undefined, { trustedLocalSource: true }).layouts.map(
+                (layout) => [layout.sourceSlideId, layout.evidence!],
+              ),
+            )
+          : {};
+        if (source) await this.write(cache, JSON.stringify(evidence));
+      }
+      layouts = layouts.map((layout) => ({
+        ...layout,
+        evidence: evidence[layout.sourceSlideId] ?? layout.evidence,
+      }));
+    }
     const visual = await this.getVisual(scope, { templateId, versionId });
     return {
       constraints,
@@ -408,10 +439,11 @@ export const templatePlannerInstructions = (application: TemplateApplication): s
   let remaining = 80_000;
   const layouts = selected
     .slice(0, 8)
-    .map(({ assetSlots, elements, kind, layoutId, referenceSvg, textCapacity }) => {
+    .map(({ assetSlots, elements, evidence, kind, layoutId, referenceSvg, textCapacity }) => {
       const entry = {
         assetSlots: assetSlots.slice(0, 16),
         elements: elements.slice(0, 80),
+        evidence,
         kind,
         layoutId,
         referenceSvg:

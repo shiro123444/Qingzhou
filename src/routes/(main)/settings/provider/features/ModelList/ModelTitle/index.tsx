@@ -119,9 +119,16 @@ const ModelTitle = memo<ModelFetcherProps>(
                       try {
                         await fetchRemoteModelList(provider);
                       } catch (e) {
-                        console.error(e);
+                        message.error(
+                          e instanceof DOMException && e.name === 'TimeoutError'
+                            ? t('providerModels.list.fetcher.timeout')
+                            : e instanceof Error
+                              ? e.message
+                              : t('providerModels.list.fetcher.failed'),
+                        );
+                      } finally {
+                        setFetchRemoteModelsLoading(false);
                       }
-                      setFetchRemoteModelsLoading(false);
                     }}
                   >
                     {fetchRemoteModelsLoading

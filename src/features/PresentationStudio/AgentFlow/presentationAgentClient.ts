@@ -4,6 +4,11 @@ import type { PresentationMaterials } from '@/types/presentationMaterial';
 import type { PresentationCreativePlan } from '@/types/presentationPlan';
 import type { TeachingSelection } from '@/types/presentationTeaching';
 
+import type {
+  PresentationDecisionAnswer,
+  PresentationPlanningSession,
+  PresentationPresenceInput,
+} from '../../../../packages/runtime-contracts/src';
 import type { OutlineSlide } from './OutlineWorkspace';
 import type { PresentationReferenceInput } from './types';
 
@@ -29,7 +34,9 @@ export interface PresentationAgentBrief {
 export interface PresentationAgentTurnInput {
   brief?: PresentationAgentBrief;
   messages: PresentationAgentMessage[];
+  presence?: PresentationPresenceInput;
   references: PresentationReferenceInput[];
+  requestId?: string;
   template?: { templateId: string; versionId?: string };
   threadId: string;
   tools?: { search: boolean; skillIds: string[] };
@@ -42,6 +49,7 @@ export interface PresentationAgentTurnResult {
   phase: 'intake' | 'outline' | 'complete';
   question?: PresentationAgentQuestion;
   questionId?: string;
+  session?: PresentationPlanningSession;
   slides?: OutlineSlide[];
 }
 
@@ -59,6 +67,11 @@ export interface PresentationAgentQuestion {
 }
 
 export interface PresentationAgentClient {
+  answerDecision?: (
+    threadId: string,
+    answer: PresentationDecisionAnswer,
+  ) => Promise<PresentationPlanningSession>;
+  getSession?: (threadId: string) => Promise<PresentationPlanningSession | null>;
   outline: (input: {
     brief: PresentationAgentBrief;
     currentSlides?: OutlineSlide[];
@@ -66,6 +79,7 @@ export interface PresentationAgentClient {
     instruction?: string;
     teachingSelection?: TeachingSelection;
   }) => Promise<{ slides: OutlineSlide[]; lessonPlan?: LessonPlan }>;
+  setPresence?: (threadId: string, presence: PresentationPresenceInput) => Promise<void>;
   turn: (
     input: PresentationAgentTurnInput,
     options?: {
@@ -79,6 +93,7 @@ export interface PresentationAgentClient {
 
 const jsonRequest = async <T>(url: string, body: unknown): Promise<T> => {
   const response = await fetch(url, {
+    signal: AbortSignal.timeout(30_000),
     body: JSON.stringify(body),
     headers: { 'content-type': 'application/json' },
     method: 'POST',
@@ -105,6 +120,20 @@ const abortable = <T>(promise: Promise<T>, signal: AbortSignal): Promise<T> => {
 export const createPresentationAgentClient = (
   timing: { idleTimeoutMs?: number; totalTimeoutMs?: number } = {},
 ): PresentationAgentClient => ({
+  getSession: (threadId) =>
+    jsonRequest('/api/runtime/presentation/conversation', { operation: 'session', threadId }),
+  setPresence: (threadId, presence) =>
+    jsonRequest('/api/runtime/presentation/conversation', {
+      operation: 'presence',
+      threadId,
+      presence,
+    }),
+  answerDecision: (threadId, answer) =>
+    jsonRequest('/api/runtime/presentation/conversation', {
+      operation: 'decision',
+      threadId,
+      answer,
+    }),
   outline: (input) =>
     jsonRequest('/api/runtime/presentation/outline?mode=propose', {
       ...input,
@@ -130,7 +159,11 @@ export const createPresentationAgentClient = (
       const response = await abortable(
         fetch('/api/runtime/presentation/conversation', {
           method: 'POST',
-          body: JSON.stringify({ ...input, operation: 'turn' }),
+          body: JSON.stringify({
+            ...input,
+            requestId: input.requestId ?? crypto.randomUUID(),
+            operation: 'turn',
+          }),
           headers: { 'content-type': 'application/json', 'accept': 'application/x-ndjson' },
           signal,
         }),

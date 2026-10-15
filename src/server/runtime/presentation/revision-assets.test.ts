@@ -5,6 +5,7 @@ import type {
   PresentationPlan,
   RuntimeScope,
 } from '../../../../packages/runtime-contracts/src';
+import { resolvePresentationArtworkPolicy } from './artwork-pipeline';
 import { ImageGenerationEventPublisher, InMemoryImageGenerationEventJournal } from './asset-events';
 import { InMemoryPresentationAssetStore } from './asset-store';
 import { createImageGenerationCapability } from './image-generation-capability';
@@ -107,6 +108,61 @@ const imageCapability = () => {
     store,
   };
 };
+
+it('keeps a complete illustration scene unless a cutout was explicitly requested', async () => {
+  const artwork = { role: 'subject' as const, background: 'transparent' as const };
+  expect(
+    resolvePresentationArtworkPolicy({
+      artwork,
+      kind: 'illustration',
+      instruction: '教师与企业导师共同指导学生实践，白底',
+    }),
+  ).toEqual({ role: 'scene', background: 'preserve' });
+  expect(
+    resolvePresentationArtworkPolicy({
+      artwork,
+      kind: 'illustration',
+      instruction: '制作透明背景的独立人物贴纸',
+    }),
+  ).toEqual(artwork);
+  expect(resolvePresentationArtworkPolicy({ artwork, kind: 'sticker' })).toEqual(artwork);
+  const { capability, port } = imageCapability();
+  const processAssets = vi.fn();
+  await createRevisionAssetPlanner({
+    chatPort: chatPort([{ ...replaceIntent, slotId: 'mentors', artwork }]),
+    imageGenerationCapability: capability,
+    processAssets,
+  }).prepare({
+    ...input,
+    revision: { ...input.revision, content: '教师与企业导师共同指导学生实践，白底，不用文字' },
+    jobInput: {
+      ...input.jobInput,
+      options: {
+        contentIntents: {
+          slides: [
+            {
+              slideId: 'product',
+              claim: 'Mentors teach together',
+              formulas: [],
+              visualKind: 'illustration',
+              visualReason: 'Explain collaboration',
+              visuals: [
+                {
+                  id: 'mentors',
+                  kind: 'illustration',
+                  required: true,
+                  brief: 'Teachers and students around a robot',
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+  });
+  expect(processAssets).not.toHaveBeenCalled();
+  expect(JSON.stringify(vi.mocked(port.generate).mock.calls[0])).toContain('Do not put words');
+});
 
 it('supplies composed historical style to asset planning without requiring a bound template', async () => {
   const chat = chatPort([]);
@@ -876,6 +932,73 @@ it('places an owned asset made during intake without generating it again, and re
   ).rejects.toThrow('belonging to the selected slide');
 });
 
+it('resumes ready generated figures and original document charts without calling the model or generator', async () => {
+  const sourceRef = `document-image-${'a'.repeat(40)}`;
+  const chat = chatPort();
+  const generate = vi.fn();
+  const result = await createRevisionAssetPlanner({
+    chatPort: chat,
+    imageGenerationCapability: { generate },
+    readReusableAssets: async () => [{ ref: 'owned-artwork' }, { ref: sourceRef }],
+  }).prepare({
+    ...input,
+    revision: {
+      requestId: 'initial-assets',
+      content: '重排但不重新生图',
+      target: { type: 'deck' },
+    },
+    jobInput: {
+      ...input.jobInput,
+      options: {
+        availableAssetRefs: ['owned-artwork', sourceRef],
+        contentRevision: { content: '保留已有素材，不重新生图' },
+        generatedImageSlots: [
+          {
+            slideId: 'cover',
+            slotId: 'initial-assets:hero',
+            state: 'ready',
+            assetRefs: [{ ref: 'owned-artwork' }],
+            visualBinding: { visualId: 'hero', kind: 'illustration', origin: 'generated' },
+          },
+        ],
+        contentIntents: {
+          slides: [
+            {
+              slideId: 'cover',
+              claim: '封面',
+              formulas: [],
+              visualKind: 'illustration',
+              visualReason: '已有素材',
+              visuals: [{ id: 'hero', kind: 'illustration', required: true, brief: '原有插画' }],
+            },
+            {
+              slideId: 'product',
+              claim: '原始数据',
+              formulas: [],
+              visualKind: 'source-figure',
+              visualReason: '保真',
+              visuals: [
+                {
+                  id: 'source',
+                  kind: 'source-figure',
+                  required: true,
+                  brief: `复用原文图1 ${sourceRef}`,
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+  });
+  expect(chat.chat).not.toHaveBeenCalled();
+  expect(generate).not.toHaveBeenCalled();
+  expect(result.assetArtifactIds).toEqual(['owned-artwork', sourceRef]);
+  expect(
+    (result.input.options?.generatedImageSlots as any[]).map((slot) => slot.visualBinding.origin),
+  ).toEqual(['generated', 'provided']);
+});
+
 const componentBox = { height: 0.4, width: 0.3, x: 0.1, y: 0.2 };
 const templateVisual = {
   analyzedAt: '2026-01-01T00:00:00.000Z',
@@ -1069,24 +1192,38 @@ it('shows owned template page pixels to asset direction instead of relying on pr
 it('excludes a mislabeled template crop after actual pixel review and records the rejection for composition', async () => {
   const validateReferenceAssets = vi.fn(async () => [] as string[]);
   const result = await createRevisionAssetPlanner({
-    chatPort: chatPort([{ action: 'reuse', componentId: 'ribbon', slideId: 'cover', slotId: 'ribbon-slot' }]),
-    extractTemplateComponent: async () => ({ needsTransparency: false, ref: 'old-wording-in-crop' }),
+    chatPort: chatPort([
+      { action: 'reuse', componentId: 'ribbon', slideId: 'cover', slotId: 'ribbon-slot' },
+    ]),
+    extractTemplateComponent: async () => ({
+      needsTransparency: false,
+      ref: 'old-wording-in-crop',
+    }),
     validateReferenceAssets,
   }).prepare(visualJobInput);
   expect(validateReferenceAssets).toHaveBeenCalledWith(['old-wording-in-crop'], visualJobInput);
   expect(result.assetArtifactIds).toEqual([]);
-  expect(result.input.options?.rejectedTemplateComponents).toEqual([{ slideId: 'cover', componentId: 'ribbon' }]);
+  expect(result.input.options?.rejectedTemplateComponents).toEqual([
+    { slideId: 'cover', componentId: 'ribbon' },
+  ]);
 });
 
 it('excludes an inseparable frame but preserves provider failures as resumable errors', async () => {
-  const create = (code: string) => createRevisionAssetPlanner({
-    chatPort: chatPort([{ action: 'reuse', componentId: 'ribbon', slideId: 'cover', slotId: 'ribbon-slot' }]),
-    extractTemplateComponent: async () => { throw Object.assign(new Error('Cannot extract'), { code }); },
-  });
+  const create = (code: string) =>
+    createRevisionAssetPlanner({
+      chatPort: chatPort([
+        { action: 'reuse', componentId: 'ribbon', slideId: 'cover', slotId: 'ribbon-slot' },
+      ]),
+      extractTemplateComponent: async () => {
+        throw Object.assign(new Error('Cannot extract'), { code });
+      },
+    });
   const excluded = await create('PRESENTATION_COMPONENT_UNSAFE').prepare(visualJobInput);
   expect(excluded.assetArtifactIds).toEqual([]);
   expect(excluded.input.options?.rejectedTemplateComponents).toHaveLength(1);
-  await expect(create('CHAT_UNAVAILABLE').prepare(visualJobInput)).rejects.toMatchObject({ code: 'CHAT_UNAVAILABLE' });
+  await expect(create('CHAT_UNAVAILABLE').prepare(visualJobInput)).rejects.toMatchObject({
+    code: 'CHAT_UNAVAILABLE',
+  });
 });
 
 it('defaults template component reuse to the learned box and rejects text, redraw, native, or unprocessed cutouts', async () => {

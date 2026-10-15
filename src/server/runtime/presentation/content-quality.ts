@@ -124,7 +124,53 @@ export const promoteReadablePlainText = (svg: string): string => {
       .sort((a, b) => a.width * a.height - b.width * b.height)[0];
     const right = panel ? panel.x + panel.width - 8 : originX + width - 0.5;
     const safeLeft = panel ? panel.x + 8 : originX + 0.5;
-    if (left < safeLeft || left + advance > right) continue;
+    if (left < safeLeft || left + advance > right) {
+      // A short paragraph may fit at a readable size after wrapping inside its
+      // existing card. Do not move other elements or shrink the type to make it fit.
+      if (!panel || anchor !== 'start' || x < safeLeft || right - x < minimum * 5) continue;
+      const lines: string[] = [];
+      let line = '';
+      for (const character of content) {
+        if (
+          line &&
+          measureSlideText(
+            line + character,
+            minimum,
+            inherited(node, 'font-family') ?? undefined,
+            inherited(node, 'font-weight') ?? undefined,
+          ) >
+            right - x
+        ) {
+          lines.push(line);
+          line = '';
+        }
+        line += character;
+      }
+      if (line) lines.push(line);
+      if (lines.length > 3) continue;
+      const bottom = y + (lines.length - 1) * minimum * 1.2 + minimum * 0.3;
+      const nextBaseline = Array.from(document.getElementsByTagName('text'))
+        .filter((other) => other !== node && !inherited(other, 'transform'))
+        .map((other) => ({
+          x: Number(other.getAttribute('x')),
+          y: Number(other.getAttribute('y')),
+          size: Number.parseFloat(inherited(other, 'font-size') ?? '16'),
+        }))
+        .filter((other) => other.x >= panel.x && other.x < panel.x + panel.width && other.y > y)
+        .reduce(
+          (limit, other) => Math.min(limit, other.y - other.size),
+          panel.y + panel.height - 8,
+        );
+      if (bottom > nextBaseline) continue;
+      node.textContent = '';
+      for (const [index, text] of lines.entries()) {
+        const span = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+        span.setAttribute('x', String(x));
+        span.setAttribute('y', String(y + index * minimum * 1.2));
+        span.textContent = text;
+        node.appendChild(span);
+      }
+    }
     node.setAttribute('font-size', String(minimum));
     changed = true;
   }

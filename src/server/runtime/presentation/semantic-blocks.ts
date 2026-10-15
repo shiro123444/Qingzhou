@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import { parseString } from '../../../../packages/file-loaders/src/utils/parser-utils';
 import { isNativeVisual, type SlideContentIntent, visualRequirements } from './content-intent';
+import { layoutReportTable, renderReportTable, reportTableSchema } from './report-table';
 import {
   computeScientificPlot,
   quadraticPlotSchema,
@@ -29,6 +30,7 @@ const provenance = z
   .object({
     kind: z.enum(['illustrative', 'source']),
     reference: z.string().trim().min(1).max(1000).optional(),
+    caption: z.string().trim().min(1).max(160).optional(),
   })
   .strict()
   .refine(
@@ -147,6 +149,7 @@ export const semanticBlockSchema = z.discriminatedUnion('kind', [
           radar.innerType(),
           quadraticPlotSchema,
           taylorPlotSchema,
+          reportTableSchema,
         ])
         .superRefine((value, ctx) => {
           if (value.type === 'graph') {
@@ -168,6 +171,8 @@ export function minimumScientificDiagramSize(
   block: Extract<SemanticBlock, { kind: 'scientific-diagram' }>,
   width: number,
 ): { width: number; height: number } {
+  if (block.spec.type === 'table')
+    return { width, height: layoutReportTable(block.spec, width, 0).height };
   const computed =
     block.spec.type === 'quadratic' || block.spec.type === 'taylor'
       ? computeScientificPlot(block.spec)
@@ -255,6 +260,8 @@ export function renderScientificDiagram(
   const { width, height } = block.rect;
   if (width < 280 || height < 180)
     throw new Error('Scientific diagrams need at least 280×180 canvas units');
+  if (block.spec.type === 'table')
+    return `<g transform="translate(${block.rect.x} ${block.rect.y})" data-scientific-diagram="${block.id}" aria-label="${escapeSvgText(block.title)}">${renderReportTable(block.spec, width, height)}</g>`;
   const label = (x: number, y: number, text: string, anchor = 'middle') =>
     `<text x="${number(x)}" y="${number(y)}" font-size="16" font-family="Arial, Microsoft YaHei" text-anchor="${anchor}" fill="#334155">${escapeSvgText(text)}</text>`;
   const body: string[] = [];
@@ -266,7 +273,7 @@ export function renderScientificDiagram(
   const source =
     computed?.caption ??
     (block.provenance.kind === 'source'
-      ? `来源：${block.provenance.reference}`
+      ? (block.provenance.caption ?? '')
       : block.spec.type === 'radar'
         ? '教学定性比较'
         : block.spec.type === 'plot' && block.spec.series.some((s) => s.points)
@@ -596,7 +603,7 @@ export async function renderSemanticBlocks(
       )
     )
       throw new Error(
-        `This page requires a structured scientific diagram ${visual.id}, not an impression image`,
+        `This page requires a structured scientific diagram ${visual.id}, not an impression image. Add contentBlocks:[{id:"${visual.id}",kind:"scientific-diagram",title,provenance:{kind:"source",reference:"用户资料"},rect:{x,y,width,height},spec:{type:"table",columns:[...],rows:[[...]]}}] or a graph/plot spec, plus one empty <g data-content-id="${visual.id}"/> in svg. Received blocks: ${blocks.map((block) => `${block.id}:${block.kind}`).join(', ') || 'none'}`,
       );
     const scientific = blocks.find(
       (b) => b.kind === 'scientific-diagram' && (!intent?.visuals || b.id === visual.id),
@@ -646,7 +653,7 @@ export async function renderSemanticBlocks(
         throw new Error('Content anchors must use canvas coordinates without transformed parents');
     }
     const anchor = new RegExp(
-      `<g\\b(?=[^>]*\\bdata-content-id=["']${block.id}["'])[^>]*(?:\\/>|>\\s*<\\/g>)`,
+      `<g\\b(?=[^>]*\\bdata-content-id=["']${block.id}["'])[^>]*?(?:\\/>|>\\s*<\\/g>)`,
       'gu',
     );
     if ([...result.matchAll(anchor)].length !== 1)
@@ -661,5 +668,6 @@ export async function renderSemanticBlocks(
 }
 
 export const SEMANTIC_BLOCK_FORMAT =
+  '精确表格使用scientific-diagram，spec:{type:"table",columns:["单位","进展","合作重点"],rows:[["资料中的单位","已签约或推进中","资料中的事项"]],columnWeights:[2,1,4],fontSize:20,headerFill:"#1D3E6B"}。每行列数一致；原生文字按列宽自动换行，服务端核验完整行高，禁止把表格生成为图片或遗漏行列。出处存provenance和讲者备注。' +
   `每页JSON可包含contentBlocks数组。formula: {id,kind:"formula",latex,display:true,color:"#172554",fontSize:28,rect:{x,y,width,height}}。scientific-diagram: {id,kind:"scientific-diagram",title,provenance:{kind:"illustrative"或"source",reference?:"出处"},rect:{x,y,width,height},spec: {type:"plot",xRange:[min,max],yRange:[min,max],xLabel,yLabel,series:[{label,color?:"#RRGGBB",arrowEnd?:true,points:[[x,y],...] 或 polynomial:[常数项,一次项,二次项,...]}]} 或 spec:{type:"graph",nodes:[{id,label:"最多12字",x:0到1,y:0到1}],edges:[{from,to,label?}]} 或定性雷达图 spec:{type:"radar",axes:["维度1","维度2","维度3","维度4"],series:[{label:"算法A",values:[0.2,0.5,0.8,0.6]},{label:"算法B",values:[0.7,0.6,0.3,0.9]}]}，雷达值在0到1，仅用于明确标为教学定性比较、不得伪称实测。方向向量用独立points序列和arrowEnd:true，不要把没有箭头的线段当向量。图例由服务端在绘图区外排布，每个图例行需20px空间；复杂多曲线图优先独占一页，不要与多行推导争抢区域。图区域至少280×180，坐标范围必须容纳全部数据。contentBlocks中的公式id和latex必须与内容编译器一致。公式区域须容纳指定字号，长公式拆行，不能压缩到无法阅读。` +
   ' 对需要精确计算的图，使用服务端计算配方（不要填points）：spec:{type:"quadratic",a:1,b:20,levels:[10,20],start:[-3,1],learningRate:0.08,momentum:0.9,steps:20,methods:["gradient","momentum"]}，函数为(a*x²+b*y²)/2，支持gradient/momentum/nesterov，等高线与迭代点由服务端真实计算。泰勒对比：spec:{type:"taylor",coefficients:[0,0,1,0.1],at:1,xRange:[-1,3]}，系数常数项在前，由服务端计算函数与一/二阶近似。图区域高度按图例行数测算，至少为144+20×图例行数；空间不够时拆页，不要缩小公式或覆盖板书区。精确向量几何的plot使用equalAspect:true避免角度失真。普通概念框架应使用Image资产或graph，不需要免责声明。';

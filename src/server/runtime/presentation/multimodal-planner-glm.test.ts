@@ -5,6 +5,7 @@ import type {
   PresentationPlan,
   RuntimeScope,
 } from '../../../../packages/runtime-contracts/src';
+import { assertDeckVisualConsistency, createDeckVisualSystem } from './deck-visual-system';
 import type { ImageGenerationSlot } from './image-generation-planner';
 import type { GLMMultimodalChatPort } from './multimodal-chat-provider-glm';
 import { createGLMPresentationPlanner } from './multimodal-planner-glm';
@@ -17,6 +18,366 @@ const mockScope: RuntimeScope = {
 };
 
 describe('GLMPresentationPlanner (C-106)', () => {
+  it('recovers native table geometry without dropping the table or swallowing its parent group', async () => {
+    const input = {
+      notebookId: 'test',
+      title: '招生汇报',
+      sourceVersionIds: [],
+      slideCount: 1,
+      options: {
+        style: '商务',
+        outline: [
+          { title: '封面' },
+          { title: '招生指标', keyPoints: ['录取68人', '第一志愿72人', '报考率105.88%'] },
+        ],
+        contentIntents: {
+          slides: [
+            {
+              slideId: 'slide-2',
+              claim: '招生情况',
+              formulas: [],
+              visualKind: 'chart',
+              visualReason: '准确数据表',
+              visuals: [
+                {
+                  id: 'metrics',
+                  kind: 'chart',
+                  renderer: 'native',
+                  required: true,
+                  brief: '招生数据表',
+                },
+              ],
+            },
+          ],
+        },
+      },
+    };
+    const system = createDeckVisualSystem(input)!;
+    const raw = {
+      planId: 'table',
+      title: '招生汇报',
+      slides: [
+        {
+          slideId: 'slide-2',
+          order: 1,
+          svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><g data-deck-body="true"><rect width="960" height="540" fill="#ffffff"/><g data-content-id="metrics"/></g></svg>',
+          contentBlocks: [
+            {
+              id: 'metrics',
+              kind: 'scientific-diagram',
+              title: '招生数据',
+              provenance: { kind: 'source', reference: '汇报材料' },
+              rect: system.body,
+              spec: {
+                type: 'table',
+                columns: ['指标', '结果', '口径'],
+                columnWeights: [2, 1, 4],
+                rows: [
+                  ['录取人数', '68', '学校录取人数'],
+                  ['一志愿报考', '72', '第一志愿人数'],
+                  ['报考率', '105.88%', '报考人数与录取人数比值'],
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const chat = vi.fn<GLMMultimodalChatPort['chat']>(async () => ({
+      created: 1,
+      id: 'test',
+      model: 'test',
+      choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify(raw) } }],
+    }));
+    const planner = createGLMPresentationPlanner({
+      chatPort: {
+        chat,
+        providerId: 'test',
+        manifest: {
+          model: 'test',
+          providerId: 'test',
+          displayName: 'test',
+          supportsVision: true,
+          supportsIdempotency: true,
+        },
+      },
+    });
+    const result = await planner.plan(
+      { ...input, options: { ...input.options, deckVisualSystem: system } },
+      { scope: mockScope, pageIndex: 1, pageSlideId: 'slide-2', pagePass: true },
+    );
+    expect(result.slides[0].svg).toContain('105.88%');
+    expect(result.slides[0].svg).toContain('data-report-table');
+    expect(result.slides[0].metadata?.layoutRecovered).toBe(true);
+    expect(() => assertDeckVisualConsistency(result, system)).not.toThrow();
+    expect(chat).toHaveBeenCalledTimes(2);
+  });
+  it.each(['overlap', 'panel', 'transformed'] as const)(
+    'keeps an owned figure large when recovering %s text inside the deck master',
+    async (failure) => {
+      const ref = '/api/runtime/presentation/artifacts/owned-figure';
+      const chat = vi.fn<GLMMultimodalChatPort['chat']>(async () => ({
+        created: 1,
+        id: 'figure',
+        model: 'test',
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: JSON.stringify({
+                planId: 'figure',
+                title: '工作汇报',
+                slides: [
+                  {
+                    slideId: 'slide-1',
+                    order: 1,
+                    svg:
+                      failure === 'overlap'
+                        ? `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><g data-deck-body="true"><image href="${ref}" x="48" y="144" width="864" height="328"/><text x="60" y="190" font-size="24">图内已有的数据被重复铺排</text></g></svg>`
+                        : failure === 'panel'
+                          ? `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><g data-deck-body="true"><image href="${ref}" x="48" y="144" width="400" height="300"/><rect x="480" y="150" width="120" height="280" fill="#BBD3EA"/><text x="490" y="190" font-size="24">图内已有的数据被重复铺排，文字伸出卡片边界</text></g></svg>`
+                          : `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><g data-deck-body="true"><g transform="translate(148,0)"><image href="${ref}" x="-100" y="144" width="864" height="328"/></g></g></svg>`,
+                  },
+                ],
+              }),
+            },
+          },
+        ],
+      }));
+      const input = {
+        notebookId: 'test',
+        sourceVersionIds: [],
+        title: '工作汇报',
+        slideCount: 1,
+        options: {
+          style: '商务',
+          outline: [{ title: '主要成果', keyPoints: ['录取68人，完整解释保存在演讲备注'] }],
+          visualStoryboard: { slides: [{ slideId: 'slide-1', role: 'content' }] },
+          contentIntents: {
+            slides: [
+              {
+                slideId: 'slide-1',
+                claim: '主要成果',
+                formulas: [],
+                visualKind: 'illustration',
+                visualReason: '批准的成果图',
+                visuals: [
+                  { id: 'v1', kind: 'illustration', brief: '批准的成果图', required: true },
+                ],
+              },
+            ],
+          },
+          generatedImageSlots: [
+            {
+              slideId: 'slide-1',
+              slotId: 'v1',
+              state: 'ready',
+              assetRefs: [{ ref }],
+              visualBinding: { visualId: 'v1', kind: 'illustration', origin: 'generated' },
+            },
+          ],
+        },
+      } as PresentationJobInput;
+      const system = createDeckVisualSystem(input)!;
+      const planner = createGLMPresentationPlanner({
+        chatPort: {
+          chat,
+          providerId: 'test',
+          manifest: {
+            providerId: 'test',
+            model: 'test',
+            displayName: 'test',
+            supportsVision: true,
+            supportsIdempotency: true,
+          },
+        },
+      });
+      const plan = await planner.plan(
+        { ...input, options: { ...input.options, deckVisualSystem: system } },
+        { scope: mockScope },
+      );
+      expect(chat).toHaveBeenCalledTimes(failure === 'overlap' ? 1 : 2);
+      expect(plan.slides[0].svg).toContain(`height="${system.body.height}"`);
+      expect(plan.slides[0].svg).not.toContain('图内已有的数据被重复铺排');
+      expect(plan.slides[0].notes).toContain('录取68人');
+      expect(plan.slides[0].metadata?.visualAssets).toEqual([
+        { visualId: 'v1', kind: 'illustration', origin: 'generated', ref },
+      ]);
+      expect(() => assertDeckVisualConsistency(plan, system)).not.toThrow();
+    },
+  );
+  it('shares the same rendered master across independently generated pages', async () => {
+    let page = 0;
+    const chat = vi.fn<GLMMultimodalChatPort['chat']>(async () => {
+      page = Math.min(page + 1, 2);
+      return {
+        created: 1,
+        id: 'test',
+        model: 'test',
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: JSON.stringify({
+                planId: 'p',
+                title: '工作汇报',
+                slides: [
+                  {
+                    slideId: `slide-${page}`,
+                    order: 1,
+                    svg: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><g data-deck-body="true"><text x="60" y="${page === 1 ? 350 : 130}" font-size="24" font-family="${page === 1 ? 'serif' : 'cursive'}" fill="#1a1a1a">保留原有内容</text></g></svg>`,
+                  },
+                ],
+              }),
+            },
+          },
+        ],
+      };
+    });
+    const base = {
+      notebookId: 'test',
+      sourceVersionIds: [],
+      title: '工作汇报',
+      slideCount: 2,
+      options: {
+        style: '商务',
+        visualStoryboard: {
+          slides: [
+            {
+              slideId: 'slide-1',
+              role: 'cover',
+              compositionIntent: '保留主标题下方的汇报人区域',
+              continuity: '沿用统一蓝白配色',
+            },
+            {
+              slideId: 'slide-2',
+              role: 'content',
+              compositionIntent: '左侧结果右侧证据，按模板保留对比层级',
+              continuity: '继承封面字体与页眉',
+            },
+          ],
+        },
+        contentIntents: {
+          slides: [1, 2].map((index) => ({
+            slideId: `slide-${index}`,
+            claim: '批准的内容',
+            formulas: [],
+            visualKind: 'none',
+            visualReason: '文字页',
+            visuals: [],
+          })),
+        },
+        outline: [
+          { title: '封面', keyPoints: ['汇报人'] },
+          { title: '主要结果', keyPoints: ['实际数据'] },
+        ],
+      },
+    };
+    const system = createDeckVisualSystem(base)!;
+    const planner = createGLMPresentationPlanner({
+      chatPort: {
+        chat,
+        providerId: 'test',
+        manifest: {
+          providerId: 'test',
+          model: 'test',
+          displayName: 'test',
+          supportsVision: true,
+          supportsIdempotency: true,
+        },
+      },
+    });
+    const plan = await planner.plan(
+      { ...base, options: { ...base.options, deckVisualSystem: system } },
+      { scope: mockScope },
+    );
+    expect(chat).toHaveBeenCalledTimes(3);
+    expect(plan.slides[1].metadata?.layoutRecovered).toBe(true);
+    expect(() => assertDeckVisualConsistency(plan, system)).not.toThrow();
+    expect(plan.slides.every((slide) => slide.metadata?.deckVisualSystemId === system.id)).toBe(
+      true,
+    );
+    expect(plan.designSpec?.deckVisualSystem).toEqual(system);
+    const prompts = JSON.stringify(chat.mock.calls.map(([request]) => request.messages));
+    expect(prompts).toContain('左侧结果右侧证据，按模板保留对比层级');
+    expect(prompts).toContain('继承封面字体与页眉');
+    expect(prompts).toContain('usableContentRect');
+  });
+  it('reflows an approved text page after the model repair repeats unreadable body type', async () => {
+    const chat = vi.fn<GLMMultimodalChatPort['chat']>(async () => ({
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: 'assistant',
+            content: JSON.stringify({
+              planId: 'small-type',
+              title: '阶段成果',
+              slides: [
+                {
+                  slideId: 'slide-1',
+                  order: 1,
+                  svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><rect width="960" height="48" fill="#1d3e6b"/><text x="50" y="35" font-size="28" fill="#fff">阶段成果</text><g transform="translate(0,0)"><text x="60" y="180" font-size="16">获批校级一流本科专业建设点，前瞻布局特色方向。</text></g></svg>',
+                },
+              ],
+            }),
+          },
+        },
+      ],
+      created: 1,
+      id: 'test',
+      model: 'test',
+    }));
+    const planner = createGLMPresentationPlanner({
+      chatPort: {
+        chat,
+        providerId: 'test',
+        manifest: {
+          providerId: 'test',
+          model: 'test',
+          displayName: 'test',
+          supportsVision: true,
+          supportsIdempotency: true,
+        },
+      },
+    });
+    const plan = await planner.plan(
+      {
+        notebookId: 'test',
+        sourceVersionIds: [],
+        title: '阶段成果',
+        slideCount: 1,
+        options: {
+          outline: [
+            {
+              title: '阶段成果',
+              keyPoints: ['获批校级一流本科专业建设点', '前瞻布局智能控制特色方向'],
+            },
+          ],
+          contentIntents: {
+            slides: [
+              {
+                slideId: 'slide-1',
+                claim: '阶段成果',
+                formulas: [],
+                visualKind: 'none',
+                visualReason: '文字成果',
+                visuals: [],
+              },
+            ],
+          },
+        },
+      },
+      { scope: mockScope },
+    );
+    expect(chat).toHaveBeenCalledTimes(2);
+    expect(plan.slides[0].metadata?.layoutRecovered).toBe(true);
+    expect(plan.slides[0].svg).toContain('font-size="24"');
+    expect(plan.slides[0].svg).toContain('#1d3e6b');
+    expect(plan.slides[0].svg).toContain('前瞻布局智能控制特色方向');
+  });
   it('passes cross-template composition to the planner and retains only offered per-page attribution', async () => {
     const capsuleId = `capsule-${'a'.repeat(40)}`;
     const chat = vi.fn(async () => ({

@@ -298,33 +298,58 @@ export const createPresentationVisualStoryboardPlanner = (options: {
                   ? 'content'
                   : archetype.roles[0];
           if (!role) return storyboardError('Visual storyboard selected an incompatible role');
-          const componentIds = slide.componentIds.map((componentId) => {
-            const exact = components.get(componentId);
-            const suffixMatches = [...components.values()].filter(
-              (component) =>
-                component.familyId === archetype.familyId &&
-                component.id.endsWith(`-${componentId}`),
-            );
-            const component = exact ?? (suffixMatches.length === 1 ? suffixMatches[0] : undefined);
-            if (
-              !component ||
-              (component.familyId !== archetype.familyId &&
-                !template.componentSources?.[component.id]) ||
-              !isReusableTemplateComponent(component)
-            ) {
-              return storyboardError(
-                'Visual storyboard attempted to reuse an unsafe template component',
+          const needsTemplateSubjects =
+            !jobInput.options?.deckVisualSystem ||
+            !intent ||
+            visualRequirements(intent).some(isRasterVisual);
+          const componentIds = (needsTemplateSubjects ? slide.componentIds : []).flatMap(
+            (componentId) => {
+              const exact = components.get(componentId);
+              const suffixMatches = [...components.values()].filter(
+                (component) =>
+                  component.familyId === archetype.familyId &&
+                  component.id.endsWith(`-${componentId}`),
               );
-            }
-            if (component.role === 'artwork' && !slide.assetBrief) {
-              return storyboardError(
-                'Reusing template artwork requires a subject-relevance explanation (assetBrief)',
-              );
-            }
-            return component.id;
-          });
+              const component =
+                exact ?? (suffixMatches.length === 1 ? suffixMatches[0] : undefined);
+              if (
+                !component ||
+                (component.familyId !== archetype.familyId &&
+                  !template.componentSources?.[component.id]) ||
+                !isReusableTemplateComponent(component)
+              ) {
+                return storyboardError(
+                  'Visual storyboard attempted to reuse an unsafe template component',
+                );
+              }
+              // Native/data pages do not need an unrelated template subject just
+              // because the model returned its ID. Drop that optional selection;
+              // never weaken ownership or relevance checks for actual image work.
+              if (
+                component.role === 'artwork' &&
+                ((intent && !visualRequirements(intent).some(isRasterVisual)) ||
+                  (['native', 'none'].includes(slide.assetMode) && !slide.assetBrief))
+              )
+                return [];
+              if (component.role === 'artwork' && !slide.assetBrief) {
+                return storyboardError(
+                  'Reusing template artwork requires a subject-relevance explanation (assetBrief)',
+                );
+              }
+              return component.id;
+            },
+          );
           return {
             ...slide,
+            ...(jobInput.options?.deckVisualSystem &&
+            ['cover', 'closing'].includes(role) &&
+            intent &&
+            visualRequirements(intent).length === 0
+              ? {
+                  compositionIntent:
+                    '使用整稿母版已声明的封面/尾页背景与标题锚点，正文只排当前大纲的署名、单位、日期或收束文字；没有已批准的视觉需求，不追加源模板照片、光晕、装饰或品牌。',
+                }
+              : {}),
             archetypeId: archetype.id,
             componentIds,
             familyId: archetype.familyId,
@@ -344,7 +369,7 @@ export const createPresentationVisualStoryboardPlanner = (options: {
         messages: [
           {
             content:
-              '你是整稿视觉导演。模板观察结果是证据，不是逐页照抄命令。请先理解这份演示的叙事弧线，再为每页选择一个有证据的视觉族和构图原型。封面、章节、正文、数据和收束页应形成节奏；相邻页面保持锚点连续，同时避免机械重复。只有无旧文字、已获准复用的组件才可放入 componentIds。先在 reusableComponents 中寻找能服务本页内容的已有素材：背景、边框、装饰可以保持视觉连续；主体插画只有语义适合本页且明确获准 reuse/crop/removeBackground 时才复用，并在 assetBrief 解释其内容适配理由。不要把旧活动照片、数据证据或不相关人物替换成当前事实。只有缺少合适素材才生图。需要新画的插画、水彩或装饰主体时，assetMode 必须是 generate；已有素材与新素材组合时用 mixed，并把新增主体、画风、留白方向和前后层级写进 assetBrief。compositionIntent 必须说明文本与素材的相对位置、遮挡关系、尺度和裁切，不把整页拍平。准确图表、流程和文字结构使用 native。模板的卡片尺寸和文字密度只能是软参考；公式真实测量尺寸、科研图图例空间、24px正文与已批准素材槽位是硬预算，不能为了模仿模板压缩它们。embeddedMedia 来自真实视频抽帧或媒体元数据：可用于理解节奏、画风和槽位，静态 SVG 生成不能假装已经保留动态播放；需要动态保真时在构图意图中明确要求走原稿保真路径。不要因为模板有图片就强迫每页生图。严格返回 JSON。',
+              '你是整稿视觉导演。模板观察结果是证据，不是逐页照抄命令。请先理解这份演示的叙事弧线，再为每页选择一个有证据的视觉族和构图原型。封面、章节、正文、数据和收束页应形成节奏；当大纲末页为致谢、感谢或汇报完毕时，必须role:closing并呼应封面；固定总页数包含尾页，不能自行增加页数或删除行动项。信息密度依据页任务分级：封面与过渡留白，数据页为图+关键结论，状态/责任/对比用原生表格，流程用原生节点+关系；完整事实要在适合的正文页表达，不能全部挪到备注。相邻页面保持锚点连续，同时避免机械重复。只有无旧文字、已获准复用的组件才可放入 componentIds。先在 reusableComponents 中寻找能服务本页内容的已有素材：背景、边框、装饰可以保持视觉连续；主体插画只有语义适合本页且明确获准 reuse/crop/removeBackground 时才复用，并在 assetBrief 解释其内容适配理由。不要把旧活动照片、数据证据或不相关人物替换成当前事实。只有缺少合适素材才生图。需要新画的插画、水彩或装饰主体时，assetMode 必须是 generate；已有素材与新素材组合时用 mixed，并把新增主体、画风、留白方向和前后层级写进 assetBrief。compositionIntent 必须说明文本与素材的相对位置、遮挡关系、尺度和裁切，不把整页拍平。准确图表、流程和文字结构使用 native。模板的卡片尺寸和文字密度只能是软参考；公式真实测量尺寸、科研图图例空间、24px正文与已批准素材槽位是硬预算，不能为了模仿模板压缩它们。embeddedMedia 来自真实视频抽帧或媒体元数据：可用于理解节奏、画风和槽位，静态 SVG 生成不能假装已经保留动态播放；需要动态保真时在构图意图中明确要求走原稿保真路径。不要因为模板有图片就强迫每页生图。严格返回 JSON。',
             role: 'system',
           },
           {
@@ -379,7 +404,12 @@ export const createPresentationVisualStoryboardPlanner = (options: {
             content: JSON.stringify({
               designProgram: design,
               userStyle: jobInput.options?.style,
-              componentSelectionPolicy: '每个被选中的 artwork 主体必须在本页 assetBrief 解释和当前主题的内容联系，无论assetMode取值是什么。纯native流程页无需位图主体时，componentIds返回[]；不要为凑复用数量搬入旧照片。已提供的availableAssetRefs由后续素材规划绑定，不写进componentIds。',
+              deckVisualSystem: jobInput.options?.deckVisualSystem,
+              deckPolicy: jobInput.options?.deckVisualSystem
+                ? '整稿的字体、色板、页眉页脚、标题和正文净区已锁定。仅为各页选择内容区的构图、素材、图表与阅读顺序；不同模板不允许改变母版。compositionIntent不得重新规定页眉、字号、口号或旧机构名称。'
+                : undefined,
+              componentSelectionPolicy:
+                '每个被选中的 artwork 主体必须在本页 assetBrief 解释和当前主题的内容联系，无论assetMode取值是什么。纯native流程页无需位图主体时，componentIds返回[]；不要为凑复用数量搬入旧照片。已提供的availableAssetRefs由后续素材规划绑定，不写进componentIds。',
               primaryStyle: template.compositionPolicy ? design.tokens : undefined,
               templateSources: template.sources,
               compositionPolicy: template.sources?.length
@@ -388,12 +418,15 @@ export const createPresentationVisualStoryboardPlanner = (options: {
               embeddedMedia: template.visual!.media,
               goal: jobInput.prompt ?? jobInput.title,
               inputFingerprint,
-              layouts: template.layouts.map(({ kind, layoutId, notes, textCapacity }) => ({
-                kind,
-                layoutId,
-                notes,
-                textCapacity,
-              })),
+              layouts: template.layouts.map(
+                ({ evidence, kind, layoutId, notes, textCapacity }) => ({
+                  evidence,
+                  kind,
+                  layoutId,
+                  notes,
+                  textCapacity,
+                }),
+              ),
               contentIntents,
               materials: materialContextForSlides(jobInput.options?.materials, outline),
               teachingStages: publicLessonStages(jobInput),

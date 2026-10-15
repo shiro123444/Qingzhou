@@ -45,6 +45,7 @@ const capsuleSchema = z
         'scientific-illustration',
         'mixed-scientific',
         'decoration-sticker',
+        'report-table',
       ])
       .optional(),
     createdAt: z.string(),
@@ -247,7 +248,10 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
     const capsules: CapabilityCapsule[] = [];
     for (const draft of drafts) {
       const id = `capsule-${hash(draft).slice(0, 40)}`;
-      const existing = await this.read(path.join(this.directory(scope, 'capsules'), `${hash(id)}.json`), capsuleSchema);
+      const existing = await this.read(
+        path.join(this.directory(scope, 'capsules'), `${hash(id)}.json`),
+        capsuleSchema,
+      );
       const capsule =
         existing ?? capsuleSchema.parse({ ...draft, id, schemaVersion: 1, createdAt: this.now() });
       if (!existing) await this.save(scope, 'capsules', id, capsule);
@@ -255,18 +259,27 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
     }
     const currentIds = new Set(capsules.map(({ id }) => id));
     for (const previous of await this.list(scope, 'capsules', capsuleSchema)) {
-      if (previous.kind === 'render-recipe' || previous.source.templateId !== visual.templateId ||
-          previous.source.versionId !== visual.versionId || currentIds.has(previous.id)) continue;
+      if (
+        previous.kind === 'render-recipe' ||
+        previous.source.templateId !== visual.templateId ||
+        previous.source.versionId !== visual.versionId ||
+        currentIds.has(previous.id)
+      )
+        continue;
       const file = path.join(this.directory(scope, 'capsules'), `${hash(previous.id)}.json`);
       // Preserve historical evidence; superseded observations leave automatic selection.
-      await rename(file, `${file}.retired`).catch((error) => { if (!missing(error)) throw error; });
+      await rename(file, `${file}.retired`).catch((error) => {
+        if (!missing(error)) throw error;
+      });
     }
     return capsules;
   }
 
   load(scope: RuntimeScope, id: string): Promise<CapabilityCapsule | null> {
     const file = path.join(this.directory(scope, 'capsules'), `${hash(id)}.json`);
-    return this.read(file, capsuleSchema).then((current) => current ?? this.read(`${file}.retired`, capsuleSchema));
+    return this.read(file, capsuleSchema).then(
+      (current) => current ?? this.read(`${file}.retired`, capsuleSchema),
+    );
   }
 
   async learnRecipes(
@@ -312,11 +325,17 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
               ? 'scientific-plot'
               : block?.kind === 'scientific-diagram' && block.spec?.type === 'graph'
                 ? 'scientific-graph'
-                : undefined;
+                : block?.kind === 'scientific-diagram' && block.spec?.type === 'table'
+                  ? 'report-table'
+                  : undefined;
         if (recipe) recipes.set(recipe, [...(recipes.get(recipe) ?? []), slide.order]);
       }
     }
     const descriptions = {
+      'report-table': [
+        '可编辑汇报表格与状态矩阵',
+        '使用scientific-diagram/table保留完整列名与行数据，按模板的列宽关系组织单位、状态和事项；实测每格换行与行高，状态严格来自材料，不把表格拍平成图片。',
+      ],
       'formula-with-explanation': [
         '数学公式与变量解释',
         '先用formula.measure测量关键公式，再按真实宽高留白；使用formula节点渲染LaTeX，旁列变量含义，完整推导放讲稿。',
@@ -476,7 +495,9 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
     if (ids.length > 6 || new Set(ids).size !== ids.length)
       throw new Error('Compose up to six distinct capabilities');
     const { active, rejected } = await this.promoted(scope);
-    const available = new Set((await this.list(scope, 'capsules', capsuleSchema)).map(({ id }) => id));
+    const available = new Set(
+      (await this.list(scope, 'capsules', capsuleSchema)).map(({ id }) => id),
+    );
     const capsules = await Promise.all(ids.map((id) => this.load(scope, id)));
     if (
       capsules.some(

@@ -93,6 +93,20 @@ const videoPptxFixture = (): Uint8Array => {
 };
 
 describe('Presentation template learning', () => {
+  it('learns table geometry and information density without importing old cells as facts', () => {
+    const files = unzipSync(pptxFixture());
+    const name = 'ppt/slides/slide4.xml';
+    files[name] = strToU8(
+      strFromU8(files[name]).replace(
+        '</p:spTree>',
+        '<p:graphicFrame><p:xfrm><a:off x="457200" y="1028700"/><a:ext cx="7315200" cy="3086100"/></p:xfrm><a:graphic><a:graphicData><a:tbl><a:tblGrid><a:gridCol w="100"/><a:gridCol w="300"/></a:tblGrid><a:tr><a:tc><a:txBody><a:p><a:r><a:t>旧数据</a:t></a:r></a:p></a:txBody></a:tc><a:tc/></a:tr><a:tr><a:tc/><a:tc/></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame></p:spTree>',
+      ),
+    );
+    const evidence = extractPptxTemplate(zipSync(files)).layouts[0].evidence!;
+    expect(evidence.tables[0]).toMatchObject({ rows: 2, columns: 2, columnWeights: [0.25, 0.75] });
+    expect(evidence.textCharacters).toBeGreaterThan(3);
+    expect(JSON.stringify(evidence)).not.toContain('旧数据');
+  });
   it('extracts actual SVG style, transformed geometry, capacity, image slots and notes', () => {
     const learned = extractPlanTemplate(plan);
     expect(learned.constraints.palette).toContain('#123456');

@@ -16,6 +16,7 @@ import {
   ScopedPresentationJobEventJournalCache,
 } from './event-journal-cache';
 import { FilePresentationStorage } from './file-storage';
+import { persistGeneratedImageUrl } from './generated-image-storage';
 import { createPresentationImageGenerationEventPublisher } from './image-event-bridge';
 import { createImageGenerationCapability } from './image-generation-capability';
 import { createLocalCorpusSeeder } from './local-corpus';
@@ -62,7 +63,9 @@ const createDefaultGenerationContextFactory = (
     qualityScriptPath: nodePath.join(scriptsRoot, 'svg_quality_checker.py'),
     qualityArgs: [
       ...(quickGenerate ? ['--quick-generate'] : ['--canonical-authoring']),
-      '--stage', 'final', '--json',
+      '--stage',
+      'final',
+      '--json',
     ],
     convertArgs: quickGenerate ? ['--quick-generate', '--with-notes'] : undefined,
     runner,
@@ -159,13 +162,24 @@ const assemble = (): PresentationRuntimeComposition | undefined => {
       }),
     );
     const visionModel = process.env.CORDIS_PRESENTATION_VISION_MODEL?.trim();
-    const scopedVisionChatPort = visionModel ? createResilientMultimodalChatPort(createUserChatProvider({
-      fetcher: createPresentationChatFetch(globalThis.fetch),
-      resolve: async (scope) => ({ ...await resolveChatConnection(scope), model: visionModel, supportsVision: true }),
-    })) : multimodalChatPort;
-    const visionChatPort = visionModel ? { ...scopedVisionChatPort,
-      manifest: Object.freeze({ ...scopedVisionChatPort.manifest, model: visionModel }),
-    } : scopedVisionChatPort;
+    const scopedVisionChatPort = visionModel
+      ? createResilientMultimodalChatPort(
+          createUserChatProvider({
+            fetcher: createPresentationChatFetch(globalThis.fetch),
+            resolve: async (scope) => ({
+              ...(await resolveChatConnection(scope)),
+              model: visionModel,
+              supportsVision: true,
+            }),
+          }),
+        )
+      : multimodalChatPort;
+    const visionChatPort = visionModel
+      ? {
+          ...scopedVisionChatPort,
+          manifest: Object.freeze({ ...scopedVisionChatPort.manifest, model: visionModel }),
+        }
+      : scopedVisionChatPort;
 
     const imageGenerationCapability = imageApiKey
       ? createImageGenerationCapability({
@@ -180,6 +194,8 @@ const assemble = (): PresentationRuntimeComposition | undefined => {
               scope,
             }),
           imagePort: createProductionOpenAIImageGenerationPort(imgEnv, {
+            resolveAssetUri: (scope, uri, signal) =>
+              persistGeneratedImageUrl(assetStore, scope, uri, globalThis.fetch, signal),
             readReferenceAsset: async (scope, ref) => {
               const artifact = await artifactStore.get(scope, ref);
               return artifact?.bytes && artifact.mimeType
@@ -245,6 +261,21 @@ const assemble = (): PresentationRuntimeComposition | undefined => {
       templateLibrary,
       artifactStore,
       jobRepository: artifactStore,
+      planningContextFactory: async (scope) => {
+        const [
+          { getServerDB },
+          { createPresentationContextServices },
+          { createPresentationContextRuntime },
+        ] = await Promise.all([
+          import('@/database/core/db-adaptor'),
+          import('./context-services'),
+          import('./context-tools'),
+        ]);
+        const tools = createPresentationContextRuntime(
+          createPresentationContextServices(await getServerDB(), scope.userId),
+        );
+        return { context: { tools }, dispose: () => tools.dispose() };
+      },
       contextFactory,
       env: pptEnv,
       imageGenerationCapability,
@@ -267,13 +298,18 @@ const assemble = (): PresentationRuntimeComposition | undefined => {
   }
 };
 
-let loaded = false;
-let composition: PresentationRuntimeComposition | undefined;
+const registry = globalThis as typeof globalThis & {
+  __qingzhouPresentationRuntime?: {
+    composition?: PresentationRuntimeComposition;
+    readiness?: ProductionProviderReadiness;
+    error?: unknown;
+  };
+};
 /** Studio routes and channel tools share the same production assembly and scoped storage. */
 export const getDefaultPresentationComposition = () => {
-  if (!loaded) {
-    composition = assemble();
-    loaded = true;
+  if (!registry.__qingzhouPresentationRuntime) {
+    const composition = assemble();
+    registry.__qingzhouPresentationRuntime = { composition, readiness, error: configurationError };
   }
-  return { composition, readiness, error: configurationError };
+  return registry.__qingzhouPresentationRuntime;
 };

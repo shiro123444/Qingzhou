@@ -2,15 +2,43 @@ import sharp from 'sharp';
 import { expect, it, vi } from 'vitest';
 
 import { InMemoryPresentationArtifactStore } from './artifact-store';
+import { createDeckVisualSystem, renderDeckVisualFrame } from './deck-visual-system';
 import type { GLMMultimodalChatPort } from './multimodal-chat-provider-glm';
 import type { TemplateApplication } from './templates';
 import { compileTemplateDesignProgram } from './templates/design-program';
 import {
+  adjudicateVisualReviewStatus,
   createPresentationVisualCritic,
   type PresentationVisualReview,
   retainUnresolvedVisualIssues,
   retryTransientVisualReview,
 } from './visual-critic';
+
+it('derives the publish gate from validated severities without waiving major defects', () => {
+  const review: PresentationVisualReview = {
+    schemaVersion: 1,
+    passed: false,
+    summary: 'A spacing suggestion',
+    issues: [
+      {
+        slideId: 'slide-1',
+        severity: 'minor',
+        category: 'spacing',
+        evidence: 'Small margin difference',
+        instruction: 'Optional margin adjustment',
+      },
+    ],
+  };
+  expect(adjudicateVisualReviewStatus(review).passed).toBe(true);
+  expect(
+    adjudicateVisualReviewStatus({
+      ...review,
+      passed: true,
+      issues: [{ ...review.issues[0], severity: 'major' }],
+    }).passed,
+  ).toBe(false);
+  expect(() => adjudicateVisualReviewStatus({ ...review, issues: [] })).toThrow('blocking issues');
+});
 
 it('retries transient visual-review HTTP 500 without retrying malformed content', async () => {
   const temporary = Object.assign(new Error('Multimodal chat provider returned HTTP 500'), {
@@ -65,6 +93,75 @@ it('does not forget a confirmed unresolved defect when a subsequent review omits
 });
 
 const scope = { sessionId: 'session', userId: 'user' };
+
+it('reviews one whole-deck contact sheet after the detailed page batches', async () => {
+  const system = createDeckVisualSystem({
+    notebookId: 'test',
+    title: '统一工作汇报',
+    sourceVersionIds: [],
+    options: { style: '商务' },
+  })!;
+  const chat = vi.fn<GLMMultimodalChatPort['chat']>(async () => ({
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: 'assistant',
+          content: JSON.stringify({
+            schemaVersion: 1,
+            passed: true,
+            summary: '统一视觉系统通过',
+            issues: [],
+          }),
+        },
+      },
+    ],
+    created: 1,
+    id: 'review',
+    model: 'test',
+  }));
+  const port: GLMMultimodalChatPort = {
+    chat,
+    providerId: 'test',
+    manifest: {
+      model: 'test',
+      providerId: 'test',
+      displayName: 'test',
+      supportsVision: true,
+      supportsIdempotency: true,
+    },
+  };
+  const slides = Array.from({ length: 5 }, (_, index) => ({
+    slideId: `slide-${index + 1}`,
+    order: index + 1,
+    svg: renderDeckVisualFrame(
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><g data-deck-body="true"><text x="60" y="180" font-size="24">已验证内容</text></g></svg>',
+      system,
+      { title: `标题${index + 1}`, role: 'content', order: index + 1, total: 5 },
+    ),
+  }));
+  const review = await createPresentationVisualCritic({
+    chat: port,
+    store: new InMemoryPresentationArtifactStore(),
+  }).review(
+    {
+      plan: {
+        planId: 'deck',
+        title: '工作汇报',
+        aspectRatio: '16:9',
+        sourceVersionIds: [],
+        designSpec: { deckVisualSystem: system },
+        slides,
+      },
+    },
+    { scope },
+  );
+  expect(review.passed).toBe(true);
+  expect(chat).toHaveBeenCalledTimes(3);
+  expect(JSON.stringify(chat.mock.calls.at(-1)?.[0].messages[0].content)).toContain(
+    '检查整份演示的统一视觉系统',
+  );
+});
 const family = {
   artwork: 'watercolor',
   composition: 'left title, right art',
@@ -185,82 +282,107 @@ it.each([true, false])(
   },
 );
 
-it('reviews rendered slide pixels against owned template pixels and returns bounded corrections', async () => {
-  const store = new InMemoryPresentationArtifactStore();
-  const reference = await sharp({
-    create: { background: '#88AACC', channels: 3, height: 90, width: 160 },
-  })
-    .jpeg()
-    .toBuffer();
-  await store.put(scope, {
-    artifactId: 'template-page',
-    bytes: reference,
-    mimeType: 'image/jpeg',
-    name: 'reference.jpg',
-    type: 'image',
-  });
-  const review = {
-    issues: [
-      {
-        category: 'spacing',
-        evidence: 'The title touches the left edge while the reference keeps a broad margin.',
-        instruction: 'Move the title right and keep the illustration anchor unchanged.',
-        severity: 'major',
-        slideId: 'slide-1',
-      },
-    ],
-    passed: false,
-    schemaVersion: 1,
-    summary: 'The hierarchy is sound but the left margin is too tight.',
-  };
-  const chat: GLMMultimodalChatPort = {
-    chat: vi.fn(async () => ({
-      choices: [
+it.each([false, true])(
+  'reviews owned template pixels even with a shared master (%s)',
+  async (sharedMaster) => {
+    const store = new InMemoryPresentationArtifactStore();
+    const reference = await sharp({
+      create: { background: '#88AACC', channels: 3, height: 90, width: 160 },
+    })
+      .jpeg()
+      .toBuffer();
+    await store.put(scope, {
+      artifactId: 'template-page',
+      bytes: reference,
+      mimeType: 'image/jpeg',
+      name: 'reference.jpg',
+      type: 'image',
+    });
+    const review = {
+      issues: [
         {
-          index: 0,
-          message: { content: JSON.stringify(review), role: 'assistant' as const },
+          category: 'spacing',
+          evidence: 'The title touches the left edge while the reference keeps a broad margin.',
+          instruction: 'Move the title right and keep the illustration anchor unchanged.',
+          severity: 'major',
+          slideId: 'slide-1',
         },
       ],
-      created: 1,
-      id: 'review',
-      model: 'vision',
-    })),
-    manifest: {
-      displayName: 'Vision',
-      model: 'vision',
-      providerId: 'vision',
-      supportsIdempotency: true,
-      supportsVision: true,
-    },
-    providerId: 'vision',
-  };
-  const result = await createPresentationVisualCritic({ chat, store }).review(
-    {
-      plan: {
-        aspectRatio: '16:9',
-        planId: 'plan',
-        slides: [
+      passed: false,
+      schemaVersion: 1,
+      summary: 'The hierarchy is sound but the left margin is too tight.',
+    };
+    const chat: GLMMultimodalChatPort = {
+      chat: vi.fn(async () => ({
+        choices: [
           {
-            order: 1,
-            slideId: 'slide-1',
-            svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><rect width="960" height="540" fill="#fff"/><text x="2" y="80">Title</text></svg>',
+            index: 0,
+            message: { content: JSON.stringify(review), role: 'assistant' as const },
           },
         ],
-        sourceVersionIds: [],
-        title: 'Deck',
+        created: 1,
+        id: 'review',
+        model: 'vision',
+      })),
+      manifest: {
+        displayName: 'Vision',
+        model: 'vision',
+        providerId: 'vision',
+        supportsIdempotency: true,
+        supportsVision: true,
       },
-      template,
-    },
-    { scope },
-  );
-  expect(result).toEqual(review);
-  const [, context] = vi.mocked(chat.chat).mock.calls[0];
-  expect(context.trustedImages?.urls).toHaveLength(2);
-  const message = vi.mocked(chat.chat).mock.calls[0][0].messages[1].content;
-  expect(
-    Array.isArray(message) && message.filter((part) => part.type === 'image_url'),
-  ).toHaveLength(2);
-});
+      providerId: 'vision',
+    };
+    const result = await createPresentationVisualCritic({ chat, store }).review(
+      {
+        plan: {
+          aspectRatio: '16:9',
+          planId: 'plan',
+          ...(sharedMaster
+            ? {
+                designSpec: {
+                  deckVisualSystem: createDeckVisualSystem({
+                    notebookId: 'test',
+                    title: 'Deck',
+                    sourceVersionIds: [],
+                    options: { style: 'business' },
+                  }),
+                },
+              }
+            : {}),
+          slides: [
+            {
+              order: 1,
+              slideId: 'slide-1',
+              svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><rect width="960" height="540" fill="#fff"/><text x="2" y="80">Title</text></svg>',
+            },
+          ],
+          sourceVersionIds: [],
+          title: 'Deck',
+        },
+        template,
+      },
+      { scope },
+    );
+    expect(result).toEqual(review);
+    const [, context] = vi.mocked(chat.chat).mock.calls[0];
+    expect(context.trustedImages?.urls).toHaveLength(2);
+    const message = vi.mocked(chat.chat).mock.calls[0][0].messages[1].content;
+    if (!Array.isArray(message)) throw new Error('Expected multimodal review context');
+    const payload = JSON.parse(message.find((part) => part.type === 'text')!.text!);
+    expect(payload.currentTask.title).toBe('Deck');
+    if (sharedMaster) {
+      expect(payload.designProgram).toBeUndefined();
+      expect(payload.referenceStructures).toHaveLength(designProgram.archetypes.length);
+      expect(payload.deckPolicy).toContain('当前任务事实 > deckVisualSystem');
+    } else {
+      expect(payload.designProgram).toEqual(designProgram);
+    }
+    expect(
+      Array.isArray(message) && message.filter((part) => part.type === 'image_url'),
+    ).toHaveLength(2);
+  },
+);
 
 it('projects verbose critic output onto the trusted review contract', async () => {
   const store = new InMemoryPresentationArtifactStore();

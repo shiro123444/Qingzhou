@@ -34,26 +34,19 @@ export class ModelsService {
     });
 
     const runtimeProvider = resolveRuntimeProvider(provider);
-    try {
-      /**
-       * Use browser agent runtime
-       */
-      const enableFetchOnClient = isEnableFetchOnClient(provider);
-      if (enableFetchOnClient) {
-        const agentRuntime = await initializeWithClientStore({
-          provider,
-          runtimeProvider,
-        });
-        return agentRuntime.models();
-      }
-
-      const res = await fetch(API_ENDPOINTS.models(provider), { headers });
-      if (!res.ok) return;
-
-      return res.json();
-    } catch {
-      return;
+    const enableFetchOnClient = isEnableFetchOnClient(provider);
+    if (enableFetchOnClient) {
+      const agentRuntime = await initializeWithClientStore({ provider, runtimeProvider });
+      return agentRuntime.models();
     }
+
+    const res = await fetch(API_ENDPOINTS.models(provider), {
+      headers,
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!res.ok) throw new Error((await getMessageError(res)).message);
+
+    return res.json();
   };
 
   /**

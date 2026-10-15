@@ -45,10 +45,7 @@ export interface Disposer {
 
 export type Disposable = Disposer;
 export type Effect =
-  | Disposable
-  | Iterable<Disposable>
-  | AsyncIterable<Disposable>
-  | Promise<Effect | void>;
+  Disposable | Iterable<Disposable> | AsyncIterable<Disposable> | Promise<Effect | void>;
 
 export interface Fiber {
   collect: (disposer: Disposer) => Disposable;
@@ -255,7 +252,54 @@ export interface PresentationPlanner {
   plan: (input: PresentationJobInput, context: PlannerContext) => Promise<PresentationPlan>;
 }
 
-export type PresentationJobState = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type PresentationJobState =
+  'queued' | 'running' | 'waiting_input' | 'completed' | 'failed' | 'cancelled';
+
+export type PresentationCollaborationMode = 'adaptive' | 'ask' | 'auto';
+export interface PresentationDecision {
+  answer?: { action: 'retry' | 'revise'; content?: string; requestId: string; answeredAt: string };
+  category: 'quality' | 'provider' | 'input' | 'conflict';
+  choices?: { id: string; label: string; description?: string }[];
+  createdAt: string;
+  detail: string;
+  id: string;
+  options: Array<{ id: 'retry' | 'revise' | 'defer'; label: string; description: string }>;
+  status: 'pending' | 'deferred' | 'answered';
+  title: string;
+}
+export interface PresentationDecisionAnswer {
+  action: 'retry' | 'revise' | 'defer';
+  content?: string;
+  decisionId: string;
+  requestId: string;
+}
+export interface PresentationPresenceInput {
+  focused: boolean;
+  mode?: PresentationCollaborationMode;
+  tabId: string;
+  visible: boolean;
+}
+export interface PresentationCollaborationState {
+  automaticAttempts: number;
+  decisions: PresentationDecision[];
+  lastErrorCode?: string;
+  mode: PresentationCollaborationMode;
+}
+
+/** Durable creation conversation; data is revalidated by its owning capability. */
+export interface PresentationPlanningSession {
+  activity?: string;
+  checkpoint?: { brief: Record<string, unknown>; slides?: unknown[] };
+  collaboration: PresentationCollaborationState;
+  command: Record<string, unknown>;
+  heartbeatAt: string;
+  recoveryAttempts: number;
+  requestId: string;
+  result?: Record<string, unknown>;
+  state: PresentationJobState;
+  threadId: string;
+  updatedAt: string;
+}
 
 export interface PresentationAnnotation {
   baseSvgHash: string;
@@ -290,11 +334,14 @@ export interface PresentationRevision {
 export interface PresentationJob {
   artifactIds?: string[];
   aspectRatio?: string;
+  collaboration?: PresentationCollaborationState;
   createdAt: string;
   error?: RunError;
+  heartbeatAt?: string;
   jobId: string;
   messages?: PresentationMessage[];
   projectId?: string;
+  recovery?: { attempts: number; resumedAt: string; completedSlides: number };
   revisions?: PresentationRevision[];
   slideCount?: number;
   state: PresentationJobState;
@@ -756,8 +803,7 @@ export interface SlideScene {
 
 /** Validation result: either the scene data or one stable `SlideSceneError`. */
 export type SlideSceneValidation =
-  | { ok: true; scene: SlideScene }
-  | { ok: false; error: SlideSceneError };
+  { ok: true; scene: SlideScene } | { ok: false; error: SlideSceneError };
 
 const isFiniteNumber = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value);

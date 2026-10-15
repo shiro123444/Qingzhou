@@ -4,6 +4,7 @@ import type {
   PresentationRunner,
   PresentationRunnerResult,
 } from '../../../../packages/cordis-kernel/src/presentation';
+import { preserveSvgTextLayout } from './pptx-text-layout';
 import type { PresentationQualityReport, PresentationWorkerArtifact } from './worker';
 
 export interface PresentationToolchain {
@@ -159,7 +160,10 @@ export class PptMasterToolchain implements PresentationToolchain {
         );
       return {
         artifactId: `${workspacePath}:${index}`,
-        bytes: new Uint8Array(artifact.bytes),
+        bytes:
+          artifact.type === 'pptx' || artifact.path.toLowerCase().endsWith('.pptx')
+            ? preserveSvgTextLayout(artifact.bytes)
+            : new Uint8Array(artifact.bytes),
         mimeType:
           artifact.mimeType ??
           (artifact.type === 'svg' || artifact.path.toLowerCase().endsWith('.svg')
@@ -199,6 +203,8 @@ export class PptMasterToolchain implements PresentationToolchain {
               'exports/presentation.pptx',
               '--animation',
               'fade',
+              // Source-document charts retain their original labels and pixels.
+              '--no-image-optimize',
               ...(this.options.convertArgs ?? []),
             ]
           : []),

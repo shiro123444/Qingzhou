@@ -21,6 +21,8 @@ export async function recoverSemanticSlideLayout(input: {
   /** Already-owned image references; recovery may arrange them but never invent them. */
   imageRefs?: string[];
   visibleContent?: string[];
+  /** A deck contract owns the title/chrome and the content rectangle across every recovery path. */
+  deckBody?: { x: number; y: number; width: number; height: number };
 }) {
   const blocks = Array.isArray(input.rawBlocks)
     ? input.rawBlocks
@@ -79,7 +81,7 @@ export async function recoverSemanticSlideLayout(input: {
   }
   if (diagramIds.length && !diagram)
     throw new Error('A required scientific diagram has no valid source');
-  const bounds = contentLayout(input.boardSpace, input.aspectRatio);
+  const bounds = input.deckBody ?? contentLayout(input.boardSpace, input.aspectRatio);
   const [ratioWidth, ratioHeight] = input.aspectRatio.split(':').map(Number);
   const canvasHeight = (960 * ratioHeight) / ratioWidth;
   const formulas = input.intent.formulas.filter((formula) => formula.placement !== 'notes');
@@ -105,8 +107,12 @@ export async function recoverSemanticSlideLayout(input: {
     return fitted;
   };
   const diagramFits = (diagramWidth: number, diagramHeight: number) => {
-    if (diagram?.kind !== 'scientific-diagram' || diagram.spec.type !== 'graph') return true;
     try {
+      if (diagram?.kind === 'scientific-diagram') {
+        const minimum = minimumScientificDiagramSize(diagram, diagramWidth);
+        if (minimum.width > diagramWidth || minimum.height > diagramHeight) return false;
+      }
+      if (diagram?.kind !== 'scientific-diagram' || diagram.spec.type !== 'graph') return true;
       layoutScientificGraph(diagram.spec, diagramWidth, diagramHeight);
       return true;
     } catch {
@@ -170,19 +176,21 @@ export async function recoverSemanticSlideLayout(input: {
   const columnWidth = sideBySide ? (bounds.width - 24) / 2 : bounds.width;
   const textMarkup: string[] = [];
   const fontSize = 24;
+  const fontFamily = input.deckBody ? 'Microsoft YaHei, Arial' : 'Arial, Microsoft YaHei';
+  const measure = (text: string) => measureSlideText(text, fontSize, fontFamily);
   const lineHeight = 29;
   const wrap = (value: string, maxWidth: number): string[] => {
     const tokens = value.match(/[A-Za-z0-9]+(?:[./+-][A-Za-z0-9]+)*|./gu) ?? [];
     const lines: string[] = [];
     let current = '';
     for (const token of tokens) {
-      if (current && measureSlideText(current + token, fontSize) > maxWidth) {
+      if (current && measure(current + token) > maxWidth) {
         lines.push(current.trimEnd());
         current = '';
       }
-      if (measureSlideText(token, fontSize) > maxWidth) {
+      if (measure(token) > maxWidth) {
         for (const character of token) {
-          if (current && measureSlideText(current + character, fontSize) > maxWidth) {
+          if (current && measure(current + character) > maxWidth) {
             lines.push(current.trimEnd());
             current = '';
           }
@@ -195,9 +203,20 @@ export async function recoverSemanticSlideLayout(input: {
   };
   // An outline is content, not a request for a bullet list. Preserve an authored
   // marker when present, but never introduce one during layout recovery.
-  const contentLines = (input.visibleContent ?? []).flatMap((item) => wrap(item, columnWidth - 16));
-  const overflowLines: string[] = [];
-  const textBottom = bounds.y + bounds.height - reservedImage;
+  // A report table is already the main body. Do not paste its complete outline
+  // above it again; retain those source details in notes and show one conclusion.
+  const tableOwnsBody = diagram?.kind === 'scientific-diagram' && diagram.spec.type === 'table';
+  const contentLines = (
+    tableOwnsBody ? [input.intent.claim] : (input.visibleContent ?? [])
+  ).flatMap((item) => wrap(item, columnWidth - 32));
+  const overflowLines: string[] = tableOwnsBody ? [...(input.visibleContent ?? [])] : [];
+  // Reserve the actual diagram before flowing supplementary prose. Otherwise
+  // a valid full-width table loses its space to the outline that it already visualizes.
+  const reservedDiagram =
+    !sideBySide && diagram?.kind === 'scientific-diagram'
+      ? minimumScientificDiagramSize(diagram, bounds.width).height + 12
+      : 0;
+  const textBottom = bounds.y + bounds.height - reservedImage - reservedDiagram;
   if (contentLines.length && y + 4 < textBottom) {
     y += 4;
     for (const line of contentLines) {
@@ -207,7 +226,7 @@ export async function recoverSemanticSlideLayout(input: {
       }
       y += lineHeight;
       textMarkup.push(
-        `<text x="${bounds.x + 4}" y="${y}" font-size="${fontSize}" font-family="Arial, Microsoft YaHei" fill="#26374d">${escapeSvgText(line)}</text>`,
+        `<text x="${bounds.x + 4}" y="${y}" font-size="${fontSize}" font-family="${fontFamily}" fill="#26374d">${escapeSvgText(line)}</text>`,
       );
     }
     y += 8;
@@ -250,7 +269,7 @@ export async function recoverSemanticSlideLayout(input: {
       );
   }
   const title = escapeSvgText(input.title);
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 ${canvasHeight}"><rect x="0" y="0" width="960" height="${canvasHeight}" fill="#ffffff"/><text x="72" y="44" font-family="Microsoft YaHei, Arial" font-size="28" font-weight="bold" fill="#172554">${title}</text>${imageMarkup.join('')}${textMarkup.join('')}${blocksOut.map((block) => `<g data-content-id="${block.id}"/>`).join('')}</svg>`;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 ${canvasHeight}">${input.deckBody ? '<g data-deck-body="true">' : `<rect x="0" y="0" width="960" height="${canvasHeight}" fill="#ffffff"/><text x="72" y="44" font-family="Microsoft YaHei, Arial" font-size="28" font-weight="bold" fill="#172554">${title}</text>`}${imageMarkup.join('')}${textMarkup.join('')}${blocksOut.map((block) => `<g data-content-id="${block.id}"/>`).join('')}${input.deckBody ? '</g>' : ''}</svg>`;
   const rendered = await renderSemanticBlocks(svg, blocksOut, input.intent);
   return overflowLines.length ? { ...rendered, overflowNotes: overflowLines.join('\n') } : rendered;
 }

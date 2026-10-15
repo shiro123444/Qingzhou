@@ -1,5 +1,6 @@
 import { parseString } from '../../../../packages/file-loaders/src/utils/parser-utils';
 import type { PresentationPlan } from '../../../../packages/runtime-contracts/src';
+import { deckVisualSystemSchema, renderDeckVisualFrame } from './deck-visual-system';
 import {
   renderScientificDiagram,
   renderSemanticBlocks,
@@ -87,6 +88,7 @@ export async function stabilizePresentationVisuals(
   plan: PresentationPlan,
   template?: TemplateApplication,
 ): Promise<PresentationPlan> {
+  const master = deckVisualSystemSchema.safeParse(plan.designSpec?.deckVisualSystem);
   const slides = await Promise.all(
     plan.slides.map(async (slide) => {
       const blocks = slide.metadata?.contentBlocks;
@@ -95,11 +97,25 @@ export async function stabilizePresentationVisuals(
         const editable = semanticAuthoringSvg(svg, blocks);
         svg = (await renderSemanticBlocks(editable, blocks)).svg;
       }
-      svg = stampLockedTemplateChrome(
-        svg,
-        template,
-        (slide.metadata?.visualDirection as { archetypeId?: string } | undefined)?.archetypeId,
-      );
+      if (master.success && slide.metadata?.deckVisualSystemId) {
+        const role = (slide.metadata.visualDirection as { role?: string } | undefined)?.role;
+        svg = renderDeckVisualFrame(svg, master.data, {
+          title: String(slide.metadata.title ?? ''),
+          role:
+            role === 'cover' || role === 'section' || role === 'closing'
+              ? role
+              : slide.order === 1
+                ? 'cover'
+                : 'content',
+          order: slide.order,
+          total: plan.slides.length,
+        });
+      } else
+        svg = stampLockedTemplateChrome(
+          svg,
+          template,
+          (slide.metadata?.visualDirection as { archetypeId?: string } | undefined)?.archetypeId,
+        );
       return reconcileEmbeddedVisualAnnotations(
         reconcileNativeVisualAssets(svg === slide.svg ? slide : { ...slide, svg }),
       );
@@ -169,9 +185,7 @@ export interface VisualEvidenceAdjudication {
   category: PresentationVisualReview['issues'][number]['category'];
   minimumClearancePx?: number;
   reason:
-    | 'verified-formula-source'
-    | 'verified-native-radar-clearance'
-    | 'server-drawn-annotations';
+    'verified-formula-source' | 'verified-native-radar-clearance' | 'server-drawn-annotations';
   slideId: string;
   visualId?: string;
 }

@@ -2,11 +2,17 @@ import { describe, expect, it } from 'vitest';
 
 import { parseString } from '../../../../packages/file-loaders/src/utils/parser-utils';
 import type { PresentationPlan } from '../../../../packages/runtime-contracts/src';
+import {
+  assertDeckVisualConsistency,
+  createDeckVisualSystem,
+  renderDeckVisualFrame,
+} from './deck-visual-system';
 import { renderScientificDiagram, semanticBlockSchema } from './semantic-blocks';
 import type { TemplateApplication } from './templates';
 import {
   reconcileEvidenceBasedVisualReview,
   reconcileTypedFormulaReview,
+  stabilizePresentationVisuals,
   stampLockedTemplateChrome,
 } from './visual-stabilizer';
 
@@ -20,6 +26,60 @@ const template = {
 } as TemplateApplication;
 
 describe('visual stabilizer', () => {
+  it('retains the shared font and palette after recompiling native blocks', async () => {
+    const master = createDeckVisualSystem({
+      notebookId: 'test',
+      title: '协同育人',
+      sourceVersionIds: [],
+      options: { style: '商务' },
+    })!;
+    const block = semanticBlockSchema.parse({
+      id: 'flow',
+      kind: 'scientific-diagram',
+      title: '双向协作',
+      rect: master.body,
+      provenance: { kind: 'source', reference: 'attachment-private' },
+      spec: {
+        type: 'graph',
+        nodes: [
+          { id: 'a', label: '企业导师', x: 0.2, y: 0.5 },
+          { id: 'b', label: '教师实践', x: 0.8, y: 0.5 },
+        ],
+        edges: [{ from: 'a', to: 'b' }],
+      },
+    });
+    if (block.kind !== 'scientific-diagram') throw new Error('expected graph');
+    const svg = renderDeckVisualFrame(
+      `<svg viewBox="0 0 960 540"><g data-deck-body="true">${renderScientificDiagram(block)}</g></svg>`,
+      master,
+      { title: '双向协作', role: 'content', order: 2, total: 2 },
+    );
+    const plan: PresentationPlan = {
+      planId: 'test',
+      title: '协同育人',
+      aspectRatio: '16:9',
+      sourceVersionIds: [],
+      designSpec: { deckVisualSystem: master },
+      slides: [
+        {
+          slideId: 'slide-2',
+          order: 2,
+          svg,
+          metadata: {
+            title: '双向协作',
+            contentBlocks: [block],
+            deckVisualSystemId: master.id,
+            visualDirection: { role: 'content' },
+          },
+        },
+      ],
+    };
+    const result = await stabilizePresentationVisuals(plan);
+    expect(() => assertDeckVisualConsistency(result, master)).not.toThrow();
+    expect(result.slides[0].svg).toContain('企业导师');
+    expect(result.slides[0].svg).not.toContain('attachment-private');
+    expect(result.slides[0].metadata?.contentBlocks).toEqual([block]);
+  });
   it('does not recolor panels or diagrams by guessing brand roles from prose', () => {
     const svg =
       '<svg viewBox="0 0 960 540"><rect x="460" y="332" width="465" height="164" fill="#f0fdf4" stroke="#86efac"/><rect x="480" y="346" width="14" height="14" fill="#2C6EB5"/><text x="504" y="359" font-size="24" font-weight="bold" fill="#15803d">结论</text></svg>';

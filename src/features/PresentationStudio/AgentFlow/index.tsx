@@ -1,5 +1,6 @@
 import { type SendMessageParams, type UIChatMessage } from '@lobechat/types';
 import { Block, Button, Flexbox, Icon } from '@lobehub/ui';
+import { t } from 'i18next';
 import { FileText, Layers, Palette, Presentation, RotateCcw, Sparkles, Users } from 'lucide-react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
@@ -11,6 +12,8 @@ import type { LessonPlan } from '@/types/presentationLesson';
 import type { PresentationMaterials } from '@/types/presentationMaterial';
 import type { TeachingSelection } from '@/types/presentationTeaching';
 
+import type { PresentationPlanningSession } from '../../../../packages/runtime-contracts/src';
+import CollaborationControls from '../CollaborationControls';
 import { CreationContextBar, type PresentationCreationMode } from './CreationContextBar';
 import { MaterialContextPanel } from './MaterialContextPanel';
 import OutlineWorkspace, { type OutlineSlide } from './OutlineWorkspace';
@@ -25,6 +28,8 @@ import type {
   PresentationAgentBrief,
   PresentationAgentClient,
   PresentationAgentQuestion,
+  PresentationAgentTurnInput,
+  PresentationAgentTurnResult,
 } from './presentationAgentClient';
 import PresentationChatInput, { type PresentationSendPayload } from './PresentationChatInput';
 import { PresentationTools, type PresentationToolSelection } from './PresentationTools';
@@ -238,7 +243,13 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
     const [questionDraft, setQuestionDraft] = useState('');
     const [confirmedAnswers, setConfirmedAnswers] = useState<ConfirmedAgentAnswer[]>([]);
     const needsBriefConfirmation = useRef(false);
-    const threadIdRef = useRef(`presentation-thread-${Date.now()}`);
+    const threadIdRef = useRef(`presentation-thread-${crypto.randomUUID()}`);
+    const presenceTabId = useRef(crypto.randomUUID()).current;
+    const [planningSession, setPlanningSession] = useState<PresentationPlanningSession | null>(
+      null,
+    );
+    const [decisionBusy, setDecisionBusy] = useState(false);
+    const [restoring, setRestoring] = useState(Boolean(agentClient.getSession));
     const initialSubmittedRef = useRef(false);
 
     const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -265,6 +276,157 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
         );
     }, []);
 
+    const adoptPlanningSession = useCallback(
+      (session: PresentationPlanningSession, restoreMessages = false) => {
+        threadIdRef.current = session.threadId;
+        setPlanningSession(session);
+        const result = session.result as unknown as PresentationAgentTurnResult | undefined;
+        const command = session.command as unknown as PresentationAgentTurnInput;
+        const brief = (session.checkpoint?.brief ?? result?.brief ?? command.brief) as
+          PresentationAgentBrief | undefined;
+        if (brief) applyAgentBrief(brief);
+        if (command.references) setSelectedReferences(command.references);
+        const slides = result?.slides ?? (session.checkpoint?.slides as OutlineSlide[] | undefined);
+        if (slides?.length) setAgentOutline(slides);
+        if (restoreMessages)
+          setMessages([
+            ...(command.messages ?? []).map((message, index) => ({
+              id: `restored-${session.requestId}-${index}`,
+              sender: message.role === 'assistant' ? ('agent' as const) : ('user' as const),
+              content: message.content,
+            })),
+            ...(result?.message
+              ? [
+                  {
+                    id: `result-${session.requestId}`,
+                    sender: 'agent' as const,
+                    content: result.message,
+                  },
+                ]
+              : []),
+          ]);
+        else if (result?.message)
+          setMessages((current) =>
+            current.some(
+              (message) => message.content === result.message && message.sender === 'agent',
+            )
+              ? current
+              : [
+                  ...current,
+                  { id: `result-${session.requestId}`, sender: 'agent', content: result.message },
+                ],
+          );
+        if (result?.question) {
+          needsBriefConfirmation.current = true;
+          setPendingQuestion({
+            id: result.questionId ?? `question-${session.requestId}`,
+            question: result.question,
+            text: result.question.prompt,
+          });
+        } else setPendingQuestion(null);
+        setActivity(session.activity ?? '正在恢复创作进度');
+        if (result?.phase === 'outline' && result.slides?.length)
+          setStep(needsBriefConfirmation.current ? 'summary' : 'outline');
+        else setStep('intake');
+        setAgentBusy(
+          session.state === 'running' || session.state === 'queued' ? 'conversation' : null,
+        );
+      },
+      [applyAgentBrief],
+    );
+
+    useEffect(() => {
+      if (!agentClient.getSession) return;
+      let disposed = false;
+      const threadId =
+        new URLSearchParams(window.location.search).get('planningThreadId') ??
+        localStorage.getItem('qingzhou:presentation:planning:active');
+      if (!threadId) {
+        setRestoring(false);
+        return;
+      }
+      setAgentBusy('conversation');
+      setActivity('正在恢复已保存的需求与资料');
+      void agentClient
+        .getSession(threadId)
+        .then((session) => {
+          if (disposed) return;
+          if (session) {
+            localStorage.setItem('qingzhou:presentation:planning:active', session.threadId);
+            initialSubmittedRef.current = true;
+            adoptPlanningSession(session, true);
+          } else {
+            localStorage.removeItem('qingzhou:presentation:planning:active');
+            setAgentBusy(null);
+          }
+        })
+        .catch(() => {
+          if (!disposed) {
+            setAgentError('暂时无法恢复已保存的创作，请刷新重试');
+            setAgentBusy(null);
+          }
+        })
+        .finally(() => {
+          if (!disposed) setRestoring(false);
+        });
+      return () => {
+        disposed = true;
+      };
+    }, [agentClient, adoptPlanningSession]);
+
+    useEffect(() => {
+      if (!planningSession || !agentClient.getSession || !agentClient.setPresence) return;
+      let disposed = false;
+      let timer: ReturnType<typeof setTimeout>;
+      let presenceQueue = Promise.resolve();
+      const presence = (leaving = false) => {
+        const input = {
+          tabId: presenceTabId,
+          visible: !leaving && document.visibilityState === 'visible',
+          focused: !leaving && document.hasFocus(),
+        };
+        presenceQueue = presenceQueue
+          .then(() => agentClient.setPresence!(planningSession.threadId, input))
+          .catch(() => undefined);
+      };
+      const publish = () => presence();
+      const poll = async () => {
+        try {
+          const session = await agentClient.getSession!(planningSession.threadId);
+          if (!disposed && session) adoptPlanningSession(session);
+        } catch {
+          if (!disposed) setAgentError('连接暂时中断，已保存的任务会在服务恢复后继续');
+        }
+        if (!disposed) timer = setTimeout(poll, 2500);
+      };
+      presence();
+      const heartbeat = setInterval(publish, 20_000);
+      if (
+        planningSession.state === 'running' ||
+        planningSession.state === 'queued' ||
+        planningSession.state === 'waiting_input'
+      )
+        timer = setTimeout(poll, 2500);
+      document.addEventListener('visibilitychange', publish);
+      window.addEventListener('focus', publish);
+      window.addEventListener('blur', publish);
+      return () => {
+        disposed = true;
+        clearTimeout(timer);
+        clearInterval(heartbeat);
+        document.removeEventListener('visibilitychange', publish);
+        window.removeEventListener('focus', publish);
+        window.removeEventListener('blur', publish);
+        presence(true);
+      };
+    }, [
+      agentClient,
+      adoptPlanningSession,
+      planningSession?.threadId,
+      planningSession?.state,
+      presenceTabId,
+    ]);
+
     const handleAgentTurn = useCallback(
       async (
         payload: PresentationSendPayload,
@@ -276,7 +438,7 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
           visibleUserMessage?: string;
         },
       ) => {
-        if (agentBusy || turnInFlight.current) return;
+        if (restoring || agentBusy || turnInFlight.current) return;
         const text = payload.text.trim();
         if (!text && payload.references.length === 0) return;
         if (!options?.hiddenUserMessage) recoveredLimitErrorRef.current = null;
@@ -344,11 +506,23 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
         turnInFlight.current = true;
         turnController.current = new AbortController();
         let streamingMessageId: string | undefined;
+        if (agentClient.getSession) {
+          localStorage.setItem('qingzhou:presentation:planning:active', threadIdRef.current);
+          const location = new URL(window.location.href);
+          location.searchParams.set('planningThreadId', threadIdRef.current);
+          window.history.replaceState(null, '', location);
+        }
 
         try {
           const result = await agentClient.turn(
             {
               brief: agentBrief,
+              requestId: crypto.randomUUID(),
+              presence: {
+                tabId: presenceTabId,
+                visible: document.visibilityState === 'visible',
+                focused: document.hasFocus(),
+              },
               template: selectedTemplate
                 ? {
                     templateId: selectedTemplate.templateId,
@@ -399,6 +573,7 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
               /(?:请|需要).{0,24}(?:确认|选择|告诉|决定)/u.test(result.message),
             );
           recoveredLimitErrorRef.current = null;
+          if (result.session) setPlanningSession(result.session);
           applyAgentBrief(result.brief);
           if (!streamingMessageId) {
             setMessages((current) => [
@@ -438,6 +613,8 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
       },
       [
         agentBrief,
+        restoring,
+        presenceTabId,
         agentBusy,
         agentClient,
         creationMode,
@@ -647,6 +824,7 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
           language: selectedLanguage,
           notebookId: defaultNotebookId.trim() || 'studio',
           options: {
+            visualEnrichment: { mode: 'auto' },
             ...(confirmed?.lessonPlan ? { lessonPlan: confirmed.lessonPlan } : {}),
             audience: selectedAudience,
             outline: slidesToUse,
@@ -699,6 +877,11 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
     );
 
     const handleReset = useCallback(() => {
+      localStorage.removeItem('qingzhou:presentation:planning:active');
+      const location = new URL(window.location.href);
+      location.searchParams.delete('planningThreadId');
+      window.history.replaceState(null, '', location);
+      setPlanningSession(null);
       setStep('topic');
       setSelectedTopic('');
       setSelectedReferences([]);
@@ -718,7 +901,7 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
       setConfirmedAnswers([]);
       needsBriefConfirmation.current = false;
       recoveredLimitErrorRef.current = null;
-      threadIdRef.current = `presentation-thread-${Date.now()}`;
+      threadIdRef.current = `presentation-thread-${crypto.randomUUID()}`;
       setMessages([]);
     }, [defaultLanguage]);
 
@@ -919,6 +1102,39 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
         height={'100%'}
         width={'100%'}
       >
+        {planningSession && agentClient.answerDecision && agentClient.setPresence && (
+          <CollaborationControls
+            collaboration={planningSession.collaboration}
+            key={planningSession.threadId}
+            pending={decisionBusy}
+            state={planningSession.state}
+            taskId={planningSession.threadId}
+            onAnswer={async (answer) => {
+              setDecisionBusy(true);
+              try {
+                const session = await agentClient.answerDecision!(planningSession.threadId, answer);
+                adoptPlanningSession(session, true);
+                setAgentError(null);
+                return true;
+              } catch (error) {
+                setAgentError(error instanceof Error ? error.message : '决定未送达，请重试');
+                return false;
+              } finally {
+                setDecisionBusy(false);
+              }
+            }}
+            onMode={async (mode) => {
+              await agentClient.setPresence!(planningSession.threadId, {
+                tabId: presenceTabId,
+                visible: document.visibilityState === 'visible',
+                focused: document.hasFocus(),
+                mode,
+              });
+              const session = await agentClient.getSession?.(planningSession.threadId);
+              if (session) adoptPlanningSession(session);
+            }}
+          />
+        )}
         <CreationContextBar
           disabled={creating || Boolean(agentBusy)}
           mode={creationMode}
@@ -1028,18 +1244,47 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
                     </div>
                   )}
 
-                  {!agentBusy && pendingQuestion && (
-                    <AgentQuestionCard
-                      answerCount={confirmedAnswers.length}
-                      question={pendingQuestion.question}
-                      value={questionDraft}
-                      onAnswerChange={setQuestionDraft}
-                      onSubmit={handleQuestionAnswer}
-                    />
-                  )}
+                  {!agentBusy &&
+                    pendingQuestion &&
+                    !(
+                      planningSession?.state === 'waiting_input' &&
+                      planningSession.collaboration.decisions.some(
+                        (question) => question.status !== 'answered',
+                      )
+                    ) && (
+                      <AgentQuestionCard
+                        answerCount={confirmedAnswers.length}
+                        question={pendingQuestion.question}
+                        value={questionDraft}
+                        onAnswerChange={setQuestionDraft}
+                        onSubmit={handleQuestionAnswer}
+                      />
+                    )}
 
                   {(step === 'topic' || step === 'intake') && !agentBusy && !pendingQuestion && (
                     <div className={styles.flowComposer}>
+                      {(agentError || messages.some((message) => message.sender === 'agent')) && (
+                        <Button
+                          data-testid="presentation-agent-resume"
+                          disabled={creating}
+                          icon={RotateCcw}
+                          size="small"
+                          onClick={() =>
+                            void handleAgentTurn(
+                              {
+                                references: [],
+                                text: t('presentationRecovery.resume', { ns: 'common' }),
+                              },
+                              {
+                                modelContent:
+                                  '[恢复执行] 从本会话已经读过的资料、模板分析、素材和创作方案继续完成用户目标，不要重新开始。若有必要的用户决策，请提出一个具体的结构化问题；否则直接执行下一步，不要只预告。',
+                              },
+                            )
+                          }
+                        >
+                          {t('presentationRecovery.resume', { ns: 'common' })}
+                        </Button>
+                      )}
                       <PresentationChatInput
                         conversation
                         creating={creating}

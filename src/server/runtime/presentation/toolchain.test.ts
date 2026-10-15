@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
 
+import { strToU8, zipSync } from 'fflate';
 import { describe, expect, it, vi } from 'vitest';
 
 import type {
@@ -52,7 +53,17 @@ describe('C-53 ppt-master toolchain', () => {
   it('maps conversion artifacts and rejects unsafe configuration', async () => {
     const { runner, spawn } = makeRunner({
       exitCode: 0,
-      artifacts: [{ path: 'deck.pptx', bytes: new Uint8Array([1]), name: 'deck.pptx' }],
+      artifacts: [
+        {
+          path: 'deck.pptx',
+          bytes: zipSync({
+            'ppt/slides/slide1.xml': strToU8(
+              '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>',
+            ),
+          }),
+          name: 'deck.pptx',
+        },
+      ],
     });
     const toolchain = new PptMasterToolchain(options(runner));
     await expect(toolchain.convert('/tmp/workspaces/job-1')).resolves.toMatchObject([
@@ -67,6 +78,7 @@ describe('C-53 ppt-master toolchain', () => {
           'exports/presentation.pptx',
           '--animation',
           'fade',
+          '--no-image-optimize',
         ],
         shell: false,
       }),

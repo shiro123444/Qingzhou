@@ -4,7 +4,7 @@
  * Handles all agent builder tool calls for configuring and customizing agents.
  * Delegates to AgentManagerRuntime for actual implementation.
  */
-import { AgentManagerRuntime } from '@lobechat/agent-manager-runtime';
+import type { AgentManagerRuntime } from '@lobechat/agent-manager-runtime';
 import type { BuiltinToolContext, BuiltinToolResult } from '@lobechat/types';
 import { BaseExecutor } from '@lobechat/types';
 
@@ -20,10 +20,13 @@ import type {
 } from './types';
 import { AgentBuilderApiName, AgentBuilderIdentifier } from './types';
 
-const runtime = new AgentManagerRuntime({
-  agentService,
-  discoverService,
-});
+// Runtime imports the tool store, which also imports this executor. Defer
+// construction until dispatch so the module cycle can finish initializing.
+let runtime: AgentManagerRuntime | undefined;
+const getRuntime = async () => {
+  const { AgentManagerRuntime } = await import('@lobechat/agent-manager-runtime');
+  return (runtime ??= new AgentManagerRuntime({ agentService, discoverService }));
+};
 
 class AgentBuilderExecutor extends BaseExecutor<typeof AgentBuilderApiName> {
   readonly identifier = AgentBuilderIdentifier;
@@ -32,11 +35,11 @@ class AgentBuilderExecutor extends BaseExecutor<typeof AgentBuilderApiName> {
   // ==================== Read Operations ====================
 
   getAvailableModels = async (params: GetAvailableModelsParams): Promise<BuiltinToolResult> => {
-    return runtime.getAvailableModels(params);
+    return (await getRuntime()).getAvailableModels(params);
   };
 
   searchMarketTools = async (params: SearchMarketToolsParams): Promise<BuiltinToolResult> => {
-    return runtime.searchMarketTools(params);
+    return (await getRuntime()).searchMarketTools(params);
   };
 
   // ==================== Write Operations ====================
@@ -55,7 +58,7 @@ class AgentBuilderExecutor extends BaseExecutor<typeof AgentBuilderApiName> {
       };
     }
 
-    return runtime.updateAgentConfig(agentId, params);
+    return (await getRuntime()).updateAgentConfig(agentId, params);
   };
 
   updatePrompt = async (
@@ -72,7 +75,7 @@ class AgentBuilderExecutor extends BaseExecutor<typeof AgentBuilderApiName> {
       };
     }
 
-    return runtime.updatePrompt(agentId, {
+    return (await getRuntime()).updatePrompt(agentId, {
       streaming: true,
       ...params,
     });
@@ -92,7 +95,7 @@ class AgentBuilderExecutor extends BaseExecutor<typeof AgentBuilderApiName> {
       };
     }
 
-    return runtime.installPlugin(agentId, params);
+    return (await getRuntime()).installPlugin(agentId, params);
   };
 }
 

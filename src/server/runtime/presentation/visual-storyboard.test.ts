@@ -395,12 +395,94 @@ it('allows subject artwork only when its relevance is explained for this slide',
   ).rejects.toThrow('subject-relevance');
 });
 
+it('drops accidental subject selections on native pages instead of pausing the whole report', async () => {
+  const storyboard = await createPresentationVisualStoryboardPlanner({
+    chat: chatPort(['p1-leaf'], undefined, { assetMode: 'native' }),
+  }).plan(
+    {
+      jobInput,
+      template: {
+        ...template,
+        visual: { ...template.visual!, components: [{ ...component, role: 'artwork' }] },
+      },
+    },
+    { scope },
+  );
+  expect(storyboard.slides.every((slide) => slide.componentIds.length === 0)).toBe(true);
+});
+
+it('ignores unused component IDs on a shared-master native page before asset validation', async () => {
+  const nativeInput = {
+    ...jobInput,
+    options: {
+      ...jobInput.options,
+      deckVisualSystem: { id: 'shared' },
+      contentIntents: {
+        slides: [1, 2].map((page) => ({
+          slideId: `slide-${page}`,
+          claim: '数据比较',
+          formulas: [],
+          visualKind: 'chart',
+          visualReason: '原生数据表',
+          visuals: [
+            { id: 'table', kind: 'chart', renderer: 'native', required: true, brief: '原生数据表' },
+          ],
+        })),
+      },
+    },
+  };
+  const chat = chatPort(['unknown-decoration'], {
+    inputFingerprint: presentationStoryboardInputFingerprint(nativeInput),
+  });
+  const board = await createPresentationVisualStoryboardPlanner({ chat }).plan(
+    { jobInput: nativeInput, template },
+    { scope },
+  );
+  expect(board.slides[0].componentIds).toEqual([]);
+  expect(board.slides[0].assetMode).toBe('native');
+  expect(chat.chat).toHaveBeenCalledOnce();
+});
+
 it('requires an explicit new-artwork brief for mixed compositions', async () => {
   await expect(
     createPresentationVisualStoryboardPlanner({
       chat: chatPort([], undefined, { assetMode: 'mixed' }),
     }).plan({ jobInput, template }, { scope }),
   ).rejects.toThrow('assetBrief');
+});
+
+it('does not inherit unrequested cover photography into a shared native master', async () => {
+  const nativeInput = {
+    ...jobInput,
+    options: {
+      ...jobInput.options,
+      deckVisualSystem: { id: 'shared' },
+      contentIntents: {
+        slides: [1, 2].map((page) => ({
+          slideId: `slide-${page}`,
+          claim: '当前汇报',
+          formulas: [],
+          visualKind: 'none',
+          visualReason: '无需插画',
+          visuals: [],
+        })),
+      },
+    },
+  };
+  const chat = chatPort(
+    [],
+    {
+      inputFingerprint: presentationStoryboardInputFingerprint(nativeInput),
+    },
+    { compositionIntent: 'Add an unrelated city photograph and concentric rings.' },
+  );
+  const board = await createPresentationVisualStoryboardPlanner({ chat }).plan(
+    { jobInput: nativeInput, template },
+    { scope },
+  );
+  expect(board.slides[0].compositionIntent).toContain('没有已批准的视觉需求');
+  expect(board.slides[0].compositionIntent).not.toContain('city photograph');
+  expect(board.slides[0].componentIds).toEqual([]);
 });
 
 it('refuses baked or unknown components instead of letting the model invent reusable assets', async () => {

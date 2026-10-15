@@ -14,6 +14,17 @@ const slide = (artifactId: string, slideNumber: number, updatedAt: string): Arti
 });
 
 describe('currentSlideArtifacts', () => {
+  it('does not mix an old master with the first drafts of a new deck style', () => {
+    const latest = slide('new-style-1', 1, '2026-10-15T08:30:00.000Z');
+    latest.metadata = { ...latest.metadata, deckVisualSystemId: 'uniform-style' };
+    expect(
+      currentSlideArtifacts([
+        slide('old-1', 1, '2026-10-15T08:00:00.000Z'),
+        slide('old-2', 2, '2026-10-15T08:00:00.000Z'),
+        latest,
+      ]).map((a) => a.artifactId),
+    ).toEqual(['new-style-1']);
+  });
   it('replaces an old page with its latest streamed draft without duplicating navigation', () => {
     const result = currentSlideArtifacts([
       slide('old-1', 1, '2026-09-16T10:00:00.000Z'),

@@ -1,5 +1,6 @@
 import { networkInterfaces } from 'node:os';
 
+import { ensureSpaDevTemplates } from './scripts/_shared/ensureSpaDevTemplates';
 import { getBuildBudget } from './src/libs/next/config/build-budget';
 import { defineConfig } from './src/libs/next/config/define-config';
 
@@ -56,6 +57,7 @@ const nextConfig = defineConfig({
 });
 
 if (process.env.NODE_ENV === 'development') {
+  ensureSpaDevTemplates(process.cwd());
   const allowedOrigins = getLocalIPs();
   (nextConfig as any).allowedDevOrigins = allowedOrigins;
 }

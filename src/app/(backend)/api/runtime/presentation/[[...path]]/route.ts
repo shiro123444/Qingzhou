@@ -1006,6 +1006,47 @@ const toConversationResponse = async (
           contextServices.documents.load,
         );
     }
+    if (
+      composition?.planningSessions &&
+      ['turn', 'session', 'presence', 'decision'].includes(String(body.operation))
+    ) {
+      const sessions = composition.planningSessions;
+      const threadId = body.threadId as string;
+      if (body.operation === 'session')
+        return NextResponse.json(await sessions.read(resolvedScope, threadId));
+      if (body.operation === 'presence') {
+        await sessions.presenceUpdate(resolvedScope, threadId, body.presence as never);
+        return NextResponse.json({ received: true });
+      }
+      if (body.operation === 'decision')
+        return NextResponse.json(
+          await sessions.answer(resolvedScope, threadId, body.answer as never),
+        );
+      const { requestId, presence, ...command } = body;
+      if (presence) await sessions.presenceUpdate(resolvedScope, threadId, presence as never);
+      await sessions.start(
+        resolvedScope,
+        command as never,
+        typeof requestId === 'string' ? requestId : crypto.randomUUID(),
+      );
+      if (request.headers.get('accept')?.includes('application/x-ndjson')) {
+        return conversationStream(
+          (onActivity, signal, onCheckpoint) =>
+            sessions.wait(resolvedScope, threadId, signal, onActivity, onCheckpoint),
+          async () => {},
+          request.signal,
+        );
+      }
+      return NextResponse.json(
+        await sessions.wait(
+          resolvedScope,
+          threadId,
+          request.signal,
+          () => {},
+          async () => {},
+        ),
+      );
+    }
     const contextRuntime = contextServices
       ? createPresentationContextRuntime(contextServices)
       : undefined;
@@ -1014,15 +1055,39 @@ const toConversationResponse = async (
       request.headers.get('accept')?.includes('application/x-ndjson')
     ) {
       return conversationStream(
-        (onActivity, signal, onCheckpoint) =>
-          capability.execute(body as never, {
-            scope: resolvedScope,
-            tools: contextRuntime,
-            capabilities: composition?.atomicRuntime,
-            signal,
-            onActivity,
-            onCheckpoint,
-          }),
+        async (onActivity, signal, onCheckpoint) => {
+          const started = Date.now();
+          const threadId =
+            typeof body.threadId === 'string'
+              ? body.threadId.slice(0, 128).replaceAll(/[^\w-]/g, '_')
+              : undefined;
+          try {
+            const result = await capability.execute(body as never, {
+              scope: resolvedScope,
+              tools: contextRuntime,
+              capabilities: composition?.atomicRuntime,
+              signal,
+              onActivity,
+              onCheckpoint,
+            });
+            console.info('[presentation.conversation] finished', {
+              threadId,
+              phase: result.phase,
+              waitingForInput: Boolean(result.question),
+              slideCount: result.slides?.length ?? 0,
+              toolCalls: result.execution?.length ?? 0,
+              elapsedMs: Date.now() - started,
+            });
+            return result;
+          } catch (error) {
+            console.error('[presentation.conversation] interrupted', {
+              threadId,
+              error: error instanceof Error ? error.name : 'UnknownError',
+              elapsedMs: Date.now() - started,
+            });
+            throw error;
+          }
+        },
         async () => {
           await contextRuntime?.dispose();
         },

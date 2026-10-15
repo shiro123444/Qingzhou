@@ -20,6 +20,7 @@ import { createSkillsPlugin } from '../skills-plugin';
 import { createTeachingPlugin, type TeachingMemory } from '../teaching/atomic-plugin';
 import type { CompiledLesson } from '../teaching/lesson';
 import type { PresentationArtifactStore } from './artifact-store';
+import { createPresentationCollaborationPlugin } from './collaboration-plugin';
 import type { PresentationContentCompiler } from './content-intent';
 import type { PresentationGenerationPort } from './generation-port';
 import type { ImageGenerationCapability } from './image-generation-capability';
@@ -125,18 +126,16 @@ export const createPresentationAtomicRuntime = (options: {
     // Compatibility entry points delegate through Cordis, including its leases and events.
     ...teaching.operations
       .filter(({ name }) => !['teaching.lesson.compile', 'teaching.lesson.validate'].includes(name))
-      .map(
-        (operation): AtomicOperation => ({
-          ...operation,
-          name: operation.name
-            .replace('teaching.lesson.', 'presentation.lesson.')
-            .replace('teaching.memory.', 'presentation.teaching.'),
-          agent: operation.name.startsWith('teaching.memory.')
-            ? { contexts: ['presentation.intake'], maxCalls: operation.agent?.maxCalls }
-            : undefined,
-          execute: (input, context) => runtime.invoke(operation.name, input, context),
-        }),
-      ),
+      .map((operation): AtomicOperation => ({
+        ...operation,
+        name: operation.name
+          .replace('teaching.lesson.', 'presentation.lesson.')
+          .replace('teaching.memory.', 'presentation.teaching.'),
+        agent: operation.name.startsWith('teaching.memory.')
+          ? { contexts: ['presentation.intake'], maxCalls: operation.agent?.maxCalls }
+          : undefined,
+        execute: (input, context) => runtime.invoke(operation.name, input, context),
+      })),
     ...(options.teachingLearning?.operations() ?? []),
     {
       name: 'presentation.lesson.compile',
@@ -551,6 +550,7 @@ export const createPresentationAtomicRuntime = (options: {
     ...(options.operations ?? []),
   ];
   const plugins: AtomicPlugin[] = [
+    createPresentationCollaborationPlugin(),
     teaching,
     {
       id: 'presentation',

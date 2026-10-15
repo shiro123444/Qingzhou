@@ -264,6 +264,11 @@ export const extractPptxTemplate = (
     const colorMap = object(master.clrMap);
     const elements: TemplateElement[] = [];
     const assetSlots: TemplateAssetSlot[] = [];
+    const evidence: NonNullable<TemplateLayout['evidence']> = {
+      tables: [],
+      chartCount: 0,
+      textCharacters: 0,
+    };
     const sourceSlideId = `slide-${index + 1}`;
     const content: string[] = [];
     const background =
@@ -352,6 +357,24 @@ export const extractPptxTemplate = (
             (relation) => relationIds.has(relation.id) && mediaEntries.has(relation.path),
           );
           const text = textContent(shape.txBody).trim();
+          const table = descendants(shape, 'tbl')[0];
+          if (table) {
+            const widths = descendants(table, 'gridCol').map((column) =>
+              number(attribute(column, 'w')),
+            );
+            const total = widths.reduce((a, b) => a + b, 0);
+            evidence.tables.push({
+              box,
+              rows: descendants(table, 'tr').length,
+              columns: widths.length,
+              columnWeights: widths.map((value) =>
+                total > 0 ? round(value / total) : 1 / widths.length,
+              ),
+            });
+            evidence.textCharacters += [...textContent(table)].length;
+          }
+          evidence.chartCount += descendants(shape, 'chart').length;
+          evidence.textCharacters += [...text].length;
           const runProperties =
             descendants(shape.txBody, 'rPr')[0] ??
             descendants(shape.txBody, 'defRPr')[0] ??
@@ -519,6 +542,7 @@ export const extractPptxTemplate = (
     }
     return {
       assetSlots,
+      evidence,
       elements,
       kind: layoutKind(elements),
       layoutId: `layout:${sourceSlideId}`,

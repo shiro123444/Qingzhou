@@ -67,6 +67,7 @@ import { PresentationJobEventJournal } from './job-event-journal';
 import type { MultimodalChatPort } from './multimodal-chat-provider';
 import { createMultimodalPresentationPlanner } from './multimodal-planner';
 import { createPresentationGenerationPipeline } from './pipeline';
+import type { PlanningContextFactory } from './planning-session';
 import type {
   ProductionPresentationProvider,
   ProductionPresentationProviderOptions,
@@ -426,6 +427,7 @@ export interface ProductionPresentationGenerationCompositionOptions {
   readonly multimodalChatPort?: MultimodalChatPort;
   readonly now?: () => string;
   readonly planner?: PresentationPlanner;
+  readonly planningContextFactory?: PlanningContextFactory;
   readonly prepareCapabilityLibrary?: (scope: RuntimeScope) => Promise<void>;
   readonly runnerFactory?: (provider: ProductionPresentationProvider) => PresentationRunner;
   readonly teachingMemory?: FileTeachingMemory;
@@ -462,7 +464,10 @@ export const createProductionPresentationGenerationComposition = (
     options.planner ??
     (options.multimodalChatPort
       ? createMultimodalPresentationPlanner({
-          chatPort: options.multimodalChatPort,
+          // Layout must inspect real template pages and artwork. Keep the user's
+          // text model for content compilation and as the layout fallback.
+          chatPort: visionChatPort ?? options.multimodalChatPort,
+          fallbackChatPort: options.multimodalChatPort,
           defaultSlideCount: options.defaultSlideCount,
         })
       : undefined);
@@ -475,7 +480,11 @@ export const createProductionPresentationGenerationComposition = (
     options.contentCompiler ??
     (!options.planner && options.multimodalChatPort
       ? createPresentationContentCompiler(options.multimodalChatPort, options.defaultSlideCount, {
+          ...(visionChatPort && visionChatPort !== options.multimodalChatPort
+            ? { fallbackChat: visionChatPort }
+            : {}),
           ...(imageBudget === undefined ? {} : { maxRasterVisuals: imageBudget }),
+          imageGenerationAvailable: Boolean(options.imageGenerationCapability),
         })
       : undefined);
   const artifactStore =
@@ -509,14 +518,14 @@ export const createProductionPresentationGenerationComposition = (
         })
       : undefined;
   const visualStoryboardPlanner = options.multimodalChatPort
-    ? createPresentationVisualStoryboardPlanner({ chat: options.multimodalChatPort })
+    ? createPresentationVisualStoryboardPlanner({ chat: visionChatPort! })
     : undefined;
   const visualCritic = options.multimodalChatPort
     ? createPresentationVisualCritic({ chat: visionChatPort!, store: artifactStore })
     : undefined;
   const revisionAssetPlanner = options.multimodalChatPort
     ? createRevisionAssetPlanner({
-        chatPort: options.multimodalChatPort,
+        chatPort: visionChatPort!,
         validateReferenceAssets: createPresentationReferenceValidator({
           store: artifactStore,
           chat: visionChatPort!,
@@ -558,7 +567,7 @@ export const createProductionPresentationGenerationComposition = (
           ? async (componentId, input) => {
               if (!input.jobInput.template || !atomicRuntime)
                 throw new Error('Template runtime unavailable');
-              const extracted = await atomicRuntime.invoke(
+              const extracted = (await atomicRuntime.invoke(
                 'presentation.template.extractComponent',
                 {
                   ...((
@@ -580,9 +589,14 @@ export const createProductionPresentationGenerationComposition = (
                   signal: input.signal,
                   onEvent: input.onEvent,
                 },
-              ) as { ref: string; needsTransparency: boolean; component: { role: string } };
+              )) as { ref: string; needsTransparency: boolean; component: { role: string } };
               return extracted.component.role === 'frame'
-                  ? prepareFrameAperture({ ...input, ref: extracted.ref, store: artifactStore, chat: visionChatPort! })
+                ? prepareFrameAperture({
+                    ...input,
+                    ref: extracted.ref,
+                    store: artifactStore,
+                    chat: visionChatPort!,
+                  })
                 : extracted;
             }
           : undefined,
@@ -692,7 +706,12 @@ export const createProductionPresentationGenerationComposition = (
       : options.journalLoader;
 
   const composition = createPresentationRuntimeComposition({
+    planningContextFactory: options.planningContextFactory,
     atomicRuntime,
+    collaborationHook: atomicRuntime
+      ? (input, context) =>
+          atomicRuntime.invoke('presentation-collaboration.decide', input, context)
+      : undefined,
     contentCompiler,
     capabilityMemory: options.capabilityMemory,
     capabilitySelector: options.multimodalChatPort

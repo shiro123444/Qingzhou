@@ -1,6 +1,7 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import type { PresentationPlanningSession } from '../../../../packages/runtime-contracts/src';
 import { PresentationAgentFlow } from './index';
 import type { PresentationAgentClient } from './presentationAgentClient';
 
@@ -29,7 +30,135 @@ const readyClient = (
 
 const rewriteOutline = vi.fn(async ({ allSlides }) => allSlides);
 
+afterEach(async () => {
+  cleanup();
+  // The shared rich-text editor debounces selection reads by 100 ms. Drain
+  // those callbacks while the DOM still exists rather than after teardown.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  });
+});
+
 describe('PresentationAgentFlow (A-1 / A-2 / A-3)', () => {
+  it('restores a durable planning question and answers it through the collaboration hook', async () => {
+    localStorage.setItem('qingzhou:presentation:planning:active', 'restored-planning-thread');
+    const session: PresentationPlanningSession = {
+      threadId: 'restored-planning-thread',
+      requestId: 'saved-turn',
+      state: 'waiting_input',
+      recoveryAttempts: 1,
+      updatedAt: '2026-10-15',
+      heartbeatAt: '2026-10-15',
+      command: {
+        messages: [{ role: 'user', content: '沿用已读资料制作18页汇报' }],
+        references: [],
+      },
+      checkpoint: { brief: { topic: '保存的汇报主题', research: '已经读取的正文' } },
+      collaboration: {
+        mode: 'adaptive',
+        automaticAttempts: 0,
+        decisions: [
+          {
+            id: 'question-to-restore',
+            category: 'provider',
+            status: 'pending',
+            createdAt: '2026-10-15',
+            title: '继续制作前请选择',
+            detail: '资料和大纲已保存',
+            options: [
+              { id: 'retry', label: '沿用资料继续', description: '继续当前步骤' },
+              { id: 'revise', label: '补充后继续', description: '补充要求' },
+              { id: 'defer', label: '稍后决定', description: '保留进度' },
+            ],
+          },
+        ],
+      },
+    };
+    const getSession = vi.fn(async () => session);
+    const answerDecision = vi.fn(async () => ({ ...session, state: 'queued' as const }));
+    const turn = vi.fn();
+    const view = render(
+      <PresentationAgentFlow
+        agentClient={{
+          turn,
+          outline: vi.fn(),
+          getSession,
+          answerDecision,
+          setPresence: vi.fn(async () => {}),
+        }}
+        onCreate={vi.fn()}
+        onOutlineAiRewrite={rewriteOutline}
+      />,
+    );
+    try {
+      expect(await screen.findByText('继续制作前请选择')).toBeInTheDocument();
+      expect(screen.getByTestId('presentation-agent-transcript')).toHaveTextContent(
+        '沿用已读资料制作18页汇报',
+      );
+      expect(turn).not.toHaveBeenCalled();
+      fireEvent.change(
+        screen.getByRole('textbox', { name: /Describe|补充希望|presentationCollaboration.input/ }),
+        { target: { value: '增加两张统一风格插画' } },
+      );
+      fireEvent.click(screen.getByRole('button', { name: '补充后继续' }));
+      await waitFor(() =>
+        expect(answerDecision).toHaveBeenCalledWith(
+          'restored-planning-thread',
+          expect.objectContaining({
+            decisionId: 'question-to-restore',
+            action: 'revise',
+            content: '增加两张统一风格插画',
+          }),
+        ),
+      );
+      expect(turn).not.toHaveBeenCalled();
+    } finally {
+      view.unmount();
+      localStorage.removeItem('qingzhou:presentation:planning:active');
+    }
+  });
+  it('resumes an idle intake turn with its existing brief and conversation', async () => {
+    const brief = {
+      topic: '两大板块均衡汇报',
+      research: '已读资料的来源与正文',
+      assets: ['saved-image'],
+    };
+    const turn = vi
+      .fn<PresentationAgentClient['turn']>()
+      .mockResolvedValueOnce({
+        brief,
+        message: '材料已读完，先确认视觉风格，再出大纲。',
+        phase: 'intake',
+      })
+      .mockResolvedValueOnce({
+        brief,
+        message: '请确认视觉风格。',
+        phase: 'intake',
+        questionId: 'style',
+        question: { prompt: '这次采用哪种视觉风格？' },
+      });
+    render(
+      <PresentationAgentFlow
+        agentClient={{ turn, outline: vi.fn() }}
+        initialTopic="两大板块均衡汇报"
+        onCreate={vi.fn()}
+        onOutlineAiRewrite={rewriteOutline}
+      />,
+    );
+    fireEvent.click(await screen.findByTestId('presentation-agent-resume'));
+    await waitFor(() => expect(turn).toHaveBeenCalledTimes(2));
+    expect(turn.mock.calls[1][0].brief).toMatchObject(brief);
+    expect(turn.mock.calls[1][0].messages).toContainEqual(
+      expect.objectContaining({
+        role: 'assistant',
+        content: '材料已读完，先确认视觉风格，再出大纲。',
+      }),
+    );
+    expect(await screen.findByTestId('presentation-agent-question')).toHaveTextContent(
+      '这次采用哪种视觉风格？',
+    );
+  });
+
   it.each([
     '工具调用次数已达本轮上限',
     'Conversation response message is required',

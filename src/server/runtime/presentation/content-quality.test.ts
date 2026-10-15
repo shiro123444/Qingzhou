@@ -61,6 +61,23 @@ describe('presentation content quality', () => {
     expect(inspectPresentationContent(plan as never).passed).toBe(true);
   });
 
+  it('wraps a short undersized card paragraph without colliding with the next element', () => {
+    const svg =
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><rect x="40" y="80" width="380" height="180"/><text x="60" y="120" font-size="16">获批校级一流本科专业建设点，前瞻布局特色方向。</text></svg>';
+    const readable = promoteReadablePlainText(svg);
+    expect(readable).toContain('font-size="24"');
+    expect(readable).toContain('<tspan');
+    expect(
+      inspectPresentationContent({ slides: [{ slideId: 'slide-9', svg: readable }] } as never)
+        .passed,
+    ).toBe(true);
+    const occupied = svg.replace(
+      '</svg>',
+      '<text x="60" y="155" font-size="24">下一个要点</text></svg>',
+    );
+    expect(promoteReadablePlainText(occupied)).toBe(occupied);
+  });
+
   it('still rejects text smaller than a label inside an annotation group', () => {
     const plan = {
       slides: [

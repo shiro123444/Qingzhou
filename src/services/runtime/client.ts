@@ -3,10 +3,12 @@ import type {
   ExportResult,
   PluginDescriptor,
   PluginRuntimeState,
+  PresentationDecisionAnswer,
   PresentationExportFormat,
   PresentationJob,
   PresentationJobInput,
   PresentationMessageInput,
+  PresentationPresenceInput,
   ResumeRunInput,
   RunSnapshot,
   RuntimeEvent,
@@ -81,6 +83,8 @@ export type RuntimePresentationClient = Pick<
       | 'deletePresentationJob'
       | 'downloadArtifact'
       | 'sendPresentationMessage'
+      | 'updatePresentationPresence'
+      | 'answerPresentationDecision'
       | 'listPresentationJobs'
     >
   >;
@@ -159,6 +163,10 @@ export interface CreateImageGenerationResult {
 }
 
 export interface RuntimeClient {
+  answerPresentationDecision: (
+    jobId: string,
+    input: PresentationDecisionAnswer,
+  ) => Promise<PresentationJob>;
   cancelPresentationJob: (
     jobId: string,
     options?: { signal?: AbortSignal },
@@ -220,6 +228,7 @@ export interface RuntimeClient {
     options?: SubscribePresentationJobOptions,
   ) => AsyncIterable<PresentationJobEvent>;
   unmountPlugin: (id: string, options?: { signal?: AbortSignal }) => Promise<PluginRuntimeState>;
+  updatePresentationPresence: (jobId: string, input: PresentationPresenceInput) => Promise<void>;
 }
 
 export class RuntimeClientImpl implements RuntimeClient {
@@ -558,6 +567,39 @@ export class RuntimeClientImpl implements RuntimeClient {
     if (!response.ok)
       throw new Error(
         `Failed to send presentation message (${response.status}): ${await response.text()}`,
+      );
+    return (await response.json()) as PresentationJob;
+  }
+
+  async updatePresentationPresence(jobId: string, input: PresentationPresenceInput): Promise<void> {
+    const response = await this.fetcher(
+      this.resolveUrl(`${RUNTIME_ENDPOINTS.presentationJob(jobId)}/presence`),
+      {
+        method: 'POST',
+        headers: await this.prepareHeaders(),
+        body: JSON.stringify(input),
+        keepalive: true,
+      },
+    );
+    if (!response.ok)
+      throw new Error(`Failed to update presentation presence (${response.status})`);
+  }
+
+  async answerPresentationDecision(
+    jobId: string,
+    input: PresentationDecisionAnswer,
+  ): Promise<PresentationJob> {
+    const response = await this.fetcher(
+      this.resolveUrl(`${RUNTIME_ENDPOINTS.presentationJob(jobId)}/decisions`),
+      {
+        method: 'POST',
+        headers: await this.prepareHeaders(),
+        body: JSON.stringify(input),
+      },
+    );
+    if (!response.ok)
+      throw new Error(
+        `Failed to answer presentation decision (${response.status}): ${await response.text()}`,
       );
     return (await response.json()) as PresentationJob;
   }

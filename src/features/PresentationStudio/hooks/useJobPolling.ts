@@ -31,7 +31,8 @@ export interface UseJobPollingOptions {
   wait?: (delayMs: number, signal: AbortSignal) => Promise<void>;
 }
 
-const isActiveState = (state: string): boolean => state === 'queued' || state === 'running';
+const isActiveState = (state: string): boolean =>
+  ['queued', 'running', 'waiting_input'].includes(state);
 
 export const defaultReconnectWait = (delayMs: number, signal: AbortSignal): Promise<void> =>
   new Promise((resolve, reject) => {

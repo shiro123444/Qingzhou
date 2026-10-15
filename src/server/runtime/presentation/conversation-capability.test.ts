@@ -17,7 +17,19 @@ const plan = {
 };
 const slide = { id: 's1', title: '试点计划', keyPoints: ['预算37万元'] };
 const response = (value: unknown) => ({
-  choices: [{ index: 0, message: { content: JSON.stringify(value), role: 'assistant' as const } }],
+  choices: [
+    {
+      index: 0,
+      message: {
+        content: JSON.stringify(
+          value && typeof value === 'object' && 'phase' in value && value.phase === 'intake'
+            ? { completion: 'fulfilled', ...value }
+            : value,
+        ),
+        role: 'assistant' as const,
+      },
+    },
+  ],
   created: 1,
   id: 'test',
   model: 'test',
@@ -45,6 +57,67 @@ const command = {
 const op = (operation: string, input: unknown = {}) => ({ operation, input });
 
 describe('autonomous presentation conversation', () => {
+  it('repairs an unfinished announcement into an actual question instead of silently stopping', async () => {
+    const chat = chatPort(
+      {
+        phase: 'intake',
+        completion: undefined,
+        message: '材料已读完，两大板块均衡汇报。先确认视觉风格，再出大纲。',
+      },
+      {
+        phase: 'intake',
+        message: '接下来确认汇报的视觉风格。',
+        questionId: 'style',
+        question: {
+          prompt: '你希望这份汇报采用什么视觉风格？',
+          choices: [
+            { id: 'formal', label: '正式学术' },
+            { id: 'visual', label: '图解叙事' },
+          ],
+        },
+      },
+    );
+    const result = await createPresentationConversationCapability({ chat }).execute(command, {
+      scope,
+    });
+    expect(chat.chat).toHaveBeenCalledTimes(2);
+    expect(result.question?.prompt).toContain('视觉风格');
+    expect(result.questionId).toBe('style');
+    expect(
+      JSON.parse(vi.mocked(chat.chat).mock.calls[1][0].messages.at(-1)!.content as string)
+        .correction,
+    ).toContain('question.prompt');
+  });
+
+  it('continues after a progress update and delivers the executed outline in the same turn', async () => {
+    const chat = chatPort(
+      { phase: 'intake', completion: 'continue', message: '材料已读完，继续组织大纲。' },
+      op('planning.update', { topic: '均衡汇报', plan }),
+      op('planning.outline'),
+      { slides: [slide] },
+      { phase: 'outline', message: '大纲已就绪' },
+    );
+    const activity = vi.fn();
+    const result = await createPresentationConversationCapability({ chat }).execute(command, {
+      scope,
+      onActivity: activity,
+    });
+    expect(result.phase).toBe('outline');
+    expect(result.slides).toEqual([slide]);
+    expect(activity).toHaveBeenCalledWith(
+      expect.objectContaining({ text: '材料已读完，继续组织大纲。' }),
+    );
+  });
+
+  it('reports repeated unfinished decisions as a visible error rather than an idle successful turn', async () => {
+    const unfinished = { phase: 'intake', completion: undefined, message: '先确认风格，再继续。' };
+    const chat = chatPort(unfinished, unfinished, unfinished);
+    await expect(
+      createPresentationConversationCapability({ chat }).execute(command, { scope }),
+    ).rejects.toThrow('尚未给出可执行的下一步');
+    expect(chat.chat).toHaveBeenCalledTimes(3);
+  });
+
   it('lets the agent choose file, search, skill, plan and outline order and carries real evidence forward', async () => {
     const readFile = vi.fn(async () => ({ name: 'budget.txt', content: '预算37万元，12家门店。' }));
     const search = vi.fn(async () => ({ results: [{ url: 'https://example.com/source' }] }));
@@ -238,7 +311,7 @@ describe('autonomous presentation conversation', () => {
     };
     for (let index = 0; index < 8; index++) {
       const result = await createPresentationConversationCapability({
-        chat: chatPort({ message: '继续沿用原稿。' }),
+        chat: chatPort({ phase: 'intake', completion: 'fulfilled', message: '继续沿用原稿。' }),
       }).execute({ ...command, brief, template }, { scope });
       brief = { research: result.brief.research! };
       expect(JSON.parse(brief.research).evidence[0]).toMatchObject({

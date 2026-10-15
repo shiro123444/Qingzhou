@@ -149,7 +149,8 @@ export const contentInputFingerprint = (input: PresentationJobInput): string =>
         slideCount: input.slideCount,
         title: input.title,
         revision: input.options?.contentRevision,
-        contractVersion: 6,
+        contractVersion: 8,
+        visualEnrichment: input.options?.visualEnrichment,
         imageSlots: input.options?.imageSlots,
         lessonPlan: input.options?.lessonPlan,
         materials: input.options?.materials,
@@ -173,6 +174,8 @@ export interface PresentationContentCompiler {
 }
 
 export interface PresentationContentCompilerOptions {
+  readonly fallbackChat?: MultimodalChatPort;
+  readonly imageGenerationAvailable?: boolean;
   /** Generated images one deck may plan; exceeded pages fall back to vector or typographic. */
   readonly maxRasterVisuals?: number;
 }
@@ -194,6 +197,7 @@ export const createPresentationContentCompiler = (
         for (const stage of publicLessonStages(input)) {
           context.signal?.throwIfAborted();
           const compiled = await createPresentationContentCompiler(chat, 1, {
+            fallbackChat: options.fallbackChat,
             maxRasterVisuals,
           }).compile(
             {
@@ -223,19 +227,117 @@ export const createPresentationContentCompiler = (
       const count = outline.length || input.slideCount || defaultSlideCount;
       if (!count || count < 1 || count > 100)
         throw new Error('Content compilation requires 1–100 confirmed slides');
+      if (count > 4 && outline.length === count) {
+        const slides: SlideContentIntent[] = [];
+        const enrichment = input.options?.visualEnrichment as
+          { mode?: string; slideNumbers?: number[] } | undefined;
+        for (let start = 0; start < count; start += 4) {
+          context.signal?.throwIfAborted();
+          const numbers = Array.from(
+            { length: Math.min(4, count - start) },
+            (_, offset) => start + offset + 1,
+          );
+          const selected = enrichment?.slideNumbers?.filter((number) => numbers.includes(number));
+          const batch = await createPresentationContentCompiler(
+            chat,
+            numbers.length,
+            options,
+          ).compile(
+            {
+              ...input,
+              slideCount: numbers.length,
+              options: {
+                ...input.options,
+                outline: outline.slice(start, start + numbers.length),
+                originalSlideNumbers: numbers,
+                contentIntents: input.options?.contentIntents
+                  ? {
+                      slides: readContentIntents(input)
+                        .slice(start, start + numbers.length)
+                        .map((slide, index) => ({ ...slide, slideId: `slide-${index + 1}` })),
+                    }
+                  : undefined,
+                visualEnrichment: {
+                  ...enrichment,
+                  mode:
+                    enrichment?.mode === 'off' || (enrichment?.slideNumbers && !selected?.length)
+                      ? 'off'
+                      : 'auto',
+                },
+                imageSlots: Array.isArray(input.options?.imageSlots)
+                  ? input.options.imageSlots.flatMap((slot: any) => {
+                      const original = Number(String(slot.slideId).replace('slide-', ''));
+                      const local = numbers.indexOf(original);
+                      return local < 0 ? [] : [{ ...slot, slideId: `slide-${local + 1}` }];
+                    })
+                  : undefined,
+              },
+            },
+            { ...context, rasterAllowance: allowance },
+          );
+          slides.push(
+            ...batch.slides.map((slide, index) => ({
+              ...slide,
+              slideId: `slide-${numbers[index]}`,
+            })),
+          );
+        }
+        if (
+          enrichment?.mode === 'required' &&
+          !slides.some((slide) => slide.visuals?.some(isRasterVisual))
+        )
+          throw Object.assign(new Error('当前分镜没有提供要求的生图素材，请确认视觉用途后继续'), {
+            code: 'PRESENTATION_VISUAL_PLAN_FAILED',
+          });
+        return { inputFingerprint: contentInputFingerprint(input), slides };
+      }
       const { value } = await completeStructuredJson({
         chat,
+        fallbackChat: options.fallbackChat,
         context,
         parse: async (candidate) => {
+          if (
+            count === 1 &&
+            candidate &&
+            typeof candidate === 'object' &&
+            'slideId' in candidate &&
+            !('slides' in candidate)
+          )
+            candidate = { slides: [candidate] };
+          if (
+            count === 1 &&
+            candidate &&
+            typeof candidate === 'object' &&
+            'slides' in candidate &&
+            Array.isArray(candidate.slides) &&
+            candidate.slides.length === 1 &&
+            Array.isArray(input.options?.originalSlideNumbers) &&
+            candidate.slides[0]?.slideId === `slide-${input.options.originalSlideNumbers[0]}`
+          )
+            candidate = { ...candidate, slides: [{ ...candidate.slides[0], slideId: 'slide-1' }] };
           const result = z
             .object({
               slides: z
                 .array(
                   slideContentIntentSchema.extend({
-                    visuals: z.array(visualRequirementSchema.extend({
-                      // Echoed refs are not bindings. The asset phase verifies ownership/routing.
-                      ref: z.string().refine((ref) => Array.isArray(input.options?.availableAssetRefs) && input.options.availableAssetRefs.includes(ref), 'Only an offered asset ref may be echoed').optional(),
-                    }).transform(({ ref: _ref, ...requirement }) => requirement)).max(6),
+                    visuals: z
+                      .array(
+                        visualRequirementSchema
+                          .extend({
+                            // Echoed refs are not bindings. The asset phase verifies ownership/routing.
+                            ref: z
+                              .string()
+                              .refine(
+                                (ref) =>
+                                  Array.isArray(input.options?.availableAssetRefs) &&
+                                  input.options.availableAssetRefs.includes(ref),
+                                'Only an offered asset ref may be echoed',
+                              )
+                              .optional(),
+                          })
+                          .transform(({ ref: _ref, ...requirement }) => requirement),
+                      )
+                      .max(6),
                   }),
                 )
                 .length(count),
@@ -255,16 +357,17 @@ export const createPresentationContentCompiler = (
             for (const visual of slide.visuals ?? []) {
               if (isRasterVisual(visual) && visual.fidelity === 'conceptual')
                 visual.annotationMode ??= 'embedded';
-              if (visual.kind === 'source-figure' && visual.renderer === 'image')
-                throw new Error('Source figures must be reused, never generated.');
+              // A source figure is an existing bitmap, not an instruction to call
+              // image generation. Normalize the model's renderer shorthand; the
+              // asset planner still requires an owned, provided source reference.
+              if (visual.kind === 'source-figure') delete visual.renderer;
               if (visual.fidelity === 'computed' && isRasterVisual(visual))
                 throw new Error(
                   'Compute quantitative geometry with the native renderer; use a separate image visual for conceptual explanation.',
                 );
             }
             const stage = input.options?.lessonStage as
-              | { boardSpace?: string; kind?: string }
-              | undefined;
+              { boardSpace?: string; kind?: string } | undefined;
             if (stage?.kind === 'cover') {
               // Teaching covers carry the course title and pause. Decorative model
               // imagery is not a scientific subject and easily overwhelms the opening.
@@ -304,6 +407,14 @@ export const createPresentationContentCompiler = (
               }
             }
           }
+          const enrichment = input.options?.visualEnrichment as { mode?: string } | undefined;
+          if (
+            enrichment?.mode === 'required' &&
+            !result.slides.some((slide) => slide.visuals?.some(isRasterVisual))
+          )
+            throw new Error(
+              'The user requires generated visuals: plan at least one meaningful renderer:image asset, while keeping factual data native.',
+            );
           return { ...result, slides: applyRasterBudget(result.slides, allowance, input).slides };
         },
         request: {
@@ -311,7 +422,11 @@ export const createPresentationContentCompiler = (
           response_format: { type: 'json_object' },
           temperature: 0,
           messages: [
-            { role: 'system', content: '资料处理阶段的操作要求（例如“本轮只做分镜、不生图”）用于安排工具，不是报告正文，不作为页面事实或讲稿内容。当前制作阶段以当前prompt的交付要求为准；保留主题事实、来源、预算/计划口径与必要样例性质。' },
+            {
+              role: 'system',
+              content:
+                '资料处理阶段的操作要求（例如“本轮只做分镜、不生图”）用于安排工具，不是报告正文，不作为页面事实或讲稿内容。当前制作阶段以当前prompt的交付要求为准；保留主题事实、来源、预算/计划口径与必要样例性质。',
+            },
             { role: 'system', content: MATERIAL_GROUNDING_INSTRUCTIONS },
             {
               role: 'system',
@@ -320,7 +435,7 @@ export const createPresentationContentCompiler = (
             {
               role: 'system',
               content:
-                '视觉类型kind与绘制工具renderer必须分开。贴纸、表情包、角标、小徽章这类纯装饰用 kind:"sticker"：只画一个孤立主体，不带文字、不带整幅背景；服务端会自动抠图成透明并小尺寸落位，所以不要在 sticker 上要求背景、场景或图注。框架图、流程图、机制图、实验装置图、概念性科研图优先renderer:image，不限于装饰配图；brief明确部件、关系和箭头，不允许多余拼贴、照片条或无关装饰。概念性框架图、流程图、知识地图默认 annotationMode:"embedded"：生图负责图内短标签、连接线与箭头，SVG只负责图外标题正文，不再叠加同一套标签和箭头。不要在看到真实图片之前猜测对象坐标。只有确实需要独立编辑、且按确定布局约束生成的精确几何标注才用 annotationMode:"overlay" 与 visuals[].annotations：{type:"vector"|"guide"|"label", from/to 或 at（实际图像内 0 到 1 的相对坐标）, label 或 text（不超过 24 字）, color?}；此模式下图片禁止同名标签与箭头，服务端按真实图像比例投影。定量或严格几何关系优先native，由服务端计算。科研图默认简洁的二维学术图、实物照片或可核实原始资料；没有定义函数与数据时，不生成装饰性三维曲面、发光光轨和空泛科技背景。需要精确函数、等高线、泰勒逼近、迭代轨迹、实验数值的图选renderer:native,fidelity:computed，交给可复算模型或有来源数据，禁止手填看似正确的点。仅解释概念、不声称定量结果时用fidelity:conceptual，可以生图。复杂页面可以拆成一个image机制图和一个native数据块，不用整页禁用生图。论文原图source-figure只复用。不要强制每页配图。概念/框架/机制图不用添加“示意图·非实测”免责声明；数据图则保留真实来源和实验设置。数学公式默认28px，由服务器测量和等价换行，不能虚构measurement。板书页预算为左侧544px净宽。教学封面优先只用课程标题、统一色彩和留白；没有内容意义的AI背景会被服务端移除。',
+                '视觉类型kind与绘制工具renderer必须分开。贴纸、表情包、角标、小徽章这类纯装饰用 kind:"sticker"：只画一个孤立主体，不带文字、不带整幅背景；服务端会自动抠图成透明并小尺寸落位，所以不要在 sticker 上要求背景、场景或图注。工作汇报中的表格、指标矩阵、对比与明确节点流程优先renderer:native（表格用kind:chart，流程用kind:scientific-diagram），保持数字、状态、文字和关系可编辑；表格brief列出有来源的完整行列。复杂科研机制、实验装置、主体插画才优先renderer:image；brief明确部件、关系和箭头，不允许多余拼贴、照片条或无关装饰。选择image渲染的概念性框架图、流程图、知识地图使用 annotationMode:"embedded"：生图负责图内短标签、连接线与箭头，SVG只负责图外标题正文，不再叠加同一套标签和箭头。不要在看到真实图片之前猜测对象坐标。只有确实需要独立编辑、且按确定布局约束生成的精确几何标注才用 annotationMode:"overlay" 与 visuals[].annotations：{type:"vector"|"guide"|"label", from/to 或 at（实际图像内 0 到 1 的相对坐标）, label 或 text（不超过 24 字）, color?}；此模式下图片禁止同名标签与箭头，服务端按真实图像比例投影。定量或严格几何关系优先native，由服务端计算。科研图默认简洁的二维学术图、实物照片或可核实原始资料；没有定义函数与数据时，不生成装饰性三维曲面、发光光轨和空泛科技背景。需要精确函数、等高线、泰勒逼近、迭代轨迹、实验数值的图选renderer:native,fidelity:computed，交给可复算模型或有来源数据，禁止手填看似正确的点。仅解释概念、不声称定量结果时用fidelity:conceptual，可以生图。复杂页面可以拆成一个image机制图和一个native数据块，不用整页禁用生图。论文原图source-figure只复用。不要强制每页配图。概念/框架/机制图不用添加“示意图·非实测”免责声明；数据图则保留真实来源和实验设置。数学公式默认28px，由服务器测量和等价换行，不能虚构measurement。板书页预算为左侧544px净宽。教学封面优先只用课程标题、统一色彩和留白；没有内容意义的AI背景会被服务端移除。',
             },
             {
               role: 'user',
@@ -332,11 +447,25 @@ export const createPresentationContentCompiler = (
                 slideCount: count,
                 revision: input.options?.contentRevision,
                 previousContent: input.options?.contentIntents,
+                sourceDocumentVisuals: input.options?.sourceDocumentVisuals,
+                availableAssetRefs: input.options?.availableAssetRefs,
                 requestedImageSlots: input.options?.imageSlots,
                 teachingStage: input.options?.lessonStage,
                 rasterBudget: rasterBudgetInstruction(allowance),
+                visualEnrichment: {
+                  requested: input.options?.visualEnrichment ?? { mode: 'auto' },
+                  available: options.imageGenerationAvailable !== false,
+                  instruction:
+                    (input.options?.visualEnrichment as { mode?: string } | undefined)?.mode ===
+                    'off'
+                      ? '当前页或批次不新增生图，保留原始资料图和可编辑内容。'
+                      : options.imageGenerationAvailable === false
+                        ? '当前没有可用生图服务，不得声称已生成图片。明确要求生图时应报告配置问题。'
+                        : '主动评估每页是否需要视觉补充：在应用场景、未来方案、概念解释、合作机制等适合页面，原始资料图不能充分表达时，规划1–3个有明确内容作用的原创插画或场景素材，并通过renderer:image调用生图。不要把所有工作汇报默认处理成纯表格；也不要为了凑数量每页生图。保留数字、表格与真实资料图，禁止虚构成果照片、机构标志或实测数据。整稿共享字体、配色和图像风格，生成素材只占内容区，禁止替换整张母版或将正文烘焙进背景。',
+                },
+                originalSlideNumbers: input.options?.originalSlideNumbers,
                 assetPolicy:
-                  '若有requestedImageSlots，保留其slideId和slotId作为相应栅格visual的id；这些是用户明确要求的配图，也要纳入逐块规划。',
+                  '若有requestedImageSlots，保留其slideId和slotId作为相应栅格visual的id；这些是用户明确要求的配图，也要纳入逐块规划。sourceDocumentVisuals是已验证的原始文档图表，已有匹配原图时优先用source-figure直接复用，不填renderer:image，不生成、不猜测重绘原图数据；brief写清原图引用和出处。',
                 revisionPolicy:
                   '有本轮修改时，以用户本轮要求更新公式或表达类型；没有要求改动的内容保持原语义。未选中的页面不得改变。',
               }),
@@ -364,4 +493,4 @@ export const readContentIntents = (input: PresentationJobInput): SlideContentInt
   return value ? z.array(slideContentIntentSchema).parse(value.slides) : [];
 };
 
-export const CONTENT_RENDERING_INSTRUCTIONS = `每页只承担一个讲解动作，不强求3–5要点；允许封面、单图、提问和停顿。正文至少24px，短标签/坐标/页脚至少16px。大纲要点只是内容，不代表项目符号列表；默认用短句、分栏或留白组织，不添加Markdown圆点、星号或破折号，只有用户或模板明确要求列表时才保留。先留真实图像与公式区域，再排文字；不要复制模板密集正文。公式用formula节点渲染，使用编译器给出的完整latex、measurement字号和尺寸；不能缩字或改变数学含义。板书页左侧净宽544，右侧三分之一留白，不跨栏。按visuals.renderer选工具：image的科研/框架/流程图用已生成的真实image资产，native的计算图用同id scientific-diagram节点；不把image图重复绘制为plot/graph。annotationMode:embedded的图内文字和箭头已经属于图片，不在SVG里重写或补箭头；overlay模式只由服务端添加已声明的标注。计算轨迹使用可复算quadratic/taylor模型或有来源数据，不让模型猜坐标。纯概念图不添加“示意图/非实测/AI生成”通用标签，数据性质保存在metadata与备注，需要避免误解的模拟数据应说明实验设置。source-figure保留原图与出处。SVG用空<g data-content-id="块id"/>放置公式/计算图，服务端绘制，不重复画内容。`;
+export const CONTENT_RENDERING_INSTRUCTIONS = `每页围绕一个明确任务组织信息；封面、章节和收束页留白，汇报数据/对比页使用完整表格、图表与关键结论，教学页按讲解步骤组织。正文至少24px，原生表格18–24px，短标签/坐标/页脚至少16px。大纲要点只是内容，不代表项目符号列表；默认用短句、分栏或留白组织，不添加Markdown圆点、星号或破折号，只有用户或模板明确要求列表时才保留。先留真实图像与公式区域，再排文字；借鉴模板的信息层级和图文比例，正文保留核心事实与比较维度，不把关键事实全部转移到备注。公式用formula节点渲染，使用编译器给出的完整latex、measurement字号和尺寸；不能缩字或改变数学含义。板书页左侧净宽544，右侧三分之一留白，不跨栏。按visuals.renderer选工具：image的科研/框架/流程图用已生成的真实image资产，native的表格、流程和计算图必须用同id scientific-diagram节点；不把image图重复绘制为plot/graph。annotationMode:embedded的图内文字和箭头已经属于图片，不在SVG里重写或补箭头；overlay模式只由服务端添加已声明的标注。计算轨迹使用可复算quadratic/taylor模型或有来源数据，不让模型猜坐标。纯概念图不添加“示意图/非实测/AI生成”通用标签，数据性质保存在metadata与备注，需要避免误解的模拟数据应说明实验设置。source-figure保留原图，出处默认存讲者备注，必要时在对应图旁简短标注，不统一添加资料来源页脚。SVG用空<g data-content-id="块id"/>放置公式/计算图，服务端绘制，不重复画内容。`;

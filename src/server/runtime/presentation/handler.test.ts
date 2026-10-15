@@ -59,6 +59,33 @@ const post = (path: string, body: unknown): Request =>
   request(path, { method: 'POST', body: JSON.stringify(body) });
 
 describe('presentation HTTP seam', () => {
+  it('routes presence and answers through the authenticated scoped port', async () => {
+    const { port } = createPort();
+    const extended = Object.assign(port, {
+      updatePresence: vi.fn(async () => {}),
+      answerDecision: vi.fn(async () => job),
+    });
+    const factory = vi.fn(async (_scope: unknown) => extended);
+    const presence = { tabId: 'tab-1', visible: true, focused: true };
+    const response = await handlePresentationRequest(
+      post('/jobs/job-1/presence', presence),
+      scope,
+      { operation: 'presence', id: 'job-1' },
+      factory,
+    );
+    expect(response.status).toBe(200);
+    expect(extended.updatePresence).toHaveBeenCalledWith('job-1', presence);
+    const answer = { decisionId: 'q1', requestId: 'a1', action: 'retry' };
+    const answered = await handlePresentationRequest(
+      post('/jobs/job-1/decisions', answer),
+      scope,
+      { operation: 'decision', id: 'job-1' },
+      factory,
+    );
+    expect(answered.body).toEqual(job);
+    expect(extended.answerDecision).toHaveBeenCalledWith('job-1', answer);
+    expect(factory.mock.calls[0][0]).toMatchObject(scope);
+  });
   it('matches the presentation operations including destructive routes', () => {
     const cases: Array<[string, string, PresentationRouteMatch]> = [
       ['/jobs', 'POST', { operation: 'create' }],
@@ -66,6 +93,8 @@ describe('presentation HTTP seam', () => {
       ['/jobs/job-1', 'DELETE', { operation: 'deleteJob', id: 'job-1' }],
       ['/jobs/job-1/cancel', 'POST', { operation: 'cancel', id: 'job-1' }],
       ['/jobs/job-1/retry', 'POST', { operation: 'retry', id: 'job-1' }],
+      ['/jobs/job-1/presence', 'POST', { operation: 'presence', id: 'job-1' }],
+      ['/jobs/job-1/decisions', 'POST', { operation: 'decision', id: 'job-1' }],
       ['/artifacts/artifact-1', 'GET', { operation: 'getArtifact', id: 'artifact-1' }],
       ['/artifacts/export', 'POST', { operation: 'exportArtifact' }],
       ['/artifacts/artifact-1/export', 'POST', { operation: 'exportArtifact', id: 'artifact-1' }],

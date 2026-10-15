@@ -105,21 +105,41 @@ export default function PresentationRecoveryWorkspace({
         <img alt={JUMI_NAME} src={JUMI_AVATAR} />
         <h2>
           {t(
-            job.state === 'cancelled'
-              ? 'presentationRecovery.paused'
-              : 'presentationRecovery.interrupted',
+            job.state === 'waiting_input'
+              ? 'presentationCollaboration.pending'
+              : job.state === 'cancelled'
+                ? 'presentationRecovery.paused'
+                : 'presentationRecovery.interrupted',
           )}
         </h2>
-        <p>{t('presentationRecovery.preserved')}</p>
-        <Button
-          aria-label="Retry presentation job"
-          disabled={busy}
-          loading={busy}
-          type="primary"
-          onClick={() => void onRetry(job.jobId)}
-        >
-          {t('presentationRecovery.resume')}
-        </Button>
+        {job.state === 'failed' && job.error?.code && (
+          <p data-testid="presentation-recovery-reason" role="alert">
+            {job.error.code === 'IMAGE_UNAVAILABLE'
+              ? t('presentationRecovery.imageUnavailable')
+              : job.error.message ===
+                  'Choose at most one primary style; borrow other sources as layout or rendering methods'
+                ? t('presentationRecovery.styleConflict')
+                : t('presentationRecovery.reason', { code: job.error.code })}
+          </p>
+        )}
+        <p>
+          {t(
+            job.state === 'waiting_input'
+              ? 'presentationCollaboration.waiting'
+              : 'presentationRecovery.preserved',
+          )}
+        </p>
+        {job.state !== 'waiting_input' && (
+          <Button
+            aria-label="Retry presentation job"
+            disabled={busy}
+            loading={busy}
+            type="primary"
+            onClick={() => void onRetry(job.jobId)}
+          >
+            {t('presentationRecovery.resume')}
+          </Button>
+        )}
         <Button type="text" onClick={onNew}>
           {t('presentationTemplates.newPresentation')}
         </Button>

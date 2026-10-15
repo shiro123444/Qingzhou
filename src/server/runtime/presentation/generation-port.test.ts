@@ -1,4 +1,5 @@
 import { InMemoryPresentationArtifactStore } from './artifact-store';
+import { createDeckVisualSystem } from './deck-visual-system';
 import type { PresentationGenerationCapability } from './generation-capability';
 import { PresentationGenerationPort } from './generation-port';
 import type { ImageGenerationCapability } from './image-generation-capability';
@@ -10,6 +11,297 @@ const scope = { request: new Request('https://example.test'), userId: 'u1', sess
 const input = { notebookId: 'n1', title: '演示', sourceVersionIds: ['v1'] };
 
 describe('PresentationGenerationPort', () => {
+  it('restores a detached native block from its saved source before final review', async () => {
+    const directed = {
+      ...input,
+      slideCount: 1,
+      options: {
+        style: '商务',
+        outline: [{ title: '企业师资', keyPoints: ['企业导师参与教学', '教师参与企业实践'] }],
+        visualStoryboard: { slides: [{ slideId: 'slide-1', role: 'content' }] },
+        contentIntents: {
+          slides: [
+            {
+              slideId: 'slide-1',
+              claim: '双向协同育人',
+              formulas: [],
+              visualKind: 'scientific-diagram',
+              visualReason: '协作关系',
+              visuals: [
+                {
+                  id: 'flow',
+                  kind: 'scientific-diagram',
+                  renderer: 'native',
+                  required: true,
+                  brief: '双向协作',
+                },
+              ],
+            },
+          ],
+        },
+      },
+    };
+    const master = createDeckVisualSystem(directed)!;
+    const plan = {
+      planId: 'saved',
+      title: input.title,
+      aspectRatio: '16:9',
+      sourceVersionIds: ['v1'],
+      designSpec: { contentPolicyVersion: 1 },
+      slides: [
+        {
+          slideId: 'slide-1',
+          order: 1,
+          svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><g data-deck-body="true"><text x="48" y="200" font-size="24">原有教师实践说明</text></g></svg>',
+          notes: '原始材料出处',
+          metadata: {
+            title: '企业师资',
+            deckVisualSystemId: master.id,
+            outline: directed.options.outline[0].keyPoints,
+            contentBlocks: [
+              {
+                id: 'flow',
+                kind: 'scientific-diagram',
+                title: '双向协作',
+                rect: master.body,
+                provenance: { kind: 'source', reference: '报告 attachment-private' },
+                spec: {
+                  type: 'graph',
+                  nodes: [
+                    { id: 'a', label: '企业导师', x: 0.2, y: 0.5 },
+                    { id: 'b', label: '教师实践', x: 0.8, y: 0.5 },
+                  ],
+                  edges: [{ from: 'a', to: 'b' }],
+                },
+              },
+            ],
+          },
+        },
+      ],
+    };
+    const execute = vi.fn(async (_scope, _input, context) => ({
+      artifacts: [],
+      plan: await context.preparePlan(plan),
+    }));
+    const port = new PresentationGenerationPort(
+      {
+        artifactStore: new InMemoryPresentationArtifactStore(),
+        capability: { execute, plan: vi.fn() } as never,
+        idFactory: () => 'detached-block',
+        contextFactory: () => ({
+          plannerContext: {},
+          workerContext: {
+            jobId: 'ignored',
+            convert: vi.fn(),
+            qualityCheck: vi.fn(),
+            workspace: { path: '/tmp', write: vi.fn() },
+          },
+        }),
+      },
+      scope,
+    );
+    await port.createJob({
+      ...directed,
+      options: { ...directed.options, deckVisualSystem: master },
+    });
+    await vi.waitFor(async () =>
+      expect((await port.getJob('detached-block'))?.state).toBe('completed'),
+    );
+    const completed = await execute.mock.results[0].value;
+    expect(completed.plan.slides[0].svg).toContain('data-scientific-diagram="flow"');
+    expect(completed.plan.slides[0].svg).not.toContain('attachment-private');
+    expect(completed.plan.slides[0].notes).toContain('原始材料出处');
+  });
+  it('uses an edit received before initial completion in the first render instead of replaying the whole deck', async () => {
+    let saved = {
+      input: { ...input, slideCount: 1 },
+      job: {
+        jobId: 'initial-edit',
+        projectId: 'p',
+        title: input.title,
+        aspectRatio: '16:9',
+        slideCount: 1,
+        state: 'failed',
+        createdAt: '2026-01-01',
+        updatedAt: '2026-01-01',
+        revisions: [],
+        messages: [
+          {
+            requestId: 'reuse-source-figures',
+            content: '复用文档原图并统一样式',
+            target: { type: 'deck' },
+            status: 'queued',
+            createdAt: '2026-01-01',
+          },
+        ],
+      },
+    };
+    const compile = vi.fn(async () => ({
+      inputFingerprint: 'compiled',
+      slides: [
+        {
+          slideId: 'slide-1',
+          claim: '原始资料',
+          formulas: [],
+          visualKind: 'none',
+          visualReason: '文字',
+          visuals: [],
+        },
+      ],
+    }));
+    const capability = {
+      plan: vi.fn(),
+      execute: vi.fn(async (_scope: any, jobInput: any, context: any) => {
+        expect(jobInput.options.contentRevision.requestId).toBe('reuse-source-figures');
+        const plan = await context.preparePlan({
+          planId: 'first',
+          title: input.title,
+          aspectRatio: '16:9',
+          sourceVersionIds: ['v1'],
+          slides: [
+            {
+              slideId: 'slide-1',
+              order: 1,
+              svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><text x="48" y="100" font-size="24">已批准的内容</text></svg>',
+            },
+          ],
+        });
+        return { artifacts: [], plan };
+      }),
+    };
+    const port = new PresentationGenerationPort(
+      {
+        artifactStore: new InMemoryPresentationArtifactStore(),
+        capability: capability as never,
+        contentCompiler: { compile } as never,
+        repository: {
+          getJob: vi.fn(async () => structuredClone(saved) as never),
+          saveJob: vi.fn(async (_scope, snapshot) => {
+            saved = structuredClone(snapshot) as typeof saved;
+          }),
+        },
+        contextFactory: () => ({
+          plannerContext: {},
+          workerContext: {
+            jobId: 'ignored',
+            convert: vi.fn(),
+            qualityCheck: vi.fn(),
+            workspace: { path: '/tmp', write: vi.fn() },
+          },
+        }),
+      },
+      scope,
+    );
+    await port.retryJob('initial-edit');
+    await vi.waitFor(async () =>
+      expect((await port.getJob('initial-edit'))?.state).toBe('completed'),
+    );
+    expect(compile).toHaveBeenCalledOnce();
+    expect(capability.plan).not.toHaveBeenCalled();
+    expect(saved.job.messages[0].status).toBe('applied');
+  });
+  it('restores complete raster bindings before checking a resumed draft for missing assets', async () => {
+    const directedInput = {
+      ...input,
+      slideCount: 1,
+      options: {
+        contentIntents: {
+          slides: [
+            {
+              slideId: 'cover',
+              claim: 'Keep the prepared figure',
+              formulas: [],
+              visualKind: 'illustration',
+              visualReason: 'Prepared image',
+              visuals: [
+                {
+                  id: 'visual-1',
+                  kind: 'illustration',
+                  brief: 'A campus',
+                  required: true,
+                  renderer: 'image',
+                },
+              ],
+            },
+          ],
+        },
+      },
+    };
+    const preparedInput = {
+      ...directedInput,
+      options: {
+        ...directedInput.options,
+        generatedImageSlots: [
+          {
+            slideId: 'cover',
+            slotId: 'initial-assets:visual-1',
+            state: 'ready',
+            assetRefs: [{ ref: 'image-owned' }],
+            visualBinding: { visualId: 'visual-1', kind: 'illustration', origin: 'generated' },
+          },
+        ],
+      },
+    };
+    let saved = {
+      initialAssetsComplete: true,
+      input: directedInput,
+      job: {
+        jobId: 'job-cached-raster',
+        projectId: 'project',
+        title: input.title,
+        aspectRatio: '16:9',
+        slideCount: 1,
+        state: 'failed',
+        messages: [],
+        revisions: [],
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      },
+      preparedAssets: {
+        initial: { input: preparedInput, assetArtifactIds: ['image-owned'], intents: [] },
+      },
+    };
+    const capability = {
+      execute: vi.fn(async (_scope, _input, context) => ({
+        artifacts: [],
+        plan: context.initialPlan,
+      })),
+      plan: vi.fn(),
+    } as unknown as PresentationGenerationCapability;
+    const prepare = vi.fn();
+    const port = new PresentationGenerationPort(
+      {
+        artifactStore: new InMemoryPresentationArtifactStore(),
+        capability,
+        contextFactory: () => ({
+          plannerContext: {},
+          workerContext: {
+            convert: vi.fn(),
+            qualityCheck: vi.fn(),
+            jobId: 'ignored',
+            workspace: { path: '/tmp', write: vi.fn() },
+          },
+        }),
+        repository: {
+          getJob: vi.fn(async () => structuredClone(saved) as never),
+          saveJob: vi.fn(async (_scope, snapshot) => {
+            saved = structuredClone(snapshot) as typeof saved;
+          }),
+        },
+        revisionAssetPlanner: { prepare, prepareInitial: vi.fn() } as never,
+      },
+      scope,
+    );
+    await port.retryJob('job-cached-raster');
+    await vi.waitFor(async () =>
+      expect((await port.getJob('job-cached-raster'))?.state).toBe('completed'),
+    );
+    expect(prepare).not.toHaveBeenCalled();
+    expect(vi.mocked(capability.execute).mock.calls[0]?.[1].options?.generatedImageSlots).toEqual(
+      preparedInput.options.generatedImageSlots,
+    );
+    expect(saved.initialAssetsComplete).toBe(true);
+  });
   it('retains minor review findings without rewriting a publishable deck', async () => {
     const initial = { ...samplePlan, designSpec: { contentPolicyVersion: 1 } };
     const capability = {
@@ -1007,6 +1299,69 @@ describe('PresentationGenerationPort completed-state template application', () =
       }),
     }) as unknown as PresentationGenerationCapability;
 
+  it('reexports a completed plan without reviving an older failed edit', async () => {
+    let saved: any = {
+      input,
+      plan: samplePlan,
+      initialAssetsComplete: true,
+      job: {
+        jobId: 'completed-export',
+        projectId: 'p',
+        title: input.title,
+        aspectRatio: '16:9',
+        slideCount: 1,
+        state: 'completed',
+        createdAt: '2026-01-01',
+        updatedAt: '2026-01-01',
+        revisions: [],
+        messages: [
+          {
+            requestId: 'old-failed',
+            content: '已经被后续修改替代',
+            target: { type: 'deck' },
+            status: 'failed',
+            error: 'Older quality failure',
+            createdAt: '2026-01-01',
+          },
+        ],
+      },
+    };
+    const capability = createCapability();
+    const port = new PresentationGenerationPort(
+      {
+        artifactStore: new InMemoryPresentationArtifactStore(),
+        capability,
+        repository: {
+          getJob: vi.fn(async () => structuredClone(saved)),
+          saveJob: vi.fn(async (_scope, value) => {
+            saved = structuredClone(value);
+          }),
+        },
+        contextFactory: () => ({
+          plannerContext: {},
+          workerContext: {
+            jobId: 'ignored',
+            convert: vi.fn(),
+            qualityCheck: vi.fn(),
+            workspace: { path: '/tmp', write: vi.fn() },
+          },
+        }),
+      },
+      scope,
+    );
+    await port.retryJob('completed-export');
+    await vi.waitFor(async () =>
+      expect((await port.getJob('completed-export'))?.state).toBe('completed'),
+    );
+    expect(capability.plan).not.toHaveBeenCalled();
+    expect(capability.execute).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ initialPlan: samplePlan }),
+    );
+    expect(saved.job.messages[0].status).toBe('failed');
+  });
+
   it('binds a deck storyboard and repairs defects newly exposed by the first visual pass', async () => {
     const directedInput = {
       ...input,
@@ -1436,6 +1791,120 @@ describe('PresentationGenerationPort completed-state template application', () =
     expect(prepare).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    { kind: 'illustration', instruction: '放大图片显示区域，保留已有图内文字' },
+    { kind: 'source-figure', instruction: '原始图片内图例文字偏小，改善可读性' },
+  ] as const)(
+    'repairs $kind placement without regenerating the owned figure',
+    async ({ kind, instruction }) => {
+      const store = new InMemoryPresentationArtifactStore();
+      await seedTemplatePages(store);
+      await store.put(scope, {
+        artifactId: 'old-art',
+        bytes: png,
+        mimeType: 'image/png',
+        name: 'old.png',
+        type: 'image',
+      });
+      const capability = createCapability();
+      const candidate = {
+        ...samplePlan,
+        slides: samplePlan.slides.map((slide) => ({
+          ...slide,
+          svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><image href="/api/runtime/presentation/artifacts/old-art" x="100" y="100" width="600" height="300"/></svg>',
+          metadata: {
+            visualAssets: [
+              {
+                visualId: 'subject',
+                kind,
+                origin: 'provided',
+                ref: '/api/runtime/presentation/artifacts/old-art',
+              },
+            ],
+          },
+        })),
+      };
+      vi.mocked(capability.execute).mockImplementation(async (_scope, _input, context) => ({
+        artifacts: [readyArtifact],
+        plan: await context.preparePlan!(candidate),
+        worker: {
+          artifacts: [],
+          jobId: 'layout-only',
+          planId: candidate.planId,
+          qualityReport: { passed: true },
+        },
+      }));
+      vi.mocked(capability.plan).mockResolvedValue(candidate as never);
+      const prepare = vi.fn<PresentationRevisionAssetPlanner['prepare']>(async (request) => ({
+        input: request.jobInput,
+        intents: [],
+        assetArtifactIds: [],
+      }));
+      const review = vi
+        .fn<PresentationVisualCritic['review']>()
+        .mockResolvedValueOnce({
+          schemaVersion: 1,
+          passed: false,
+          summary: '图片可读性',
+          issues: [
+            {
+              slideId: 'cover',
+              visualId: 'subject',
+              category: 'legibility',
+              severity: 'major',
+              evidence: '图片在当前页面偏小',
+              instruction,
+            },
+          ],
+        })
+        .mockResolvedValue({ schemaVersion: 1, passed: true, summary: '已恢复', issues: [] });
+      const port = new PresentationGenerationPort(
+        {
+          artifactStore: store,
+          capability,
+          idFactory: () => 'layout-only',
+          contextFactory: () => ({
+            plannerContext: {},
+            workerContext: {
+              jobId: 'ignored',
+              convert: vi.fn(),
+              qualityCheck: vi.fn(),
+              workspace: { path: '/tmp', write: vi.fn() },
+            },
+          }),
+          templateLibrary: {
+            get: vi.fn(async () => ({
+              ...pptxProfile,
+              source: { kind: 'plan', planId: 'source-plan' },
+            })),
+            resolve: vi.fn(async () => structuredClone(pptxApplication)),
+          } as never,
+          revisionAssetPlanner: {
+            prepare,
+            prepareInitial: vi.fn(async (request) => ({
+              input: request.jobInput,
+              intents: [],
+              assetArtifactIds: [],
+            })),
+          },
+          visualCritic: { review },
+        },
+        scope,
+      );
+      await port.createJob({ ...input, template: 'tmpl-pptx' });
+      await vi.waitFor(async () => {
+        const job = await port.getJob('layout-only');
+        expect(job?.error).toBeUndefined();
+        expect(job?.state).toBe('completed');
+      });
+      expect(
+        prepare.mock.calls.every(([request]) => request.revision.requestId === 'initial-assets'),
+      ).toBe(true);
+      expect(capability.plan).toHaveBeenCalledOnce();
+      expect(review).toHaveBeenCalledTimes(2);
+    },
+  );
+
   it.each(['artwork-style', 'scientific-semantics', 'template-fidelity'] as const)(
     'repairs a critic-confirmed %s mismatch through asset tools and retains page identity',
     async (category) => {
@@ -1670,8 +2139,7 @@ describe('PresentationGenerationPort completed-state template application', () =
     await seedTemplatePages(store);
     const order: string[] = [];
     let latestSaved:
-      | { input?: { options?: Record<string, unknown>; template?: string } }
-      | undefined;
+      { input?: { options?: Record<string, unknown>; template?: string } } | undefined;
     const resolve = vi.fn(async () => {
       order.push('resolve');
       return structuredClone(pptxApplication);

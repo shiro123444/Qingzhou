@@ -31,7 +31,8 @@ export interface PresentationJobInput {
   readonly title: string;
 }
 
-export type PresentationJobState = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type PresentationJobState =
+  'queued' | 'running' | 'waiting_input' | 'completed' | 'failed' | 'cancelled';
 
 export interface PresentationJob {
   readonly artifactIds?: string[];

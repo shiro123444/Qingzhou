@@ -49,6 +49,12 @@ export interface TemplateMediaReference {
 export interface TemplateLayout {
   assetSlots: TemplateAssetSlot[];
   elements: TemplateElement[];
+  /** Measured structure only; source cells are not imported as new report facts. */
+  evidence?: {
+    tables: Array<{ box: TemplateBox; rows: number; columns: number; columnWeights: number[] }>;
+    chartCount: number;
+    textCharacters: number;
+  };
   kind: 'cover' | 'text' | 'two-column' | 'image-left' | 'image-right' | 'image-led';
   layoutId: string;
   notes?: string;

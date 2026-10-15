@@ -1,4 +1,5 @@
 import { Button, Center, Flexbox, Icon } from '@lobehub/ui';
+import { App } from 'antd';
 import { createStaticStyles } from 'antd-style';
 import { BrainIcon, LucideRefreshCcwDot, PlusIcon } from 'lucide-react';
 import { memo, useState } from 'react';
@@ -46,6 +47,7 @@ const styles = createStaticStyles(({ css, cssVar }) => ({
 
 const EmptyState = memo<{ provider: string }>(({ provider }) => {
   const { t } = useTranslation('modelProvider');
+  const { message } = App.useApp();
 
   const [fetchRemoteModelList] = useAiInfraStore((s) => [s.fetchRemoteModelList]);
 
@@ -81,9 +83,16 @@ const EmptyState = memo<{ provider: string }>(({ provider }) => {
             try {
               await fetchRemoteModelList(provider);
             } catch (e) {
-              console.error(e);
+              message.error(
+                e instanceof DOMException && e.name === 'TimeoutError'
+                  ? t('providerModels.list.fetcher.timeout')
+                  : e instanceof Error
+                    ? e.message
+                    : t('providerModels.list.fetcher.failed'),
+              );
+            } finally {
+              setFetchRemoteModelsLoading(false);
             }
-            setFetchRemoteModelsLoading(false);
           }}
         >
           {fetchRemoteModelsLoading

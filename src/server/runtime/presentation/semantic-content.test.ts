@@ -69,14 +69,76 @@ const chat = (responses: unknown[]): MultimodalChatPort => ({
 });
 
 describe('semantic presentation content', () => {
+  it('normalizes an existing source bitmap to reuse without treating it as a generation request', async () => {
+    const provider = chat([
+      {
+        slides: [
+          {
+            ...intent,
+            formulas: [],
+            visualKind: 'source-figure',
+            visuals: [
+              {
+                id: 'visual-1',
+                kind: 'source-figure',
+                renderer: 'image',
+                fidelity: 'computed',
+                brief: '复用原文图1 owned-source-chart，保留数据与出处',
+                required: true,
+              },
+            ],
+          },
+        ],
+      },
+    ]);
+    const result = await createPresentationContentCompiler(provider, 1).compile(
+      {
+        title: '招生规模',
+        notebookId: 'studio',
+        sourceVersionIds: [],
+        slideCount: 1,
+        options: { availableAssetRefs: ['owned-source-chart'] },
+      },
+      { scope },
+    );
+    expect(result.slides[0].visuals?.[0]).toMatchObject({
+      kind: 'source-figure',
+      fidelity: 'computed',
+    });
+    expect(result.slides[0].visuals?.[0]).not.toHaveProperty('renderer');
+    expect(provider.chat).toHaveBeenCalledOnce();
+  });
   it('keeps offered asset refs out of semantic requirements so the owned asset phase controls binding', async () => {
-    const provider = chat([{ slides: [{ ...intent, formulas: [], visualKind: 'illustration',
-      visuals: [{ id: 'visual-1', kind: 'illustration', brief: '校园插画', required: true, ref: 'owned-artwork' }],
-    }] }]);
-    const result = await createPresentationContentCompiler(provider, 1).compile({
-      title: '高校教学', notebookId: 'studio', sourceVersionIds: [], slideCount: 1,
-      options: { availableAssetRefs: ['owned-artwork'] },
-    }, { scope });
+    const provider = chat([
+      {
+        slides: [
+          {
+            ...intent,
+            formulas: [],
+            visualKind: 'illustration',
+            visuals: [
+              {
+                id: 'visual-1',
+                kind: 'illustration',
+                brief: '校园插画',
+                required: true,
+                ref: 'owned-artwork',
+              },
+            ],
+          },
+        ],
+      },
+    ]);
+    const result = await createPresentationContentCompiler(provider, 1).compile(
+      {
+        title: '高校教学',
+        notebookId: 'studio',
+        sourceVersionIds: [],
+        slideCount: 1,
+        options: { availableAssetRefs: ['owned-artwork'] },
+      },
+      { scope },
+    );
     expect(result.slides[0].visuals?.[0]).not.toHaveProperty('ref');
     expect(result.slides[0].visuals?.[0].brief).toBe('校园插画');
   });
@@ -133,6 +195,7 @@ describe('semantic presentation content', () => {
       provenance: {
         kind: 'source',
         reference: 'Kingma & Ba, Adam (ICLR 2015); Loshchilov & Hutter, AdamW (ICLR 2019)',
+        caption: '来源：Kingma & Ba, Adam (ICLR 2015); Loshchilov & Hutter, AdamW (ICLR 2019)',
       },
       rect: { x: 470, y: 138, width: 436, height: 342 },
       spec: {

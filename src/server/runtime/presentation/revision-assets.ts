@@ -20,6 +20,7 @@ import {
   type PresentationArtworkPolicy,
   type PresentationArtworkStoryboardSlide,
   presentationArtworkStyle,
+  resolvePresentationArtworkPolicy,
   shouldAutoCutout,
 } from './artwork-pipeline';
 import {
@@ -30,6 +31,7 @@ import {
   type VisualRequirement,
   visualRequirements,
 } from './content-intent';
+import { readDeckVisualSystem } from './deck-visual-system';
 import type { ImageGenerationCapability } from './image-generation-capability';
 import type { ImageGenerationSlotOutput } from './image-generation-planner';
 import {
@@ -479,11 +481,57 @@ class RevisionAssetPlanner implements PresentationRevisionAssetPlanner {
         ? await this.options.readReusableAssets(
             requestedRefs
               .filter((ref): ref is string => typeof ref === 'string' && ref.length <= 256)
-              .slice(-12),
+              .slice(-32),
             input,
           )
         : [];
     const reusableRefs = new Set(reusable.map((asset) => asset.ref));
+    const revisionContent =
+      (input.jobInput.options?.contentRevision as { content?: string } | undefined)?.content ??
+      input.revision.content;
+    const reuseOnly = /不重新生图|不再生图|不要重新生成|仅(?:复用|使用已有)/u.test(revisionContent);
+    const preservedOrigins = new Map<string, VisualAssetBinding['origin']>();
+    if (input.revision.requestId === 'initial-assets' && reuseOnly && !checkpoint.intents) {
+      const preparedSlots = (input.jobInput.options?.generatedImageSlots ?? []) as PlacedAsset[];
+      const required = readContentIntents(input.jobInput).flatMap((page) =>
+        visualRequirements(page)
+          .filter(
+            (visual) =>
+              visual.required && (isRasterVisual(visual) || visual.kind === 'source-figure'),
+          )
+          .map((visual) => ({ slideId: page.slideId, visual })),
+      );
+      const preserved: RevisionAssetIntent[] = [];
+      for (const { slideId, visual } of required) {
+        const existing = preparedSlots.find(
+          (slot) =>
+            slot.slideId === slideId &&
+            slot.state === 'ready' &&
+            slot.visualBinding?.visualId === visual.id &&
+            slot.visualBinding.kind === visual.kind &&
+            slot.assetRefs.length === 1 &&
+            reusableRefs.has(slot.assetRefs[0].ref),
+        );
+        const sourceRefs =
+          visual.kind === 'source-figure'
+            ? [...visual.brief.matchAll(/document-image-[a-f\d]{40}/gu)]
+                .map((match) => match[0])
+                .filter((ref) => reusableRefs.has(ref))
+            : [];
+        const ref =
+          existing?.assetRefs[0].ref ??
+          (new Set(sourceRefs).size === 1 ? sourceRefs[0] : undefined);
+        if (!ref) continue;
+        preserved.push({ action: 'reuse', slideId, slotId: visual.id, ref });
+        preservedOrigins.set(
+          `${slideId}:${visual.id}`,
+          existing?.visualBinding?.origin ?? 'provided',
+        );
+      }
+      // Only bypass model planning when every required slot is already resolved
+      // to bytes in this account. Body placement remains the page planner's job.
+      if (required.length && preserved.length === required.length) checkpoint.intents = preserved;
+    }
     const visual = input.jobInput.options?.templateVisual as TemplateVisualProfile | undefined;
     const storyboard = input.jobInput.options?.visualStoryboard as
       { slides?: readonly PresentationArtworkStoryboardSlide[] } | undefined;
@@ -495,11 +543,19 @@ class RevisionAssetPlanner implements PresentationRevisionAssetPlanner {
         return archetype?.evidencePages ?? [];
       }),
     );
-    const sourcePageRefs = (storyboard?.slides ?? []).flatMap((slide) => visual?.designProgram?.archetypes.find((item) => item.id === slide.archetypeId)?.sourcePageRefs ?? []);
-    const pageVisualRefs = [...new Set([...sourcePageRefs, ...(visual?.pages ?? [])
-      .filter((page) => !evidencePages.size || evidencePages.has(page.page))
-      .map((page) => page.ref)])]
-      .slice(0, 4);
+    const sourcePageRefs = (storyboard?.slides ?? []).flatMap(
+      (slide) =>
+        visual?.designProgram?.archetypes.find((item) => item.id === slide.archetypeId)
+          ?.sourcePageRefs ?? [],
+    );
+    const pageVisualRefs = [
+      ...new Set([
+        ...sourcePageRefs,
+        ...(visual?.pages ?? [])
+          .filter((page) => !evidencePages.size || evidencePages.has(page.page))
+          .map((page) => page.ref),
+      ]),
+    ].slice(0, 4);
     const mediaFrameRefs = (visual?.media ?? [])
       .flatMap((media) => media.frameRefs)
       .filter((ref, index, all) => all.indexOf(ref) === index)
@@ -517,7 +573,23 @@ class RevisionAssetPlanner implements PresentationRevisionAssetPlanner {
         maxGeneratedSlots: this.maxGeneratedSlots,
         initialCreation: input.revision.requestId === 'initial-assets',
         reusableAssets: reusable,
-        visualTemplate: visual,
+        sourceDocumentVisuals: input.jobInput.options?.sourceDocumentVisuals,
+        preparedVisualAssets: input.jobInput.options?.generatedImageSlots,
+        contentRevision: input.jobInput.options?.contentRevision,
+        deckVisualSystem: input.jobInput.options?.deckVisualSystem,
+        reusePolicy:
+          '没有明确要求重画时，已有同slideId与visualId的ready素材必须优先reuse；原始文档图表按sourceDocumentVisuals与本轮要求直接复用，不重复生成。',
+        visualTemplate: input.jobInput.options?.deckVisualSystem
+          ? {
+              components: visual?.components.map(({ id, role, box, treatment, containsText }) => ({
+                id,
+                role,
+                box,
+                treatment,
+                containsText,
+              })),
+            }
+          : visual,
         learnedCapabilities: readLessonPlan(input.jobInput)
           ? undefined
           : input.jobInput.options?.learnedCapabilities,
@@ -732,8 +804,13 @@ class RevisionAssetPlanner implements PresentationRevisionAssetPlanner {
                   raw.size !== '1536x1024'
                 )
                   return invalid('Image generation requires a supported aspect ratio');
-                const artwork =
-                  raw.artwork === undefined ? undefined : artworkPolicySchema.parse(raw.artwork);
+                const artwork = resolvePresentationArtworkPolicy({
+                  artwork:
+                    raw.artwork === undefined ? undefined : artworkPolicySchema.parse(raw.artwork),
+                  kind: requirement?.kind,
+                  brief: requirement?.brief,
+                  instruction: input.revision.content,
+                });
                 const processing = raw.processing
                   ? validateProcessingSteps(raw.processing)
                   : undefined;
@@ -796,6 +873,10 @@ class RevisionAssetPlanner implements PresentationRevisionAssetPlanner {
               const generated = (intents as RevisionAssetIntent[]).filter(
                 (intent) => intent.action === 'generate' || intent.action === 'replace',
               ).length;
+              if (reuseOnly && generated)
+                return invalid(
+                  'This instruction permits owned asset reuse only; do not generate replacement images.',
+                );
               if (generated > this.maxGeneratedSlots)
                 throw new PresentationRevisionAssetError(
                   'IMAGE_BUDGET_EXCEEDED',
@@ -830,6 +911,10 @@ class RevisionAssetPlanner implements PresentationRevisionAssetPlanner {
                       (Boolean(i.prompt) || Boolean(i.ref) || Boolean(i.componentId)),
                   );
                   if (existing || supplied) continue;
+                  if (reuseOnly)
+                    return invalid(
+                      `Reuse the existing owned asset for ${slide.slideId}/${visual.id}; new image generation is forbidden by this instruction.`,
+                    );
                   // The server owns completeness: a required raster slot the model forgot is
                   // generated from the compiled brief instead of failing the whole deck.
                   if (!isRasterVisual(visual))
@@ -965,7 +1050,7 @@ class RevisionAssetPlanner implements PresentationRevisionAssetPlanner {
     const prepareAsset = async (intent: RevisionAssetIntent): Promise<PlacedAsset | null> => {
       checkAbort(input.signal);
       if (intent.action === 'remove') return null;
-      if (intent.action === 'reuse' && intent.ref && intent.layout && !intent.processing) {
+      if (intent.action === 'reuse' && intent.ref && !intent.processing) {
         emitAsset(intent, 'presentation.assets.reuse', 'completed');
         return {
           slideId: intent.slideId,
@@ -980,10 +1065,16 @@ class RevisionAssetPlanner implements PresentationRevisionAssetPlanner {
           return invalid('Template component extraction is unavailable');
         let extracted;
         try {
-          extracted = await this.options.extractTemplateComponent(intent.componentId, assetContext(intent));
+          extracted = await this.options.extractTemplateComponent(
+            intent.componentId,
+            assetContext(intent),
+          );
         } catch (error) {
           if ((error as { code?: string }).code !== 'PRESENTATION_COMPONENT_UNSAFE') throw error;
-          rejectedTemplateComponents.push({ slideId: intent.slideId, componentId: intent.componentId });
+          rejectedTemplateComponents.push({
+            slideId: intent.slideId,
+            componentId: intent.componentId,
+          });
           emitAsset(intent, 'presentation.assets.template.unsafe', 'failed');
           return null;
         }
@@ -993,7 +1084,10 @@ class RevisionAssetPlanner implements PresentationRevisionAssetPlanner {
           if (!verified.length) {
             // Learned labels are hypotheses. Exclude actual old wording/photos; the
             // planner receives this evidence and still must satisfy every required visual.
-            rejectedTemplateComponents.push({ slideId: intent.slideId, componentId: intent.componentId });
+            rejectedTemplateComponents.push({
+              slideId: intent.slideId,
+              componentId: intent.componentId,
+            });
             emitAsset(intent, 'presentation.assets.template.unsafe', 'failed');
             return null;
           }
@@ -1047,6 +1141,7 @@ class RevisionAssetPlanner implements PresentationRevisionAssetPlanner {
           { slides?: readonly PresentationArtworkStoryboardSlide[] } | undefined,
         intent.slideId,
       );
+      const deckVisualSystem = readDeckVisualSystem(input.jobInput);
       const scientific = readContentIntents(input.jobInput)
         .find((page) => page.slideId === intent.slideId)
         ?.visuals?.some(
@@ -1061,8 +1156,15 @@ class RevisionAssetPlanner implements PresentationRevisionAssetPlanner {
       );
       // Stickers are transparent decorations even when the model forgets the artwork policy,
       // so the cutout step below is supplied by the server instead of being requested.
-      const artwork: PresentationArtworkPolicy | undefined =
-        intent.artwork ?? (sticker ? { ...STICKER_ARTWORK } : undefined);
+      const requirement = readContentIntents(input.jobInput)
+        .find((page) => page.slideId === intent.slideId)
+        ?.visuals?.find((visual) => visual.id === intent.slotId);
+      const artwork = resolvePresentationArtworkPolicy({
+        artwork: intent.artwork ?? (sticker ? { ...STICKER_ARTWORK } : undefined),
+        kind: requirement?.kind,
+        brief: requirement?.brief,
+        instruction: input.revision.content,
+      });
       const processing =
         intent.processing ??
         (shouldAutoCutout({
@@ -1101,10 +1203,12 @@ class RevisionAssetPlanner implements PresentationRevisionAssetPlanner {
               ...(processing ? { background: style.background ?? 'opaque' } : {}),
               idempotencyKey: `${operationKey}:${intent.slideId}:${intent.slotId}`,
               prompt: lockArtworkPrompt(
-                scientific
-                  ? 'Formal academic figure. Flat 2D, restrained palette, light background. '
-                  : style.promptPrefix,
-                intent.prompt,
+                deckVisualSystem
+                  ? `One deck visual system ${deckVisualSystem.id}. Use only this palette: ${deckVisualSystem.palette.join(', ')}. Clean 2D business illustration on a white background, consistent line weights and sans-serif labels. Draw only the requested figure, no slide heading, footer, motto, institution name or whole-slide layout. `
+                  : scientific
+                    ? 'Formal academic figure. Flat 2D, restrained palette, light background. '
+                    : style.promptPrefix,
+                `${intent.prompt}${/不[用放要].{0,12}(?:文字|标签)|无文字|no\s+(?:text|labels)/iu.test(input.revision.content) ? '\nDo not put words, letters, labels, digits, captions, watermarks or logos inside the image. All text is supplied as editable slide content.' : ''}`,
               ),
               ...(!scientific && approvedReferences.length
                 ? {
@@ -1177,7 +1281,9 @@ class RevisionAssetPlanner implements PresentationRevisionAssetPlanner {
           asset.visualBinding = {
             visualId: requirement.id,
             kind: requirement.kind,
-            origin: intent.prompt ? 'generated' : (previous?.origin ?? 'provided'),
+            origin:
+              preservedOrigins.get(key) ??
+              (intent.prompt ? 'generated' : (previous?.origin ?? 'provided')),
             // Only a checked measurement becomes a claim; unknown stays unstated.
             ...(measured?.checked
               ? { transparency: measured.verified ? ('verified' as const) : ('opaque' as const) }

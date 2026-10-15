@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 import { isReusableTemplateComponent } from '../artwork-pipeline';
 import { compileTemplateDesignProgram } from './design-program';
+import { selectRoleDiverse } from './role-diversity';
 import type { TemplateApplication } from './types';
 
 export interface TemplateComponentSource {
@@ -69,32 +70,33 @@ export function composeTemplateApplications(
       });
   });
   const archetypes = sources.flatMap((source) =>
-    (source.visual?.designProgram.archetypes ?? [])
-      .filter((archetype) => archetype.familyId === familyFor(source)?.id)
-      .slice(0, 3)
-      .map((archetype) => ({
-        ...archetype,
-        id: scopedId(source, 'archetype', archetype.id),
-        familyId: scopedId(source, 'family', archetype.familyId),
-        sourcePageRefs: source.visual!.pages.filter((page) => archetype.evidencePages.includes(page.page)).map(({ ref }) => ref),
-        ...(source !== primary && archetype.header
-          ? { header: { ...archetype.header, fill: accent, textColor: '#FFFFFF' } }
+    selectRoleDiverse(source.visual?.designProgram.archetypes ?? [], 7).map((archetype) => ({
+      ...archetype,
+      id: scopedId(source, 'archetype', archetype.id),
+      familyId: scopedId(source, 'family', familyFor(source)!.id),
+      sourcePageRefs: source
+        .visual!.pages.filter((page) => archetype.evidencePages.includes(page.page))
+        .map(({ ref }) => ref),
+      ...(source !== primary && archetype.header
+        ? { header: { ...archetype.header, fill: accent, textColor: '#FFFFFF' } }
+        : {}),
+      regions: archetype.regions.map((region) => ({
+        ...region,
+        ...(source !== primary && region.behavior === 'locked'
+          ? { behavior: 'elastic' as const }
           : {}),
-        regions: archetype.regions.map((region) => ({
-          ...region,
-          ...(source !== primary && region.behavior === 'locked'
-            ? { behavior: 'elastic' as const }
-            : {}),
-          ...(region.componentId
-            ? { componentId: scopedId(source, 'component', region.componentId) }
-            : {}),
-        })),
+        ...(region.componentId
+          ? { componentId: scopedId(source, 'component', region.componentId) }
+          : {}),
       })),
+    })),
   );
   const activeDesign = compileTemplateDesignProgram({
     summary: primary.visual.summary,
     families: [anchorFamily],
-    components: primary.visual.components.filter((component) => component.familyId === anchorFamily.id),
+    components: primary.visual.components.filter(
+      (component) => component.familyId === anchorFamily.id,
+    ),
     guidance: '按当前任务组合能力；借用几何关系，其他来源不改变主风格。',
   });
   const styleVisual = {
@@ -114,7 +116,15 @@ export function composeTemplateApplications(
     ...primary.visual,
     families,
     components,
-    pages: sources.flatMap((source) => source.visual!.pages.filter((page) => familyFor(source)!.pages.includes(page.page))).slice(0, 24),
+    pages: sources
+      .flatMap((source) =>
+        source.visual!.pages.filter(
+          (page) =>
+            archetypes.some((a) => a.sourcePageRefs?.includes(page.ref)) ||
+            familyFor(source)!.pages.includes(page.page),
+        ),
+      )
+      .slice(0, 48),
     styleAtlas: primary.visual.styleAtlas?.map((sample) => ({
       ...sample,
       familyId: scopedId(primary, 'family', sample.familyId),
@@ -123,7 +133,7 @@ export function composeTemplateApplications(
     designProgram: {
       ...activeDesign,
       tokens: styleVisual.designProgram.tokens,
-      archetypes,
+      archetypes: selectRoleDiverse(archetypes, 12),
       cadence: {
         ...primary.visual.designProgram.cadence,
         bodyFamilyIds: families.map(({ id }) => id),
@@ -144,7 +154,19 @@ export function composeTemplateApplications(
     sources: sources.map(({ name, templateId, versionId }) => ({ name, templateId, versionId })),
     visual,
     layouts: sources.flatMap((source) =>
-      source.layouts.slice(0, 2).map((layout) => ({
+      selectRoleDiverse(
+        source.layouts.map((layout, index) => ({
+          ...layout,
+          roles: [
+            layout.kind,
+            index === source.layouts.length - 1 ? 'closing' : 'content',
+            (layout.evidence?.textCharacters ?? layout.textCapacity) > 240 ? 'dense' : 'light',
+            ...(layout.evidence?.tables.length ? ['table'] : []),
+            ...(layout.evidence?.chartCount ? ['chart'] : []),
+          ],
+        })),
+        8,
+      ).map(({ roles: _roles, ...layout }) => ({
         ...layout,
         elements: layout.elements.map((element) => ({
           ...element,

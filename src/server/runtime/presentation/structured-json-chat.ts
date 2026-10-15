@@ -74,6 +74,8 @@ export interface CompleteStructuredJsonOptions<T> {
   readonly chat: ChatPort;
   readonly context: GLMChatContext;
   readonly emptyError?: string;
+  /** An already configured alternate model, used only after empty JSON continuations. */
+  readonly fallbackChat?: ChatPort;
   readonly parse?: (value: unknown, raw: string) => T | Promise<T>;
   readonly request: GLMChatRequest;
 }
@@ -93,6 +95,7 @@ export const completeStructuredJson = async <T = unknown>(
   options: CompleteStructuredJsonOptions<T>,
 ): Promise<CompleteStructuredJsonResult<T>> => {
   const { chat, context, request } = options;
+  let activeChat = chat;
   const emptyError = options.emptyError ?? 'Structured chat returned empty JSON';
   const baseKey = context.idempotencyKey?.trim() || `structured-json:${crypto.randomUUID()}`;
   const initialTokens = Math.max(request.max_tokens ?? DEFAULT_MAX_TOKENS, DEFAULT_MAX_TOKENS);
@@ -102,16 +105,32 @@ export const completeStructuredJson = async <T = unknown>(
     messages: GLMChatRequest['messages'],
     idempotencyKey: string,
     maxTokens: number,
-  ): Promise<GLMChatResult> =>
-    chat.chat(
-      {
-        ...request,
-        max_tokens: maxTokens,
-        messages,
-        response_format: request.response_format ?? { type: 'json_object' },
-      },
-      { ...context, idempotencyKey },
-    );
+  ): Promise<GLMChatResult> => {
+    try {
+      return await activeChat.chat(
+        {
+          ...request,
+          ...(activeChat !== chat ? { model: activeChat.manifest.model } : {}),
+          max_tokens: maxTokens,
+          messages,
+          response_format: request.response_format ?? { type: 'json_object' },
+        },
+        { ...context, idempotencyKey },
+      );
+    } catch (error) {
+      // The transport may reject an entirely empty response before the JSON reader
+      // gets a result. Use the same bounded fallback as a reasoning-only response.
+      if (
+        (error as { code?: string })?.code !== 'CHAT_PAYLOAD_INVALID' ||
+        !options.fallbackChat ||
+        activeChat === options.fallbackChat
+      )
+        throw error;
+      context.signal?.throwIfAborted();
+      activeChat = options.fallbackChat;
+      return call(messages, `${idempotencyKey}:fallback`, HARVEST_MAX_TOKENS);
+    }
+  };
 
   const read = (result: GLMChatResult) => {
     const choice = result.choices[0];
@@ -126,22 +145,50 @@ export const completeStructuredJson = async <T = unknown>(
     };
   };
 
-  let result = await call(messages, baseKey, initialTokens);
-  let current = read(result);
-
-  if (current.parsed === undefined) {
-    result = await call(
-      [
-        ...messages,
+  const harvest = async (
+    result: GLMChatResult,
+    continuationMessages: GLMChatRequest['messages'],
+    key: string,
+  ) => {
+    let current = read(result);
+    for (let attempt = 0; current.parsed === undefined && attempt < 2; attempt += 1) {
+      continuationMessages = [
+        ...continuationMessages,
         { content: assistantEcho(current.content, current.reasoning), role: 'assistant' },
         { content: harvestPrompt(current.truncated, current.reasoning), role: 'user' },
-      ],
-      `${baseKey}:harvest`,
-      current.truncated ? HARVEST_MAX_TOKENS : initialTokens,
-    );
-    current = read(result);
-  }
-
+      ];
+      result = await call(
+        continuationMessages,
+        attempt === 0 ? `${key}:harvest` : `${key}:harvest-${attempt + 1}`,
+        current.truncated || attempt > 0 ? HARVEST_MAX_TOKENS : initialTokens,
+      );
+      current = read(result);
+    }
+    if (
+      current.parsed === undefined &&
+      options.fallbackChat &&
+      options.fallbackChat !== activeChat
+    ) {
+      context.signal?.throwIfAborted();
+      activeChat = options.fallbackChat;
+      result = await call(
+        [
+          ...continuationMessages,
+          { content: assistantEcho(current.content, current.reasoning), role: 'assistant' },
+          { content: harvestPrompt(current.truncated, current.reasoning), role: 'user' },
+        ],
+        `${key}:fallback`,
+        HARVEST_MAX_TOKENS,
+      );
+      current = read(result);
+    }
+    return { result, current };
+  };
+  let { result, current } = await harvest(
+    await call(messages, baseKey, initialTokens),
+    messages,
+    baseKey,
+  );
   if (current.parsed === undefined) throw new Error(emptyError);
 
   if (!options.parse) {
@@ -155,24 +202,49 @@ export const completeStructuredJson = async <T = unknown>(
       value: await options.parse(current.parsed, current.content),
     };
   } catch (error) {
-    result = await call(
-      [
-        ...messages,
-        { content: assistantEcho(current.content, current.reasoning), role: 'assistant' },
-        {
-          content: `上一轮 JSON 未通过校验。请保留已确认的事实，输出完整纠正后的 JSON 对象。错误：${String(error).slice(0, 4000)}`,
-          role: 'user',
-        },
-      ],
+    const repairMessages: GLMChatRequest['messages'] = [
+      ...messages,
+      { content: assistantEcho(current.content, current.reasoning), role: 'assistant' },
+      {
+        content: `上一轮 JSON 未通过校验。请保留已确认的事实，输出完整纠正后的 JSON 对象。错误：${String(error).slice(0, 4000)}`,
+        role: 'user',
+      },
+    ];
+    ({ result, current } = await harvest(
+      await call(repairMessages, `${baseKey}:repair`, initialTokens),
+      repairMessages,
       `${baseKey}:repair`,
-      initialTokens,
-    );
-    current = read(result);
+    ));
     if (current.parsed === undefined) throw new Error(emptyError, { cause: error });
-    return {
-      raw: current.content,
-      result,
-      value: await options.parse(current.parsed, current.content),
-    };
+    try {
+      return {
+        raw: current.content,
+        result,
+        value: await options.parse(current.parsed, current.content),
+      };
+    } catch (repairError) {
+      if (!options.fallbackChat || activeChat === options.fallbackChat) throw repairError;
+      context.signal?.throwIfAborted();
+      activeChat = options.fallbackChat;
+      const fallbackMessages: GLMChatRequest['messages'] = [
+        ...repairMessages,
+        { role: 'assistant', content: assistantEcho(current.content, current.reasoning) },
+        {
+          role: 'user',
+          content: `修复后的结果仍未通过校验。请依据同一份事实与约束输出完整 JSON。不得删除必需内容来规避校验。错误：${String(repairError).slice(0, 4000)}`,
+        },
+      ];
+      ({ result, current } = await harvest(
+        await call(fallbackMessages, `${baseKey}:validation-fallback`, HARVEST_MAX_TOKENS),
+        fallbackMessages,
+        `${baseKey}:validation-fallback`,
+      ));
+      if (current.parsed === undefined) throw new Error(emptyError, { cause: repairError });
+      return {
+        raw: current.content,
+        result,
+        value: await options.parse(current.parsed, current.content),
+      };
+    }
   }
 };

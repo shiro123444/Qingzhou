@@ -8,9 +8,14 @@ import type {
   PresentationJob,
   PresentationJobInput,
   PresentationPlan,
+  PresentationPlanningSession,
   RuntimeScope,
 } from '../../../../packages/runtime-contracts/src';
 import type { ArtifactInput, PresentationArtifactStore, StoredArtifact } from './artifact-store';
+import {
+  acquirePresentationExecutionLease,
+  type PresentationExecutionLease,
+} from './execution-lease';
 import { type PresentationJobEvent, PresentationJobEventJournal } from './job-event-journal';
 import type { PresentationRevisionAssetResult } from './revision-assets';
 
@@ -22,13 +27,30 @@ export interface StoredPresentationJob {
   plan?: PresentationPlan;
   preparedAssets?: Record<string, PresentationRevisionAssetResult>;
   revisionCheckpoint?: { requestId: string; completedSlideIds: string[] };
+  scope?: RuntimeScope;
 }
 
 export interface PresentationJobRepository {
+  acquireLease?: (
+    scope: RuntimeScope,
+    jobId: string,
+    signal?: AbortSignal,
+  ) => Promise<PresentationExecutionLease | null>;
   getJob: (scope: RuntimeScope, jobId: string) => Promise<StoredPresentationJob | null>;
   listJobs?: (scope: RuntimeScope) => Promise<PresentationJob[]>;
+  listRecoveryCandidates?: () => Promise<{ scope: RuntimeScope; jobId: string }[]>;
   removeJob?: (scope: RuntimeScope, jobId: string) => Promise<void>;
   saveJob: (scope: RuntimeScope, record: StoredPresentationJob) => Promise<void>;
+}
+
+export interface PresentationPlanningRepository {
+  acquireLease: NonNullable<PresentationJobRepository['acquireLease']>;
+  getPlanningSession: (
+    scope: RuntimeScope,
+    threadId: string,
+  ) => Promise<PresentationPlanningSession | null>;
+  listPlanningRecoveryCandidates: () => Promise<{ scope: RuntimeScope; threadId: string }[]>;
+  savePlanningSession: (scope: RuntimeScope, session: PresentationPlanningSession) => Promise<void>;
 }
 
 const hash = (value: string): string => createHash('sha256').update(value).digest('hex');
@@ -39,6 +61,87 @@ export class FilePresentationStorage
   implements PresentationArtifactStore, PresentationJobRepository
 {
   constructor(private readonly root: string) {}
+
+  acquireLease(scope: RuntimeScope, jobId: string, signal?: AbortSignal) {
+    return acquirePresentationExecutionLease(this.path(scope, 'leases', jobId), signal);
+  }
+
+  async getPlanningSession(
+    scope: RuntimeScope,
+    threadId: string,
+  ): Promise<PresentationPlanningSession | null> {
+    const record = await this.read<PresentationPlanningSession & { scope?: RuntimeScope }>(
+      this.path(scope, 'conversations', threadId),
+    );
+    if (!record) return null;
+    const { scope: _scope, ...session } = record;
+    return session;
+  }
+
+  savePlanningSession(scope: RuntimeScope, session: PresentationPlanningSession): Promise<void> {
+    return this.write(scope, 'conversations', session.threadId, {
+      ...session,
+      scope: { userId: scope.userId, sessionId: scope.sessionId },
+    });
+  }
+
+  async listPlanningRecoveryCandidates(): Promise<{ scope: RuntimeScope; threadId: string }[]> {
+    const directories = await readdir(this.root, { withFileTypes: true }).catch((error) => {
+      if (missing(error)) return [];
+      throw error;
+    });
+    const candidates: { scope: RuntimeScope; threadId: string }[] = [];
+    for (const directory of directories) {
+      if (!directory.isDirectory() || !/^[a-f0-9]{64}$/.test(directory.name)) continue;
+      const folder = path.join(this.root, directory.name, 'conversations');
+      const files = await readdir(folder).catch((error) => {
+        if (missing(error)) return [];
+        throw error;
+      });
+      for (const file of files.filter((name) => /^[a-f0-9]{64}\.json$/.test(name))) {
+        const session = await this.read<PresentationPlanningSession & { scope: RuntimeScope }>(
+          path.join(folder, file),
+        );
+        if (
+          session?.scope?.userId &&
+          session.scope.sessionId &&
+          hash(JSON.stringify([session.scope.userId, session.scope.sessionId])) ===
+            directory.name &&
+          (session.state === 'running' || session.state === 'queued')
+        )
+          candidates.push({ scope: session.scope, threadId: session.threadId });
+      }
+    }
+    return candidates;
+  }
+
+  async listRecoveryCandidates(): Promise<{ scope: RuntimeScope; jobId: string }[]> {
+    const directories = await readdir(this.root, { withFileTypes: true }).catch((error) => {
+      if (missing(error)) return [];
+      throw error;
+    });
+    const candidates: { scope: RuntimeScope; jobId: string }[] = [];
+    for (const directory of directories) {
+      if (!directory.isDirectory() || !/^[a-f0-9]{64}$/.test(directory.name)) continue;
+      const jobs = path.join(this.root, directory.name, 'jobs');
+      const files = await readdir(jobs).catch((error) => {
+        if (missing(error)) return [];
+        throw error;
+      });
+      for (const file of files.filter((name) => /^[a-f0-9]{64}\.json$/.test(name))) {
+        const record = await this.read<StoredPresentationJob>(path.join(jobs, file));
+        if (
+          !record?.scope?.userId ||
+          !record.scope.sessionId ||
+          hash(JSON.stringify([record.scope.userId, record.scope.sessionId])) !== directory.name
+        )
+          continue;
+        if (record.job.state === 'queued' || record.job.state === 'running')
+          candidates.push({ scope: record.scope, jobId: record.job.jobId });
+      }
+    }
+    return candidates;
+  }
 
   private directory(scope: RuntimeScope, kind: string): string {
     if (!scope.userId?.trim() || !scope.sessionId?.trim()) {
@@ -70,7 +173,21 @@ export class FilePresentationStorage
     const temporary = `${path}.${randomUUID()}.tmp`;
     try {
       await writeFile(temporary, JSON.stringify(data), { mode: 0o600 });
-      await rename(temporary, path);
+      // Windows readers and virus scanners can briefly hold the destination.
+      // Keep the old complete snapshot until an atomic replacement succeeds.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await rename(temporary, path);
+          break;
+        } catch (error) {
+          if (
+            attempt >= 5 ||
+            !['EPERM', 'EACCES', 'EBUSY'].includes((error as NodeJS.ErrnoException).code ?? '')
+          )
+            throw error;
+          await new Promise((resolve) => setTimeout(resolve, 20 * 2 ** attempt));
+        }
+      }
     } finally {
       await unlink(temporary).catch((error) => {
         if (!missing(error)) throw error;
@@ -96,12 +213,18 @@ export class FilePresentationStorage
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
-  getJob(scope: RuntimeScope, jobId: string): Promise<StoredPresentationJob | null> {
-    return this.read(this.path(scope, 'jobs', jobId));
+  async getJob(scope: RuntimeScope, jobId: string): Promise<StoredPresentationJob | null> {
+    const record = await this.read<StoredPresentationJob>(this.path(scope, 'jobs', jobId));
+    if (!record) return null;
+    const { scope: _scope, ...stored } = record;
+    return stored;
   }
 
   saveJob(scope: RuntimeScope, record: StoredPresentationJob): Promise<void> {
-    return this.write(scope, 'jobs', record.job.jobId, record);
+    return this.write(scope, 'jobs', record.job.jobId, {
+      ...record,
+      scope: { userId: scope.userId, sessionId: scope.sessionId },
+    });
   }
 
   async removeJob(scope: RuntimeScope, jobId: string): Promise<void> {
