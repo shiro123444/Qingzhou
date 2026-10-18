@@ -24,6 +24,18 @@ export type PresentationCollaborationHook = (
   context: { scope: RuntimeScope; jobId: string },
 ) => Promise<PresentationCollaborationResolution>;
 
+/** Presence tabs expire after this window; a stale tab never counts as foreground. */
+export const PRESENTATION_PRESENCE_TTL_MS = 45_000;
+
+/** A tab counts as foreground only while it is active and fresh. */
+export function presenceIsForeground(
+  tabs: Iterable<{ active: boolean; seenAt: number }>,
+  now: number,
+  ttlMs = PRESENTATION_PRESENCE_TTL_MS,
+): boolean {
+  return [...tabs].some((tab) => tab.active && now - tab.seenAt < ttlMs);
+}
+
 /** Pure policy plugin: neither presence nor an answer can waive publishability checks. */
 export function decidePresentationCollaboration(
   raw: PresentationCollaborationInput,

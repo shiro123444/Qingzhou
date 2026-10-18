@@ -27,6 +27,8 @@ import {
 import type { PresentationCapabilitySelector } from './capability-selection';
 import {
   createPresentationDecision,
+  presenceIsForeground,
+  PRESENTATION_PRESENCE_TTL_MS,
   type PresentationCollaborationHook,
 } from './collaboration-plugin';
 import type { PresentationGenerationContextFactory } from './composition';
@@ -48,7 +50,11 @@ import {
   renderDeckVisualFrame,
 } from './deck-visual-system';
 import type { PresentationExecutionLease } from './execution-lease';
-import type { PresentationJobRepository, StoredPresentationJob } from './file-storage';
+import type {
+  PresentationJobRepository,
+  PresentationPresenceTab,
+  StoredPresentationJob,
+} from './file-storage';
 import type { PresentationGenerationCapability } from './generation-capability';
 import type { PresentationGenerationEventPublisherFactory } from './generation-handler';
 import type { ImageGenerationCapability } from './image-generation-capability';
@@ -611,10 +617,13 @@ export class PresentationGenerationPort implements PresentationPort {
       });
     const now = Date.parse(this.now());
     const tabs = this.presence.get(jobId) ?? new Map();
-    for (const [id, tab] of tabs) if (now - tab.seenAt > 45_000) tabs.delete(id);
+    for (const [id, tab] of tabs)
+      if (now - tab.seenAt > PRESENTATION_PRESENCE_TTL_MS) tabs.delete(id);
     if (tabs.size >= 16 && !tabs.has(input.tabId)) tabs.delete(tabs.keys().next().value!);
     tabs.set(input.tabId, { seenAt: now, active: input.visible && input.focused });
     this.presence.set(jobId, tabs);
+    // Forward through the shared store so the executor holding the lease sees this tab too.
+    await this.persistPresence(jobId, tabs);
     if (entry.passive) {
       if (input.mode)
         throw Object.assign(new Error('任务由其他执行器处理，请稍后重试偏好设置'), {
@@ -632,6 +641,32 @@ export class PresentationGenerationPort implements PresentationPort {
       entry.job.updatedAt = this.now();
       await this.save(entry);
     }
+  }
+
+  private async persistPresence(
+    jobId: string,
+    tabs: Map<string, { active: boolean; seenAt: number }>,
+  ): Promise<void> {
+    const save = this.options.repository?.savePresence;
+    if (!save) return;
+    const snapshot: PresentationPresenceTab[] = [...tabs].map(([tabId, tab]) => ({
+      active: tab.active,
+      seenAt: tab.seenAt,
+      tabId,
+    }));
+    // Presence is best-effort: a storage hiccup must not fail the tab's update.
+    await save.call(this.options.repository, this.scope, jobId, snapshot).catch(() => undefined);
+  }
+
+  /** Merge local and shared presence so a peer executor's tab is honoured here. */
+  private async isForeground(jobId: string, now: number): Promise<boolean> {
+    const merged = new Map(this.presence.get(jobId) ?? []);
+    const persisted = await this.options.repository
+      ?.readPresence?.(this.scope, jobId)
+      .catch(() => undefined);
+    for (const tab of persisted ?? [])
+      merged.set(tab.tabId, { active: tab.active, seenAt: tab.seenAt });
+    return presenceIsForeground(merged.values(), now);
   }
 
   async answerDecision(jobId: string, input: PresentationDecisionAnswer): Promise<PresentationJob> {
@@ -2062,6 +2097,31 @@ export class PresentationGenerationPort implements PresentationPort {
     await Promise.allSettled([...this.jobs.values()].map(({ task }) => task));
   }
 
+  /**
+   * Pin every mounted plugin for the whole run, not just `presentation`. Otherwise a
+   * plugin such as `assets` can be replaced between two calls of the same job and the
+   * job would mix implementation versions.
+   */
+  private async acquireRunLeases(): Promise<(() => void) | undefined> {
+    const runtime = this.options.atomicRuntime;
+    if (!runtime) return undefined;
+    const ids =
+      typeof runtime.pluginIds === 'function' ? await runtime.pluginIds() : ['presentation'];
+    const releases: (() => void)[] = [];
+    try {
+      for (const id of ids) releases.push(await runtime.acquire(id));
+    } catch (error) {
+      for (const done of releases.reverse()) done();
+      throw error;
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      for (const done of releases.reverse()) done();
+    };
+  }
+
   private async run(
     jobId: string,
     input: PresentationJobInput,
@@ -2129,7 +2189,7 @@ export class PresentationGenerationPort implements PresentationPort {
             ),
           );
       }, 15_000);
-      release = await this.options.atomicRuntime?.acquire('presentation');
+      release = await this.acquireRunLeases();
       const context = this.options.contextFactory(jobId);
       const publisher = this.options.eventPublisherFactory
         ? await this.options.eventPublisherFactory(this.scope, jobId, this.scope.request)
@@ -3236,9 +3296,7 @@ export class PresentationGenerationPort implements PresentationPort {
           decisions: [],
         };
         const now = Date.parse(this.now());
-        const foreground = [...(this.presence.get(jobId)?.values() ?? [])].some(
-          (tab) => tab.active && now - tab.seenAt < 45_000,
-        );
+        const foreground = await this.isForeground(jobId, now);
         const resolution = await this.options
           .collaborationHook(
             {

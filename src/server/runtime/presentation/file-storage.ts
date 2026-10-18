@@ -30,6 +30,12 @@ export interface StoredPresentationJob {
   scope?: RuntimeScope;
 }
 
+export interface PresentationPresenceTab {
+  active: boolean;
+  seenAt: number;
+  tabId: string;
+}
+
 export interface PresentationJobRepository {
   acquireLease?: (
     scope: RuntimeScope,
@@ -39,8 +45,18 @@ export interface PresentationJobRepository {
   getJob: (scope: RuntimeScope, jobId: string) => Promise<StoredPresentationJob | null>;
   listJobs?: (scope: RuntimeScope) => Promise<PresentationJob[]>;
   listRecoveryCandidates?: () => Promise<{ scope: RuntimeScope; jobId: string }[]>;
+  /**
+   * Presence is a short-lived cross-executor signal. A shared store lets the executor
+   * that owns the lease observe the foreground state reported to a passive port.
+   */
+  readPresence?: (scope: RuntimeScope, jobId: string) => Promise<PresentationPresenceTab[]>;
   removeJob?: (scope: RuntimeScope, jobId: string) => Promise<void>;
   saveJob: (scope: RuntimeScope, record: StoredPresentationJob) => Promise<void>;
+  savePresence?: (
+    scope: RuntimeScope,
+    jobId: string,
+    tabs: PresentationPresenceTab[],
+  ) => Promise<void>;
 }
 
 export interface PresentationPlanningRepository {
@@ -50,7 +66,14 @@ export interface PresentationPlanningRepository {
     threadId: string,
   ) => Promise<PresentationPlanningSession | null>;
   listPlanningRecoveryCandidates: () => Promise<{ scope: RuntimeScope; threadId: string }[]>;
+  /** Shared presence so the actor holding the lease sees a peer port's foreground tab. */
+  readPresence?: (scope: RuntimeScope, threadId: string) => Promise<PresentationPresenceTab[]>;
   savePlanningSession: (scope: RuntimeScope, session: PresentationPlanningSession) => Promise<void>;
+  savePresence?: (
+    scope: RuntimeScope,
+    threadId: string,
+    tabs: PresentationPresenceTab[],
+  ) => Promise<void>;
 }
 
 const hash = (value: string): string => createHash('sha256').update(value).digest('hex');
@@ -218,6 +241,14 @@ export class FilePresentationStorage
     if (!record) return null;
     const { scope: _scope, ...stored } = record;
     return stored;
+  }
+
+  async readPresence(scope: RuntimeScope, jobId: string): Promise<PresentationPresenceTab[]> {
+    return (await this.read<PresentationPresenceTab[]>(this.path(scope, 'presence', jobId))) ?? [];
+  }
+
+  savePresence(scope: RuntimeScope, jobId: string, tabs: PresentationPresenceTab[]): Promise<void> {
+    return this.write(scope, 'presence', jobId, tabs);
   }
 
   saveJob(scope: RuntimeScope, record: StoredPresentationJob): Promise<void> {

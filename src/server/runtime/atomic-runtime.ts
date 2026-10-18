@@ -186,6 +186,12 @@ export class AtomicRuntime {
     }
   }
 
+  /** Mounted plugin ids, sorted. A whole job leases every participant to pin its version. */
+  async pluginIds(): Promise<string[]> {
+    await this.pending;
+    return [...this.plugins.keys()].sort();
+  }
+
   async acquire(pluginId: string): Promise<() => void> {
     await this.pending;
     if (this.disposed || this.changing.has(pluginId) || !this.plugins.has(pluginId))

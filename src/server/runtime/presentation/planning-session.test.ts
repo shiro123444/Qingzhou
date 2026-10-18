@@ -4,6 +4,7 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { decidePresentationCollaboration } from './collaboration-plugin';
 import type {
   PresentationConversationCapability,
   PresentationConversationCommand,
@@ -110,6 +111,39 @@ describe('durable planning collaboration', () => {
     expect(
       await manager.read({ userId: 'someone-else', sessionId: 'workspace' }, command.threadId),
     ).toBeNull();
+  }, 20_000);
+
+  it('honours a foreground tab a peer session reported through the shared store', async () => {
+    const repo = await storage();
+    // A different session instance (the passive peer) reports the tab; the actor that
+    // owns the lease has no local presence of its own.
+    const peer = create(repo, vi.fn());
+    await peer.presenceUpdate(scope, command.threadId, {
+      tabId: 'peer-tab',
+      visible: true,
+      focused: true,
+    });
+    const hook = vi.fn(async (value: Parameters<typeof decidePresentationCollaboration>[0]) =>
+      decidePresentationCollaboration(value),
+    );
+    const manager = new PresentationPlanningSessions(
+      repo,
+      {
+        id: 'presentation.conversation',
+        execute: vi.fn(async () => {
+          throw Object.assign(new Error('private provider response'), {
+            code: 'CHAT_EMPTY_RESPONSE',
+          });
+        }),
+      },
+      async () => ({ context: {} }),
+      hook,
+      10_000,
+    );
+    managers.push(manager);
+    await manager.start(scope, command, 'turn-shared-presence');
+    await waitForState(manager, 'waiting_input');
+    expect(hook.mock.calls[0][0].foreground).toBe(true);
   }, 20_000);
 
   it('does not let a second runtime take over a living worker or replace its command', async () => {

@@ -81,11 +81,16 @@ describe('durable presentation capability memory', () => {
   it('retires superseded observations from selection while retaining their historical evidence', async () => {
     const store = new FileCapabilityCapsuleStore(root);
     const original = await store.learn(scope, visual);
-    const revised = { ...visual, families: visual.families.map((family) => ({ ...family, composition: '更正后上下分栏' })) };
+    const revised = {
+      ...visual,
+      families: visual.families.map((family) => ({ ...family, composition: '更正后上下分栏' })),
+    };
     await store.learn(scope, revised);
     const oldStyle = original.find(({ kind }) => kind === 'style')!;
     expect(await store.load(scope, oldStyle.id)).toEqual(oldStyle);
-    expect((await store.search(scope, '学术课程', 6, true)).map(({ id }) => id)).not.toContain(oldStyle.id);
+    expect((await store.search(scope, '学术课程', 6, true)).map(({ id }) => id)).not.toContain(
+      oldStyle.id,
+    );
     await expect(store.compose(scope, [oldStyle.id], true)).rejects.toThrow('verified');
     expect(await store.load({ ...scope, userId: 'bob' }, oldStyle.id)).toBeNull();
   });
@@ -437,6 +442,53 @@ describe('durable presentation capability memory', () => {
     expect(await store.search(scope, '学术')).toEqual([]);
     await store.recordOutcome(scope, { jobId: 'good', plan, capsuleIds: ids, result: 'accepted' });
     expect((await store.search(scope, '学术')).length).toBeGreaterThan(0);
+  });
+
+  it('resolves a changed mind to the newest verdict instead of resurrecting the stale one', async () => {
+    let clock = 0;
+    const store = new FileCapabilityCapsuleStore(root, () =>
+      new Date(1000 * ++clock).toISOString(),
+    );
+    const ids = (await store.learn(scope, visual)).map((c) => c.id);
+
+    const accepted = await store.recordOutcome(scope, {
+      jobId: 'mind',
+      plan,
+      capsuleIds: ids,
+      result: 'accepted',
+    });
+    // Repeating the current verdict is idempotent, not a new event.
+    expect(
+      await store.recordOutcome(scope, {
+        jobId: 'mind',
+        plan,
+        capsuleIds: ids,
+        result: 'accepted',
+      }),
+    ).toEqual(accepted);
+
+    const rejected = await store.recordOutcome(scope, {
+      jobId: 'mind',
+      plan,
+      capsuleIds: ids,
+      result: 'rejected',
+    });
+    expect(await store.search(scope, '学术课程')).toEqual([]);
+
+    // Changing back must win over the intervening rejection.
+    const reaccepted = await store.recordOutcome(scope, {
+      jobId: 'mind',
+      plan,
+      capsuleIds: ids,
+      result: 'accepted',
+    });
+    // Behavioral guarantee first: the newest verdict decides the outcome.
+    expect((await store.search(scope, '学术课程')).length).toBeGreaterThan(0);
+    expect((await store.compose(scope, [ids[0]])).capsules).toHaveLength(1);
+    expect(reaccepted.id).not.toBe(accepted.id);
+    expect(rejected.supersedes).toBe(accepted.id);
+    expect(reaccepted.supersedes).toBe(rejected.id);
+    expect(reaccepted.revision).toBeGreaterThan(1);
   });
 
   it('exposes scoped retrieval and composition as ordinary Cordis operations with references', async () => {

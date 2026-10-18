@@ -490,6 +490,54 @@ describe('PresentationGenerationPort', () => {
     );
   });
 
+  it('pins every mounted plugin for the whole run and releases them together', async () => {
+    const acquired: string[] = [];
+    const released: string[] = [];
+    const pluginIds = [
+      'assets',
+      'presentation',
+      'presentation-collaboration',
+      'skills',
+      'teaching',
+    ];
+    const acquire = vi.fn(async (id: string) => {
+      acquired.push(id);
+      return () => released.push(id);
+    });
+    const port = new PresentationGenerationPort(
+      {
+        artifactStore: new InMemoryPresentationArtifactStore(),
+        atomicRuntime: {
+          acquire,
+          catalog: vi.fn(async () => []),
+          invoke: vi.fn(async () => ({})),
+          pluginIds: vi.fn(async () => [...pluginIds]),
+        } as never,
+        capability: {
+          execute: vi.fn(async () => ({ artifacts: [] })),
+        } as unknown as PresentationGenerationCapability,
+        contextFactory: () => ({
+          plannerContext: {},
+          workerContext: {
+            convert: vi.fn(),
+            jobId: 'ignored',
+            qualityCheck: vi.fn(),
+            workspace: { path: '/tmp', write: vi.fn() },
+          },
+        }),
+        idFactory: () => 'job-leases',
+      },
+      scope,
+    );
+
+    await port.createJob(input);
+    await vi.waitFor(() => expect(released).toHaveLength(pluginIds.length));
+    // Every participant is pinned, not only `presentation`, so no plugin can be replaced
+    // between two calls of the same job and mix implementation versions.
+    expect([...acquired].sort()).toEqual([...pluginIds].sort());
+    expect([...released].sort()).toEqual([...pluginIds].sort());
+  });
+
   it('accepts prompt-only presentations when no source versions are attached', async () => {
     const capability = {
       execute: vi.fn(async () => ({ artifacts: [] })),

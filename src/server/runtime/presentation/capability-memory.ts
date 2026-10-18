@@ -83,9 +83,27 @@ const outcomeSchema = z
     capsuleIds: z.array(z.string()).max(100),
     result: z.enum(['passed', 'failed', 'accepted', 'rejected']),
     recordedAt: z.string(),
+    // Explicit user verdicts are revocable: a later verdict supersedes earlier ones for
+    // the same work unit, so "accept → reject → accept" resolves to the newest intent.
+    // Automated quality evidence stays content-addressed and carries neither field.
+    revision: z.number().int().positive().optional(),
+    supersedes: z.string().optional(),
   })
   .strict();
 type Outcome = z.infer<typeof outcomeSchema>;
+
+const isUserVerdict = (result: Outcome['result']): boolean =>
+  result === 'accepted' || result === 'rejected';
+
+/** A verdict's identity is the work it judges, not the verdict itself. */
+const verdictGroup = (outcome: Pick<Outcome, 'jobId' | 'planFingerprint' | 'capsuleIds'>): string =>
+  hash([outcome.jobId, outcome.planFingerprint, outcome.capsuleIds]);
+
+const supersededOutcomeIds = (outcomes: Outcome[]): Set<string> => {
+  const superseded = new Set<string>();
+  for (const outcome of outcomes) if (outcome.supersedes) superseded.add(outcome.supersedes);
+  return superseded;
+};
 export interface CapabilityMemory {
   candidates?: (scope: RuntimeScope, query: string) => Promise<CapabilityCapsule[]>;
   compose: (
@@ -387,10 +405,17 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
     return capsules;
   }
 
+  /** Superseded verdicts remain historical evidence but no longer express current intent. */
+  private async effectiveOutcomes(scope: RuntimeScope, evidence?: Outcome[]) {
+    const all = evidence ?? (await this.list(scope, 'outcomes', outcomeSchema));
+    const superseded = supersededOutcomeIds(all);
+    return all
+      .filter((outcome) => !superseded.has(outcome.id))
+      .sort((a, b) => a.recordedAt.localeCompare(b.recordedAt) || a.id.localeCompare(b.id));
+  }
+
   private async promoted(scope: RuntimeScope, evidence?: Outcome[]) {
-    const outcomes = [...(evidence ?? (await this.list(scope, 'outcomes', outcomeSchema)))].sort(
-      (a, b) => a.recordedAt.localeCompare(b.recordedAt) || a.id.localeCompare(b.id),
-    );
+    const outcomes = await this.effectiveOutcomes(scope, evidence);
     const active = new Set<string>();
     const rejected = new Set<string>();
     for (const outcome of outcomes)
@@ -410,7 +435,7 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
   }
 
   private async rankedCandidates(scope: RuntimeScope, query: string, includeObserved = false) {
-    const outcomes = await this.list(scope, 'outcomes', outcomeSchema);
+    const outcomes = await this.effectiveOutcomes(scope);
     const { active, rejected } = await this.promoted(scope, outcomes);
     const reliability = new Map<string, number>();
     for (const outcome of outcomes)
@@ -539,7 +564,31 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
       if (!(await this.load(scope, id)))
         throw new Error('Capability is unavailable in this account');
     const fingerprint = hash(input.plan.slides.map((slide) => [slide.slideId, slide.svg]));
-    const id = hash([input.jobId, fingerprint, input.capsuleIds, input.result]);
+
+    // The latest user verdict for one work unit decides its outcome. Repeating the current
+    // verdict is idempotent; changing it supersedes the earlier record instead of
+    // resurrecting the stale one, so a change of mind is reliably honoured.
+    let revision: number | undefined;
+    let supersedes: string | undefined;
+    if (isUserVerdict(input.result)) {
+      const group = verdictGroup({
+        capsuleIds: input.capsuleIds,
+        jobId: input.jobId,
+        planFingerprint: fingerprint,
+      });
+      const latest = (await this.effectiveOutcomes(scope)).findLast(
+        (outcome) => isUserVerdict(outcome.result) && verdictGroup(outcome) === group,
+      );
+      if (latest?.result === input.result) return latest;
+      if (latest) {
+        supersedes = latest.id;
+        revision = (latest.revision ?? 1) + 1;
+      }
+    }
+
+    const id = revision
+      ? hash([input.jobId, fingerprint, input.capsuleIds, input.result, revision, supersedes])
+      : hash([input.jobId, fingerprint, input.capsuleIds, input.result]);
     const existing = await this.read(
       path.join(this.directory(scope, 'outcomes'), `${hash(id)}.json`),
       outcomeSchema,
@@ -552,6 +601,7 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
       capsuleIds: input.capsuleIds,
       result: input.result,
       recordedAt: this.now(),
+      ...(revision ? { revision, supersedes } : {}),
     });
     await this.save(scope, 'outcomes', id, outcome);
     return outcome;

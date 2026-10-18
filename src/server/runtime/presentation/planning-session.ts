@@ -9,6 +9,8 @@ import type {
 import {
   createPresentationDecision,
   decidePresentationCollaboration,
+  presenceIsForeground,
+  PRESENTATION_PRESENCE_TTL_MS,
   type PresentationCollaborationHook,
 } from './collaboration-plugin';
 import type {
@@ -18,7 +20,7 @@ import type {
   PresentationConversationResult,
 } from './conversation-capability';
 import type { PresentationExecutionLease } from './execution-lease';
-import type { PresentationPlanningRepository } from './file-storage';
+import type { PresentationPlanningRepository, PresentationPresenceTab } from './file-storage';
 
 export type PlanningContextFactory = (scope: RuntimeScope) => Promise<{
   context: Omit<PresentationConversationContext, 'scope'>;
@@ -173,10 +175,13 @@ export class PresentationPlanningSessions {
     )
       throw fail('Invalid planning presence');
     const tabs = this.presence.get(key(scope, threadId)) ?? new Map();
-    for (const [tabId, tab] of tabs) if (Date.now() - tab.seenAt > 45_000) tabs.delete(tabId);
+    for (const [tabId, tab] of tabs)
+      if (Date.now() - tab.seenAt > PRESENTATION_PRESENCE_TTL_MS) tabs.delete(tabId);
     if (tabs.size >= 16 && !tabs.has(input.tabId)) tabs.delete(tabs.keys().next().value!);
     tabs.set(input.tabId, { active: input.visible && input.focused, seenAt: Date.now() });
     this.presence.set(key(scope, threadId), tabs);
+    // Forward through the shared store so the actor holding the lease sees this tab too.
+    await this.persistPresence(scope, threadId, tabs);
     if (input.mode) {
       const lease = await this.lease(scope, threadId);
       if (!lease) throw fail('当前步骤进行中，请在本轮结束后修改协作偏好', 'PRESENTATION_CONFLICT');
@@ -190,6 +195,36 @@ export class PresentationPlanningSessions {
       }
     }
   }
+
+  private async persistPresence(
+    scope: RuntimeScope,
+    threadId: string,
+    tabs: Map<string, { active: boolean; seenAt: number }>,
+  ): Promise<void> {
+    const save = this.repository.savePresence;
+    if (!save) return;
+    const snapshot: PresentationPresenceTab[] = [...tabs].map(([tabId, tab]) => ({
+      active: tab.active,
+      seenAt: tab.seenAt,
+      tabId,
+    }));
+    // Presence is best-effort: a storage hiccup must not fail the tab's update.
+    await save
+      .call(this.repository, scope, `planning:${id(threadId)}`, snapshot)
+      .catch(() => undefined);
+  }
+
+  /** Merge local and shared presence so a peer actor's tab is honoured here. */
+  private async isForeground(scope: RuntimeScope, threadId: string): Promise<boolean> {
+    const merged = new Map(this.presence.get(key(scope, threadId)) ?? []);
+    const persisted = await this.repository
+      .readPresence?.(scope, `planning:${id(threadId)}`)
+      .catch(() => undefined);
+    for (const tab of persisted ?? [])
+      merged.set(tab.tabId, { active: tab.active, seenAt: tab.seenAt });
+    return presenceIsForeground(merged.values(), Date.now());
+  }
+
   async answer(scope: RuntimeScope, threadId: string, input: PresentationDecisionAnswer) {
     id(threadId);
     id(input.requestId);
@@ -388,9 +423,7 @@ export class PresentationPlanningSessions {
           const code = controller.signal.aborted
             ? (controller.signal.reason?.code ?? 'CHAT_INTERRUPTED')
             : ((error as { code?: string })?.code ?? 'CHAT_INTERRUPTED');
-          const foreground = [
-            ...(this.presence.get(key(scope, session.threadId))?.values() ?? []),
-          ].some((tab) => tab.active && Date.now() - tab.seenAt < 45_000);
+          const foreground = await this.isForeground(scope, session.threadId);
           const resolution = await this.hook(
             {
               code,

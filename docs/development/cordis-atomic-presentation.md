@@ -87,7 +87,7 @@ try {
 }
 ```
 
-有活跃 lease 时，卸载和替换返回 `PLUGIN_BUSY`，调用方应完成或取消任务后再重试。PPT 的 `GenerationPort.run` 已持有整个运行周期的 lease，避免同一次运行混用两版实现。释放函数可以重复调用。
+有活跃 lease 时，卸载和替换返回 `PLUGIN_BUSY`，调用方应完成或取消任务后再重试。PPT 的 `GenerationPort.run` 不只锁定 `presentation`：它先枚举该运行时所挂载的全部插件（`pluginIds()`），为每个插件持有整个运行周期的 lease，结束后统一释放。因此在同一个运行时实例里，`assets`、`teaching`、`skills` 这类参与插件也不会在一次任务中途被替换，避免同一次运行混用两版实现。这个范围是"该运行时挂载的插件集合"，不是全进程或跨主机的全局锁。释放函数可以重复调用。
 
 替换先由真实 Cordis 加载候选插件，其工具暂存于清舟 `ToolRegistry`。候选激活成功后同步切换工具所有者，再卸载旧插件；候选激活失败时旧实现继续运行。这里保证的是工具目录切换，不提供任意文件、网络或服务发布的事务回滚。使用新的实现版本号发布替换，避免用同一个版本名指代不同代码。
 
@@ -155,7 +155,7 @@ SVG 文本边界及容量是估算值；旋转、复杂形状、图表和表格�
 
 生图模型在方向、共线关系和标签拼写上不可靠，而这些都是可确定推导的信息，因此它们的作者权归服务端：
 
-- **关系由服务端矢量叠加**：`visualRequirements[].annotations`（`vector`/`guide`/`label`，图内 0 到 1 的相对坐标）在内容编译阶段就确定；`asset-annotations` 按素材真实落位框（placement × viewBox）投影成独立 `<g data-asset-annotations>`，随图缩放而不随图重画。生图提示只画图形本体，并附上标签清单，明确要求不要自己绘制。
+- **关系只在 overlay 模式下由服务端矢量叠加**：概念性栅格图在内容编译阶段默认 `annotationMode:"embedded"` —— 图内短标签、连接线与箭头由生图模型绘制，服务端不再叠加同一套标注，也不对这部分主张作者权。只有模型显式声明 `annotationMode:"overlay"` 且给出 `visuals[].annotations`（`vector`/`guide`/`label`，图内 0 到 1 的相对坐标）时，服务端才按素材真实落位框（placement × viewBox）把它投影成独立 `<g data-asset-annotations>`，随图缩放而不随图重画；此时生图提示只画图形本体，并附上标签清单，明确要求不要自己绘制。
 - **评审按作者权分流**：图内箭头方向、引线走向、已由服务端绘制标签的拼写不再作为阻塞意见，按 `server-drawn-annotations` 裁决；对象缺失、关系错误、风格与越界仍然阻塞。这样 "重画箭头" 不会再触发一轮注定失败的再生图。
 - **服务端画的标注按标签规则评审**：`content-quality` 的排版检查识别标注组（`data-asset-annotations` 祖先），对其中 16px 的标签用 "简要标签" 下限而不是 24px 正文下限，也不再拿它去比对它所覆盖的卡片边框 —— 这些坐标由 `renderAssetAnnotations` 在图形框内夹住，不适用文档流规则。下限仍生效，所以把 8px 小字塞进标注组并不能绕过检查。真实运行曾因此把 24 字符的标注标签判成 major 阻断项（`Text "支撑超平面 (Supporting Hyperp…" is 16.0px; minimum 24px at 960 width`），修复后同一页不再失败。
 - **贴纸 / 装饰是一等角色**：`kind:"sticker"` 属于默认栅格（`raster-budget`），服务端无视模型是否声明，强制 `{role:"decoration",background:"transparent"}` 并在没有 processing 时注入 `assets.removeBackground` 抠图（`PRESENTATION_CUTOUT_STEPS`）。透明来自服务端后处理，而不是 "请生成透明背景" 这类不可验证的提示。

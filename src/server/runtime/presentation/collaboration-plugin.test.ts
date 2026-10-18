@@ -6,6 +6,7 @@ import {
   createPresentationDecision,
   decidePresentationCollaboration,
 } from './collaboration-plugin';
+import type { PresentationPresenceTab } from './file-storage';
 import { PresentationGenerationPort } from './generation-port';
 
 const scope = { request: new Request('https://example.test'), userId: 'u1', sessionId: 's1' };
@@ -34,8 +35,11 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function fixture(options: { code?: string; now?: () => string; saved?: any } = {}) {
+function fixture(
+  options: { code?: string; now?: () => string; passive?: boolean; saved?: any } = {},
+) {
   let saved = options.saved;
+  const presence: PresentationPresenceTab[] = [];
   let release!: () => void;
   const gate = new Promise<void>((resolve) => {
     release = resolve;
@@ -56,10 +60,17 @@ function fixture(options: { code?: string; now?: () => string; saved?: any } = {
     now: options.now,
     collaborationHook: hook,
     repository: {
+      ...(options.passive ? { acquireLease: vi.fn(async () => null) } : {}),
       getJob: vi.fn(async () => (saved ? structuredClone(saved) : null)),
+      readPresence: vi.fn(async () => structuredClone(presence)),
       saveJob: vi.fn(async (_scope: unknown, snapshot: unknown) => {
         saved = structuredClone(snapshot);
       }),
+      savePresence: vi.fn(
+        async (_scope: unknown, _jobId: string, tabs: PresentationPresenceTab[]) => {
+          presence.splice(0, presence.length, ...structuredClone(tabs));
+        },
+      ),
     },
     contextFactory: () => ({
       plannerContext: {},
@@ -73,7 +84,7 @@ function fixture(options: { code?: string; now?: () => string; saved?: any } = {
   };
   const port = new PresentationGenerationPort(config, scope);
   ports.push(port);
-  return { port, config, execute, hook, release, snapshot: () => saved };
+  return { port, config, execute, hook, presence, release, snapshot: () => saved };
 }
 
 describe('presentation collaboration hook', () => {
@@ -172,6 +183,29 @@ describe('presentation collaboration hook', () => {
       visible: false,
       focused: false,
     });
+    f.release();
+    await vi.waitFor(() => expect(f.hook).toHaveBeenCalled());
+    expect(f.hook.mock.calls[0][0].foreground).toBe(true);
+  });
+
+  it('forwards presence to the shared store while a peer executor owns the job', async () => {
+    const f = fixture({ passive: true });
+    await f.port.createJob(input);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await f.port.updatePresence('collaboration-job', {
+      tabId: 'peer-tab',
+      visible: true,
+      focused: true,
+    });
+    expect(f.presence).toEqual([expect.objectContaining({ active: true, tabId: 'peer-tab' })]);
+  });
+
+  it('honours the foreground tab a peer executor reported through the shared store', async () => {
+    const f = fixture();
+    // Another port instance already reported this tab; this executor owns the lease but
+    // has no local presence of its own.
+    f.presence.push({ active: true, seenAt: Date.now(), tabId: 'peer-tab' });
+    await f.port.createJob(input);
     f.release();
     await vi.waitFor(() => expect(f.hook).toHaveBeenCalled());
     expect(f.hook.mock.calls[0][0].foreground).toBe(true);
