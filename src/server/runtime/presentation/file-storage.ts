@@ -12,6 +12,7 @@ import type {
   RuntimeScope,
 } from '../../../../packages/runtime-contracts/src';
 import type { ArtifactInput, PresentationArtifactStore, StoredArtifact } from './artifact-store';
+import { PRESENTATION_PRESENCE_TTL_MS } from './collaboration-plugin';
 import {
   acquirePresentationExecutionLease,
   type PresentationExecutionLease,
@@ -52,6 +53,7 @@ export interface PresentationJobRepository {
   readPresence?: (scope: RuntimeScope, jobId: string) => Promise<PresentationPresenceTab[]>;
   removeJob?: (scope: RuntimeScope, jobId: string) => Promise<void>;
   saveJob: (scope: RuntimeScope, record: StoredPresentationJob) => Promise<void>;
+  /** Upsert the supplied tabs only; omitted tabs belong to other writers. */
   savePresence?: (
     scope: RuntimeScope,
     jobId: string,
@@ -69,6 +71,7 @@ export interface PresentationPlanningRepository {
   /** Shared presence so the actor holding the lease sees a peer port's foreground tab. */
   readPresence?: (scope: RuntimeScope, threadId: string) => Promise<PresentationPresenceTab[]>;
   savePlanningSession: (scope: RuntimeScope, session: PresentationPlanningSession) => Promise<void>;
+  /** Upsert the supplied tabs only; omitted tabs belong to other writers. */
   savePresence?: (
     scope: RuntimeScope,
     threadId: string,
@@ -244,11 +247,53 @@ export class FilePresentationStorage
   }
 
   async readPresence(scope: RuntimeScope, jobId: string): Promise<PresentationPresenceTab[]> {
-    return (await this.read<PresentationPresenceTab[]>(this.path(scope, 'presence', jobId))) ?? [];
+    const directory = this.path(scope, 'presence', jobId).slice(0, -5);
+    const files = await readdir(directory).catch((error) => {
+      if (missing(error)) return [];
+      throw error;
+    });
+    const now = Date.now();
+    const tabs: PresentationPresenceTab[] = [];
+    for (const file of files.filter((name) => /^[a-f0-9]{64}\.json$/u.test(name))) {
+      let tab: PresentationPresenceTab | null;
+      try {
+        tab = await this.read<PresentationPresenceTab>(path.join(directory, file));
+      } catch (error) {
+        if (error instanceof SyntaxError) continue;
+        throw error;
+      }
+      if (
+        tab &&
+        typeof tab.tabId === 'string' &&
+        `${hash(tab.tabId)}.json` === file &&
+        typeof tab.active === 'boolean' &&
+        Number.isFinite(tab.seenAt) &&
+        now >= tab.seenAt &&
+        now - tab.seenAt < PRESENTATION_PRESENCE_TTL_MS
+      )
+        tabs.push(tab);
+    }
+    return tabs;
   }
 
-  savePresence(scope: RuntimeScope, jobId: string, tabs: PresentationPresenceTab[]): Promise<void> {
-    return this.write(scope, 'presence', jobId, tabs);
+  async savePresence(
+    scope: RuntimeScope,
+    jobId: string,
+    tabs: PresentationPresenceTab[],
+  ): Promise<void> {
+    // Each tab owns one atomic file. Never read/merge/rewrite a whole-task snapshot:
+    // independent executors would otherwise lose each other's heartbeats.
+    this.path(scope, 'presence', jobId);
+    for (const tab of tabs) {
+      if (
+        !tab.tabId?.trim() ||
+        tab.tabId.length > 128 ||
+        typeof tab.active !== 'boolean' ||
+        !Number.isFinite(tab.seenAt)
+      )
+        throw Object.assign(new Error('Invalid presence tab'), { code: 'ARTIFACT_INVALID' });
+      await this.write(scope, path.join('presence', hash(jobId)), tab.tabId, tab);
+    }
   }
 
   saveJob(scope: RuntimeScope, record: StoredPresentationJob): Promise<void> {

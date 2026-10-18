@@ -146,6 +146,44 @@ describe('durable planning collaboration', () => {
     expect(hook.mock.calls[0][0].foreground).toBe(true);
   }, 20_000);
 
+  it('keeps a foreground planning peer when an independent peer reports background', async () => {
+    const repo = await storage();
+    const foreground = create(repo, vi.fn());
+    const background = create(repo, vi.fn());
+    await foreground.presenceUpdate(scope, command.threadId, {
+      tabId: 'active',
+      visible: true,
+      focused: true,
+    });
+    await background.presenceUpdate(scope, command.threadId, {
+      tabId: 'idle',
+      visible: false,
+      focused: false,
+    });
+    const hook = vi.fn(async (_value: Parameters<typeof decidePresentationCollaboration>[0]) => ({
+      action: 'ask' as const,
+      category: 'provider' as const,
+    }));
+    const owner = new PresentationPlanningSessions(
+      repo,
+      {
+        id: 'presentation.conversation',
+        execute: vi.fn(async () => {
+          throw Object.assign(new Error('Provider response missing'), {
+            code: 'CHAT_EMPTY_RESPONSE',
+          });
+        }),
+      },
+      async () => ({ context: {} }),
+      hook,
+      10_000,
+    );
+    managers.push(owner);
+    await owner.start(scope, command, 'multi-peer-presence');
+    await waitForState(owner, 'waiting_input');
+    expect(hook.mock.calls[0][0].foreground).toBe(true);
+  }, 20_000);
+
   it('does not let a second runtime take over a living worker or replace its command', async () => {
     const repo = await storage();
     const execute = vi.fn<PresentationConversationCapability['execute']>(

@@ -9,6 +9,7 @@ import type {
 import {
   createPresentationDecision,
   decidePresentationCollaboration,
+  mergePresenceTabs,
   presenceIsForeground,
   PRESENTATION_PRESENCE_TTL_MS,
   type PresentationCollaborationHook,
@@ -178,10 +179,11 @@ export class PresentationPlanningSessions {
     for (const [tabId, tab] of tabs)
       if (Date.now() - tab.seenAt > PRESENTATION_PRESENCE_TTL_MS) tabs.delete(tabId);
     if (tabs.size >= 16 && !tabs.has(input.tabId)) tabs.delete(tabs.keys().next().value!);
-    tabs.set(input.tabId, { active: input.visible && input.focused, seenAt: Date.now() });
+    const tab = { tabId: input.tabId, active: input.visible && input.focused, seenAt: Date.now() };
+    tabs.set(input.tabId, tab);
     this.presence.set(key(scope, threadId), tabs);
     // Forward through the shared store so the actor holding the lease sees this tab too.
-    await this.persistPresence(scope, threadId, tabs);
+    await this.persistPresence(scope, threadId, tab);
     if (input.mode) {
       const lease = await this.lease(scope, threadId);
       if (!lease) throw fail('当前步骤进行中，请在本轮结束后修改协作偏好', 'PRESENTATION_CONFLICT');
@@ -199,29 +201,25 @@ export class PresentationPlanningSessions {
   private async persistPresence(
     scope: RuntimeScope,
     threadId: string,
-    tabs: Map<string, { active: boolean; seenAt: number }>,
+    tab: PresentationPresenceTab,
   ): Promise<void> {
     const save = this.repository.savePresence;
     if (!save) return;
-    const snapshot: PresentationPresenceTab[] = [...tabs].map(([tabId, tab]) => ({
-      active: tab.active,
-      seenAt: tab.seenAt,
-      tabId,
-    }));
     // Presence is best-effort: a storage hiccup must not fail the tab's update.
     await save
-      .call(this.repository, scope, `planning:${id(threadId)}`, snapshot)
+      .call(this.repository, scope, `planning:${id(threadId)}`, [tab])
       .catch(() => undefined);
   }
 
   /** Merge local and shared presence so a peer actor's tab is honoured here. */
   private async isForeground(scope: RuntimeScope, threadId: string): Promise<boolean> {
-    const merged = new Map(this.presence.get(key(scope, threadId)) ?? []);
     const persisted = await this.repository
       .readPresence?.(scope, `planning:${id(threadId)}`)
       .catch(() => undefined);
-    for (const tab of persisted ?? [])
-      merged.set(tab.tabId, { active: tab.active, seenAt: tab.seenAt });
+    const merged = mergePresenceTabs(
+      this.presence.get(key(scope, threadId)) ?? new Map(),
+      persisted ?? [],
+    );
     return presenceIsForeground(merged.values(), Date.now());
   }
 

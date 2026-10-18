@@ -5,6 +5,8 @@ import type { PresentationCollaborationInput } from './collaboration-plugin';
 import {
   createPresentationDecision,
   decidePresentationCollaboration,
+  mergePresenceTabs,
+  presenceIsForeground,
 } from './collaboration-plugin';
 import type { PresentationPresenceTab } from './file-storage';
 import { PresentationGenerationPort } from './generation-port';
@@ -68,7 +70,11 @@ function fixture(
       }),
       savePresence: vi.fn(
         async (_scope: unknown, _jobId: string, tabs: PresentationPresenceTab[]) => {
-          presence.splice(0, presence.length, ...structuredClone(tabs));
+          for (const tab of tabs) {
+            const index = presence.findIndex(({ tabId }) => tabId === tab.tabId);
+            if (index < 0) presence.push(structuredClone(tab));
+            else presence[index] = structuredClone(tab);
+          }
         },
       ),
     },
@@ -88,6 +94,44 @@ function fixture(
 }
 
 describe('presentation collaboration hook', () => {
+  it('merges the newest observation per tab and rejects stale or future foreground signals', () => {
+    const local = new Map([
+      ['leaving', { active: false, seenAt: 100_000 }],
+      ['arriving', { active: true, seenAt: 100_000 }],
+      ['closed-remotely', { active: true, seenAt: 99_999 }],
+    ]);
+    const merged = mergePresenceTabs(local, [
+      { tabId: 'leaving', active: true, seenAt: 99_999 },
+      { tabId: 'arriving', active: false, seenAt: 99_999 },
+      { tabId: 'closed-remotely', active: false, seenAt: 100_000 },
+    ]);
+    expect(merged.get('leaving')?.active).toBe(false);
+    expect(merged.get('arriving')?.active).toBe(true);
+    expect(merged.get('closed-remotely')?.active).toBe(false);
+    expect(presenceIsForeground(merged.values(), 100_000)).toBe(true);
+    expect(presenceIsForeground(merged.values(), 145_000)).toBe(false);
+    expect(presenceIsForeground([{ active: true, seenAt: 100_001 }], 100_000)).toBe(false);
+  });
+
+  it('persists only the tab being updated instead of replaying its cached peers', async () => {
+    const f = fixture();
+    await f.port.createJob(input);
+    await f.port.updatePresence('collaboration-job', {
+      tabId: 'first',
+      visible: true,
+      focused: true,
+    });
+    await f.port.updatePresence('collaboration-job', {
+      tabId: 'second',
+      visible: false,
+      focused: false,
+    });
+    expect(f.config.repository.savePresence.mock.calls[1][2]).toEqual([
+      expect.objectContaining({ tabId: 'second', active: false }),
+    ]);
+    f.release();
+    await vi.waitFor(() => expect(f.hook).toHaveBeenCalled());
+  });
   it.each([
     ['adaptive', true, 0, 'CHAT_EMPTY_RESPONSE', 'ask'],
     ['adaptive', false, 0, 'CHAT_EMPTY_RESPONSE', 'retry'],

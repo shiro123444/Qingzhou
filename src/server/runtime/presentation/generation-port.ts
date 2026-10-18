@@ -27,6 +27,7 @@ import {
 import type { PresentationCapabilitySelector } from './capability-selection';
 import {
   createPresentationDecision,
+  mergePresenceTabs,
   presenceIsForeground,
   PRESENTATION_PRESENCE_TTL_MS,
   type PresentationCollaborationHook,
@@ -623,7 +624,11 @@ export class PresentationGenerationPort implements PresentationPort {
     tabs.set(input.tabId, { seenAt: now, active: input.visible && input.focused });
     this.presence.set(jobId, tabs);
     // Forward through the shared store so the executor holding the lease sees this tab too.
-    await this.persistPresence(jobId, tabs);
+    await this.persistPresence(jobId, {
+      tabId: input.tabId,
+      active: input.visible && input.focused,
+      seenAt: now,
+    });
     if (entry.passive) {
       if (input.mode)
         throw Object.assign(new Error('任务由其他执行器处理，请稍后重试偏好设置'), {
@@ -643,29 +648,19 @@ export class PresentationGenerationPort implements PresentationPort {
     }
   }
 
-  private async persistPresence(
-    jobId: string,
-    tabs: Map<string, { active: boolean; seenAt: number }>,
-  ): Promise<void> {
+  private async persistPresence(jobId: string, tab: PresentationPresenceTab): Promise<void> {
     const save = this.options.repository?.savePresence;
     if (!save) return;
-    const snapshot: PresentationPresenceTab[] = [...tabs].map(([tabId, tab]) => ({
-      active: tab.active,
-      seenAt: tab.seenAt,
-      tabId,
-    }));
     // Presence is best-effort: a storage hiccup must not fail the tab's update.
-    await save.call(this.options.repository, this.scope, jobId, snapshot).catch(() => undefined);
+    await save.call(this.options.repository, this.scope, jobId, [tab]).catch(() => undefined);
   }
 
   /** Merge local and shared presence so a peer executor's tab is honoured here. */
   private async isForeground(jobId: string, now: number): Promise<boolean> {
-    const merged = new Map(this.presence.get(jobId) ?? []);
     const persisted = await this.options.repository
       ?.readPresence?.(this.scope, jobId)
       .catch(() => undefined);
-    for (const tab of persisted ?? [])
-      merged.set(tab.tabId, { active: tab.active, seenAt: tab.seenAt });
+    const merged = mergePresenceTabs(this.presence.get(jobId) ?? new Map(), persisted ?? []);
     return presenceIsForeground(merged.values(), now);
   }
 

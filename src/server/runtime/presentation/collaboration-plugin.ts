@@ -5,6 +5,7 @@ import type {
   RuntimeScope,
 } from '../../../../packages/runtime-contracts/src';
 import type { AtomicPlugin } from '../atomic-runtime';
+import type { PresentationPresenceTab } from './file-storage';
 
 const inputSchema = z
   .object({
@@ -33,7 +34,24 @@ export function presenceIsForeground(
   now: number,
   ttlMs = PRESENTATION_PRESENCE_TTL_MS,
 ): boolean {
-  return [...tabs].some((tab) => tab.active && now - tab.seenAt < ttlMs);
+  return [...tabs].some(
+    (tab) =>
+      tab.active && Number.isFinite(tab.seenAt) && now >= tab.seenAt && now - tab.seenAt < ttlMs,
+  );
+}
+
+/** A stale shared heartbeat must never replace a newer in-memory observation. */
+export function mergePresenceTabs(
+  local: Map<string, { active: boolean; seenAt: number }>,
+  shared: PresentationPresenceTab[],
+) {
+  const merged = new Map(local);
+  for (const tab of shared) {
+    const current = merged.get(tab.tabId);
+    if (Number.isFinite(tab.seenAt) && (!current || tab.seenAt >= current.seenAt))
+      merged.set(tab.tabId, { active: tab.active, seenAt: tab.seenAt });
+  }
+  return merged;
 }
 
 /** Pure policy plugin: neither presence nor an answer can waive publishability checks. */
