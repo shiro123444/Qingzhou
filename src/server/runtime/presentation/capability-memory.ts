@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { z } from 'zod';
@@ -10,6 +10,12 @@ import { composeCapabilityPolicy } from './capability-composition';
 import { PRESENTATION_CONTENT_BUDGET } from './content-intent';
 import { assertPresentationPublishable, inspectPresentationContent } from './content-quality';
 import type { PresentationJobRepository } from './file-storage';
+import {
+  type RepresentativeTrial,
+  representativeTrialSchema,
+  representativeTrialSelectionSchema,
+  selectRepresentativeTrial,
+} from './representative-trial';
 import type { TemplateVisualProfile } from './templates';
 import { templateDesignProgramSchema } from './templates/design-program';
 
@@ -52,6 +58,7 @@ const capsuleSchema = z
   })
   .strict();
 export type CapabilityCapsule = z.infer<typeof capsuleSchema>;
+export { capsuleSchema as capabilityCapsuleSchema };
 
 /** Only the template atoms actually selected for generated pages have usage evidence. */
 export function appliedTemplateCapsuleIds(
@@ -91,6 +98,16 @@ const outcomeSchema = z
   })
   .strict();
 type Outcome = z.infer<typeof outcomeSchema>;
+const trialRecordSchema = z
+  .object({
+    id: z.string().regex(/^[a-f\d]{64}$/u),
+    trial: representativeTrialSchema,
+    selection: representativeTrialSelectionSchema,
+    recordedAt: z.string(),
+  })
+  .strict();
+export type CapabilityTrialRecord = z.infer<typeof trialRecordSchema>;
+type MemoryKind = 'capsules' | 'outcomes' | 'trials';
 
 const isUserVerdict = (result: Outcome['result']): boolean =>
   result === 'accepted' || result === 'rejected';
@@ -122,6 +139,7 @@ export interface CapabilityMemory {
     visual?: TemplateVisualProfile,
   ) => Promise<CapabilityCapsule[]>;
   load: (scope: RuntimeScope, id: string) => Promise<CapabilityCapsule | null>;
+  readTrial?: (scope: RuntimeScope, id: string) => Promise<CapabilityTrialRecord | null>;
   recordOutcome: (
     scope: RuntimeScope,
     input: {
@@ -131,6 +149,8 @@ export interface CapabilityMemory {
       result: Outcome['result'];
     },
   ) => Promise<Outcome>;
+  /** Raw comparison evidence; recording it never promotes a capsule. Trusted hosts only. */
+  recordTrial?: (scope: RuntimeScope, trial: RepresentativeTrial) => Promise<CapabilityTrialRecord>;
   search: (
     scope: RuntimeScope,
     query: string,
@@ -169,13 +189,16 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
     private readonly now = () => new Date().toISOString(),
   ) {}
 
-  private directory(scope: RuntimeScope, kind: 'capsules' | 'outcomes') {
+  private directory(scope: RuntimeScope, kind: MemoryKind) {
     if (!scope.userId?.trim() || !scope.sessionId?.trim())
       throw new Error('Authenticated memory scope is required');
     return path.join(this.root, hash(scope.userId), kind);
   }
 
-  private async read<T>(filename: string, schema: z.ZodType<T>): Promise<T | null> {
+  private async read<T>(
+    filename: string,
+    schema: z.ZodType<T, z.ZodTypeDef, unknown>,
+  ): Promise<T | null> {
     try {
       return schema.parse(JSON.parse(await readFile(filename, 'utf8')));
     } catch (error) {
@@ -184,12 +207,7 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
     }
   }
 
-  private async save(
-    scope: RuntimeScope,
-    kind: 'capsules' | 'outcomes',
-    id: string,
-    value: unknown,
-  ) {
+  private async save(scope: RuntimeScope, kind: MemoryKind, id: string, value: unknown) {
     const directory = this.directory(scope, kind);
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const filename = path.join(directory, `${hash(id)}.json`);
@@ -197,7 +215,14 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
     const temporary = `${filename}.${randomUUID()}.tmp`;
     try {
       await writeFile(temporary, JSON.stringify(value), { mode: 0o600 });
-      await rename(temporary, filename);
+      if (kind === 'trials') {
+        // Publish the complete immutable record once, including across independent writers.
+        await link(temporary, filename).catch((error) => {
+          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        });
+      } else {
+        await rename(temporary, filename);
+      }
     } finally {
       await unlink(temporary).catch((error) => {
         if (!missing(error)) throw error;
@@ -205,11 +230,7 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
     }
   }
 
-  private async list<T>(
-    scope: RuntimeScope,
-    kind: 'capsules' | 'outcomes',
-    schema: z.ZodType<T>,
-  ): Promise<T[]> {
+  private async list<T>(scope: RuntimeScope, kind: MemoryKind, schema: z.ZodType<T>): Promise<T[]> {
     const directory = this.directory(scope, kind);
     const files = await readdir(directory).catch((error) => {
       if (missing(error)) return [];
@@ -556,7 +577,8 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
     if (input.result === 'passed' || input.result === 'accepted') {
       assertPresentationPublishable(input.plan);
       const visual = input.plan.designSpec?.templateVisualReview as
-        { final?: { passed?: boolean } } | undefined;
+        | { final?: { passed?: boolean } }
+        | undefined;
       if (!visual?.final?.passed || !inspectPresentationContent(input.plan).passed)
         throw new Error('Promotion requires both visual and semantic quality evidence');
     }
@@ -606,6 +628,40 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
     await this.save(scope, 'outcomes', id, outcome);
     return outcome;
   }
+
+  async recordTrial(
+    scope: RuntimeScope,
+    input: RepresentativeTrial,
+  ): Promise<CapabilityTrialRecord> {
+    const trial = representativeTrialSchema.parse(input);
+    // Resolve ownership without treating a historic, rejected use as a new success.
+    for (const variant of [trial.baseline, ...trial.candidates])
+      for (const id of variant.appliedCapsuleIds)
+        if (!(await this.load(scope, id)))
+          throw new Error('Capability is unavailable in this account');
+    const id = hash(trial);
+    const existing = await this.readTrial(scope, id);
+    if (existing) return existing;
+    const selection = selectRepresentativeTrial(trial);
+    const record = { id, trial, selection, recordedAt: this.now() };
+    await this.save(scope, 'trials', id, record);
+    return (await this.readTrial(scope, id))!;
+  }
+
+  async readTrial(scope: RuntimeScope, id: string): Promise<CapabilityTrialRecord | null> {
+    const record = await this.read(
+      path.join(this.directory(scope, 'trials'), `${hash(id)}.json`),
+      trialRecordSchema,
+    );
+    if (!record) return null;
+    if (
+      record.id !== id ||
+      hash(record.trial) !== id ||
+      hash(record.selection) !== hash(selectRepresentativeTrial(record.trial))
+    )
+      throw new Error('Trial evidence identity mismatch');
+    return record;
+  }
 }
 
 export function capabilityMemoryOperations(
@@ -624,6 +680,18 @@ export function capabilityMemoryOperations(
     return memory.recordOutcome(scope, { jobId, plan: job.plan, capsuleIds, result });
   };
   return [
+    ...(memory.readTrial
+      ? [
+          {
+            name: 'presentation.memory.trial.read',
+            description:
+              'Read owned representative-page comparison evidence. A trial recommendation does not publish a page or promote a capability.',
+            input: z.object({ id: z.string().regex(/^[a-f\d]{64}$/u) }).strict(),
+            execute: ({ id }: { id: string }, ctx: Parameters<AtomicOperation['execute']>[1]) =>
+              memory.readTrial!(ctx.scope, id),
+          } satisfies AtomicOperation,
+        ]
+      : []),
     {
       name: 'presentation.memory.search',
       description:

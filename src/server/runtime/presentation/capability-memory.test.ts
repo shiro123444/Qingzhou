@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -18,6 +18,7 @@ import {
 import { contentInputFingerprint, type PresentationContentCompiler } from './content-intent';
 import type { PresentationGenerationCapability } from './generation-capability';
 import { PresentationGenerationPort } from './generation-port';
+import type { RepresentativeTrial } from './representative-trial';
 import { compileTemplateDesignProgram } from './templates/design-program';
 import type { TemplateVisualProfile } from './templates/visual-types';
 
@@ -70,8 +71,153 @@ const plan: PresentationPlan = {
   ],
 };
 let root: string;
+function trialEvidence(capsuleIds: string[] = []): RepresentativeTrial {
+  const gate = {
+    status: 'passed' as const,
+    evidence: 'Trusted runner checked original sources and preview',
+  };
+  const quality = (score: number) => ({
+    readability: { score, evidence: 'Rendered text size checked' },
+    hierarchy: { score, evidence: 'Title and body hierarchy checked' },
+    composition: { score, evidence: 'Rendered geometry checked' },
+    styleConsistency: { score, evidence: 'Compared with frozen master' },
+  });
+  const evaluation = {
+    conditionFingerprint: 'a'.repeat(64),
+    evaluatorVersion: 'trusted-review-v1',
+    artifact: { ref: 'owned-preview', sha256: 'b'.repeat(64) },
+    gates: { facts: gate, editability: gate, assets: gate, render: gate, visual: gate },
+    quality: quality(2),
+  };
+  return {
+    schemaVersion: 1,
+    trialId: 'trial-1',
+    source: { jobId: 'source-job', versionId: 'v1', slideId: 'slide-1' },
+    conditionFingerprint: 'a'.repeat(64),
+    baseline: { id: 'baseline', status: 'completed', appliedCapsuleIds: [], evaluation },
+    candidates: [
+      {
+        id: 'candidate',
+        status: 'completed',
+        appliedCapsuleIds: capsuleIds,
+        evaluation: {
+          ...evaluation,
+          artifact: { ref: 'candidate-preview', sha256: 'c'.repeat(64) },
+          quality: quality(3),
+        },
+      },
+    ],
+    rejectedCandidateIds: [],
+  };
+}
 beforeEach(async () => {
   root = await mkdtemp(path.join(os.tmpdir(), 'qingzhou-memory-test-'));
+});
+
+describe('representative trial evidence in capability memory', () => {
+  it('persists an automatic winner without promoting the capabilities it used', async () => {
+    const store = new FileCapabilityCapsuleStore(root);
+    const capsules = await store.learn(scope, visual);
+    const input = trialEvidence(capsules.map(({ id }) => id));
+    const record = await store.recordTrial(scope, input);
+    expect(record.selection).toMatchObject({
+      selectedId: 'candidate',
+      reason: 'strict-improvement',
+    });
+    expect(await store.search(scope, '学术课程')).toEqual([]);
+    await expect(store.compose(scope, [capsules[0].id])).rejects.toThrow('verified');
+    expect(await new FileCapabilityCapsuleStore(root).readTrial(scope, record.id)).toEqual(record);
+  });
+
+  it('preserves account isolation while allowing a new session of the same account', async () => {
+    const store = new FileCapabilityCapsuleStore(root);
+    const record = await store.recordTrial(scope, trialEvidence());
+    expect(await store.readTrial({ ...scope, userId: 'bob' }, record.id)).toBeNull();
+    expect(await store.readTrial({ ...scope, sessionId: 'next' }, record.id)).toEqual(record);
+    await expect(store.recordTrial({ ...scope, userId: '' }, trialEvidence())).rejects.toThrow(
+      'scope',
+    );
+  });
+
+  it('refuses applied capabilities from another account', async () => {
+    const store = new FileCapabilityCapsuleStore(root);
+    const [capsule] = await store.learn(scope, visual);
+    await expect(
+      store.recordTrial({ ...scope, userId: 'bob' }, trialEvidence([capsule.id])),
+    ).rejects.toThrow('unavailable');
+  });
+
+  it('publishes one immutable record even when independent writers race', async () => {
+    let clock = 0;
+    const first = new FileCapabilityCapsuleStore(root, () => new Date(++clock).toISOString());
+    const second = new FileCapabilityCapsuleStore(root, () => new Date(++clock).toISOString());
+    const input = trialEvidence();
+    const records = await Promise.all([
+      first.recordTrial(scope, input),
+      second.recordTrial(scope, input),
+    ]);
+    expect(records[0]).toEqual(records[1]);
+    expect(await second.recordTrial(scope, input)).toEqual(records[0]);
+  });
+
+  it('keeps earlier evidence when conditions, outputs or user choices change', async () => {
+    const store = new FileCapabilityCapsuleStore(root);
+    const input = trialEvidence();
+    const original = await store.recordTrial(scope, input);
+    const choice = await store.recordTrial(scope, { ...input, userChoice: 'baseline' });
+    expect(choice.id).not.toBe(original.id);
+    expect(choice.selection.selectedId).toBe('baseline');
+    const changed = structuredClone(input);
+    changed.candidates[0].evaluation!.artifact.sha256 = 'd'.repeat(64);
+    expect((await store.recordTrial(scope, changed)).id).not.toBe(original.id);
+    changed.conditionFingerprint = 'e'.repeat(64);
+    expect((await store.recordTrial(scope, changed)).id).not.toBe(original.id);
+    expect(await store.readTrial(scope, original.id)).toEqual(original);
+  });
+
+  it.each(['trial', 'selection'] as const)(
+    'detects altered persisted %s evidence',
+    async (part) => {
+      const store = new FileCapabilityCapsuleStore(root);
+      const record = await store.recordTrial(scope, trialEvidence());
+      const [account] = await readdir(root);
+      const directory = path.join(root, account, 'trials');
+      const [file] = await readdir(directory);
+      const filename = path.join(directory, file);
+      const saved = JSON.parse(await readFile(filename, 'utf8'));
+      if (part === 'trial') saved.trial.source.versionId = 'changed-version';
+      else saved.selection.selectedId = 'baseline';
+      await writeFile(filename, JSON.stringify(saved));
+      await expect(store.readTrial(scope, record.id)).rejects.toThrow('identity mismatch');
+    },
+  );
+
+  it('exposes only account-scoped reading through Cordis, never score submission or promotion', async () => {
+    const store = new FileCapabilityCapsuleStore(root);
+    const record = await store.recordTrial(scope, trialEvidence());
+    const operations = capabilityMemoryOperations(store);
+    const reads = operations.filter(({ name }) => name.includes('.trial.'));
+    expect(reads.map(({ name }) => name)).toEqual(['presentation.memory.trial.read']);
+    expect(reads[0].agent).toBeUndefined();
+    const runtime = new AtomicRuntime([{ id: 'presentation', version: '1', operations }]);
+    try {
+      expect(
+        await runtime.invoke('presentation.memory.trial.read', { id: record.id }, { scope }),
+      ).toEqual(record);
+      expect(
+        await runtime.invoke(
+          'presentation.memory.trial.read',
+          { id: record.id },
+          { scope: { ...scope, userId: 'bob' } },
+        ),
+      ).toBeNull();
+      await expect(
+        runtime.invoke('presentation.memory.trial.read', { id: record.id, score: 4 }, { scope }),
+      ).rejects.toThrow();
+    } finally {
+      await runtime.dispose();
+    }
+  });
 });
 afterEach(async () => {
   await rm(root, { recursive: true, force: true });
