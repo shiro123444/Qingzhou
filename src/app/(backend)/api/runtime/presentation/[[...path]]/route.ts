@@ -1,7 +1,4 @@
-import { createHash } from 'node:crypto';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import nodePath from 'node:path';
 
 import { eq } from 'drizzle-orm';
 import { NextResponse } from 'next/server';
@@ -14,16 +11,12 @@ import {
   migratePresentationSessions,
   presentationAccountScope,
 } from '@/server/runtime/presentation/account-workspace';
-import { createPresentationArtifactAssetStoreBridge } from '@/server/runtime/presentation/asset-store';
 import { uploadPresentationAttachment } from '@/server/runtime/presentation/attachment-storage';
 import type { PresentationRuntimeComposition } from '@/server/runtime/presentation/composition';
 import { createPresentationContextServices } from '@/server/runtime/presentation/context-services';
 import { createPresentationContextRuntime } from '@/server/runtime/presentation/context-tools';
 import { conversationStream } from '@/server/runtime/presentation/conversation-stream';
-import {
-  createPresentationRouteJournalBindings,
-  ScopedPresentationJobEventJournalCache,
-} from '@/server/runtime/presentation/event-journal-cache';
+import { getDefaultPresentationComposition } from '@/server/runtime/presentation/default-composition';
 import {
   createScopedPresentationPortCache,
   getPresentationPortFactory,
@@ -32,7 +25,6 @@ import {
   presentationPortFactoryFromScopeCache,
   type PresentationPortScopeCacheBinding,
 } from '@/server/runtime/presentation/factory';
-import { FilePresentationStorage } from '@/server/runtime/presentation/file-storage';
 import type { PresentationGenerationCapability } from '@/server/runtime/presentation/generation-capability';
 import {
   handlePresentationGenerationRequest,
@@ -42,36 +34,25 @@ import {
   handlePresentationRequest,
   matchPresentationRoute,
 } from '@/server/runtime/presentation/handler';
-import { createPresentationImageGenerationEventPublisher } from '@/server/runtime/presentation/image-event-bridge';
 import type { ImageGenerationCapability } from '@/server/runtime/presentation/image-generation-capability';
-import { createImageGenerationCapability } from '@/server/runtime/presentation/image-generation-capability';
 import { handleImageGenerationRequest } from '@/server/runtime/presentation/image-generation-handler';
 import { type PresentationJobEventJournalPort } from '@/server/runtime/presentation/job-event-journal';
+import { rehydratePresentationMaterials } from '@/server/runtime/presentation/material-document';
 import type { PresentationPipelineContext } from '@/server/runtime/presentation/pipeline';
 import type { ProductionProviderReadiness } from '@/server/runtime/presentation/production-command';
 import { PRODUCTION_PRESENTATION_ENV_KEYS } from '@/server/runtime/presentation/production-config';
 import {
   createPptMasterProcessRunnerFactory,
   createPptMasterProductionPresentationComposition,
-  createProductionPresentationGenerationComposition,
   type PptMasterPresentationScope,
 } from '@/server/runtime/presentation/production-factory';
-import {
-  createProductionOpenAIImageGenerationPort,
-  PRODUCTION_IMAGE_ENV_KEYS,
-} from '@/server/runtime/presentation/production-image-config';
-import {
-  createProductionMultimodalChatPort,
-  PRODUCTION_CHAT_ENV_KEYS,
-} from '@/server/runtime/presentation/production-multimodal-chat-config';
-import { createPresentationChatFetch } from '@/server/runtime/presentation/resilient-fetch';
-import { createProcessPresentationRunner } from '@/server/runtime/presentation/runner';
 import {
   createPresentationJobEventSseResponse,
   type PresentationJobEventSerializer,
 } from '@/server/runtime/presentation/sse';
-import { FilePresentationTemplateLibrary } from '@/server/runtime/presentation/templates';
-import { PptMasterToolchain } from '@/server/runtime/presentation/toolchain';
+import { handleTeachingRequest } from '@/server/runtime/presentation/teaching-handler';
+import { userChatEndpoint } from '@/server/runtime/presentation/user-chat-provider';
+import { presentationMaterialsSchema } from '@/types/presentationMaterial';
 
 import type { RuntimeScope } from '../../../../../../../packages/runtime-contracts/src';
 
@@ -228,6 +209,7 @@ const generationStatusForCode = (code: string): number => {
   if (code === 'PRESENTATION_INVALID' || code === 'PRESENTATION_COMPOSITION_OPTIONS_INVALID') {
     return 400;
   }
+  if (code === 'PRESENTATION_TEMPLATE_INPUT_REQUIRED') return 409;
   if (code === 'NOT_FOUND') return 404;
   if (code === 'PRESENTATION_QUALITY_FAILED' || code === 'PPTX_INVALID') return 502;
   if (code === 'PRESENTATION_WORKER_CANCELLED') return 499;
@@ -286,7 +268,8 @@ const defaultGenerationScopeFactory: PresentationGenerationScopeFactory = async 
               .where(eq(authSessions.userId, sessionUserId))
           : [];
       await migratePresentationSessions(
-        process.env.CORDIS_PRESENTATION_DATA_DIR ?? join(process.cwd(), '.data', 'presentation'),
+        process.env.CORDIS_PRESENTATION_DATA_DIR ??
+          nodePath.join(process.cwd(), '.data', 'presentation'),
         sessionUserId,
         [sessionId, ...verified.map((row) => row.id)],
       );
@@ -331,16 +314,7 @@ const defaultProductionPortFactory = (): PresentationPortFactory => {
         pptMasterRoot: root,
       }),
     });
-    configuredDefaultReadiness = process.env[PRODUCTION_CHAT_ENV_KEYS.apiKey]
-      ? composition.readiness
-      : {
-          available: false,
-          commandAvailable: false,
-          code: 'PROVIDER_UNAVAILABLE',
-          provider: composition.readiness.provider,
-          runnerId: composition.readiness.runnerId,
-          state: 'unavailable',
-        };
+    configuredDefaultReadiness = composition.readiness;
     const scopedCache = createScopedPresentationPortCache({
       factory: async (scope) => composition.portFactory(scope as PptMasterPresentationScope),
     });
@@ -371,176 +345,11 @@ const defaultProductionPortFactory = (): PresentationPortFactory => {
   }
 };
 
-const createDefaultGenerationContextFactory = (
-  pptMasterRoot: string,
-  pythonCommand: string,
-): PresentationGenerationContextFactory => {
-  const runnerId = 'ppt-master-generation-toolchain';
-  const runner = createProcessPresentationRunner({
-    command: [pythonCommand],
-    id: runnerId,
-    maxArtifacts: 64,
-  });
-  const scriptsRoot = join(pptMasterRoot, 'skills', 'ppt-master', 'scripts');
-  const toolchain = new PptMasterToolchain({
-    allowedRunnerIds: [runnerId],
-    convertScriptPath: join(scriptsRoot, 'svg_to_pptx.py'),
-    providerCommand: [pythonCommand],
-    pptMasterRoot,
-    qualityScriptPath: join(scriptsRoot, 'svg_quality_checker.py'),
-    runner,
-    runnerId,
-    timeoutMs: 120_000,
-    workspaceRoot: tmpdir(),
-  });
-
-  return (jobId) => {
-    const safeJobId = jobId.replaceAll(/[^\w-]/g, '_');
-    const workspacePath = join(tmpdir(), `lobehub-presentation-generation-${safeJobId}`);
-    return {
-      plannerContext: {},
-      workerContext: {
-        convert: (path, signal) => toolchain.convert(path, signal),
-        jobId,
-        qualityCheck: (path, signal) => toolchain.qualityCheck(path, signal),
-        workspace: {
-          cleanup: () => rm(workspacePath, { force: true, recursive: true }),
-          path: workspacePath,
-          write: async (relativePath, content) => {
-            const target = join(workspacePath, relativePath);
-            await mkdir(dirname(target), { recursive: true });
-            await writeFile(target, content);
-          },
-        },
-      },
-    };
-  };
-};
-
 const defaultProductionGenerationComposition = (): PresentationRuntimeComposition | undefined => {
-  const root = process.env.CORDIS_PPT_MASTER_ROOT;
-  const runnerPath = process.env.CORDIS_PPT_RUNNER;
-  // The presentation planner uses one provider-neutral, OpenAI-compatible
-  // multimodal endpoint. Retired BAI/GLM variables are intentionally ignored.
-  const chatApiKey = process.env[PRODUCTION_CHAT_ENV_KEYS.apiKey];
-  const imageApiKey = process.env[PRODUCTION_IMAGE_ENV_KEYS.apiKey];
-
-  // If the presentation runner (ppt-master) is not configured, do not assemble
-  // a half-baked composition that cannot produce presentation output. Fail-closed
-  // with PROVIDER_UNAVAILABLE.
-  if (!root || !runnerPath) {
-    return undefined;
-  }
-
-  const pptEnv = {
-    [PRODUCTION_PRESENTATION_ENV_KEYS.provider]:
-      process.env[PRODUCTION_PRESENTATION_ENV_KEYS.provider] ?? 'ppt-master',
-    [PRODUCTION_PRESENTATION_ENV_KEYS.command]:
-      process.env[PRODUCTION_PRESENTATION_ENV_KEYS.command] ??
-      JSON.stringify([process.env.CORDIS_PPT_PYTHON ?? 'python3', runnerPath]),
-    [PRODUCTION_PRESENTATION_ENV_KEYS.runnerId]:
-      process.env[PRODUCTION_PRESENTATION_ENV_KEYS.runnerId] ?? 'ppt-master-runner',
-    [PRODUCTION_PRESENTATION_ENV_KEYS.allowedRunnerIds]:
-      process.env[PRODUCTION_PRESENTATION_ENV_KEYS.allowedRunnerIds] ??
-      JSON.stringify(['ppt-master-runner']),
-  } as const;
-
-  const chatEnv = {
-    [PRODUCTION_CHAT_ENV_KEYS.apiKey]: chatApiKey,
-    [PRODUCTION_CHAT_ENV_KEYS.baseUrl]: process.env[PRODUCTION_CHAT_ENV_KEYS.baseUrl],
-  } as const;
-
-  const imgEnv = {
-    [PRODUCTION_IMAGE_ENV_KEYS.apiKey]: imageApiKey,
-    [PRODUCTION_IMAGE_ENV_KEYS.baseUrl]: process.env[PRODUCTION_IMAGE_ENV_KEYS.baseUrl],
-    [PRODUCTION_IMAGE_ENV_KEYS.model]: process.env[PRODUCTION_IMAGE_ENV_KEYS.model],
-  } as const;
-
-  try {
-    const dataRoot =
-      process.env.CORDIS_PRESENTATION_DATA_DIR ?? join(process.cwd(), '.data', 'presentation');
-    const artifactStore = new FilePresentationStorage(dataRoot);
-    const assetStore = createPresentationArtifactAssetStoreBridge(artifactStore);
-    const journalCache = new ScopedPresentationJobEventJournalCache({
-      load: async (scope) => artifactStore.createJournal(scope),
-    });
-    const journalBindings = createPresentationRouteJournalBindings(journalCache);
-
-    const multimodalChatPort = chatApiKey
-      ? createProductionMultimodalChatPort({
-          env: chatEnv,
-          fetcher: createPresentationChatFetch(globalThis.fetch),
-        })
-      : undefined;
-
-    const imageGenerationCapability = imageApiKey
-      ? createImageGenerationCapability({
-          assetStore,
-          eventPublisherFactory: async (scope, jobId) =>
-            createPresentationImageGenerationEventPublisher({
-              publisher: await journalBindings.generationEventPublisherFactory(
-                scope,
-                jobId,
-                new Request('http://presentation.internal/image-generation'),
-              ),
-              scope,
-            }),
-          imagePort: createProductionOpenAIImageGenerationPort(imgEnv, {
-            assetSink: async ({ bytes, metadata, scope }) => {
-              const artifactId = `image-${createHash('sha256').update(bytes).digest('hex').slice(0, 32)}`;
-              const stored = await assetStore.put(scope, {
-                asset: { ref: artifactId },
-                bytes,
-                idempotencyKey: artifactId,
-                metadata,
-              });
-              return stored.asset;
-            },
-            fetcher: globalThis.fetch,
-          }),
-        })
-      : undefined;
-
-    const runnerFactory = createPptMasterProcessRunnerFactory({ pptMasterRoot: root });
-    const contextFactory = createDefaultGenerationContextFactory(
-      root,
-      process.env.CORDIS_PPT_PYTHON ?? 'python3',
-    );
-
-    const result = createProductionPresentationGenerationComposition({
-      templateLibrary: new FilePresentationTemplateLibrary({
-        root: join(dataRoot, 'templates'),
-      }),
-      artifactStore,
-      jobRepository: artifactStore,
-      contextFactory,
-      env: pptEnv,
-      imageGenerationCapability,
-      journalCache,
-      multimodalChatPort,
-      runnerFactory,
-    });
-
-    if (configuredDefaultReadiness === undefined) {
-      configuredDefaultReadiness = chatApiKey
-        ? result.readiness
-        : {
-            available: false,
-            commandAvailable: false,
-            code: 'PROVIDER_UNAVAILABLE',
-            provider: result.readiness.provider,
-            runnerId: result.readiness.runnerId,
-            state: 'unavailable',
-          };
-    }
-
-    return result.composition;
-  } catch (error) {
-    if (configuredDefaultReadinessError === undefined) {
-      configuredDefaultReadinessError = error;
-    }
-    return undefined;
-  }
+  const result = getDefaultPresentationComposition();
+  configuredDefaultReadiness ??= result.readiness;
+  configuredDefaultReadinessError ??= result.error;
+  return result.composition;
 };
 
 const configuredDefaultComposition = defaultProductionGenerationComposition();
@@ -737,7 +546,10 @@ const readinessSourceFor = (
   return configuredDefaultReadiness;
 };
 
-const toReadinessResponse = async (options: PresentationRouteOptions): Promise<Response> => {
+const toReadinessResponse = async (
+  options: PresentationRouteOptions,
+  scope: PresentationAuthScope,
+): Promise<Response> => {
   try {
     const source = readinessSourceFor(options);
     if (source === undefined) {
@@ -747,6 +559,29 @@ const toReadinessResponse = async (options: PresentationRouteOptions): Promise<R
     }
     const value = typeof source === 'function' ? await source() : source;
     const readiness = projectReadiness(value);
+    // Injected test/deployer readiness remains caller-owned. Default readiness
+    // must check this user's configuration, never another user's or a global key.
+    if (
+      readiness.available &&
+      options.readiness === undefined &&
+      options.productionComposition === undefined
+    ) {
+      try {
+        const { resolveUserChatProvider } = await import('@/server/services/modelProvider');
+        const provider = await resolveUserChatProvider(
+          scope.serverDB as LobeChatDatabase,
+          scope.userId,
+        );
+        userChatEndpoint(provider.baseURL);
+        // Text planning does not need vision. Image-bearing operations validate
+        // the current model's vision ability at the user-scoped chat port.
+      } catch {
+        return NextResponse.json(
+          { ...readiness, available: false, code: 'PROVIDER_UNAVAILABLE', state: 'unavailable' },
+          { status: 503 },
+        );
+      }
+    }
     return NextResponse.json(readiness, {
       status: readiness.available ? 200 : 503,
     });
@@ -1065,6 +900,19 @@ const toImageGenerationResponse = async (
   }
 };
 
+const readOwnedMaterials = async (value: unknown, authenticated: PresentationAuthScope) => {
+  const parsed = presentationMaterialsSchema.parse(value);
+  if (typeof (authenticated.serverDB as LobeChatDatabase)?.select !== 'function') {
+    if (parsed.documents.length) throw new Error('文档服务尚未就绪，无法校验资料来源');
+    return parsed;
+  }
+  const services = createPresentationContextServices(
+    authenticated.serverDB as LobeChatDatabase,
+    authenticated.userId,
+  );
+  return rehydratePresentationMaterials(parsed, services.documents!.load);
+};
+
 const toOutlineResponse = async (
   request: Request,
   authenticated: PresentationAuthScope,
@@ -1098,7 +946,14 @@ const toOutlineResponse = async (
     }
     const result = await capability.execute(
       {
-        brief: { audience, style, topic },
+        brief: {
+          audience,
+          style,
+          topic,
+          ...(body.materials
+            ? { materials: await readOwnedMaterials(body.materials, authenticated) }
+            : {}),
+        },
         currentSlides: slides as never,
         operation: 'rewrite',
       },
@@ -1136,28 +991,103 @@ const toConversationResponse = async (
     if (request.headers.get('content-type')?.startsWith('multipart/form-data'))
       return NextResponse.json(await uploadPresentationAttachment(request, resolvedScope));
     const body = (await request.json()) as Record<string, unknown>;
-    const contextRuntime =
+    const contextServices =
       typeof (authenticated.serverDB as LobeChatDatabase)?.select === 'function'
-        ? createPresentationContextRuntime(
-            createPresentationContextServices(
-              authenticated.serverDB as LobeChatDatabase,
-              authenticated.userId,
-            ),
+        ? createPresentationContextServices(
+            authenticated.serverDB as LobeChatDatabase,
+            authenticated.userId,
           )
         : undefined;
+    if (body.brief && typeof body.brief === 'object' && !Array.isArray(body.brief)) {
+      const brief = body.brief as Record<string, unknown>;
+      if (brief.materials && contextServices?.documents)
+        brief.materials = await rehydratePresentationMaterials(
+          brief.materials,
+          contextServices.documents.load,
+        );
+    }
+    if (
+      composition?.planningSessions &&
+      ['turn', 'session', 'presence', 'decision'].includes(String(body.operation))
+    ) {
+      const sessions = composition.planningSessions;
+      const threadId = body.threadId as string;
+      if (body.operation === 'session')
+        return NextResponse.json(await sessions.read(resolvedScope, threadId));
+      if (body.operation === 'presence') {
+        await sessions.presenceUpdate(resolvedScope, threadId, body.presence as never);
+        return NextResponse.json({ received: true });
+      }
+      if (body.operation === 'decision')
+        return NextResponse.json(
+          await sessions.answer(resolvedScope, threadId, body.answer as never),
+        );
+      const { requestId, presence, ...command } = body;
+      if (presence) await sessions.presenceUpdate(resolvedScope, threadId, presence as never);
+      await sessions.start(
+        resolvedScope,
+        command as never,
+        typeof requestId === 'string' ? requestId : crypto.randomUUID(),
+      );
+      if (request.headers.get('accept')?.includes('application/x-ndjson')) {
+        return conversationStream(
+          (onActivity, signal, onCheckpoint) =>
+            sessions.wait(resolvedScope, threadId, signal, onActivity, onCheckpoint),
+          async () => {},
+          request.signal,
+        );
+      }
+      return NextResponse.json(
+        await sessions.wait(
+          resolvedScope,
+          threadId,
+          request.signal,
+          () => {},
+          async () => {},
+        ),
+      );
+    }
+    const contextRuntime = contextServices
+      ? createPresentationContextRuntime(contextServices)
+      : undefined;
     if (
       body.operation === 'turn' &&
       request.headers.get('accept')?.includes('application/x-ndjson')
     ) {
       return conversationStream(
-        (onActivity, signal) =>
-          capability.execute(body as never, {
-            scope: resolvedScope,
-            tools: contextRuntime,
-            capabilities: composition?.atomicRuntime,
-            signal,
-            onActivity,
-          }),
+        async (onActivity, signal, onCheckpoint) => {
+          const started = Date.now();
+          const threadId =
+            typeof body.threadId === 'string'
+              ? body.threadId.slice(0, 128).replaceAll(/[^\w-]/g, '_')
+              : undefined;
+          try {
+            const result = await capability.execute(body as never, {
+              scope: resolvedScope,
+              tools: contextRuntime,
+              capabilities: composition?.atomicRuntime,
+              signal,
+              onActivity,
+              onCheckpoint,
+            });
+            console.info('[presentation.conversation] finished', {
+              threadId,
+              phase: result.phase,
+              waitingForInput: Boolean(result.question),
+              slideCount: result.slides?.length ?? 0,
+              toolCalls: result.execution?.length ?? 0,
+              elapsedMs: Date.now() - started,
+            });
+            return result;
+          } catch (error) {
+            console.error('[presentation.conversation] interrupted', {
+              threadId,
+              error: error instanceof Error ? error.name : 'UnknownError',
+              elapsedMs: Date.now() - started,
+            });
+            throw error;
+          }
+        },
         async () => {
           await contextRuntime?.dispose();
         },
@@ -1213,8 +1143,36 @@ const toOutlineProposalResponse = async (
       });
     }
     const body = (await request.json()) as Record<string, unknown>;
+    if (body.brief && typeof body.brief === 'object' && !Array.isArray(body.brief)) {
+      const brief = body.brief as Record<string, unknown>;
+      if (brief.materials)
+        brief.materials = await readOwnedMaterials(brief.materials, authenticated);
+    }
     const result = await capability.execute(body as never, { scope: resolvedScope });
     return NextResponse.json(result);
+  } catch (error) {
+    return generationErrorResponse(error);
+  }
+};
+
+const toTeachingResponse = async (
+  request: Request,
+  authenticated: PresentationAuthScope,
+  composition: PresentationRuntimeComposition | undefined,
+  scopeFactory: PresentationGenerationScopeFactory,
+): Promise<Response> => {
+  try {
+    const scope = await scopeFactory(request, authenticated);
+    if (scope.userId !== authenticated.userId)
+      throw generationScopeError('FORBIDDEN', 'Teaching scope mismatch');
+    if (!composition?.teachingLearning)
+      throw Object.assign(new Error('Teaching learning is unavailable'), {
+        code: 'PROVIDER_UNAVAILABLE',
+      });
+    return await handleTeachingRequest(request, scope, composition.teachingLearning, async () => {
+      const session = await auth.api.getSession({ headers: serverSessionHeaders(request) });
+      return session?.user?.id === authenticated.userId && Boolean(session?.session?.id);
+    });
   } catch (error) {
     return generationErrorResponse(error);
   }
@@ -1279,35 +1237,43 @@ export const createPresentationRouteHandler = (
         )
       : (options.portFactory ?? configuredDefaultPortFactory));
   return authenticate((request, scope) =>
-    isPresentationJobEventsRequest(request)
-      ? toJobEventResponse(request, scope, options, composition, generationScopeFactory)
-      : isPresentationReadinessRequest(request)
-        ? toReadinessResponse(options)
-        : imageGenerationPath(request)
-          ? toImageGenerationResponse(
-              request,
-              scope,
-              options.imageGenerationCapability,
-              composition,
-              generationScopeFactory,
-            )
-          : outlinePath(request)
-            ? new URL(request.url).searchParams.get('mode') === 'propose'
-              ? toOutlineProposalResponse(request, scope, composition, generationScopeFactory)
-              : toOutlineResponse(request, scope, composition, generationScopeFactory)
-            : conversationPath(request)
-              ? toConversationResponse(request, scope, composition, generationScopeFactory)
-              : generationPath(request)
-                ? toGenerationResponse(
-                    request,
-                    scope,
-                    options.generationCapability,
-                    options.generationContextFactory,
-                    generationScopeFactory,
-                    options.generationEventPublisherFactory,
-                    composition,
-                  )
-                : toNextResponse(request, scope, portFactory, composition, generationScopeFactory),
+    new URL(request.url).pathname.endsWith('/presentation/teaching')
+      ? toTeachingResponse(request, scope, composition, generationScopeFactory)
+      : isPresentationJobEventsRequest(request)
+        ? toJobEventResponse(request, scope, options, composition, generationScopeFactory)
+        : isPresentationReadinessRequest(request)
+          ? toReadinessResponse(options, scope)
+          : imageGenerationPath(request)
+            ? toImageGenerationResponse(
+                request,
+                scope,
+                options.imageGenerationCapability,
+                composition,
+                generationScopeFactory,
+              )
+            : outlinePath(request)
+              ? new URL(request.url).searchParams.get('mode') === 'propose'
+                ? toOutlineProposalResponse(request, scope, composition, generationScopeFactory)
+                : toOutlineResponse(request, scope, composition, generationScopeFactory)
+              : conversationPath(request)
+                ? toConversationResponse(request, scope, composition, generationScopeFactory)
+                : generationPath(request)
+                  ? toGenerationResponse(
+                      request,
+                      scope,
+                      options.generationCapability,
+                      options.generationContextFactory,
+                      generationScopeFactory,
+                      options.generationEventPublisherFactory,
+                      composition,
+                    )
+                  : toNextResponse(
+                      request,
+                      scope,
+                      portFactory,
+                      composition,
+                      generationScopeFactory,
+                    ),
   );
 };
 
@@ -1315,3 +1281,4 @@ const handler = createPresentationRouteHandler();
 
 export const GET = handler;
 export const POST = handler;
+export const DELETE = handler;

@@ -1,6 +1,30 @@
-import { createStaticStyles } from 'antd-style';
+import { createStaticStyles, keyframes } from 'antd-style';
+
+const watercolorWash = keyframes`
+  0%, 10% {
+    clip-path: inset(0 100% 0 0);
+    opacity: 0;
+  }
+  48%, 88% {
+    clip-path: inset(0 0 0 0);
+    opacity: 1;
+  }
+  100% {
+    clip-path: inset(0 0 0 0);
+    opacity: 0;
+  }
+`;
 
 export const styles = createStaticStyles(({ css, cssVar }) => ({
+  historyPanel: css`
+    overflow-y: auto;
+
+    width: min(360px, calc(100vw - 32px));
+    max-height: min(520px, calc(100vh - 96px));
+    border-radius: 16px;
+
+    box-shadow: ${cssVar.boxShadowSecondary};
+  `,
   bentoCard: css`
     cursor: pointer;
 
@@ -93,28 +117,77 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     text-overflow: ellipsis;
     white-space: nowrap;
   `,
-  bottomPaginator: css`
+  commandBar: css`
     display: flex;
     flex-shrink: 0;
     gap: 8px;
     align-items: center;
-    align-self: flex-end;
+
+    width: 100%;
+    min-height: 48px;
+    padding-block: 0 8px;
+    padding-inline: 16px;
+
+    @media (width <= 768px) {
+      flex-wrap: wrap;
+      justify-content: center;
+      padding-inline: 8px;
+    }
+  `,
+  conversationTrigger: css`
+    cursor: pointer;
+
+    display: flex;
+    flex: 1;
+    gap: 10px;
+    align-items: center;
+
+    min-width: 120px;
+    min-height: 44px;
+    padding-block: 8px;
+    padding-inline: 16px;
+    border: 1px solid ${cssVar.colorBorderSecondary};
+    border-radius: 999px;
+
+    font: inherit;
+    font-size: 13px;
+    color: ${cssVar.colorTextSecondary};
+
+    background: ${cssVar.colorBgElevated};
+
+    &:hover {
+      color: ${cssVar.colorText};
+      background: ${cssVar.colorFillQuaternary};
+    }
+
+    &[aria-pressed='true'] {
+      color: ${cssVar.colorText};
+      background: ${cssVar.colorFillSecondary};
+    }
+
+    &:focus-visible {
+      outline: 2px solid ${cssVar.colorPrimary};
+      outline-offset: 3px;
+    }
+
+    @media (width <= 768px) {
+      flex: 1 1 100%;
+      order: 3;
+    }
+  `,
+  paginatorGroup: css`
+    display: flex;
+    flex-shrink: 0;
+    gap: 4px;
+    align-items: center;
     justify-content: center;
 
-    min-height: 48px;
-    margin-inline-end: 16px;
-    padding: 4px;
+    min-height: 44px;
+    padding: 2px;
     border: 1px solid ${cssVar.colorBorderSecondary};
     border-radius: 999px;
 
     background: ${cssVar.colorBgElevated};
-    box-shadow: 0 4px 14px rgb(0 0 0 / 5%);
-
-    @media (width <= 1000px) {
-      align-self: center;
-      margin-block: 0 64px;
-      margin-inline: 0;
-    }
   `,
   capsuleGroupLeft: css`
     overflow: hidden;
@@ -155,14 +228,28 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     }
   `,
   capsuleStatus: css`
+    cursor: pointer;
+
     display: inline-flex;
     flex-shrink: 0;
     gap: 4px;
     align-items: center;
 
+    max-width: min(480px, 70vw);
+    padding-block: 4px;
+    padding-inline: 0;
+    border: 0;
+
     font-size: 11px;
     color: ${cssVar.colorTextDescription};
     white-space: nowrap;
+
+    background: transparent;
+
+    span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
   `,
   capsuleTitle: css`
     overflow: hidden;
@@ -345,6 +432,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
   focusCanvas: css`
     position: relative;
 
+    container-type: size;
     overflow: hidden;
     display: flex;
     flex: 1;
@@ -353,10 +441,12 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     width: 100%;
     min-height: 0;
-    padding: 16px;
+    padding-block: 12px 4px;
+    padding-inline: 16px;
 
     @media (width <= 768px) {
-      padding: 6px;
+      padding-block: 6px 2px;
+      padding-inline: 6px;
     }
   `,
   focusEmpty: css`
@@ -382,9 +472,10 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     align-items: center;
     justify-content: center;
 
-    aspect-ratio: 16 / 9;
-    width: 100%;
-    max-width: min(100%, calc((100vh - 110px) * (16 / 9)));
+    aspect-ratio: var(--slide-aw, 16) / var(--slide-ah, 9);
+    width: min(100cqw, calc(100cqh * var(--slide-aw, 16) / var(--slide-ah, 9)));
+    max-width: 100%;
+    height: min(100cqh, calc(100cqw * var(--slide-ah, 9) / var(--slide-aw, 16)));
     max-height: 100%;
     border: 1px solid ${cssVar.colorBorderSecondary};
     border-radius: 14px;
@@ -452,6 +543,114 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     width: 100%;
     min-height: 0;
   `,
+  generationOverlay: css`
+    pointer-events: none;
+
+    position: absolute;
+    z-index: 2;
+    inset-block-end: 16px;
+    inset-inline-start: 16px;
+
+    display: flex;
+    gap: 14px;
+    align-items: center;
+
+    max-width: calc(100% - 32px);
+    padding: 10px;
+    border: 1px solid ${cssVar.colorBorderSecondary};
+    border-radius: 16px;
+
+    color: ${cssVar.colorText};
+
+    background: ${cssVar.colorBgElevated};
+    box-shadow: 0 4px 20px rgb(23 62 69 / 8%);
+
+    &[data-empty='true']:not([data-compact='true']) {
+      inset-block: 50% auto;
+      inset-inline-start: 50%;
+      translate: -50% -50%;
+
+      flex-direction: column;
+
+      width: min(260px, calc(100% - 32px));
+      padding: 16px;
+
+      text-align: center;
+
+      svg {
+        width: 100%;
+      }
+    }
+
+    &[data-compact='true'] {
+      inset-block-end: 8px;
+      inset-inline-start: 8px;
+
+      max-width: calc(100% - 16px);
+      padding-block: 4px;
+      padding-inline: 8px;
+      border-radius: 8px;
+    }
+
+    &[data-state='interrupted'] svg g {
+      animation: none;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      svg g {
+        animation: none;
+      }
+    }
+
+    @media (width <= 680px) {
+      gap: 8px;
+      padding: 7px;
+      border-radius: 12px;
+    }
+  `,
+  generationWatercolor: css`
+    overflow: hidden;
+    flex-shrink: 0;
+
+    width: 112px;
+    height: auto;
+    border-radius: 10px;
+
+    @media (width <= 680px) {
+      width: 72px;
+    }
+  `,
+  generationPaper: css`
+    fill: color-mix(in srgb, ${cssVar.colorBgContainer} 85%, #c9ddd1);
+  `,
+  generationSky: css`
+    animation: ${watercolorWash} 18s ease-in-out infinite both;
+  `,
+  generationRiver: css`
+    animation: ${watercolorWash} 18s ease-in-out 1.5s infinite both;
+  `,
+  generationBoat: css`
+    animation: ${watercolorWash} 18s ease-in-out 3s infinite both;
+  `,
+  generationReeds: css`
+    animation: ${watercolorWash} 18s ease-in-out 2s infinite both;
+  `,
+  generationCopy: css`
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding-inline-end: 6px;
+  `,
+  generationCaption: css`
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.5;
+  `,
+  generationHint: css`
+    font-size: 11px;
+    line-height: 1.5;
+    color: ${cssVar.colorTextSecondary};
+  `,
   pageCounter: css`
     min-width: 64px;
 
@@ -468,9 +667,9 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     display: flex;
     flex: 1;
     flex-direction: column;
-    gap: 10px;
-    align-items: center;
-    justify-content: center;
+    gap: 8px;
+    align-items: stretch;
+    justify-content: flex-end;
 
     min-width: 0;
     height: 100%;

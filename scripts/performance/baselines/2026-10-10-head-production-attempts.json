@@ -1,0 +1,132 @@
+{
+  "attempts": [
+    {
+      "commit": "076b84a24b1e20f750a09e76f41f4a06ff004991",
+      "command": ["bun", "run", "build"],
+      "started_at_utc": "2026-10-10T03:09:00.318198+00:00",
+      "elapsed_seconds": 13.088145949004684,
+      "exit_code": 1,
+      "child_user_cpu_seconds": 36.453958,
+      "child_system_cpu_seconds": 5.815187,
+      "largest_child_maxrss_kib": 4287652,
+      "rss_note": "Linux RUSAGE_CHILDREN maximum of a child, not simultaneous process-tree memory sum",
+      "database_url_configured": false,
+      "real_model_credentials_configured": false,
+      "environment_policy": "allowlisted process basics plus local URL and explicit build-only placeholders",
+      "failure_category": "sandbox_ipc_permission",
+      "note": "SPA compiled; tsx could not create its local IPC socket.",
+      "log_path": "/tmp/qingzhou-production-baseline-20261010-head/sandbox-production-build.log",
+      "spa_build_seconds": 9.89,
+      "next_compile_seconds": null
+    },
+    {
+      "commit": "076b84a24b1e20f750a09e76f41f4a06ff004991",
+      "command": ["bun", "run", "build"],
+      "started_at_utc": "2026-10-10T03:10:42.714051+00:00",
+      "elapsed_seconds": 16.813695124990772,
+      "exit_code": 1,
+      "child_user_cpu_seconds": 42.587121,
+      "child_system_cpu_seconds": 5.989438,
+      "largest_child_maxrss_kib": 4171476,
+      "rss_note": "Linux RUSAGE_CHILDREN maximum of a child, not simultaneous process-tree memory sum",
+      "database_url_configured": false,
+      "real_model_credentials_configured": false,
+      "environment_policy": "allowlisted process basics plus local URL and explicit build-only placeholders",
+      "failure_category": "turbopack_linked_dependency_root",
+      "note": "SPA and template copy passed; Turbopack rejected dependency links outside the inferred project root.",
+      "log_path": "/tmp/qingzhou-production-baseline-20261010-head/host-original-production-build.log",
+      "spa_build_seconds": 10.78,
+      "next_compile_seconds": null
+    },
+    {
+      "commit": "076b84a24b1e20f750a09e76f41f4a06ff004991",
+      "command": ["bun", "run", "build"],
+      "started_at_utc": "2026-10-10T03:19:25.199084+00:00",
+      "elapsed_seconds": 109.13917757198215,
+      "exit_code": 1,
+      "child_user_cpu_seconds": 840.857724,
+      "child_system_cpu_seconds": 78.536003,
+      "largest_child_maxrss_kib": 9561292,
+      "rss_note": "Linux RUSAGE_CHILDREN maximum of a child, not simultaneous process-tree memory sum",
+      "database_url_configured": false,
+      "real_model_credentials_configured": false,
+      "environment_policy": "allowlisted process basics plus local URL and explicit build-only placeholders",
+      "failure_category": "missing_build_database_placeholder",
+      "note": "Turbopack compiled successfully; page-data collection imported a module requiring DATABASE_URL.",
+      "log_path": "/tmp/qingzhou-production-baseline-20261010-head/host-root-adjusted-production-build.log",
+      "spa_build_seconds": 9.24,
+      "next_compile_seconds": 86.0
+    },
+    {
+      "commit": "076b84a24b1e20f750a09e76f41f4a06ff004991",
+      "command": ["bun", "run", "build:next"],
+      "started_at_utc": "2026-10-10T03:24:15.630982+00:00",
+      "elapsed_seconds": 914.4767056000419,
+      "exit_code": 1,
+      "child_user_cpu_seconds": 1351.751908,
+      "child_system_cpu_seconds": 88.378716,
+      "largest_child_maxrss_kib": 9562216,
+      "rss_note": "Linux RUSAGE_CHILDREN maximum of a child, not simultaneous process-tree memory sum",
+      "database_mode": "unreachable_local_placeholder",
+      "bot_autostart": "disabled_by_existing_VERCEL_ENV_guard",
+      "real_model_credentials_configured": false,
+      "environment_policy": "allowlisted process basics plus local URL and explicit build-only placeholders",
+      "failure_category": "remote_market_sitemap_static_generation_timeout",
+      "note": "Turbopack compiled successfully; default remote-market sitemap pages timed out and static generation failed.",
+      "log_path": "/tmp/qingzhou-production-baseline-20261010-head/production-build.log",
+      "spa_build_seconds": null,
+      "next_compile_seconds": 74.0,
+      "static_generation_total": 3225,
+      "last_progress_before_failure": 1953,
+      "terminal_route": "/sitemap/assistants-2649.xml",
+      "framework_timeout_seconds_per_attempt": 60
+    }
+  ],
+  "existing_services_restarted": false,
+  "interpretation": "Build diagnostics only. Child ru_maxrss is not a concurrent process-tree total or a service runtime memory requirement. No empty-market fixture was created.",
+  "preparation": {
+    "commit": "076b84a24b1e20f750a09e76f41f4a06ff004991",
+    "source": "/home/shiro/Projects/lobehub",
+    "snapshot": "/tmp/qingzhou-production-baseline-20261010-head",
+    "dependency_links": {
+      "symlinks": 7272,
+      "workspace_links": 325,
+      "bin_wrappers": 281
+    },
+    "dotenv_files_copied": false,
+    "skipped_archive_entries": 26,
+    "note": "Third-party package files reused read-only; workspace module links point into archived HEAD.",
+    "isolated_config_adjustments": [
+      {
+        "file": "next.config.ts",
+        "turbopack.root": "/",
+        "reason": "Resolve archived /tmp project against read-only third-party /home dependency store; default Turbopack retained."
+      }
+    ],
+    "build_placeholder_configuration": {
+      "database_mode": "unreachable_local_placeholder_on_port_1",
+      "DATABASE_DRIVER": "node",
+      "VERCEL_ENV": "preview",
+      "reason": "Instantiate DB modules during page collection without contacting a real DB; suppress production bot auto-start through its existing guard."
+    },
+    "tool_versions": {
+      "node": "v22.23.1",
+      "bun": "1.3.14",
+      "pnpm": "10.33.0",
+      "next": "16.2.6",
+      "vite": "8.0.12"
+    }
+  },
+  "production_startup_measured": false,
+  "runtime_limit_probe": {
+    "method": "short-lived systemd user units only",
+    "cpu_quota": "400%",
+    "memory_max": "4G",
+    "allowed_cpus": "0-3",
+    "exit_code": 0,
+    "web_runtime_started": false
+  },
+  "schema_version": 1,
+  "snapshot": "/tmp/qingzhou-production-baseline-20261010-head",
+  "source_commit": "076b84a24b1e20f750a09e76f41f4a06ff004991"
+}

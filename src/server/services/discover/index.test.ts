@@ -11,6 +11,8 @@ import { DiscoverService } from './index';
 vi.mock('@/server/modules/AssistantStore');
 vi.mock('@/server/modules/PluginStore');
 vi.mock('@lobehub/market-sdk');
+// Catalogue unit tests do not initialize the built-in tool runtimes.
+vi.mock('@lobechat/builtin-tools', () => ({ builtinTools: [] }));
 vi.mock('@/locales/resources', () => ({
   normalizeLocale: vi.fn((locale) => {
     if (locale === 'en-US') return 'en';
@@ -74,7 +76,7 @@ vi.mock('model-bank', async (importOriginal) => {
   };
 });
 
-vi.mock('@/config/modelProviders', async (importOriginal) => {
+vi.mock('model-bank/modelProviders', async (importOriginal) => {
   const actual = await importOriginal();
   return {
     ...(actual as any),

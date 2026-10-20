@@ -1,3 +1,6 @@
+import { resolve } from 'node:path';
+
+import { strToU8, zipSync } from 'fflate';
 import { describe, expect, it, vi } from 'vitest';
 
 import type {
@@ -26,13 +29,23 @@ const options = (runner: PresentationRunner) => ({
 describe('C-53 ppt-master toolchain', () => {
   it('builds explicit argv and parses quality reports', async () => {
     const { runner, spawn } = makeRunner();
-    const toolchain = new PptMasterToolchain(options(runner));
+    const toolchain = new PptMasterToolchain({
+      ...options(runner),
+      qualityArgs: ['--canonical-authoring', '--stage', 'final', '--json'],
+    });
     await expect(toolchain.qualityCheck('/tmp/workspaces/job-1')).resolves.toEqual({
       passed: true,
     });
     expect(spawn).toHaveBeenCalledWith(
       expect.objectContaining({
-        args: [' /opt/ppt-master/svg_quality_checker.py'.trim(), '/tmp/workspaces/job-1'],
+        args: [
+          resolve('/opt/ppt-master/svg_quality_checker.py'),
+          resolve('/tmp/workspaces/job-1'),
+          '--canonical-authoring',
+          '--stage',
+          'final',
+          '--json',
+        ],
         shell: false,
       }),
     );
@@ -40,7 +53,17 @@ describe('C-53 ppt-master toolchain', () => {
   it('maps conversion artifacts and rejects unsafe configuration', async () => {
     const { runner, spawn } = makeRunner({
       exitCode: 0,
-      artifacts: [{ path: 'deck.pptx', bytes: new Uint8Array([1]), name: 'deck.pptx' }],
+      artifacts: [
+        {
+          path: 'deck.pptx',
+          bytes: zipSync({
+            'ppt/slides/slide1.xml': strToU8(
+              '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>',
+            ),
+          }),
+          name: 'deck.pptx',
+        },
+      ],
     });
     const toolchain = new PptMasterToolchain(options(runner));
     await expect(toolchain.convert('/tmp/workspaces/job-1')).resolves.toMatchObject([
@@ -48,7 +71,15 @@ describe('C-53 ppt-master toolchain', () => {
     ]);
     expect(spawn).toHaveBeenCalledWith(
       expect.objectContaining({
-        args: ['/opt/ppt-master/svg_to_pptx.py', '/tmp/workspaces/job-1', '--animation', 'fade'],
+        args: [
+          resolve('/opt/ppt-master/svg_to_pptx.py'),
+          resolve('/tmp/workspaces/job-1'),
+          '--output',
+          'exports/presentation.pptx',
+          '--animation',
+          'fade',
+          '--no-image-optimize',
+        ],
         shell: false,
       }),
     );

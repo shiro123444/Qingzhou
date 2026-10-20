@@ -3,6 +3,14 @@ import { describe, expect, it, vi } from 'vitest';
 import { createPresentationChatFetch } from './resilient-fetch';
 
 describe('presentation chat connection recovery', () => {
+  it('honors the provider deadline instead of introducing a shorter transport deadline', async () => {
+    const controller = new AbortController();
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response('{}'));
+    await createPresentationChatFetch(fetcher)('https://example.test', {
+      signal: controller.signal,
+    });
+    expect(fetcher.mock.calls[0][1]?.signal).toBe(controller.signal);
+  });
   it('recovers a single failed connection without retrying a received response', async () => {
     const response = new Response('{}', { status: 200 });
     const fetcher = vi

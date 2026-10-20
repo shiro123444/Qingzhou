@@ -382,6 +382,9 @@ export default {
   'providerModels.list.fetcher.clear': 'Clear fetched models',
   'providerModels.list.fetcher.fetch': 'Fetch models',
   'providerModels.list.fetcher.fetching': 'Fetching model list...',
+  'providerModels.list.fetcher.failed':
+    'Could not fetch models. Check the provider configuration and try again.',
+  'providerModels.list.fetcher.timeout': 'Fetching models timed out. Please try again.',
   'providerModels.list.fetcher.latestTime': 'Last updated: {{time}}',
   'providerModels.list.fetcher.noLatestTime': 'Model list not yet fetched',
   'providerModels.list.noModelsInCategory': 'No enabled models in this category',

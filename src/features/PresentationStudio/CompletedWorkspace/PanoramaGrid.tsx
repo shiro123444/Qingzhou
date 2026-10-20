@@ -2,16 +2,27 @@ import { Tag } from '@lobehub/ui';
 import { memo } from 'react';
 
 import type { ArtifactSnapshot } from '../../../../packages/runtime-contracts/src/index';
+import SlideGenerationOverlay from './SlideGenerationOverlay';
 import { styles } from './style';
 
 export interface PanoramaGridProps {
   onSelectSlide: (artifactId: string) => void;
+  painting?: boolean;
+  paintingSlideNumber?: number;
+  paintInterrupted?: boolean;
   selectedArtifactId: string | null;
   slides: ArtifactSnapshot[];
 }
 
 export const PanoramaGrid = memo<PanoramaGridProps>(
-  ({ onSelectSlide, selectedArtifactId, slides }) => {
+  ({
+    onSelectSlide,
+    paintInterrupted = false,
+    painting = false,
+    paintingSlideNumber,
+    selectedArtifactId,
+    slides,
+  }) => {
     return (
       <section
         aria-label="全景灯箱网格"
@@ -19,6 +30,8 @@ export const PanoramaGrid = memo<PanoramaGridProps>(
         data-testid="presentation-bento-grid"
       >
         {slides.map((slide, index) => {
+          const slidePainting =
+            painting && (!paintingSlideNumber || paintingSlideNumber === index + 1);
           const isSelected = slide.artifactId === selectedArtifactId;
           const pageNum = String(index + 1).padStart(2, '0');
           const title =
@@ -30,14 +43,14 @@ export const PanoramaGrid = memo<PanoramaGridProps>(
             <div
               aria-label={`第 ${index + 1} 页：${title}`}
               aria-selected={isSelected}
-              className={
-                isSelected ? `${styles.bentoCard} ${styles.bentoCardSelected}` : styles.bentoCard
-              }
               data-selected={isSelected ? 'true' : 'false'}
               data-testid={`bento-card-${slide.artifactId}`}
               key={slide.artifactId}
               role="button"
               tabIndex={0}
+              className={
+                isSelected ? `${styles.bentoCard} ${styles.bentoCardSelected}` : styles.bentoCard
+              }
               onClick={() => onSelectSlide(slide.artifactId)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' || e.key === ' ') {
@@ -46,7 +59,7 @@ export const PanoramaGrid = memo<PanoramaGridProps>(
                 }
               }}
             >
-              <div className={styles.bentoFrame}>
+              <div className={styles.bentoFrame} data-painting={slidePainting ? 'true' : 'false'}>
                 {slide.uri && slide.status === 'ready' ? (
                   <img alt={title} className={styles.bentoImage} loading="lazy" src={slide.uri} />
                 ) : (
@@ -54,6 +67,11 @@ export const PanoramaGrid = memo<PanoramaGridProps>(
                     SVG 暂不可用
                   </div>
                 )}
+                <SlideGenerationOverlay
+                  compact
+                  active={slidePainting}
+                  interrupted={paintInterrupted}
+                />
               </div>
 
               <div className={styles.bentoMeta}>

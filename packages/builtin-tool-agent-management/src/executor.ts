@@ -5,7 +5,7 @@
  * deleting, searching, and calling AI agents.
  * Delegates to AgentManagerRuntime for actual implementation.
  */
-import { AgentManagerRuntime } from '@lobechat/agent-manager-runtime';
+import type { AgentManagerRuntime } from '@lobechat/agent-manager-runtime';
 import {
   BaseExecutor,
   type BuiltinToolContext,
@@ -37,10 +37,13 @@ import {
   type UpdatePromptParams,
 } from './types';
 
-const runtime = new AgentManagerRuntime({
-  agentService,
-  discoverService,
-});
+// Runtime imports the tool store, which also imports this executor. Defer
+// construction until dispatch so the module cycle can finish initializing.
+let runtime: AgentManagerRuntime | undefined;
+const getRuntime = async () => {
+  const { AgentManagerRuntime } = await import('@lobechat/agent-manager-runtime');
+  return (runtime ??= new AgentManagerRuntime({ agentService, discoverService }));
+};
 
 class AgentManagementExecutor extends BaseExecutor<typeof AgentManagementApiName> {
   readonly identifier = AgentManagementIdentifier;
@@ -49,7 +52,7 @@ class AgentManagementExecutor extends BaseExecutor<typeof AgentManagementApiName
   // ==================== Agent CRUD ====================
 
   createAgent = async (params: CreateAgentParams): Promise<BuiltinToolResult> => {
-    return runtime.createAgent(params);
+    return (await getRuntime()).createAgent(params);
   };
 
   updateAgent = async (params: UpdateAgentParams): Promise<BuiltinToolResult> => {
@@ -71,27 +74,27 @@ class AgentManagementExecutor extends BaseExecutor<typeof AgentManagementApiName
         /* ignore */
       }
     }
-    return runtime.updateAgentConfig(agentId, { config, meta });
+    return (await getRuntime()).updateAgentConfig(agentId, { config, meta });
   };
 
   deleteAgent = async (params: DeleteAgentParams): Promise<BuiltinToolResult> => {
-    return runtime.deleteAgent(params.agentId);
+    return (await getRuntime()).deleteAgent(params.agentId);
   };
 
   getAgentDetail = async (params: GetAgentDetailParams): Promise<BuiltinToolResult> => {
-    return runtime.getAgentDetail(params.agentId);
+    return (await getRuntime()).getAgentDetail(params.agentId);
   };
 
   duplicateAgent = async (params: DuplicateAgentParams): Promise<BuiltinToolResult> => {
-    return runtime.duplicateAgent(params.agentId, params.newTitle);
+    return (await getRuntime()).duplicateAgent(params.agentId, params.newTitle);
   };
 
   updatePrompt = async (params: UpdatePromptParams): Promise<BuiltinToolResult> => {
-    return runtime.updatePrompt(params.agentId, { prompt: params.prompt });
+    return (await getRuntime()).updatePrompt(params.agentId, { prompt: params.prompt });
   };
 
   installPlugin = async (params: InstallPluginParams): Promise<BuiltinToolResult> => {
-    return runtime.installPlugin(params.agentId, {
+    return (await getRuntime()).installPlugin(params.agentId, {
       identifier: params.identifier,
       source: params.source,
     });
@@ -100,7 +103,7 @@ class AgentManagementExecutor extends BaseExecutor<typeof AgentManagementApiName
   // ==================== Search ====================
 
   searchAgent = async (params: SearchAgentParams): Promise<BuiltinToolResult> => {
-    return runtime.searchAgents(params);
+    return (await getRuntime()).searchAgents(params);
   };
 
   // ==================== Execution ====================

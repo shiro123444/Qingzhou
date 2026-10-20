@@ -1,6 +1,29 @@
-import type { ToolRegistry } from '../../../../packages/cordis-kernel/src/tool';
+import type { ToolExecutionContext as ServiceToolExecutionContext } from '@/server/services/toolExecution/types';
+
+import type { ToolExecutionContext as KernelToolExecutionContext } from '../../../../packages/cordis-kernel/src/tool';
 import type { RuntimePluginManifest } from '../../../../packages/cordis-kernel/src/types';
+import { isDuplicateToolError, resolveToolRegistry } from './registry-helper';
 import type { BuiltinToolsPluginOptions } from './types';
+
+const assertServiceContext = (toolCtx: unknown): ServiceToolExecutionContext => {
+  if (
+    typeof toolCtx !== 'object' ||
+    toolCtx === null ||
+    Array.isArray(toolCtx) ||
+    !('toolManifestMap' in toolCtx) ||
+    typeof toolCtx.toolManifestMap !== 'object' ||
+    toolCtx.toolManifestMap === null ||
+    Array.isArray(toolCtx.toolManifestMap)
+  ) {
+    throw new Error('Execution context must contain a valid toolManifestMap');
+  }
+  // Cordis also accepts symbols, but the existing business execution contract
+  // uses string conversation ids. Never silently stringify an isolation label.
+  if ('scope' in toolCtx && toolCtx.scope != null && typeof toolCtx.scope !== 'string') {
+    throw new Error('Builtin tools require a string conversation scope');
+  }
+  return toolCtx as ServiceToolExecutionContext;
+};
 
 export const createBuiltinToolsPlugin = (
   options: BuiltinToolsPluginOptions,
@@ -10,17 +33,15 @@ export const createBuiltinToolsPlugin = (
 
   return {
     apply: (ctx) => {
-      const toolRegistry = (ctx as any).get?.('cordis.tools') as ToolRegistry | undefined;
-      if (!toolRegistry) {
-        throw new Error('cordis.tools service is required to mount builtin tools plugin');
-      }
+      const toolRegistry = resolveToolRegistry(ctx, 'builtin tools plugin');
 
       for (const tool of options.tools) {
         const canonicalName = `${tool.identifier}:${tool.apiName}`;
 
         toolRegistry.register(ctx, {
           description: tool.description ?? `Builtin tool ${canonicalName}`,
-          execute: (args, toolCtx) => tool.handler(args, toolCtx as any),
+          execute: (args: unknown, toolCtx: KernelToolExecutionContext) =>
+            tool.handler(args, assertServiceContext(toolCtx)),
           inputSchema: tool.inputSchema ?? {},
           name: canonicalName,
         });
@@ -29,11 +50,15 @@ export const createBuiltinToolsPlugin = (
         try {
           toolRegistry.register(ctx, {
             description: tool.description ?? `Builtin tool ${tool.apiName}`,
-            execute: (args, toolCtx) => tool.handler(args, toolCtx as any),
+            execute: (args: unknown, toolCtx: KernelToolExecutionContext) =>
+              tool.handler(args, assertServiceContext(toolCtx)),
             inputSchema: tool.inputSchema ?? {},
             name: tool.apiName,
           });
-        } catch {
+        } catch (error) {
+          if (!isDuplicateToolError(error)) {
+            throw error;
+          }
           // If alias already exists (collision between providers), canonicalName remains unique
         }
       }

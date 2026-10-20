@@ -2,12 +2,41 @@ import * as runtimeModule from '@lobechat/model-runtime';
 import { type AIImageModelCard, type EnabledAiModel, type ModelParamsSchema } from 'model-bank';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { aiProviderService } from '@/services/aiProvider';
+
 import {
+  AiProviderActionImpl,
   getChatModelList,
   getImageModelList,
   normalizeChatModel,
   normalizeImageModel,
 } from '../action';
+
+it('clears the provider saving indicator when persisting credentials fails', async () => {
+  const toggle = vi.fn();
+  const refresh = vi.fn();
+  const failure = new Error('Connection interrupted');
+  const update = vi
+    .spyOn(aiProviderService, 'updateAiProviderConfig')
+    .mockRejectedValueOnce(failure);
+  const action = new AiProviderActionImpl(
+    vi.fn(),
+    () =>
+      ({
+        internal_toggleAiProviderConfigUpdating: toggle,
+        refreshAiProviderDetail: refresh,
+      }) as any,
+  );
+  await expect(
+    action.updateAiProviderConfig('nexus', { keyVaults: { apiKey: 'test-key' } }),
+  ).rejects.toBe(failure);
+  expect(toggle.mock.calls).toEqual([
+    ['nexus', true],
+    ['nexus', false],
+  ]);
+  expect(refresh).not.toHaveBeenCalled();
+  update.mockRestore();
+});
 
 const createChatModel = (overrides: Partial<EnabledAiModel> = {}): EnabledAiModel => ({
   abilities: overrides.abilities ?? { functionCall: true },

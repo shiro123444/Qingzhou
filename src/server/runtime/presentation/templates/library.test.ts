@@ -1,8 +1,8 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import nodePath from 'node:path';
 
-import { strToU8, zipSync } from 'fflate';
+import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { PresentationPlan } from '../../../../../packages/runtime-contracts/src';
@@ -72,7 +72,41 @@ const pptxFixture = (): Uint8Array =>
     ),
   );
 
+const videoPptxFixture = (): Uint8Array => {
+  const files = unzipSync(pptxFixture());
+  const slide = 'ppt/slides/slide4.xml';
+  files[slide] = strToU8(
+    strFromU8(files[slide]).replace(
+      '<p:pic>',
+      '<p:pic><p:nvPicPr><p:cNvPr id="9" name="Lesson video"/><p:nvPr><a:videoFile r:link="video1"/></p:nvPr></p:nvPicPr>',
+    ),
+  );
+  const relations = 'ppt/slides/_rels/slide4.xml.rels';
+  files[relations] = strToU8(
+    strFromU8(files[relations]).replace(
+      '</Relationships>',
+      `${relationship('video1', 'video', '../media/video1.mp4')}</Relationships>`,
+    ),
+  );
+  files['ppt/media/video1.mp4'] = strToU8('embedded-video-fixture');
+  return zipSync(files);
+};
+
 describe('Presentation template learning', () => {
+  it('learns table geometry and information density without importing old cells as facts', () => {
+    const files = unzipSync(pptxFixture());
+    const name = 'ppt/slides/slide4.xml';
+    files[name] = strToU8(
+      strFromU8(files[name]).replace(
+        '</p:spTree>',
+        '<p:graphicFrame><p:xfrm><a:off x="457200" y="1028700"/><a:ext cx="7315200" cy="3086100"/></p:xfrm><a:graphic><a:graphicData><a:tbl><a:tblGrid><a:gridCol w="100"/><a:gridCol w="300"/></a:tblGrid><a:tr><a:tc><a:txBody><a:p><a:r><a:t>旧数据</a:t></a:r></a:p></a:txBody></a:tc><a:tc/></a:tr><a:tr><a:tc/><a:tc/></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame></p:spTree>',
+      ),
+    );
+    const evidence = extractPptxTemplate(zipSync(files)).layouts[0].evidence!;
+    expect(evidence.tables[0]).toMatchObject({ rows: 2, columns: 2, columnWeights: [0.25, 0.75] });
+    expect(evidence.textCharacters).toBeGreaterThan(3);
+    expect(JSON.stringify(evidence)).not.toContain('旧数据');
+  });
   it('extracts actual SVG style, transformed geometry, capacity, image slots and notes', () => {
     const learned = extractPlanTemplate(plan);
     expect(learned.constraints.palette).toContain('#123456');
@@ -118,8 +152,25 @@ describe('Presentation template learning', () => {
     expect(learned.warnings).toContain('External PPTX relationships were ignored.');
   });
 
+  it('records embedded video placement and poster evidence without executing media', () => {
+    const learned = extractPptxTemplate(videoPptxFixture());
+    expect(learned.media).toEqual([
+      expect.objectContaining({
+        box: { height: 0.6, width: 0.4, x: 0.5, y: 0.2 },
+        kind: 'video',
+        mimeType: 'video/mp4',
+        page: 1,
+        path: 'ppt/media/video1.mp4',
+        posterReference: 'pptx:ppt/media/image1.png',
+        relationshipId: 'video1',
+        sizeBytes: 22,
+      }),
+    ]);
+    expect(learned.warnings.join(' ')).toContain('Embedded videos');
+  });
+
   it('persists immutable learned versions, restores them and isolates scopes', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'ppt-templates-'));
+    const root = await mkdtemp(nodePath.join(tmpdir(), 'ppt-templates-'));
     roots.push(root);
     const library = new FilePresentationTemplateLibrary({ root });
     const first = await library.learnFromPlan(scope, { name: 'Teal', plan });
@@ -154,7 +205,7 @@ describe('Presentation template learning', () => {
   });
 
   it('preserves original PPTX bytes independently of the extracted profile', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'ppt-templates-source-'));
+    const root = await mkdtemp(nodePath.join(tmpdir(), 'ppt-templates-source-'));
     roots.push(root);
     const library = new FilePresentationTemplateLibrary({ root });
     const bytes = pptxFixture();
@@ -164,9 +215,27 @@ describe('Presentation template learning', () => {
     expect(await library.getSourcePptx({ ...scope, userId: 'other' }, profile)).toBeNull();
   });
 
+  it('removes every immutable version of one owned template', async () => {
+    const root = await mkdtemp(nodePath.join(tmpdir(), 'ppt-templates-delete-'));
+    roots.push(root);
+    const library = new FilePresentationTemplateLibrary({ root });
+    const first = await library.learnFromPlan(scope, { name: 'Disposable', plan });
+    await library.learnFromPlan(scope, {
+      name: 'Disposable refined',
+      plan,
+      templateId: first.templateId,
+    });
+
+    await library.remove(scope, first.templateId);
+
+    expect(await library.get(scope, first.templateId)).toBeNull();
+    expect(await library.list(scope)).toEqual([]);
+    await expect(library.remove(scope, first.templateId)).rejects.toThrow('does not exist');
+  });
+
   it('rejects invalid/active XML and oversized uploads without external execution', () => {
     expect(() => extractPptxTemplate(new Uint8Array([1, 2, 3]))).toThrow('readable PPTX');
-    expect(() => extractPptxTemplate(new Uint8Array(33 * 1024 * 1024))).toThrow('32 MiB');
+    expect(() => extractPptxTemplate(new Uint8Array(101 * 1024 * 1024))).toThrow('100 MiB');
     expect(() =>
       extractPlanTemplate({
         ...plan,

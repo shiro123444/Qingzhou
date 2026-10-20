@@ -1,0 +1,131 @@
+{
+  "build": {
+    "base_commit": "076b84a24b1e20f750a09e76f41f4a06ff004991",
+    "source_variant": "working-tree-refactor",
+    "command": ["bun", "run", "build"],
+    "started_at_utc": "2026-10-10T05:01:57.024900+00:00",
+    "elapsed_seconds": 114.17906763794599,
+    "exit_code": 0,
+    "child_user_cpu_seconds": 852.673944,
+    "child_system_cpu_seconds": 87.314179,
+    "largest_child_maxrss_kib": 9440300,
+    "rss_note": "Linux RUSAGE_CHILDREN maximum of a child, not simultaneous process-tree memory sum",
+    "database_mode": "unreachable_local_placeholder",
+    "bot_autostart": "disabled_by_existing_VERCEL_ENV_guard",
+    "real_model_credentials_configured": false,
+    "environment_policy": "allowlisted process basics plus local URL and explicit build-only placeholders"
+  },
+  "cases": [
+    {
+      "variant": "4c4g-preload-on",
+      "build_id": "O1v5FG8dDeqxOtsnf9ANu",
+      "ready_seconds": 3.3373627080000006,
+      "idle_rss_kib": {
+        "min": 567460,
+        "mean": 567460.0,
+        "max": 567460,
+        "observations": 31
+      },
+      "load_rss_kib": {
+        "min": 590628,
+        "mean": 610745.2,
+        "max": 621264,
+        "observations": 30
+      },
+      "responses": 150,
+      "status_counts": {
+        "200": 150
+      },
+      "cpu_max": "400000 100000",
+      "memory_max": 4294967296,
+      "swap_max": 0,
+      "after_load_cgroup": {
+        "memory.current": 507686912,
+        "memory.peak": 507940864,
+        "memory.max": 4294967296,
+        "memory.swap.current": 0,
+        "memory.swap.max": 0,
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "cpu.stat": "usage_usec 6234183\nuser_usec 5879575\nsystem_usec 354608\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 186\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "cpu.max": "400000 100000",
+        "cpuset.cpus.effective": null
+      },
+      "source": "/tmp/qingzhou-production-baseline-20261010-head/runtime-4c4g-preload-on-result.json"
+    },
+    {
+      "variant": "4c4g-preload-off",
+      "build_id": "O1v5FG8dDeqxOtsnf9ANu",
+      "ready_seconds": 1.323670924990438,
+      "idle_rss_kib": {
+        "min": 239136,
+        "mean": 258108.4,
+        "max": 274628,
+        "observations": 30
+      },
+      "load_rss_kib": {
+        "min": 244128,
+        "mean": 278332.8,
+        "max": 291272,
+        "observations": 30
+      },
+      "responses": 150,
+      "status_counts": {
+        "200": 150
+      },
+      "cpu_max": "400000 100000",
+      "memory_max": 4294967296,
+      "swap_max": 0,
+      "after_load_cgroup": {
+        "memory.current": 221204480,
+        "memory.peak": 221253632,
+        "memory.max": 4294967296,
+        "memory.swap.current": 0,
+        "memory.swap.max": 0,
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "cpu.stat": "usage_usec 3345389\nuser_usec 3162820\nsystem_usec 182569\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 170\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "cpu.max": "400000 100000",
+        "cpuset.cpus.effective": null
+      },
+      "source": "/tmp/qingzhou-production-baseline-20261010-head/runtime-4c4g-preload-off-result.json"
+    },
+    {
+      "variant": "8c8g-preload-off",
+      "build_id": "O1v5FG8dDeqxOtsnf9ANu",
+      "ready_seconds": 1.2814974650391378,
+      "idle_rss_kib": {
+        "min": 282628,
+        "mean": 282628.0,
+        "max": 282628,
+        "observations": 31
+      },
+      "load_rss_kib": {
+        "min": 252592,
+        "mean": 285907.7419354839,
+        "max": 297520,
+        "observations": 31
+      },
+      "responses": 150,
+      "status_counts": {
+        "200": 150
+      },
+      "cpu_max": "800000 100000",
+      "memory_max": 8589934592,
+      "swap_max": 0,
+      "after_load_cgroup": {
+        "memory.current": 228589568,
+        "memory.peak": 228618240,
+        "memory.max": 8589934592,
+        "memory.swap.current": 0,
+        "memory.swap.max": 0,
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "cpu.stat": "usage_usec 3028750\nuser_usec 2840244\nsystem_usec 188506\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 165\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "cpu.max": "800000 100000",
+        "cpuset.cpus.effective": null
+      },
+      "source": "/tmp/qingzhou-production-baseline-20261010-head/runtime-8c8g-preload-off-result.json"
+    }
+  ],
+  "measurement_date": "2026-10-10",
+  "scope": "Public signin HTML and static metadata/assets only; placeholder DB, no real models, no bot startup; fresh process with warm filesystem cache",
+  "verification_date": "2026-10-11"
+}

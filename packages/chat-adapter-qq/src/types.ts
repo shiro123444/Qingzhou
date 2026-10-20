@@ -1,6 +1,11 @@
 export interface QQAdapterConfig {
   appId: string;
+  /** Server-only internal gateway auth. A Response rejects; errors fail closed. No native fallback. */
+  authenticateWebhook?: (request: Request) => Promise<Response | void>;
+  /** Atomic replay claim shared across replicas. Without it, only bounded process-local protection. */
+  claimWebhookReplay?: (key: string, ttlSeconds: number) => Promise<boolean>;
   clientSecret: string;
+  persistVerifiedWebhook?: (payload: unknown, eventId: string, threadId: string) => Promise<void>;
 }
 
 export interface QQThreadId {
@@ -11,9 +16,17 @@ export interface QQThreadId {
 }
 
 export interface QQAuthor {
-  id: string;
+  bot?: boolean;
+  id?: string;
   member_openid?: string;
   union_openid?: string;
+  user_openid?: string;
+  username?: string;
+}
+
+export interface QQMention extends QQAuthor {
+  /** QQ's per-event marker for a mention of the receiving bot; IDs may use a different namespace. */
+  is_you?: boolean;
 }
 
 export interface QQAttachment {
@@ -41,7 +54,7 @@ export interface QQRawMessage {
     joined_at: string;
     roles?: string[];
   };
-  mentions?: QQAuthor[];
+  mentions?: QQMention[];
   message_reference?: QQMessageReference;
   seq?: number;
   seq_in_channel?: string;
@@ -69,6 +82,7 @@ export interface QQWebhookEventData {
     joined_at: string;
     roles?: string[];
   };
+  mentions?: QQMention[];
   plain_token?: string;
   timestamp?: string;
 }
@@ -115,6 +129,7 @@ export const QQ_EVENT_TYPES = {
   C2C_MESSAGE_CREATE: 'C2C_MESSAGE_CREATE',
   DIRECT_MESSAGE_CREATE: 'DIRECT_MESSAGE_CREATE',
   GROUP_AT_MESSAGE_CREATE: 'GROUP_AT_MESSAGE_CREATE',
+  GROUP_MESSAGE_CREATE: 'GROUP_MESSAGE_CREATE',
 } as const;
 
 export const QQ_OP_CODES = {

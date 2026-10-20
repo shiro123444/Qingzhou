@@ -3,10 +3,12 @@ import { create, type StoreApi, type UseBoundStore } from 'zustand';
 import type {
   ArtifactSnapshot,
   ExportResult,
+  PresentationDecisionAnswer,
   PresentationExportFormat,
   PresentationJob,
   PresentationJobInput,
   PresentationMessageInput,
+  PresentationPresenceInput,
 } from '../../../../packages/runtime-contracts/src/index';
 import {
   type PresentationJobEvent,
@@ -90,12 +92,7 @@ export type PresentationStreamClient = RuntimePresentationStreamClient;
 export type PresentationTransportMode = 'http' | 'demo';
 
 export type PresentationPendingAction =
-  | 'cancel'
-  | 'create'
-  | 'export'
-  | 'refresh'
-  | 'retry'
-  | undefined;
+  'cancel' | 'create' | 'delete' | 'export' | 'refresh' | 'retry' | 'decision' | undefined;
 
 /**
  * Per-job live stream status (C-66): null/absent = not determined,
@@ -168,9 +165,16 @@ export interface PresentationStoreOptions {
   transportMode?: PresentationTransportMode;
 }
 
+const appendActivity = (
+  history: { id: string; text: string }[] = [],
+  text: string | undefined,
+  id: string,
+) => (!text || history.at(-1)?.text === text ? history : [...history, { id, text }].slice(-60));
+
 export interface PresentationJobGenerationProgress {
   /** Short real-time action description from backend SSE/snapshot (R1-B / R2-B) */
   activity?: string;
+  activityHistory?: { id: string; text: string }[];
   /** List of generated artifact IDs associated with this job (R2-B) */
   artifactIds?: string[];
   /** Currently active slide number or identifier (1-indexed) */
@@ -198,8 +202,7 @@ export interface PresentationStudioState {
    * keyboard-reachable retry. Cleared only by a successful export or dismiss.
    */
   exportError:
-    | (PresentationErrorInfo & { artifactId: string; format: PresentationExportFormat })
-    | null;
+    (PresentationErrorInfo & { artifactId: string; format: PresentationExportFormat }) | null;
   exporting: string | null;
   /**
    * Real-time generation progress projected per job from backend events/snapshots (R1-B).
@@ -244,6 +247,7 @@ export interface PresentationStudioState {
 }
 
 export interface PresentationStudioActions {
+  answerDecision: (jobId: string, input: PresentationDecisionAnswer) => Promise<boolean>;
   /** Applies one wire-safe job event (frozen C-60 semantics, seq-deduplicated). */
   applyPresentationEvent: (event: PresentationJobEvent) => void;
   /**
@@ -253,6 +257,7 @@ export interface PresentationStudioActions {
   applySlotEvent: (jobId: string, event: { data: unknown; seq: number; type: string }) => void;
   cancelJob: (jobId: string) => Promise<void>;
   createJob: (input: PresentationJobInput) => Promise<string | null>;
+  deleteJob: (jobId: string) => Promise<boolean>;
   dismissError: () => void;
   dismissExport: () => void;
   /** Clears a slot's error after the user saw it (C-87 recovery affordance). */
@@ -278,6 +283,7 @@ export interface PresentationStudioActions {
   setStreamStatus: (status: PresentationStreamStatus) => void;
   /** Idempotent per-job setter (C-66); also recomputes the aggregate. */
   setStreamStatusForJob: (jobId: string, status: PresentationStreamStatus) => void;
+  updatePresence: (jobId: string, input: PresentationPresenceInput) => Promise<boolean>;
 }
 
 export type PresentationStudioStore = PresentationStudioState &
@@ -394,6 +400,8 @@ export const aggregateJobStreamStatus = (
  * ------------------------------------------------------------------------ */
 
 const JOB_FIELDS = [
+  'recovery',
+  'heartbeatAt',
   'jobId',
   'state',
   'createdAt',
@@ -406,6 +414,7 @@ const JOB_FIELDS = [
   'versionId',
   'messages',
   'revisions',
+  'collaboration',
   'slideCount',
 ] as const;
 const ARTIFACT_FIELDS = [
@@ -481,6 +490,33 @@ export const projectArtifactSnapshot = (data: unknown): ArtifactSnapshot | null 
   return artifact;
 };
 
+const needsArtifactHydration = (artifact?: ArtifactSnapshot): boolean =>
+  !artifact ||
+  (artifact.status === 'ready' &&
+    !artifact.uri &&
+    (artifact.type === 'svg' ||
+      artifact.type === 'image' ||
+      Boolean(artifact.mimeType?.startsWith('image/'))));
+
+/** Events carry partial snapshots. Keep fetched preview data and newer state. */
+const mergeArtifactSnapshot = (
+  current: ArtifactSnapshot | undefined,
+  incoming: ArtifactSnapshot,
+  changedDuringFetch = false,
+): ArtifactSnapshot => {
+  if (!current) return incoming;
+  const stale =
+    changedDuringFetch ||
+    Date.parse(incoming.updatedAt ?? '') < Date.parse(current.updatedAt ?? '');
+  const [base, latest] = stale ? [incoming, current] : [current, incoming];
+  return {
+    ...base,
+    ...Object.fromEntries(Object.entries(latest).filter(([, value]) => value !== undefined)),
+    metadata: { ...base.metadata, ...latest.metadata },
+    uri: latest.uri || base.uri,
+  };
+};
+
 /**
  * Projects real-time generation progress fields (R1-B).
  * Only whitelisted fields (stage, activity, currentSlide, totalSlides, progress, updatedAt)
@@ -524,9 +560,7 @@ export const projectGenerationProgress = (
       ? source.action.trim()
       : isString(source.lastAction)
         ? source.lastAction.trim()
-        : isString(source.message)
-          ? source.message.trim()
-          : undefined;
+        : undefined;
 
   const rawCurrent =
     source.currentSlide ?? source.activeSlide ?? source.slideIndex ?? source.slideId;
@@ -611,11 +645,12 @@ export type PresentationEventProjection =
 export const projectPresentationEventData = (data: unknown): PresentationEventProjection => {
   if (!data || typeof data !== 'object') return { kind: 'invalid' };
   const record = data as Record<string, unknown>;
+  const topLevelJob = projectJobSnapshot(data);
 
   if (
     record.job !== undefined ||
     record.artifact !== undefined ||
-    record.artifactIds !== undefined
+    (record.artifactIds !== undefined && !topLevelJob)
   ) {
     const job = projectJobSnapshot(record.job);
     const artifact = projectArtifactSnapshot(record.artifact);
@@ -637,7 +672,7 @@ export const projectPresentationEventData = (data: unknown): PresentationEventPr
     };
   }
 
-  const job = projectJobSnapshot(data);
+  const job = topLevelJob;
   if (job) {
     const progress = projectGenerationProgress(data);
     return { kind: 'job', job, progress: progress ?? undefined };
@@ -676,6 +711,23 @@ export const createPresentationStudioStore = (
 
   const initialLoading = options.initialLoading ?? Boolean(options.initialJobIds?.length);
 
+  const artifactFetches = new Map<string, Promise<ArtifactSnapshot | null>>();
+  const fetchArtifact = (id: string) => {
+    const existing = artifactFetches.get(id);
+    if (existing) return existing;
+    const task = Promise.resolve().then(async () => {
+      const snapshot = await client.getArtifact(id);
+      if (snapshot && snapshot.artifactId !== id) throw new Error('Artifact response ID mismatch');
+      return snapshot;
+    });
+    artifactFetches.set(id, task);
+    const release = () => {
+      if (artifactFetches.get(id) === task) artifactFetches.delete(id);
+    };
+    void task.then(release, release);
+    return task;
+  };
+
   return create<PresentationStudioStore>()((set, get) => ({
     ...presentationInitialState,
     initialLoading,
@@ -709,6 +761,18 @@ export const createPresentationStudioStore = (
       }
 
       set((s) => {
+        const snapshot =
+          projection.kind === 'job' || projection.kind === 'bundle' ? projection.job : undefined;
+        const currentJob = s.jobs[event.job_id];
+        if (
+          snapshot?.jobId === event.job_id &&
+          currentJob &&
+          Date.parse(snapshot.updatedAt ?? '') < Date.parse(currentJob.updatedAt ?? '')
+        ) {
+          // A reconnect can replay an old failure after HTTP already restored
+          // the completed work. Consume its cursor without rolling back the UI.
+          return { lastSeqByJob: { ...s.lastSeqByJob, [event.job_id]: event.seq } };
+        }
         const jobs = { ...s.jobs };
         const jobOrder = s.jobOrder.slice();
         const artifacts = { ...s.artifacts };
@@ -744,6 +808,11 @@ export const createPresentationStudioStore = (
           generationProgressByJob[event.job_id] = {
             ...current,
             ...progress,
+            activityHistory: appendActivity(
+              current.activityHistory,
+              progress.activity,
+              `job:${event.seq}`,
+            ),
             ...(progress.artifactIds
               ? {
                   artifactIds: [
@@ -757,7 +826,10 @@ export const createPresentationStudioStore = (
         if (projection.kind === 'bundle') {
           if (projection.job) upsertOwnedJob(projection.job);
           if (projection.artifact) {
-            artifacts[projection.artifact.artifactId] = projection.artifact;
+            artifacts[projection.artifact.artifactId] = mergeArtifactSnapshot(
+              artifacts[projection.artifact.artifactId],
+              projection.artifact,
+            );
             linkArtifactIds(event.job_id, [projection.artifact.artifactId]);
           }
           if (projection.artifactIds && projection.artifactIds.length > 0) {
@@ -770,7 +842,10 @@ export const createPresentationStudioStore = (
         } else if (projection.kind === 'progress') {
           applyProgress(projection.progress);
         } else {
-          artifacts[projection.artifact.artifactId] = projection.artifact;
+          artifacts[projection.artifact.artifactId] = mergeArtifactSnapshot(
+            artifacts[projection.artifact.artifactId],
+            projection.artifact,
+          );
           linkArtifactIds(event.job_id, [projection.artifact.artifactId]);
         }
 
@@ -801,6 +876,79 @@ export const createPresentationStudioStore = (
           clientError: toPresentationError(err),
           pendingActions: { ...s.pendingActions, [jobId]: undefined },
         }));
+      }
+    },
+
+    deleteJob: async (jobId) => {
+      const current = get().pendingActions[jobId];
+      if (current && current !== 'refresh') return false;
+      set((s) => ({
+        clientError: null,
+        pendingActions: { ...s.pendingActions, [jobId]: 'delete' },
+      }));
+      try {
+        if (!client.deletePresentationJob)
+          throw Object.assign(new Error('Presentation deletion is unavailable'), {
+            code: 'PROVIDER_UNAVAILABLE',
+          });
+        await client.deletePresentationJob(jobId);
+        const selectedWasDeleted = get().selectedJobId === jobId;
+        if (selectedWasDeleted && typeof window !== 'undefined' && window.sessionStorage) {
+          try {
+            window.sessionStorage.removeItem('presentation_studio_active_job_id');
+          } catch {}
+        }
+        set((s) => {
+          const artifacts = { ...s.artifacts };
+          const generationProgressByJob = { ...s.generationProgressByJob };
+          const jobs = { ...s.jobs };
+          const jobTitles = { ...s.jobTitles };
+          const lastSeqByJob = { ...s.lastSeqByJob };
+          const pendingActions = { ...s.pendingActions };
+          const slots = { ...s.slots };
+          const slotRetryPending = { ...s.slotRetryPending };
+          const streamStatusByJob = { ...s.streamStatusByJob };
+          const artifactIds = new Set(jobs[jobId]?.artifactIds ?? []);
+          for (const [artifactId, artifact] of Object.entries(artifacts)) {
+            if (artifactIds.has(artifactId) || artifact.metadata?.jobId === jobId) {
+              delete artifacts[artifactId];
+            }
+          }
+          for (const key of Object.keys(slots)) {
+            if (key.startsWith(`${jobId}:`)) delete slots[key];
+          }
+          for (const key of Object.keys(slotRetryPending)) {
+            if (key.startsWith(`${jobId}:`)) delete slotRetryPending[key];
+          }
+          delete generationProgressByJob[jobId];
+          delete jobs[jobId];
+          delete jobTitles[jobId];
+          delete lastSeqByJob[jobId];
+          delete pendingActions[jobId];
+          delete streamStatusByJob[jobId];
+          return {
+            artifacts,
+            generationProgressByJob,
+            jobOrder: s.jobOrder.filter((id) => id !== jobId),
+            jobs,
+            jobTitles,
+            lastSeqByJob,
+            pendingActions,
+            selectedArtifactId: selectedWasDeleted ? null : s.selectedArtifactId,
+            selectedJobId: selectedWasDeleted ? null : s.selectedJobId,
+            slots,
+            slotRetryPending,
+            streamStatus: aggregateJobStreamStatus(streamStatusByJob),
+            streamStatusByJob,
+          };
+        });
+        return true;
+      } catch (error) {
+        set((s) => ({
+          clientError: toPresentationError(error),
+          pendingActions: { ...s.pendingActions, [jobId]: undefined },
+        }));
+        return false;
       }
     },
 
@@ -888,9 +1036,10 @@ export const createPresentationStudioStore = (
       const ids = job?.artifactIds ?? [];
       if (ids.length === 0) return;
 
-      const missingIds = ids.filter((id) => !get().artifacts[id]);
+      const beforeFetch = get().artifacts;
+      const missingIds = ids.filter((id) => needsArtifactHydration(beforeFetch[id]));
       if (missingIds.length === 0) {
-        if (!get().selectedArtifactId && ids.length > 0) {
+        if (!get().selectedArtifactId && (!get().selectedJobId || get().selectedJobId === jobId)) {
           set({ selectedArtifactId: ids[0] });
         }
         return;
@@ -899,7 +1048,7 @@ export const createPresentationStudioStore = (
       const snapshots = await Promise.all(
         missingIds.map(async (artifactId) => {
           try {
-            return await client.getArtifact(artifactId);
+            return await fetchArtifact(artifactId);
           } catch (err) {
             if (!get().clientError) {
               set({ clientError: toPresentationError(err) });
@@ -915,10 +1064,22 @@ export const createPresentationStudioStore = (
       }
 
       if (Object.keys(newArtifacts).length > 0) {
-        set((s) => ({
-          artifacts: { ...s.artifacts, ...newArtifacts },
-          selectedArtifactId: s.selectedArtifactId ?? ids[0],
-        }));
+        set((s) => {
+          const artifacts = { ...s.artifacts };
+          for (const [id, snapshot] of Object.entries(newArtifacts)) {
+            artifacts[id] = mergeArtifactSnapshot(
+              artifacts[id],
+              snapshot,
+              artifacts[id] !== beforeFetch[id],
+            );
+          }
+          return {
+            artifacts,
+            selectedArtifactId:
+              s.selectedArtifactId ??
+              (!s.selectedJobId || s.selectedJobId === jobId ? ids[0] : null),
+          };
+        });
       }
     },
 
@@ -972,6 +1133,36 @@ export const createPresentationStudioStore = (
       }
     },
 
+    updatePresence: async (jobId, input) => {
+      if (!client.updatePresentationPresence) return false;
+      try {
+        await client.updatePresentationPresence(jobId, input);
+        if (input.mode) await get().refreshJob(jobId);
+        return true;
+      } catch (error) {
+        // Heartbeats are best effort. Explicit preference changes must report failure.
+        if (input.mode) set({ clientError: toPresentationError(error) });
+        return false;
+      }
+    },
+
+    answerDecision: async (jobId, input) => {
+      if (get().pendingActions[jobId] === 'decision') return false;
+      set((s) => ({ pendingActions: { ...s.pendingActions, [jobId]: 'decision' } }));
+      try {
+        if (!client.answerPresentationDecision)
+          throw new Error('Collaboration decisions are unavailable');
+        const job = await client.answerPresentationDecision(jobId, input);
+        set((s) => ({ jobs: { ...s.jobs, [jobId]: job }, clientError: null }));
+        return true;
+      } catch (error) {
+        set({ clientError: toPresentationError(error) });
+        return false;
+      } finally {
+        set((s) => ({ pendingActions: { ...s.pendingActions, [jobId]: undefined } }));
+      }
+    },
+
     restoreJobList: async () => {
       if (!client.listPresentationJobs) return [];
       try {
@@ -996,18 +1187,22 @@ export const createPresentationStudioStore = (
     refreshJob: async (jobId) => {
       if (get().pendingActions[jobId] === 'refresh') return;
 
+      const beforeJob = get().jobs[jobId];
       set((s) => ({ pendingActions: { ...s.pendingActions, [jobId]: 'refresh' } }));
       try {
         const job = await client.getPresentationJob(jobId);
         if (job) {
+          const beforeFetch = get().artifacts;
           const newArtifacts: Record<string, ArtifactSnapshot> = {};
           if (job.artifactIds && job.artifactIds.length > 0) {
-            const missingIds = job.artifactIds.filter((id) => !get().artifacts[id]);
+            const missingIds = job.artifactIds.filter((id) =>
+              needsArtifactHydration(beforeFetch[id]),
+            );
             if (missingIds.length > 0) {
               const snapshots = await Promise.all(
                 missingIds.map(async (id) => {
                   try {
-                    return await client.getArtifact(id);
+                    return await fetchArtifact(id);
                   } catch (err) {
                     if (!get().clientError) {
                       set({ clientError: toPresentationError(err) });
@@ -1021,11 +1216,28 @@ export const createPresentationStudioStore = (
               }
             }
           }
-          const progress = projectGenerationProgress(job);
           set((s) => {
-            const allArtifacts = { ...s.artifacts, ...newArtifacts };
-            const firstId = job.artifactIds?.[0] ?? null;
-            const selectedArtifactId = s.selectedArtifactId ?? firstId;
+            const allArtifacts = { ...s.artifacts };
+            for (const [id, snapshot] of Object.entries(newArtifacts)) {
+              allArtifacts[id] = mergeArtifactSnapshot(
+                allArtifacts[id],
+                snapshot,
+                allArtifacts[id] !== beforeFetch[id],
+              );
+            }
+            const currentJob = s.jobs[jobId];
+            const currentTime = Date.parse(currentJob?.updatedAt ?? '');
+            const incomingTime = Date.parse(job.updatedAt ?? '');
+            const keepCurrent =
+              currentJob &&
+              (currentTime > incomingTime ||
+                (currentJob !== beforeJob && !(incomingTime > currentTime)));
+            const latestJob = keepCurrent ? { ...job, ...currentJob } : job;
+            const progress = projectGenerationProgress(latestJob);
+            const firstId = latestJob.artifactIds?.[0] ?? null;
+            const selectedArtifactId =
+              s.selectedArtifactId ??
+              (!s.selectedJobId || s.selectedJobId === jobId ? firstId : null);
             const currentProgress = s.generationProgressByJob[jobId] ?? {};
             return {
               artifacts: allArtifacts,
@@ -1049,8 +1261,10 @@ export const createPresentationStudioStore = (
                   }
                 : s.generationProgressByJob,
               jobOrder: s.jobOrder.includes(jobId) ? s.jobOrder : [jobId, ...s.jobOrder],
-              jobTitles: job.title ? { ...s.jobTitles, [jobId]: job.title } : s.jobTitles,
-              jobs: { ...s.jobs, [jobId]: job },
+              jobTitles: latestJob.title
+                ? { ...s.jobTitles, [jobId]: latestJob.title }
+                : s.jobTitles,
+              jobs: { ...s.jobs, [jobId]: latestJob },
               pendingActions: { ...s.pendingActions, [jobId]: undefined },
               selectedArtifactId,
             };
@@ -1150,7 +1364,43 @@ export const createPresentationStudioStore = (
           slideId,
           status,
         };
-        return { slots: { ...s.slots, [key]: next } };
+        const page = /^slide-(\d+)$/u.exec(slideId)?.[1];
+        const slotKeys = Object.keys(s.slots).filter((item) =>
+          item.startsWith(`${jobId}:${slideId}:`),
+        );
+        const ordinal = slotKeys.includes(key) ? slotKeys.indexOf(key) + 1 : slotKeys.length + 1;
+        const subject = `${page ? `第 ${page} 页 · ` : ''}第 ${ordinal} 张素材`;
+        const activity =
+          status === 'generating'
+            ? `${subject} · 正在绘画`
+            : status === 'ready'
+              ? `${subject} · 绘画已完成`
+              : status === 'failed'
+                ? `${subject} · 绘画未完成`
+                : status === 'cancelled'
+                  ? `${subject} · 已取消`
+                  : undefined;
+        const current = s.generationProgressByJob[jobId] ?? {};
+        const changed = activity && status !== existing?.status;
+        return {
+          slots: { ...s.slots, [key]: next },
+          ...(changed
+            ? {
+                generationProgressByJob: {
+                  ...s.generationProgressByJob,
+                  [jobId]: {
+                    ...current,
+                    activity,
+                    activityHistory: appendActivity(
+                      current.activityHistory,
+                      activity,
+                      `image:${slideId}:${slotId}:${event.seq}`,
+                    ),
+                  },
+                },
+              }
+            : {}),
+        };
       });
     },
 

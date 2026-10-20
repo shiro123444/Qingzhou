@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
+import { type PluginBundle, type PluginProfile, resolveProfile } from '@lobechat/cordis-runtime';
 import { z, type ZodTypeAny } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 
@@ -15,6 +16,8 @@ export interface AtomicInvocation {
   readonly signal?: AbortSignal;
 }
 export interface AtomicOperationEvent {
+  /** Trusted, prompt-free subject supplied by the executing capability. */
+  detail?: string;
   errorCode?: string;
   jobId?: string;
   name: string;
@@ -23,9 +26,15 @@ export interface AtomicOperationEvent {
   state: 'started' | 'completed' | 'failed';
   timestamp: string;
 }
+export interface AtomicAgentMetadata {
+  /** Trusted discovery contexts; `skills` opts an operation into composition. */
+  readonly contexts: readonly string[];
+  /** Maximum attempts for this operation in one autonomous composition. */
+  readonly maxCalls?: number;
+}
 export interface AtomicOperation {
   /** Trusted plugin opt-in to agent discovery; never accepted from user input. */
-  agent?: { contexts: string[]; maxCalls?: number };
+  agent?: AtomicAgentMetadata;
   description: string;
   execute: (input: any, invocation: AtomicInvocation) => unknown | Promise<unknown>;
   input: ZodTypeAny;
@@ -37,7 +46,18 @@ export interface AtomicPlugin {
   operations: AtomicOperation[];
   version: string;
 }
+export interface AtomicRuntimeOptions {
+  /** Maximum scopes retained for diagnostics; zero disables retained history. */
+  maxEventScopes?: number;
+  /** Maximum recent operation events per scope. Live event callbacks are unaffected. */
+  maxEventsPerScope?: number;
+}
 const fail = (code: string, message: string) => Object.assign(new Error(message), { code });
+/** Preserve the invocation cancellation contract across tools and model decisions. */
+export const assertAtomicInvocationActive = (invocation: AtomicInvocation): void => {
+  if (invocation.signal?.aborted)
+    throw fail('PRESENTATION_WORKER_CANCELLED', 'Operation cancelled');
+};
 const scopeSchema = z.object({
   userId: z.string().trim().min(1),
   sessionId: z.string().trim().min(1),
@@ -53,11 +73,21 @@ export class AtomicRuntime {
   private readonly changing = new Set<string>();
   private readonly events = new Map<string, AtomicOperationEvent[]>();
   private readonly controllers = new Set<AbortController>();
+  private readonly maxEventScopes: number;
+  private readonly maxEventsPerScope: number;
   private pending: Promise<void> = Promise.resolve();
   private disposed = false;
   private disposal?: Promise<void>;
 
-  constructor(plugins: AtomicPlugin[] = []) {
+  constructor(plugins: AtomicPlugin[] = [], options: AtomicRuntimeOptions = {}) {
+    const limits = z
+      .object({
+        maxEventScopes: z.number().int().nonnegative().safe().default(256),
+        maxEventsPerScope: z.number().int().nonnegative().safe().default(200),
+      })
+      .parse(options);
+    this.maxEventScopes = limits.maxEventScopes;
+    this.maxEventsPerScope = limits.maxEventsPerScope;
     for (const plugin of plugins) this.pending = this.pending.then(() => this.install(plugin));
   }
 
@@ -69,6 +99,11 @@ export class AtomicRuntime {
           'PLUGIN_INVALID',
           'Operations must have unique names inside their plugin namespace',
         );
+      if (
+        operation.agent?.maxCalls !== undefined &&
+        (!Number.isSafeInteger(operation.agent.maxCalls) || operation.agent.maxCalls < 1)
+      )
+        throw fail('PLUGIN_INVALID', 'Agent operation budgets must be positive integers');
       names.add(operation.name);
     }
     return {
@@ -91,11 +126,9 @@ export class AtomicRuntime {
                   'PRESENTATION_INVALID',
                   parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
                 );
-              if (invocation.signal?.aborted)
-                throw fail('PRESENTATION_WORKER_CANCELLED', 'Operation cancelled');
+              assertAtomicInvocationActive(invocation);
               const value = await operation.execute(parsed.data, invocation);
-              if (invocation.signal?.aborted)
-                throw fail('PRESENTATION_WORKER_CANCELLED', 'Operation cancelled');
+              assertAtomicInvocationActive(invocation);
               return operation.output ? operation.output.parse(value) : value;
             },
           });
@@ -153,6 +186,12 @@ export class AtomicRuntime {
     }
   }
 
+  /** Mounted plugin ids, sorted. A whole job leases every participant to pin its version. */
+  async pluginIds(): Promise<string[]> {
+    await this.pending;
+    return [...this.plugins.keys()].sort();
+  }
+
   async acquire(pluginId: string): Promise<() => void> {
     await this.pending;
     if (this.disposed || this.changing.has(pluginId) || !this.plugins.has(pluginId))
@@ -188,9 +227,19 @@ export class AtomicRuntime {
     };
     const publish = (state: AtomicOperationEvent['state'], errorCode?: string) => {
       const item = { ...event, state, errorCode, timestamp: new Date().toISOString() };
-      const history = this.events.get(scopeKey) ?? [];
-      history.push(item);
-      this.events.set(scopeKey, history.slice(-200));
+      if (this.maxEventScopes > 0 && this.maxEventsPerScope > 0) {
+        const history = this.events.get(scopeKey) ?? [];
+        history.push(item);
+        if (history.length > this.maxEventsPerScope)
+          history.splice(0, history.length - this.maxEventsPerScope);
+        // Keep the scopes with the most recent events; eviction only affects diagnostics.
+        this.events.delete(scopeKey);
+        this.events.set(scopeKey, history);
+        if (this.events.size > this.maxEventScopes) {
+          const oldest = this.events.keys().next().value;
+          if (oldest !== undefined) this.events.delete(oldest);
+        }
+      }
       invocation.onEvent?.(item);
     };
     try {
@@ -212,13 +261,15 @@ export class AtomicRuntime {
 
   async catalog() {
     await this.pending;
-    return this.registry.list().map((tool) => ({
-      ...tool,
-      agent: this.plugins
-        .get(tool.name.split('.')[0])
-        ?.operations.find((op) => op.name === tool.name)?.agent,
-      pluginVersion: this.plugins.get(tool.name.split('.')[0])?.version,
-    }));
+    return this.registry.list().map((tool) => {
+      const plugin = this.plugins.get(tool.name.split('.')[0]);
+      const agent = plugin?.operations.find((operation) => operation.name === tool.name)?.agent;
+      return {
+        ...tool,
+        agent: agent ? { ...agent, contexts: [...agent.contexts] } : undefined,
+        pluginVersion: plugin?.version,
+      };
+    });
   }
   async snapshot(scope: RuntimeScope) {
     scopeSchema.parse(scope);
@@ -232,7 +283,7 @@ export class AtomicRuntime {
         state: instance.state,
         error: instance.error,
       })),
-      operations: this.events.get(JSON.stringify([scope.userId, scope.sessionId])) ?? [],
+      operations: [...(this.events.get(JSON.stringify([scope.userId, scope.sessionId])) ?? [])],
     };
   }
 
@@ -276,4 +327,26 @@ export class AtomicRuntime {
     })();
     return this.disposal;
   }
+}
+
+/** Resolve a trusted application profile before allocating any plugin resources. */
+export function createAtomicRuntimeFromProfile(definition: {
+  bundles: Readonly<Record<string, PluginBundle>>;
+  modules: Readonly<Record<string, AtomicPlugin>>;
+  profile: PluginProfile;
+}): AtomicRuntime {
+  const plugins = resolveProfile(definition.profile, definition.bundles).map((entry) => {
+    const plugin = Object.hasOwn(definition.modules, entry.use)
+      ? definition.modules[entry.use]
+      : undefined;
+    if (!plugin) throw fail('PLUGIN_NOT_FOUND', `Unknown atomic module ${entry.use}`);
+    if (entry.id !== plugin.id || Object.keys(entry.config ?? {}).length) {
+      throw fail(
+        'PLUGIN_INVALID',
+        'Atomic profiles preserve plugin IDs; configure modules in their trusted factories',
+      );
+    }
+    return plugin;
+  });
+  return new AtomicRuntime(plugins);
 }

@@ -1,3 +1,4 @@
+import type { AgentPluginComposition } from '../core/cordis-host';
 import type { AgentEvent } from './event';
 import type { AgentInstruction, AgentRuntimeContext } from './instruction';
 import type { AgentState } from './state';
@@ -18,6 +19,8 @@ export type InstructionExecutor = (
 }>;
 
 export interface RuntimeConfig {
+  /** Trusted application profile; never sourced from model arguments. */
+  composition?: AgentPluginComposition;
   /** Custom executors for specific instruction types */
   executors?: Partial<Record<AgentInstruction['type'], InstructionExecutor>>;
   /** Function to get operation context and abort controller */

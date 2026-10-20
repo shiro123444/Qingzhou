@@ -55,11 +55,38 @@ const readNativeFiberError = (fiber: NativeFiber | undefined): unknown =>
 export interface CordisAtomicHostOptions {
   /** Injected for tests; defaults to a fresh root context. */
   readonly native?: NativeContext;
+  /** Names isolated by withScope(); all other services remain host-wide. */
+  readonly scopedServices?: readonly string[];
   readonly tools?: ToolRegistry;
 }
 
+/** Extend this map when a platform service gains a stable public contract. */
+export interface CordisHostServices {
+  'cordis.tools': ToolRegistry;
+}
+
+export interface CordisServiceContext extends RuntimeContext {
+  get: (<K extends keyof CordisHostServices>(name: K) => CordisHostServices[K] | undefined) &
+    (<T = unknown>(name: string) => T | undefined);
+  has: (name: string) => boolean;
+  plugin: (
+    manifest: CordisServicePluginManifest,
+    config?: unknown,
+    isStaging?: boolean,
+  ) => Promise<KernelFiber>;
+  readonly root: CordisServiceContext;
+  withScope: (scope: ScopeKey) => CordisServiceContext;
+}
+
+export interface CordisServicePluginManifest extends Omit<RuntimePluginManifest, 'apply'> {
+  apply: (
+    context: CordisServiceContext,
+    config?: unknown,
+  ) => ReturnType<RuntimePluginManifest['apply']>;
+}
+
 export interface CordisAtomicInstance {
-  readonly context: RuntimeContext;
+  readonly context: CordisServiceContext;
   dispose: () => Promise<void>;
   readonly error: unknown;
   readonly fiber: KernelFiber;
@@ -141,7 +168,7 @@ interface AdaptedContextOptions {
  * real Cordis context. It carries the trusted `scope` metadata that
  * {@link ToolRegistry} reads and delegates every operation upstream.
  */
-class CordisRuntimeContext implements RuntimeContext {
+class CordisRuntimeContext implements CordisServiceContext {
   readonly isRoot: boolean;
   readonly scope?: ScopeKey;
 
@@ -158,7 +185,7 @@ class CordisRuntimeContext implements RuntimeContext {
     return this.host.ownerFor(this.native.fiber);
   }
 
-  get root(): RuntimeContext {
+  get root(): CordisServiceContext {
     return this.host.context;
   }
 
@@ -200,11 +227,32 @@ class CordisRuntimeContext implements RuntimeContext {
 
   provide<T>(name: string, service: T): Disposable {
     this.host.assertOpen();
+    if (this.isStaging) {
+      throw Object.assign(new Error('Staged tool candidates cannot publish services'), {
+        code: 'CORDIS_STAGED_SERVICE_UNSUPPORTED',
+      });
+    }
     return this.native.provide(name, service);
   }
 
+  get<K extends keyof CordisHostServices>(name: K): CordisHostServices[K] | undefined;
+  get<T = unknown>(name: string): T | undefined;
+  get<T = unknown>(name: string): T | undefined {
+    this.host.assertOpen();
+    return this.native.get(name);
+  }
+
+  has(name: string): boolean {
+    this.host.assertOpen();
+    // Presence differs from get() for an active provider whose value is
+    // undefined. Read the native public reflection record, not a second map.
+    const label = this.native[Cordis.Context.isolate][name];
+    const implementation = label && this.native.reflect.store[label];
+    return Boolean(implementation && mapFiberState(implementation.fiber.state) === 'active');
+  }
+
   async plugin(
-    manifest: RuntimePluginManifest,
+    manifest: CordisServicePluginManifest,
     config?: unknown,
     isStaging = false,
   ): Promise<KernelFiber> {
@@ -223,8 +271,8 @@ class CordisRuntimeContext implements RuntimeContext {
    * `host.context.withScope(scopeKey)`) may safely attach call-local fields
    * without polluting concurrent calls.
    */
-  withScope(scope: ScopeKey): RuntimeContext {
-    return new CordisRuntimeContext(this.host, this.native, {
+  withScope(scope: ScopeKey): CordisServiceContext {
+    return new CordisRuntimeContext(this.host, this.host.scopeContext(this.native, scope), {
       isRoot: this.isRoot,
       scope,
     });
@@ -235,7 +283,7 @@ class CordisAtomicInstanceImpl implements CordisAtomicInstance {
   constructor(
     readonly id: string,
     readonly version: string,
-    readonly context: RuntimeContext,
+    readonly context: CordisServiceContext,
     private readonly owner: CordisFiberOwner,
   ) {}
 
@@ -258,18 +306,24 @@ class CordisAtomicInstanceImpl implements CordisAtomicInstance {
 
 export class CordisAtomicHost {
   /** Root adapted context; `withScope()` returns a fresh object each call. */
-  readonly context: RuntimeContext;
+  readonly context: CordisServiceContext;
   readonly native: NativeContext;
   readonly tools: ToolRegistry;
 
   private readonly owners = new WeakMap<NativeFiber, CordisFiberOwner>();
   private readonly stagedFibers = new WeakSet<NativeFiber>();
+  private readonly scopedServices: readonly string[];
+  private readonly scopeLabels = new Map<ScopeKey, Map<string, symbol>>();
   /** Captured once so root-owner detection does not depend on read identity. */
   private readonly rootNativeFiber: NativeFiber;
   private disposed = false;
   private disposal?: Promise<void>;
 
   constructor(options: CordisAtomicHostOptions = {}) {
+    this.scopedServices = [...new Set(options.scopedServices ?? [])];
+    if (this.scopedServices.some((name) => !name.trim() || name === 'cordis.tools')) {
+      throw new Error('Scoped services must have non-empty names; cordis.tools is host-wide');
+    }
     this.native = options.native ?? new Cordis.Context();
     this.rootNativeFiber = this.native.fiber;
     this.tools = options.tools ?? new ToolRegistry();
@@ -277,6 +331,28 @@ export class CordisAtomicHost {
       isRoot: true,
       scope: undefined,
     });
+    this.native.provide('cordis.tools', this.tools);
+  }
+
+  /** Native isolation labels route service lookup; no second service store. */
+  scopeContext(parent: NativeContext, scope: ScopeKey): NativeContext {
+    this.assertOpen();
+    let context = parent;
+    if (!this.scopedServices.length) return context;
+    let labels = this.scopeLabels.get(scope);
+    if (!labels) {
+      labels = new Map();
+      this.scopeLabels.set(scope, labels);
+    }
+    for (const name of this.scopedServices) {
+      let label = labels.get(name);
+      if (!label) {
+        label = Symbol(name);
+        labels.set(name, label);
+      }
+      context = context.isolate(name, label);
+    }
+    return context;
   }
 
   ownerFor(fiber: NativeFiber): CordisFiberOwner {
@@ -292,7 +368,10 @@ export class CordisAtomicHost {
     return this.stagedFibers.has(fiber);
   }
 
-  async mount(manifest: RuntimePluginManifest, staged = false): Promise<CordisAtomicInstance> {
+  async mount(
+    manifest: CordisServicePluginManifest,
+    staged = false,
+  ): Promise<CordisAtomicInstance> {
     this.assertOpen();
     const { context, owner } = await this.attachNative(
       this.native,
@@ -329,7 +408,9 @@ export class CordisAtomicHost {
   dispose(): Promise<void> {
     if (this.disposal) return this.disposal;
     this.disposed = true;
-    this.disposal = Promise.resolve().then(() => this.native.fiber.dispose());
+    this.disposal = Promise.resolve()
+      .then(() => this.native.fiber.dispose())
+      .finally(() => this.scopeLabels.clear());
     return this.disposal;
   }
 
@@ -340,22 +421,26 @@ export class CordisAtomicHost {
    */
   async attachNative(
     parent: NativeContext,
-    manifest: RuntimePluginManifest,
+    manifest: CordisServicePluginManifest,
     staged: boolean,
     config: unknown,
     scope: ScopeKey | undefined,
-  ): Promise<{ context: RuntimeContext; owner: CordisFiberOwner }> {
+  ): Promise<{ context: CordisServiceContext; owner: CordisFiberOwner }> {
     this.assertOpen();
 
     let capturedFiber: NativeFiber | undefined;
     let capturedContext: CordisRuntimeContext | undefined;
+    let firstActivation = true;
 
     const pluginObject = {
       name: `${manifest.id}@${manifest.version}`,
       inject: manifest.inject,
       apply: (nativeContext: NativeContext, applyConfig?: unknown) => {
         capturedFiber = nativeContext.fiber;
-        if (staged) this.stagedFibers.add(nativeContext.fiber);
+        // A dependency restart reuses this closure. A committed tool plugin
+        // must remain live when Cordis reactivates it later.
+        if (firstActivation && staged) this.stagedFibers.add(nativeContext.fiber);
+        firstActivation = false;
         capturedContext = new CordisRuntimeContext(this, nativeContext, {
           isRoot: false,
           scope,

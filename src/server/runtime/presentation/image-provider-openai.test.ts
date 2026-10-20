@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type {
   ImageGenerationContext,
@@ -33,6 +33,69 @@ const optionsFor = (fetcher: OpenAIImageFetcher, overrides: Record<string, unkno
 });
 
 describe('C-88 OpenAI-compatible ImageGenerationPort adapter', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('records HTTP status without reading or exposing an upstream error body', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const json = vi.fn(async () => ({ error: 'sk-test-secret private prompt' }));
+    const port = createOpenAIImageGenerationPort(
+      optionsFor(async () => ({ ok: false, status: 524, json })),
+    );
+    await expect(port.generate({ prompt: 'private prompt' }, context())).rejects.toMatchObject({
+      code: 'IMAGE_UNAVAILABLE',
+      message: 'Image provider returned HTTP 524',
+    });
+    expect(json).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith('[presentation.image] request failed', {
+      httpStatus: 524,
+      operation: 'generate',
+      phase: 'response',
+    });
+    expect(JSON.stringify(warn.mock.calls)).not.toMatch(/sk-test-secret|private prompt/u);
+  });
+
+  it.each(['ECONNRESET', 'sk-test-secret'])(
+    'only records allow-listed transport codes (%s)',
+    async (code) => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const port = createOpenAIImageGenerationPort(
+        optionsFor(async () => {
+          throw new TypeError('private prompt sk-test-secret', { cause: { code } });
+        }),
+      );
+      const expected = code === 'ECONNRESET' ? code : 'UNKNOWN';
+      await expect(port.generate({ prompt: 'private prompt' }, context())).rejects.toMatchObject({
+        code: 'IMAGE_UNAVAILABLE',
+        message: `Image provider connection failed (${expected})`,
+      });
+      expect(warn).toHaveBeenCalledWith('[presentation.image] request failed', {
+        operation: 'generate',
+        phase: 'transport',
+        transportCode: expected,
+      });
+      expect(JSON.stringify(warn.mock.calls)).not.toMatch(/sk-test-secret|private prompt/u);
+    },
+  );
+
+  it('distinguishes a failed local asset save from a failed image request', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const port = createOpenAIImageGenerationPort(
+      optionsFor(async () => response({ data: [{ b64_json: 'aGVsbG8=' }] }), {
+        assetSink: async () => {
+          throw new Error('private filesystem details');
+        },
+      }),
+    );
+    await expect(port.generate({ prompt: 'image' }, context())).rejects.toMatchObject({
+      code: 'IMAGE_UNAVAILABLE',
+      message: 'Generated image could not be saved',
+    });
+    expect(warn).toHaveBeenCalledWith('[presentation.image] asset processing failed', {
+      phase: 'persist',
+    });
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('private filesystem');
+  });
+
   it('maps prompt, size, quality and count to the Images API without exposing the key', async () => {
     const signal = new AbortController().signal;
     const fetcher = vi.fn<OpenAIImageFetcher>(async (_endpoint, init) => {
@@ -134,7 +197,11 @@ describe('C-88 OpenAI-compatible ImageGenerationPort adapter', () => {
     const result = await port.generate({ prompt: 'image' }, context());
 
     expect(result[0]?.asset.ref).toBe('asset://session-1/x');
-    expect(resolveAssetUri).toHaveBeenCalledWith(scope, 'https://cdn.example.test/x.png');
+    expect(resolveAssetUri).toHaveBeenCalledWith(
+      scope,
+      'https://cdn.example.test/x.png',
+      undefined,
+    );
     expect(await port.resolveAsset(scope, result[0]!.asset)).toEqual(result[0]?.metadata);
     expect(await port.resolveAsset(otherScope, result[0]!.asset)).toBeNull();
   });
@@ -253,6 +320,48 @@ describe('C-88 OpenAI-compatible ImageGenerationPort adapter', () => {
     await expect(port.generate({ prompt: 'image' }, context())).rejects.toMatchObject({
       code: 'IMAGE_PAYLOAD_INVALID',
     });
+  });
+
+  it('sends owned style references through the edits endpoint as multipart images', async () => {
+    const fetcher = vi.fn<OpenAIImageFetcher>(async (endpoint, init) => {
+      expect(endpoint).toBe('https://images.example.test/v1/images/edits');
+      expect(init.headers).toEqual({ Authorization: 'Bearer sk-test-secret' });
+      expect(init.body).toBeInstanceOf(FormData);
+      const body = init.body as FormData;
+      expect(body.get('prompt')).toBe('new watercolor stationery, no text');
+      expect(body.get('background')).toBe('opaque');
+      expect(body.getAll('image[]')).toHaveLength(1);
+      return response({ data: [{ url: 'https://cdn.example.test/styled.png' }] });
+    });
+    const readReferenceAsset = vi.fn(async () => ({
+      bytes: new Uint8Array([1, 2, 3, 4]),
+      mimeType: 'image/png',
+    }));
+    const port = createOpenAIImageGenerationPort(optionsFor(fetcher, { readReferenceAsset }));
+    const result = await port.generate(
+      {
+        background: 'opaque',
+        prompt: 'new watercolor stationery, no text',
+        referenceAssetRefs: ['template-page-1'],
+      },
+      context(),
+    );
+    expect(result[0]?.asset.ref).toBe('https://cdn.example.test/styled.png');
+    expect(readReferenceAsset).toHaveBeenCalledWith(scope, 'template-page-1');
+  });
+
+  it('rejects caller-supplied URLs as style references', async () => {
+    const port = createOpenAIImageGenerationPort(
+      optionsFor(vi.fn(), {
+        readReferenceAsset: async () => ({ bytes: new Uint8Array([1]), mimeType: 'image/png' }),
+      }),
+    );
+    await expect(
+      port.generate(
+        { prompt: 'copy this', referenceAssetRefs: ['https://evil.example/ref.png'] },
+        context(),
+      ),
+    ).rejects.toMatchObject({ code: 'IMAGE_REQUEST_INVALID' });
   });
 
   it('fails closed when explicit provider credentials are missing', () => {

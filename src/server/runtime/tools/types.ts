@@ -6,8 +6,8 @@ import type {
   ToolExecutionResult,
 } from '@/server/services/toolExecution/types';
 
-import type { Context } from '../../../../packages/cordis-kernel/src/context';
 import type { ToolRegistry } from '../../../../packages/cordis-kernel/src/tool';
+import type { RuntimeContext } from '../../../../packages/cordis-kernel/src/types';
 
 export interface McpClientLike {
   callTool: (name: string, args: unknown) => Promise<unknown>;
@@ -41,7 +41,7 @@ export interface BuiltinToolsPluginOptions {
 }
 
 export interface CordisToolBridgeDeps {
-  context?: Context;
+  context?: RuntimeContext;
   fallbackExecutor?: (
     payload: ChatToolPayload,
     context: ToolExecutionContext,

@@ -90,6 +90,13 @@ describe('QQGatewayConnection', () => {
   function createConnection(overrides?: Partial<QQGatewayOptions>) {
     const api = createMockApi();
     const options: QQGatewayOptions = {
+      forwarder: vi.fn((url, body) =>
+        fetch(url, {
+          body,
+          headers: { 'Content-Type': 'application/json' },
+          method: 'POST',
+        }),
+      ),
       log: vi.fn(),
       webhookUrl: 'http://localhost:3000/api/agent/webhooks/qq/test_app',
       ...overrides,
@@ -239,6 +246,26 @@ describe('QQGatewayConnection', () => {
   });
 
   describe('dispatch event forwarding', () => {
+    it('requires an explicit authenticated transport, without a naked fetch fallback', () => {
+      expect(() => createConnection({ forwarder: undefined })).toThrow(
+        'Authenticated QQ forwarder required',
+      );
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it('logs non-2xx forwarding failures', async () => {
+      const forwarder = vi.fn().mockResolvedValue(new Response('denied', { status: 403 }));
+      const { conn, options } = createConnection({ forwarder });
+      await (conn as any).forwardEvent({ d: {}, op: 0, t: 'GROUP_AT_MESSAGE_CREATE' });
+      expect(forwarder).toHaveBeenCalledOnce();
+      expect(options.log).toHaveBeenCalledWith(
+        'Failed to forward event %s to webhook: %O',
+        'GROUP_AT_MESSAGE_CREATE',
+        expect.objectContaining({ message: 'QQ forwarding rejected: HTTP 403' }),
+      );
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
     it('should forward message events to webhook URL', async () => {
       const { connectPromise, ws } = await connectAndGetWs();
 

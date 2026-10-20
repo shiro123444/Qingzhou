@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { BotInboundModel } from '@/database/models/botInbound';
+import { inboundExecution } from '../BotInboundService';
 
 const mockGetUserSettings = vi.hoisted(() => vi.fn());
 const mockExecAgent = vi.hoisted(() => vi.fn());
+const mockInterruptTask = vi.hoisted(() => vi.fn().mockResolvedValue({ success: true }));
 const mockFormatPrompt = vi.hoisted(() => vi.fn());
 const mockGetPlatform = vi.hoisted(() => vi.fn());
 const mockIsQueueAgentRuntimeEnabled = vi.hoisted(() => vi.fn());
@@ -28,6 +31,7 @@ vi.mock('@/envs/app', () => ({
 vi.mock('@/server/services/aiAgent', () => ({
   AiAgentService: vi.fn().mockImplementation(() => ({
     execAgent: mockExecAgent,
+    interruptTask: mockInterruptTask,
   })),
 }));
 
@@ -45,6 +49,11 @@ vi.mock('@/server/services/systemAgent', () => ({
 
 vi.mock('@/server/services/bot/formatPrompt', () => ({
   formatPrompt: mockFormatPrompt,
+}));
+
+vi.mock('@/server/services/bot/reactionState', () => ({
+  saveReactionState: vi.fn().mockResolvedValue(undefined),
+  clearReactionState: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('@/server/services/bot/platforms', async (importOriginal) => {
@@ -110,6 +119,9 @@ function createClient() {
 describe('AgentBridgeService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.spyOn(BotInboundModel.prototype, 'acquireSession').mockResolvedValue('session-owner');
+    vi.spyOn(BotInboundModel.prototype, 'attachOperation').mockResolvedValue({ stopRequested: 0 });
+    vi.spyOn(BotInboundModel.prototype, 'releaseSession').mockResolvedValue(undefined);
     mockExecAgent.mockResolvedValue({
       assistantMessageId: 'assistant-msg-1',
       createdAt: new Date().toISOString(),
@@ -121,6 +133,94 @@ describe('AgentBridgeService', () => {
     mockGetUserSettings.mockResolvedValue({ general: { timezone: 'UTC' } });
     mockIsQueueAgentRuntimeEnabled.mockReturnValue(true);
   });
+
+  it('defers a message before platform effects when another instance owns the session', async () => {
+    vi.spyOn(BotInboundModel.prototype, 'acquireSession').mockResolvedValueOnce(null);
+    const thread = createThread();
+    await expect(
+      new AgentBridgeService(FAKE_DB, USER_ID).handleMention(thread, createMessage(), {
+        agentId: 'agent-1',
+        botContext: {
+          platform: 'qq',
+          applicationId: 'app',
+          platformThreadId: THREAD_ID,
+          isOwner: false,
+          senderExternalUserId: 'tester',
+        },
+      }),
+    ).rejects.toThrow('inbound_session_busy');
+    expect(mockExecAgent).not.toHaveBeenCalled();
+    expect(thread.post).not.toHaveBeenCalled();
+  });
+
+  it('interrupts a started operation and surfaces uncertainty when session attachment fails', async () => {
+    vi.spyOn(BotInboundModel.prototype, 'attachOperation').mockRejectedValueOnce(
+      new Error('database lost'),
+    );
+    mockExecAgent.mockResolvedValueOnce({ success: true, operationId: 'op-1', topicId: 'topic-1' });
+    const thread = createThread();
+    await expect(
+      inboundExecution.run({ assertHeld: () => {} }, () =>
+        new AgentBridgeService(FAKE_DB, USER_ID).handleMention(thread, createMessage(), {
+          agentId: 'agent-1',
+          botContext: { platform: 'qq', applicationId: 'app', platformThreadId: THREAD_ID } as any,
+        }),
+      ),
+    ).rejects.toThrow('backend_unavailable');
+    expect(mockInterruptTask).toHaveBeenCalledWith({ operationId: 'op-1' });
+    // Only the initial acknowledgement: no misleading second error/final message.
+    expect(thread.post).toHaveBeenCalledTimes(1);
+  });
+
+  it('finishes local lifecycle without bypassing the durable final reply worker', async () => {
+    mockIsQueueAgentRuntimeEnabled.mockReturnValue(false);
+    mockExecAgent.mockResolvedValueOnce({ success: true, operationId: 'op-1', topicId: 'topic-1' });
+    const thread = createThread();
+    const task = new AgentBridgeService(FAKE_DB, USER_ID).handleMention(thread, createMessage(), {
+      agentId: 'agent-1',
+      botContext: { platform: 'qq', applicationId: 'app', platformThreadId: THREAD_ID } as any,
+    });
+    await vi.waitFor(() => expect(BotInboundModel.prototype.attachOperation).toHaveBeenCalled());
+    const hook = mockExecAgent.mock.calls[0][0].hooks.find((h: any) => h.type === 'onComplete');
+    await hook.handler({ reason: 'done', lastAssistantContent: 'final answer' });
+    await task;
+    expect(thread.post).toHaveBeenCalledTimes(1);
+    expect(BotInboundModel.prototype.releaseSession).toHaveBeenCalled();
+  });
+
+  it.each(['failed result', 'rejection'])(
+    'surfaces local startup %s to the inbound ledger',
+    async (failure) => {
+      mockIsQueueAgentRuntimeEnabled.mockReturnValue(false);
+      mockGetPlatform.mockReturnValue({ id: 'wechat', supportsMessageEdit: false });
+      if (failure === 'failed result') {
+        mockExecAgent.mockResolvedValueOnce({
+          success: false,
+          operationId: 'op-1',
+          topicId: 'topic-1',
+          error: 'startup failed',
+        });
+      } else {
+        mockExecAgent.mockRejectedValueOnce(new Error('S3 configuration missing'));
+      }
+      const thread = createThread();
+      await expect(
+        inboundExecution.run({ assertHeld: () => {} }, () =>
+          new AgentBridgeService(FAKE_DB, USER_ID).handleMention(thread, createMessage(), {
+            agentId: 'agent-1',
+            botContext: {
+              platform: 'wechat',
+              applicationId: 'app',
+              platformThreadId: THREAD_ID,
+            } as any,
+          }),
+        ),
+      ).rejects.toThrow('backend_unavailable');
+      expect(thread.post).toHaveBeenCalledTimes(1);
+      expect(BotInboundModel.prototype.releaseSession).toHaveBeenCalled();
+      expect(BotInboundModel.prototype.attachOperation).not.toHaveBeenCalled();
+    },
+  );
 
   it('calls execAgent with hooks in queue mode for mention', async () => {
     const service = new AgentBridgeService(FAKE_DB, USER_ID);
@@ -204,8 +304,7 @@ describe('AgentBridgeService', () => {
     const progressMessageIdFromHooks = (): unknown => {
       const call = mockExecAgent.mock.calls.at(-1);
       const hooks = call?.[0]?.hooks as
-        | Array<{ id?: string; webhook?: { body?: Record<string, unknown> } }>
-        | undefined;
+        Array<{ id?: string; webhook?: { body?: Record<string, unknown> } }> | undefined;
       return hooks?.find((h) => h.id === 'bot-completion')?.webhook?.body?.progressMessageId;
     };
 

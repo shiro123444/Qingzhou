@@ -4,6 +4,7 @@ import { Flexbox } from '@lobehub/ui';
 import { memo } from 'react';
 import { useParams } from 'react-router-dom';
 
+import CommunityDetailFetchError from '@/features/CommunityDetail/FetchError';
 import { DetailProvider } from '@/features/MCPPluginDetail/DetailProvider';
 import Header from '@/features/MCPPluginDetail/Header';
 import { useFetchInstalledPlugins } from '@/hooks/useFetchInstalledPlugins';
@@ -25,11 +26,13 @@ const McpDetailPage = memo<McpDetailPageProps>(({ mobile }) => {
 
   const { version } = useQuery() as { version?: string };
   const useMcpDetail = useDiscoverStore((s) => s.useFetchMcpDetail);
-  const { data, isLoading } = useMcpDetail({ identifier, version });
+  const { data, error, isLoading, mutate } = useMcpDetail({ identifier, version });
 
   useFetchInstalledPlugins();
 
   if (isLoading) return <Loading />;
+  if (error && !data)
+    return <CommunityDetailFetchError error={error} onRetry={() => void mutate()} />;
   if (!data) return <NotFound />;
 
   return (

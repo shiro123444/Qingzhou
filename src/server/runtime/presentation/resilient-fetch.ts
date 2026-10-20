@@ -4,8 +4,9 @@ import { setTimeout } from 'node:timers/promises';
 export const createPresentationChatFetch =
   (fetcher: typeof fetch): typeof fetch =>
   async (input, init) => {
-    const timeout = AbortSignal.timeout(90_000);
-    const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+    // Provider calls already carry their cancellation/deadline. A shorter hidden timeout
+    // used to discard large visual observations before their explicit budget elapsed.
+    const signal = init?.signal ?? AbortSignal.timeout(90_000);
     for (let attempt = 0; ; attempt += 1) {
       try {
         return await fetcher(input, { ...init, signal });

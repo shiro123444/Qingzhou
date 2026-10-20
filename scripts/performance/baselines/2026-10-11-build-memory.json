@@ -1,0 +1,302 @@
+{
+  "build_memory_limit_enforced": false,
+  "compiler_trials": [
+    {
+      "started_at_utc": "2026-10-11T03:10:46.447822+00:00",
+      "elapsed_seconds": 104.36036981298821,
+      "exit_code": 1,
+      "phases": {
+        "startup": {
+          "first_seen_seconds": 0.01768957602325827,
+          "samples": 1,
+          "peak_tree_rss_bytes": 16084992,
+          "peak_process_rss_bytes": 16084992,
+          "max_processes": 1
+        },
+        "spa": {
+          "first_seen_seconds": 0.23099310602992773,
+          "samples": 113,
+          "peak_tree_rss_bytes": 3852046336,
+          "peak_process_rss_bytes": 3772833792,
+          "max_processes": 8
+        },
+        "next_compile": {
+          "first_seen_seconds": 25.829088796977885,
+          "samples": 330,
+          "peak_tree_rss_bytes": 10215510016,
+          "peak_process_rss_bytes": 10075869184,
+          "max_processes": 5
+        },
+        "page_data": {
+          "first_seen_seconds": 101.555409891007,
+          "samples": 10,
+          "peak_tree_rss_bytes": 9221423104,
+          "peak_process_rss_bytes": 9025228800,
+          "max_processes": 7
+        }
+      },
+      "peak_tree_rss_bytes": 10215510016,
+      "largest_child_maxrss_kib": 9847140,
+      "child_cpu_seconds": 660.799538,
+      "log": "/tmp/qingzhou-compact-20261011/compact-4c4g-host-build.log",
+      "notes": [
+        "RSS sum can double-count shared pages; 200ms sampling can miss transient peaks.",
+        "Kernel maxrss is a single child high-water mark, not simultaneous tree usage.",
+        "No credentials or environment captured; phase markers come from build stdout."
+      ],
+      "label": "turbopack-before-tracing-fix",
+      "node_heap_limit_mib": 1536,
+      "raw_result": "/tmp/qingzhou-compact-20261011/compact-4c4g-host-build.json"
+    },
+    {
+      "started_at_utc": "2026-10-11T03:22:07.749499+00:00",
+      "elapsed_seconds": 80.97281094000209,
+      "exit_code": 1,
+      "phases": {
+        "startup": {
+          "first_seen_seconds": 0.019899871025700122,
+          "samples": 7,
+          "peak_tree_rss_bytes": 296935424,
+          "peak_process_rss_bytes": 230318080,
+          "max_processes": 3
+        },
+        "next_compile": {
+          "first_seen_seconds": 1.5053204279975034,
+          "samples": 361,
+          "peak_tree_rss_bytes": 2316378112,
+          "peak_process_rss_bytes": 2062405632,
+          "max_processes": 4
+        }
+      },
+      "peak_tree_rss_bytes": 2316378112,
+      "largest_child_maxrss_kib": 2019700,
+      "child_cpu_seconds": 145.03495700000002,
+      "log": "/tmp/qingzhou-compact-20261011/webpack-4c4g-build.log",
+      "notes": [
+        "RSS sum can double-count shared pages; 200ms sampling can miss transient peaks.",
+        "Kernel maxrss is a single child high-water mark, not simultaneous tree usage.",
+        "No credentials or environment captured; phase markers come from build stdout."
+      ],
+      "label": "webpack-heap-too-small",
+      "node_heap_limit_mib": 1536,
+      "raw_result": "/tmp/qingzhou-compact-20261011/webpack-4c4g-build.json"
+    },
+    {
+      "started_at_utc": "2026-10-11T03:24:32.495197+00:00",
+      "elapsed_seconds": 162.61099427199224,
+      "exit_code": 1,
+      "phases": {
+        "startup": {
+          "first_seen_seconds": 0.02260413795011118,
+          "samples": 7,
+          "peak_tree_rss_bytes": 303255552,
+          "peak_process_rss_bytes": 236462080,
+          "max_processes": 3
+        },
+        "next_compile": {
+          "first_seen_seconds": 1.5159025479806587,
+          "samples": 739,
+          "peak_tree_rss_bytes": 3516473344,
+          "peak_process_rss_bytes": 3261325312,
+          "max_processes": 4
+        }
+      },
+      "peak_tree_rss_bytes": 3516473344,
+      "largest_child_maxrss_kib": 3184888,
+      "child_cpu_seconds": 297.431128,
+      "log": "/tmp/qingzhou-compact-20261011/webpack-4c4g-2560-build.log",
+      "notes": [
+        "RSS sum can double-count shared pages; 200ms sampling can miss transient peaks.",
+        "Kernel maxrss is a single child high-water mark, not simultaneous tree usage.",
+        "No credentials or environment captured; phase markers come from build stdout."
+      ],
+      "label": "webpack-heap-too-small",
+      "node_heap_limit_mib": 2560,
+      "raw_result": "/tmp/qingzhou-compact-20261011/webpack-4c4g-2560-build.json"
+    },
+    {
+      "started_at_utc": "2026-10-11T03:28:00.796831+00:00",
+      "elapsed_seconds": 173.96897834003903,
+      "exit_code": 1,
+      "phases": {
+        "startup": {
+          "first_seen_seconds": 0.047155928041320294,
+          "samples": 9,
+          "peak_tree_rss_bytes": 303083520,
+          "peak_process_rss_bytes": 236261376,
+          "max_processes": 3
+        },
+        "next_compile": {
+          "first_seen_seconds": 2.0834987420239486,
+          "samples": 801,
+          "peak_tree_rss_bytes": 3603701760,
+          "peak_process_rss_bytes": 3348037632,
+          "max_processes": 4
+        }
+      },
+      "peak_tree_rss_bytes": 3603701760,
+      "largest_child_maxrss_kib": 3269568,
+      "child_cpu_seconds": 277.76899299999997,
+      "log": "/tmp/qingzhou-compact-20261011/webpack-4c4g-no-cache-build.log",
+      "notes": [
+        "RSS sum can double-count shared pages; 200ms sampling can miss transient peaks.",
+        "Kernel maxrss is a single child high-water mark, not simultaneous tree usage.",
+        "No credentials or environment captured; phase markers come from build stdout."
+      ],
+      "label": "webpack-no-cache-heap-too-small",
+      "node_heap_limit_mib": 2560,
+      "raw_result": "/tmp/qingzhou-compact-20261011/webpack-4c4g-no-cache-build.json"
+    },
+    {
+      "started_at_utc": "2026-10-11T03:48:50.949140+00:00",
+      "elapsed_seconds": 141.7519757010159,
+      "exit_code": 1,
+      "phases": {
+        "startup": {
+          "first_seen_seconds": 0.017782130977138877,
+          "samples": 7,
+          "peak_tree_rss_bytes": 303693824,
+          "peak_process_rss_bytes": 237481984,
+          "max_processes": 3
+        },
+        "next_compile": {
+          "first_seen_seconds": 1.5048488979809918,
+          "samples": 656,
+          "peak_tree_rss_bytes": 4533444608,
+          "peak_process_rss_bytes": 4276457472,
+          "max_processes": 4
+        }
+      },
+      "peak_tree_rss_bytes": 4533444608,
+      "largest_child_maxrss_kib": 234396,
+      "child_cpu_seconds": 1.82106,
+      "log": "/tmp/qingzhou-compact-20261011/webpack-8c8g-build.log",
+      "notes": [
+        "RSS sum can double-count shared pages; 200ms sampling can miss transient peaks.",
+        "Kernel maxrss is a single child high-water mark, not simultaneous tree usage.",
+        "No credentials or environment captured; phase markers come from build stdout."
+      ],
+      "label": "webpack-optional-discord-dependency-failure",
+      "node_heap_limit_mib": 4096,
+      "raw_result": "/tmp/qingzhou-compact-20261011/webpack-8c8g-build.json"
+    },
+    {
+      "started_at_utc": "2026-10-11T03:56:36.571223+00:00",
+      "elapsed_seconds": 72.57540207501734,
+      "exit_code": 0,
+      "phases": {
+        "startup": {
+          "first_seen_seconds": 0.019204634008929133,
+          "samples": 7,
+          "peak_tree_rss_bytes": 237326336,
+          "peak_process_rss_bytes": 237326336,
+          "max_processes": 1
+        },
+        "next_compile": {
+          "first_seen_seconds": 1.5080236709909514,
+          "samples": 282,
+          "peak_tree_rss_bytes": 9537323008,
+          "peak_process_rss_bytes": 9405902848,
+          "max_processes": 3
+        },
+        "page_data": {
+          "first_seen_seconds": 64.66524034098256,
+          "samples": 19,
+          "peak_tree_rss_bytes": 8863518720,
+          "peak_process_rss_bytes": 8720072704,
+          "max_processes": 5
+        },
+        "prerender": {
+          "first_seen_seconds": 69.1040936600184,
+          "samples": 1,
+          "peak_tree_rss_bytes": 6463676416,
+          "peak_process_rss_bytes": 5418225664,
+          "max_processes": 5
+        },
+        "finalize": {
+          "first_seen_seconds": 69.32508320600027,
+          "samples": 15,
+          "peak_tree_rss_bytes": 5553709056,
+          "peak_process_rss_bytes": 5422288896,
+          "max_processes": 3
+        }
+      },
+      "peak_tree_rss_bytes": 9537323008,
+      "largest_child_maxrss_kib": 9187756,
+      "child_cpu_seconds": 528.502463,
+      "log": "/tmp/qingzhou-turbo-tracing-20261011/turbo-tracing-complete-build.log",
+      "notes": [
+        "RSS sum can double-count shared pages; 200ms sampling can miss transient peaks.",
+        "Kernel maxrss is a single child high-water mark, not simultaneous tree usage.",
+        "No credentials or environment captured; phase markers come from build stdout."
+      ],
+      "label": "turbopack-tracing-fixed-success-next-only",
+      "node_heap_limit_mib": 2560,
+      "raw_result": "/tmp/qingzhou-turbo-tracing-20261011/turbo-tracing-complete-build.json"
+    },
+    {
+      "started_at_utc": "2026-10-11T04:01:43.053613+00:00",
+      "elapsed_seconds": 280.5735359529499,
+      "exit_code": 0,
+      "phases": {
+        "startup": {
+          "first_seen_seconds": 0.018773738003801554,
+          "samples": 1,
+          "peak_tree_rss_bytes": 17154048,
+          "peak_process_rss_bytes": 17154048,
+          "max_processes": 1
+        },
+        "spa": {
+          "first_seen_seconds": 0.2327672289684415,
+          "samples": 88,
+          "peak_tree_rss_bytes": 3976597504,
+          "peak_process_rss_bytes": 3897544704,
+          "max_processes": 7
+        },
+        "next_compile": {
+          "first_seen_seconds": 19.283360553963576,
+          "samples": 886,
+          "peak_tree_rss_bytes": 4623699968,
+          "peak_process_rss_bytes": 4337500160,
+          "max_processes": 5
+        },
+        "page_data": {
+          "first_seen_seconds": 209.34219857200515,
+          "samples": 93,
+          "peak_tree_rss_bytes": 3495161856,
+          "peak_process_rss_bytes": 1415634944,
+          "max_processes": 8
+        },
+        "prerender": {
+          "first_seen_seconds": 229.41599126998335,
+          "samples": 67,
+          "peak_tree_rss_bytes": 3970895872,
+          "peak_process_rss_bytes": 1826881536,
+          "max_processes": 8
+        },
+        "finalize": {
+          "first_seen_seconds": 243.72601625300013,
+          "samples": 172,
+          "peak_tree_rss_bytes": 2661564416,
+          "peak_process_rss_bytes": 2586001408,
+          "max_processes": 8
+        }
+      },
+      "peak_tree_rss_bytes": 4623699968,
+      "largest_child_maxrss_kib": 4238344,
+      "child_cpu_seconds": 464.92778000000004,
+      "log": "/tmp/qingzhou-compact-20261011/webpack-8c8g-complete-build.log",
+      "notes": [
+        "RSS sum can double-count shared pages; 200ms sampling can miss transient peaks.",
+        "Kernel maxrss is a single child high-water mark, not simultaneous tree usage.",
+        "No credentials or environment captured; phase markers come from build stdout."
+      ],
+      "label": "webpack-compact-full-success",
+      "node_heap_limit_mib": 4096,
+      "raw_result": "/tmp/qingzhou-compact-20261011/webpack-8c8g-complete-build.json"
+    }
+  ],
+  "limits": "200ms RSS sampling can miss brief spikes. RSS tree sums can double-count shared pages. Kernel ru_maxrss may omit detached grandchildren; compare sampled process peaks. Compilers run with different bounded worker settings; wall-clock/CPU ratios are not a language benchmark.",
+  "scope": "Isolated source snapshots; no real .env files; localhost closed-port DB placeholder; bot auto-start disabled. Build memory is not runtime capacity.",
+  "verified_at": "2026-10-11"
+}

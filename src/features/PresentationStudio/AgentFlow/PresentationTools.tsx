@@ -1,7 +1,7 @@
 import { Button, Icon } from '@lobehub/ui';
 import { Checkbox, Popover, Spin } from 'antd';
 import { createStaticStyles } from 'antd-style';
-import { Plus } from 'lucide-react';
+import { Globe2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
 export interface PresentationToolSelection {
@@ -105,7 +105,14 @@ export function PresentationTools({
       }
       onOpenChange={setOpen}
     >
-      <Button aria-label="PPT 技能与搜索" icon={<Icon icon={Plus} size={22} />} type="text" />
+      <Button
+        aria-label={`联网搜索与技能（联网搜索${value.search ? '已开启' : '已关闭'}）`}
+        icon={<Icon icon={Globe2} size={18} />}
+        size="small"
+        type="text"
+      >
+        联网
+      </Button>
     </Popover>
   );
 }

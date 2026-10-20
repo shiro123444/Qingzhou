@@ -2,7 +2,7 @@ export { createQQAdapter, QQAdapter } from './adapter';
 export { QQApiClient } from './api';
 export { signWebhookResponse } from './crypto';
 export { QQFormatConverter } from './format-converter';
-export type { GatewayLogger, QQGatewayOptions } from './gateway';
+export type { GatewayLogger, QQGatewayForwarder, QQGatewayOptions } from './gateway';
 export { QQGatewayConnection } from './gateway';
 export type {
   QQAccessTokenResponse,

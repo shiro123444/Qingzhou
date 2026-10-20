@@ -205,6 +205,26 @@ export class GatewayManager {
     const context: BotPlatformRuntimeContext = {
       appUrl: process.env.APP_URL,
       redisClient: getAgentRuntimeRedisClient() as any,
+      pollingCursorStore:
+        platform === 'wechat'
+          ? {
+              load: async () => {
+                const { BotInboundModel } = await import('@/database/models/botInbound');
+                const { getServerDB } = await import('@/database/core/db-adaptor');
+                return new BotInboundModel(await getServerDB()).getCursor(
+                  `wechat:${provider.applicationId}`,
+                );
+              },
+              save: async (cursor) => {
+                const { BotInboundModel } = await import('@/database/models/botInbound');
+                const { getServerDB } = await import('@/database/core/db-adaptor');
+                await new BotInboundModel(await getServerDB()).saveCursor(
+                  `wechat:${provider.applicationId}`,
+                  cursor,
+                );
+              },
+            }
+          : undefined,
     };
 
     return def.clientFactory.createClient(config, context);

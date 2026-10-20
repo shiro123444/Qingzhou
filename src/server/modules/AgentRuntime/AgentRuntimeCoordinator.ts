@@ -3,7 +3,7 @@ import debug from 'debug';
 
 import { type AgentOperationMetadata, type StepResult } from './AgentStateManager';
 import { createAgentStateManager, createStreamEventManager } from './factory';
-import { type IAgentStateManager, type IStreamEventManager } from './types';
+import { type IAgentStateManager, type IStreamEventManager, type StepLease } from './types';
 
 const log = debug('lobe-server:agent-runtime:coordinator');
 
@@ -214,22 +214,74 @@ export class AgentRuntimeCoordinator {
     return this.stateManager.cleanupExpiredOperations();
   }
 
-  /**
-   * Atomically try to claim a step for execution (distributed lock).
-   */
-  async tryClaimStep(
+  async acquireStepLease(
     operationId: string,
     stepIndex: number,
     ttlSeconds?: number,
-  ): Promise<boolean> {
-    return this.stateManager.tryClaimStep(operationId, stepIndex, ttlSeconds);
+  ): Promise<StepLease | null> {
+    return this.stateManager.acquireStepLease(operationId, stepIndex, ttlSeconds);
   }
 
-  /**
-   * Release the step execution lock.
-   */
-  async releaseStepLock(operationId: string, stepIndex: number): Promise<void> {
-    return this.stateManager.releaseStepLock(operationId, stepIndex);
+  async renewStepLease(lease: StepLease, ttlSeconds?: number): Promise<boolean> {
+    return this.stateManager.renewStepLease(lease, ttlSeconds);
+  }
+
+  async releaseStepLease(lease: StepLease): Promise<boolean> {
+    return this.stateManager.releaseStepLease(lease);
+  }
+
+  async saveAgentStateWithLease(
+    operationId: string,
+    state: AgentState,
+    lease: StepLease,
+  ): Promise<boolean> {
+    const previousState = await this.stateManager.loadAgentState(operationId);
+    const committed = await this.stateManager.saveAgentStateWithLease(operationId, state, lease);
+    if (!committed) return false;
+    if (hasEnteredStreamEndState(previousState?.status, state.status)) {
+      try {
+        await this.streamEventManager.publishAgentRuntimeEnd(
+          operationId,
+          state.stepCount ?? previousState?.stepCount ?? 0,
+          state,
+          state.status,
+        );
+      } catch {
+        // The canonical commit has already succeeded. A notification failure
+        // cannot report the tool step as uncommitted or overwrite it as error.
+        console.error('Agent runtime terminal stream notification failed', { operationId });
+      }
+    }
+    return true;
+  }
+
+  async saveStepResultWithLease(
+    operationId: string,
+    stepResult: StepResult,
+    lease: StepLease,
+  ): Promise<boolean> {
+    const previousState = await this.stateManager.loadAgentState(operationId);
+    const committed = await this.stateManager.saveStepResultWithLease(
+      operationId,
+      stepResult,
+      lease,
+    );
+    if (!committed) return false;
+    if (hasEnteredStreamEndState(previousState?.status, stepResult.newState.status)) {
+      try {
+        await this.streamEventManager.publishAgentRuntimeEnd(
+          operationId,
+          stepResult.newState.stepCount ?? stepResult.stepIndex ?? previousState?.stepCount ?? 0,
+          stepResult.newState,
+          stepResult.newState.status,
+        );
+      } catch {
+        // The canonical commit has already succeeded. A notification failure
+        // cannot report the tool step as uncommitted or overwrite it as error.
+        console.error('Agent runtime terminal stream notification failed', { operationId });
+      }
+    }
+    return true;
   }
 
   /**

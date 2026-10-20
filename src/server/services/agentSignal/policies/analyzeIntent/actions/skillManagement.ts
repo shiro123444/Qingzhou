@@ -790,89 +790,93 @@ export const runSkillDecisionAgentRuntime = async (input: SkillDecisionAgentRunt
     },
   );
 
-  const createdAt = new Date().toISOString();
-  let state: AgentState = {
-    cost: {
-      calculatedAt: createdAt,
-      currency: 'USD',
-      llm: { byModel: [], currency: 'USD', total: 0 },
-      tools: { byTool: [], currency: 'USD', total: 0 },
-      total: 0,
-    },
-    createdAt,
-    lastModified: createdAt,
-    messages,
-    metadata: {
-      agentId: input.payload.agentId,
-      sourceMessageId: input.payload.messageId,
-      topicId: input.payload.topicId,
-      trigger: RequestTrigger.AgentSignal,
-    },
-    modelRuntimeConfig: {
-      model: input.model,
-      provider: DEFAULT_MINI_SYSTEM_AGENT_ITEM.provider,
-    },
-    operationId: `agent-signal-skill-decision:${input.payload.messageId ?? 'message'}`,
-    operationToolSet: {
-      enabledToolIds: [skillDecisionToolIdentifier],
-      manifestMap,
-      sourceMap: { [skillDecisionToolIdentifier]: 'builtin' },
+  try {
+    const createdAt = new Date().toISOString();
+    let state: AgentState = {
+      cost: {
+        calculatedAt: createdAt,
+        currency: 'USD',
+        llm: { byModel: [], currency: 'USD', total: 0 },
+        tools: { byTool: [], currency: 'USD', total: 0 },
+        total: 0,
+      },
+      createdAt,
+      lastModified: createdAt,
+      messages,
+      metadata: {
+        agentId: input.payload.agentId,
+        sourceMessageId: input.payload.messageId,
+        topicId: input.payload.topicId,
+        trigger: RequestTrigger.AgentSignal,
+      },
+      modelRuntimeConfig: {
+        model: input.model,
+        provider: DEFAULT_MINI_SYSTEM_AGENT_ITEM.provider,
+      },
+      operationId: `agent-signal-skill-decision:${input.payload.messageId ?? 'message'}`,
+      operationToolSet: {
+        enabledToolIds: [skillDecisionToolIdentifier],
+        manifestMap,
+        sourceMap: { [skillDecisionToolIdentifier]: 'builtin' },
+        tools,
+      },
+      status: 'idle',
+      stepCount: 0,
+      toolManifestMap: manifestMap,
+      toolSourceMap: { [skillDecisionToolIdentifier]: 'builtin' },
       tools,
-    },
-    status: 'idle',
-    stepCount: 0,
-    toolManifestMap: manifestMap,
-    toolSourceMap: { [skillDecisionToolIdentifier]: 'builtin' },
-    tools,
-    usage: {
-      humanInteraction: {
-        approvalRequests: 0,
-        promptRequests: 0,
-        selectRequests: 0,
-        totalWaitingTimeMs: 0,
+      usage: {
+        humanInteraction: {
+          approvalRequests: 0,
+          promptRequests: 0,
+          selectRequests: 0,
+          totalWaitingTimeMs: 0,
+        },
+        llm: {
+          apiCalls: 0,
+          processingTimeMs: 0,
+          tokens: { input: 0, output: 0, total: 0 },
+        },
+        tools: {
+          byTool: [],
+          totalCalls: 0,
+          totalTimeMs: 0,
+        },
       },
-      llm: {
-        apiCalls: 0,
-        processingTimeMs: 0,
-        tokens: { input: 0, output: 0, total: 0 },
+      userInterventionConfig: { approvalMode: 'headless' },
+    };
+    let context: AgentRuntimeContext = {
+      payload: {
+        model: input.model,
+        provider: DEFAULT_MINI_SYSTEM_AGENT_ITEM.provider,
+        tools,
       },
-      tools: {
-        byTool: [],
-        totalCalls: 0,
-        totalTimeMs: 0,
+      phase: 'user_input',
+      session: {
+        messageCount: messages.length,
+        sessionId: state.operationId,
+        status: state.status,
+        stepCount: state.stepCount,
       },
-    },
-    userInterventionConfig: { approvalMode: 'headless' },
-  };
-  let context: AgentRuntimeContext = {
-    payload: {
-      model: input.model,
-      provider: DEFAULT_MINI_SYSTEM_AGENT_ITEM.provider,
-      tools,
-    },
-    phase: 'user_input',
-    session: {
-      messageCount: messages.length,
-      sessionId: state.operationId,
-      status: state.status,
-      stepCount: state.stepCount,
-    },
-  };
+    };
 
-  for (let step = 0; step < 14; step += 1) {
-    if (submittedDecision) break;
-    if (state.status === 'done' || state.status === 'error' || state.status === 'interrupted') {
-      break;
+    for (let step = 0; step < 14; step += 1) {
+      if (submittedDecision) break;
+      if (state.status === 'done' || state.status === 'error' || state.status === 'interrupted') {
+        break;
+      }
+
+      const result = await runtime.step(state, context);
+      state = result.newState;
+
+      if (!result.nextContext) break;
+      context = result.nextContext;
     }
 
-    const result = await runtime.step(state, context);
-    state = result.newState;
-
-    if (!result.nextContext) break;
-    context = result.nextContext;
+    return submittedDecision ?? createNoopDecision('decision agent did not submit a decision');
+  } finally {
+    await runtime.dispose();
   }
-
-  return submittedDecision ?? createNoopDecision('decision agent did not submit a decision');
 };
 
 /**

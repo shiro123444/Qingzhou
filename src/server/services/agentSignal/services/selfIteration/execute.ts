@@ -1224,23 +1224,23 @@ export const executeSelfIteration = async (
           },
         },
       );
-      let state = createInitialState({ input, manifestMap, runtimeTools });
-      let context: AgentRuntimeContext = {
-        payload: {
-          model: input.model,
-          provider: DEFAULT_MINI_SYSTEM_AGENT_ITEM.provider,
-          tools: runtimeTools,
-        },
-        phase: 'user_input',
-        session: {
-          messageCount: state.messages.length,
-          sessionId: state.operationId,
-          status: state.status,
-          stepCount: state.stepCount,
-        },
-      };
-
       try {
+        let state = createInitialState({ input, manifestMap, runtimeTools });
+        let context: AgentRuntimeContext = {
+          payload: {
+            model: input.model,
+            provider: DEFAULT_MINI_SYSTEM_AGENT_ITEM.provider,
+            tools: runtimeTools,
+          },
+          phase: 'user_input',
+          session: {
+            messageCount: state.messages.length,
+            sessionId: state.operationId,
+            status: state.status,
+            stepCount: state.stepCount,
+          },
+        };
+
         // NOTICE:
         // The public maxSteps policy lives in AgentRuntime via state.maxSteps.
         // The outer loop is only a hard safety cap so force-finish and the final
@@ -1327,7 +1327,11 @@ export const executeSelfIteration = async (
 
         throw error;
       } finally {
-        runSpan.end();
+        try {
+          await runtime.dispose();
+        } finally {
+          runSpan.end();
+        }
       }
     },
   );

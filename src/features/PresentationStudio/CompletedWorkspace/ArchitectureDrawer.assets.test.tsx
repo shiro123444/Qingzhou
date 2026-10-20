@@ -46,6 +46,27 @@ const props = (overrides: Partial<ArchitectureDrawerProps> = {}): ArchitectureDr
 });
 
 describe('ArchitectureDrawer generated page assets', () => {
+  it('explains the current page visual decision and clears it when selecting an older page', () => {
+    const selected = slide(2, []);
+    selected.metadata = {
+      ...selected.metadata,
+      autonomousVisualDecision: {
+        strategy: 'mixed',
+        reason: '原创场景帮助解释双导师协作，事实表格保持可编辑',
+        composition: '表格占左侧，插画按主体比例置右侧',
+      },
+      illustrationStyle: '统一水墨肌理与主色',
+    };
+    const view = render(<ArchitectureDrawer {...props({ selectedSlide: selected })} />);
+    const section = within(screen.getByTestId('drawer-visual-decision-section'));
+    expect(section.getByText('原创场景帮助解释双导师协作，事实表格保持可编辑')).toBeInTheDocument();
+    expect(section.getByText('表格占左侧，插画按主体比例置右侧')).toBeInTheDocument();
+    expect(section.getByText(/统一水墨肌理与主色/)).toBeInTheDocument();
+    view.rerender(
+      <ArchitectureDrawer {...props({ currentIndex: 2, selectedSlide: slide(3, []) })} />,
+    );
+    expect(screen.queryByTestId('drawer-visual-decision-section')).not.toBeInTheDocument();
+  });
   it('shows only ready images referenced by the current page and present in its scoped job artifacts', () => {
     const resolveArtifactUri = vi.fn(
       (id: string) => `/api/runtime/presentation/artifacts/${id}?raw=true`,

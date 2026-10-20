@@ -645,6 +645,10 @@ export const desktopRoutes: RouteObject[] = [
         path: 'page',
       },
 
+      {
+        element: dynamicElement(() => import('@/routes/(main)/sites'), 'Desktop > Sites'),
+        path: 'sites',
+      },
       // Runtime routes
       {
         children: [
@@ -690,6 +694,10 @@ export const desktopRoutes: RouteObject[] = [
 
   ...BusinessDesktopRoutesWithoutMainLayout,
 
+  {
+    element: dynamicElement(() => import('@/routes/share/sites/[siteId]'), 'Desktop > Public Blog'),
+    path: '/sites/view/:siteId',
+  },
   // Share topic route (outside main layout)
   {
     children: [

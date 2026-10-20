@@ -1,0 +1,741 @@
+{
+  "cpu_percent_definition": "100 percent = one logical CPU fully occupied during the measured interval",
+  "ended_at_utc": "2026-10-10T03:21:28.505191+00:00",
+  "host": {
+    "logical_cpus": 16,
+    "kernel": "7.1.8-200.fc44.x86_64",
+    "pid1_comm": "systemd",
+    "self_pid_namespace": "pid:[4026531836]",
+    "pid1_namespace": null,
+    "sampler_cgroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/ptyxis-spawn-0890b16b-9ae7-46ea-aac1-1547d5143915.scope"
+  },
+  "requested_duration_seconds": 15.0,
+  "requested_interval_seconds": 1.0,
+  "sampled_duration_seconds": 14.819208286993671,
+  "samples": [
+    {
+      "elapsed_seconds": 0.20024962502066046,
+      "interval_seconds": null,
+      "host_memory_kib": {
+        "MemTotal": 32568484,
+        "MemAvailable": 17734116,
+        "SwapTotal": 51935736,
+        "SwapFree": 33990488
+      },
+      "visibility": {
+        "visible_pids": 647,
+        "unreadable_stat_pids": 0,
+        "unreadable_cwd_pids": 419
+      },
+      "groups": {
+        "project:build": {
+          "state": "observed",
+          "processes": [
+            {
+              "pid": 730265,
+              "ppid": 730264,
+              "comm": "bun",
+              "start_ticks": 214963759,
+              "rss_kib": 11036,
+              "pss_kib": 4429,
+              "swap_pss_kib": 0,
+              "vm_swap_kib": 0
+            },
+            {
+              "pid": 730266,
+              "ppid": 730265,
+              "comm": "bun",
+              "start_ticks": 214963760,
+              "rss_kib": 10900,
+              "pss_kib": 4414,
+              "swap_pss_kib": 0,
+              "vm_swap_kib": 0
+            },
+            {
+              "pid": 730716,
+              "ppid": 730266,
+              "comm": "node",
+              "start_ticks": 214964984,
+              "rss_kib": 60432,
+              "pss_kib": 14878,
+              "swap_pss_kib": 0,
+              "vm_swap_kib": 0
+            },
+            {
+              "pid": 730728,
+              "ppid": 730716,
+              "comm": "bun",
+              "start_ticks": 214964993,
+              "rss_kib": 10708,
+              "pss_kib": 4414,
+              "swap_pss_kib": 0,
+              "vm_swap_kib": 0
+            },
+            {
+              "pid": 730729,
+              "ppid": 730728,
+              "comm": "node",
+              "start_ticks": 214964994,
+              "rss_kib": 4068688,
+              "pss_kib": 3617742,
+              "swap_pss_kib": 0,
+              "vm_swap_kib": 0
+            },
+            {
+              "pid": 730925,
+              "ppid": 730729,
+              "comm": "node",
+              "start_ticks": 214965372,
+              "rss_kib": 64440,
+              "pss_kib": 19616,
+              "swap_pss_kib": 0,
+              "vm_swap_kib": 0
+            },
+            {
+              "pid": 730936,
+              "ppid": 730729,
+              "comm": "node",
+              "start_ticks": 214965393,
+              "rss_kib": 64632,
+              "pss_kib": 19806,
+              "swap_pss_kib": 0,
+              "vm_swap_kib": 0
+            },
+            {
+              "pid": 734639,
+              "ppid": 730729,
+              "comm": "node-22",
+              "start_ticks": 214973753,
+              "rss_kib": 90332,
+              "pss_kib": 41984,
+              "swap_pss_kib": 0,
+              "vm_swap_kib": 0
+            },
+            {
+              "pid": 734678,
+              "ppid": 730729,
+              "comm": "node-22",
+              "start_ticks": 214973863,
+              "rss_kib": 86552,
+              "pss_kib": 38368,
+              "swap_pss_kib": 0,
+              "vm_swap_kib": 0
+            },
+            {
+              "pid": 734711,
+              "ppid": 730729,
+              "comm": "node-22",
+              "start_ticks": 214974029,
+              "rss_kib": 87940,
+              "pss_kib": 42564,
+              "swap_pss_kib": 0,
+              "vm_swap_kib": 0
+            },
+            {
+              "pid": 734729,
+              "ppid": 730729,
+              "comm": "node-22",
+              "start_ticks": 214974100,
+              "rss_kib": 90232,
+              "pss_kib": 42324,
+              "swap_pss_kib": 0,
+              "vm_swap_kib": 0
+            },
+            {
+              "pid": 734803,
+              "ppid": 730729,
+              "comm": "node-22",
+              "start_ticks": 214974212,
+              "rss_kib": 86028,
+              "pss_kib": 41735,
+              "swap_pss_kib": 0,
+              "vm_swap_kib": 0
+            },
+            {
+              "pid": 734810,
+              "ppid": 730729,
+              "comm": "node-22",
+              "start_ticks": 214974266,
+              "rss_kib": 95016,
+              "pss_kib": 58320,
+              "swap_pss_kib": 0,
+              "vm_swap_kib": 0
+            },
+            {
+              "pid": 734835,
+              "ppid": 730729,
+              "comm": "node-22",
+              "start_ticks": 214974301,
+              "rss_kib": 86640,
+              "pss_kib": 42774,
+              "swap_pss_kib": 0,
+              "vm_swap_kib": 0
+            },
+            {
+              "pid": 734842,
+              "ppid": 730729,
+              "comm": "node-22",
+              "start_ticks": 214974336,
+              "rss_kib": 119332,
+              "pss_kib": 74116,
+              "swap_pss_kib": 0,
+              "vm_swap_kib": 0
+            },
+            {
+              "pid": 734849,
+              "ppid": 730729,
+              "comm": "node-22",
+              "start_ticks": 214974363,
+              "rss_kib": 86972,
+              "pss_kib": 43998,
+              "swap_pss_kib": 0,
+              "vm_swap_kib": 0
+            },
+            {
+              "pid": 734856,
+              "ppid": 730729,
+              "comm": "node-22",
+              "start_ticks": 214974388,
+              "rss_kib": 86004,
+              "pss_kib": 41448,
+              "swap_pss_kib": 0,
+              "vm_swap_kib": 0
+            },
+            {
+              "pid": 734881,
+              "ppid": 730729,
+              "comm": "node-22",
+              "start_ticks": 214974412,
+              "rss_kib": 90088,
+              "pss_kib": 54174,
+              "swap_pss_kib": 0,
+              "vm_swap_kib": 0
+            },
+            {
+              "pid": 734890,
+              "ppid": 730729,
+              "comm": "node-22",
+              "start_ticks": 214974440,
+              "rss_kib": 98544,
+              "pss_kib": 65334,
+              "swap_pss_kib": 0,
+              "vm_swap_kib": 0
+            },
+            {
+              "pid": 734897,
+              "ppid": 730729,
+              "comm": "node-22",
+              "start_ticks": 214974457,
+              "rss_kib": 95420,
+              "pss_kib": 65367,
+              "swap_pss_kib": 0,
+              "vm_swap_kib": 0
+            },
+            {
+              "pid": 734904,
+              "ppid": 730729,
+              "comm": "node-22",
+              "start_ticks": 214974474,
+              "rss_kib": 120564,
+              "pss_kib": 84836,
+              "swap_pss_kib": 0,
+              "vm_swap_kib": 0
+            },
+            {
+              "pid": 734911,
+              "ppid": 730729,
+              "comm": "node-22",
+              "start_ticks": 214974490,
+              "rss_kib": 78128,
+              "pss_kib": 39132,
+              "swap_pss_kib": 0,
+              "vm_swap_kib": 0
+            }
+          ],
+          "summed_rss_kib": 5688628,
+          "complete_pss_kib": 4461773,
+          "pss_readable_pids": 22,
+          "complete_vm_swap_kib": 0,
+          "cpu_percent": null,
+          "cpu_source": "process_ticks_lower_bound",
+          "cgroup": null
+        }
+      },
+      "excluded_project_processes": []
+    },
+    {
+      "elapsed_seconds": 1.2217212700052187,
+      "interval_seconds": 1.0214716449845582,
+      "host_memory_kib": {
+        "MemTotal": 32568484,
+        "MemAvailable": 21482704,
+        "SwapTotal": 51935736,
+        "SwapFree": 33990488
+      },
+      "visibility": {
+        "visible_pids": 643,
+        "unreadable_stat_pids": 0,
+        "unreadable_cwd_pids": 438
+      },
+      "groups": {
+        "project:build": {
+          "state": "no_matching_processes",
+          "processes": [],
+          "summed_rss_kib": null,
+          "complete_pss_kib": null,
+          "pss_readable_pids": 0,
+          "complete_vm_swap_kib": null,
+          "cpu_percent": null,
+          "cpu_source": "process_ticks_lower_bound",
+          "cgroup": null
+        }
+      },
+      "excluded_project_processes": []
+    },
+    {
+      "elapsed_seconds": 2.2434385690139607,
+      "interval_seconds": 1.021717299008742,
+      "host_memory_kib": {
+        "MemTotal": 32568484,
+        "MemAvailable": 21525168,
+        "SwapTotal": 51935736,
+        "SwapFree": 33990544
+      },
+      "visibility": {
+        "visible_pids": 643,
+        "unreadable_stat_pids": 0,
+        "unreadable_cwd_pids": 438
+      },
+      "groups": {
+        "project:build": {
+          "state": "no_matching_processes",
+          "processes": [],
+          "summed_rss_kib": null,
+          "complete_pss_kib": null,
+          "pss_readable_pids": 0,
+          "complete_vm_swap_kib": null,
+          "cpu_percent": null,
+          "cpu_source": "process_ticks_lower_bound",
+          "cgroup": null
+        }
+      },
+      "excluded_project_processes": []
+    },
+    {
+      "elapsed_seconds": 3.2641061980393715,
+      "interval_seconds": 1.0206676290254109,
+      "host_memory_kib": {
+        "MemTotal": 32568484,
+        "MemAvailable": 21588648,
+        "SwapTotal": 51935736,
+        "SwapFree": 33990596
+      },
+      "visibility": {
+        "visible_pids": 643,
+        "unreadable_stat_pids": 0,
+        "unreadable_cwd_pids": 438
+      },
+      "groups": {
+        "project:build": {
+          "state": "no_matching_processes",
+          "processes": [],
+          "summed_rss_kib": null,
+          "complete_pss_kib": null,
+          "pss_readable_pids": 0,
+          "complete_vm_swap_kib": null,
+          "cpu_percent": null,
+          "cpu_source": "process_ticks_lower_bound",
+          "cgroup": null
+        }
+      },
+      "excluded_project_processes": []
+    },
+    {
+      "elapsed_seconds": 4.2844019629992545,
+      "interval_seconds": 1.020295764959883,
+      "host_memory_kib": {
+        "MemTotal": 32568484,
+        "MemAvailable": 21622336,
+        "SwapTotal": 51935736,
+        "SwapFree": 33990600
+      },
+      "visibility": {
+        "visible_pids": 643,
+        "unreadable_stat_pids": 0,
+        "unreadable_cwd_pids": 438
+      },
+      "groups": {
+        "project:build": {
+          "state": "no_matching_processes",
+          "processes": [],
+          "summed_rss_kib": null,
+          "complete_pss_kib": null,
+          "pss_readable_pids": 0,
+          "complete_vm_swap_kib": null,
+          "cpu_percent": null,
+          "cpu_source": "process_ticks_lower_bound",
+          "cgroup": null
+        }
+      },
+      "excluded_project_processes": []
+    },
+    {
+      "elapsed_seconds": 5.304091266007163,
+      "interval_seconds": 1.0196893030079082,
+      "host_memory_kib": {
+        "MemTotal": 32568484,
+        "MemAvailable": 21668748,
+        "SwapTotal": 51935736,
+        "SwapFree": 33990604
+      },
+      "visibility": {
+        "visible_pids": 643,
+        "unreadable_stat_pids": 0,
+        "unreadable_cwd_pids": 438
+      },
+      "groups": {
+        "project:build": {
+          "state": "no_matching_processes",
+          "processes": [],
+          "summed_rss_kib": null,
+          "complete_pss_kib": null,
+          "pss_readable_pids": 0,
+          "complete_vm_swap_kib": null,
+          "cpu_percent": null,
+          "cpu_source": "process_ticks_lower_bound",
+          "cgroup": null
+        }
+      },
+      "excluded_project_processes": []
+    },
+    {
+      "elapsed_seconds": 6.324649780988693,
+      "interval_seconds": 1.0205585149815306,
+      "host_memory_kib": {
+        "MemTotal": 32568484,
+        "MemAvailable": 21728312,
+        "SwapTotal": 51935736,
+        "SwapFree": 33990856
+      },
+      "visibility": {
+        "visible_pids": 643,
+        "unreadable_stat_pids": 0,
+        "unreadable_cwd_pids": 438
+      },
+      "groups": {
+        "project:build": {
+          "state": "no_matching_processes",
+          "processes": [],
+          "summed_rss_kib": null,
+          "complete_pss_kib": null,
+          "pss_readable_pids": 0,
+          "complete_vm_swap_kib": null,
+          "cpu_percent": null,
+          "cpu_source": "process_ticks_lower_bound",
+          "cgroup": null
+        }
+      },
+      "excluded_project_processes": []
+    },
+    {
+      "elapsed_seconds": 7.344320814998355,
+      "interval_seconds": 1.0196710340096615,
+      "host_memory_kib": {
+        "MemTotal": 32568484,
+        "MemAvailable": 21786544,
+        "SwapTotal": 51935736,
+        "SwapFree": 33990860
+      },
+      "visibility": {
+        "visible_pids": 643,
+        "unreadable_stat_pids": 0,
+        "unreadable_cwd_pids": 438
+      },
+      "groups": {
+        "project:build": {
+          "state": "no_matching_processes",
+          "processes": [],
+          "summed_rss_kib": null,
+          "complete_pss_kib": null,
+          "pss_readable_pids": 0,
+          "complete_vm_swap_kib": null,
+          "cpu_percent": null,
+          "cpu_source": "process_ticks_lower_bound",
+          "cgroup": null
+        }
+      },
+      "excluded_project_processes": []
+    },
+    {
+      "elapsed_seconds": 8.364896407991182,
+      "interval_seconds": 1.0205755929928273,
+      "host_memory_kib": {
+        "MemTotal": 32568484,
+        "MemAvailable": 21831920,
+        "SwapTotal": 51935736,
+        "SwapFree": 33991060
+      },
+      "visibility": {
+        "visible_pids": 645,
+        "unreadable_stat_pids": 1,
+        "unreadable_cwd_pids": 439
+      },
+      "groups": {
+        "project:build": {
+          "state": "no_matching_processes",
+          "processes": [],
+          "summed_rss_kib": null,
+          "complete_pss_kib": null,
+          "pss_readable_pids": 0,
+          "complete_vm_swap_kib": null,
+          "cpu_percent": null,
+          "cpu_source": "process_ticks_lower_bound",
+          "cgroup": null
+        }
+      },
+      "excluded_project_processes": []
+    },
+    {
+      "elapsed_seconds": 9.384440667985473,
+      "interval_seconds": 1.0195442599942908,
+      "host_memory_kib": {
+        "MemTotal": 32568484,
+        "MemAvailable": 21887712,
+        "SwapTotal": 51935736,
+        "SwapFree": 33991060
+      },
+      "visibility": {
+        "visible_pids": 643,
+        "unreadable_stat_pids": 0,
+        "unreadable_cwd_pids": 438
+      },
+      "groups": {
+        "project:build": {
+          "state": "no_matching_processes",
+          "processes": [],
+          "summed_rss_kib": null,
+          "complete_pss_kib": null,
+          "pss_readable_pids": 0,
+          "complete_vm_swap_kib": null,
+          "cpu_percent": null,
+          "cpu_source": "process_ticks_lower_bound",
+          "cgroup": null
+        }
+      },
+      "excluded_project_processes": []
+    },
+    {
+      "elapsed_seconds": 10.404595647996757,
+      "interval_seconds": 1.0201549800112844,
+      "host_memory_kib": {
+        "MemTotal": 32568484,
+        "MemAvailable": 21942428,
+        "SwapTotal": 51935736,
+        "SwapFree": 33991060
+      },
+      "visibility": {
+        "visible_pids": 643,
+        "unreadable_stat_pids": 0,
+        "unreadable_cwd_pids": 438
+      },
+      "groups": {
+        "project:build": {
+          "state": "no_matching_processes",
+          "processes": [],
+          "summed_rss_kib": null,
+          "complete_pss_kib": null,
+          "pss_readable_pids": 0,
+          "complete_vm_swap_kib": null,
+          "cpu_percent": null,
+          "cpu_source": "process_ticks_lower_bound",
+          "cgroup": null
+        }
+      },
+      "excluded_project_processes": []
+    },
+    {
+      "elapsed_seconds": 11.425447088025976,
+      "interval_seconds": 1.0208514400292188,
+      "host_memory_kib": {
+        "MemTotal": 32568484,
+        "MemAvailable": 21942780,
+        "SwapTotal": 51935736,
+        "SwapFree": 34031984
+      },
+      "visibility": {
+        "visible_pids": 643,
+        "unreadable_stat_pids": 0,
+        "unreadable_cwd_pids": 438
+      },
+      "groups": {
+        "project:build": {
+          "state": "no_matching_processes",
+          "processes": [],
+          "summed_rss_kib": null,
+          "complete_pss_kib": null,
+          "pss_readable_pids": 0,
+          "complete_vm_swap_kib": null,
+          "cpu_percent": null,
+          "cpu_source": "process_ticks_lower_bound",
+          "cgroup": null
+        }
+      },
+      "excluded_project_processes": []
+    },
+    {
+      "elapsed_seconds": 12.445305333007127,
+      "interval_seconds": 1.019858244981151,
+      "host_memory_kib": {
+        "MemTotal": 32568484,
+        "MemAvailable": 22010664,
+        "SwapTotal": 51935736,
+        "SwapFree": 34032280
+      },
+      "visibility": {
+        "visible_pids": 643,
+        "unreadable_stat_pids": 0,
+        "unreadable_cwd_pids": 438
+      },
+      "groups": {
+        "project:build": {
+          "state": "no_matching_processes",
+          "processes": [],
+          "summed_rss_kib": null,
+          "complete_pss_kib": null,
+          "pss_readable_pids": 0,
+          "complete_vm_swap_kib": null,
+          "cpu_percent": null,
+          "cpu_source": "process_ticks_lower_bound",
+          "cgroup": null
+        }
+      },
+      "excluded_project_processes": []
+    },
+    {
+      "elapsed_seconds": 13.466420974989887,
+      "interval_seconds": 1.0211156419827603,
+      "host_memory_kib": {
+        "MemTotal": 32568484,
+        "MemAvailable": 22068684,
+        "SwapTotal": 51935736,
+        "SwapFree": 34032284
+      },
+      "visibility": {
+        "visible_pids": 642,
+        "unreadable_stat_pids": 0,
+        "unreadable_cwd_pids": 438
+      },
+      "groups": {
+        "project:build": {
+          "state": "no_matching_processes",
+          "processes": [],
+          "summed_rss_kib": null,
+          "complete_pss_kib": null,
+          "pss_readable_pids": 0,
+          "complete_vm_swap_kib": null,
+          "cpu_percent": null,
+          "cpu_source": "process_ticks_lower_bound",
+          "cgroup": null
+        }
+      },
+      "excluded_project_processes": []
+    },
+    {
+      "elapsed_seconds": 14.488117885019165,
+      "interval_seconds": 1.0216969100292772,
+      "host_memory_kib": {
+        "MemTotal": 32568484,
+        "MemAvailable": 22129320,
+        "SwapTotal": 51935736,
+        "SwapFree": 34032340
+      },
+      "visibility": {
+        "visible_pids": 642,
+        "unreadable_stat_pids": 0,
+        "unreadable_cwd_pids": 438
+      },
+      "groups": {
+        "project:build": {
+          "state": "no_matching_processes",
+          "processes": [],
+          "summed_rss_kib": null,
+          "complete_pss_kib": null,
+          "pss_readable_pids": 0,
+          "complete_vm_swap_kib": null,
+          "cpu_percent": null,
+          "cpu_source": "process_ticks_lower_bound",
+          "cgroup": null
+        }
+      },
+      "excluded_project_processes": []
+    },
+    {
+      "elapsed_seconds": 15.019457912014332,
+      "interval_seconds": 0.5313400269951671,
+      "host_memory_kib": {
+        "MemTotal": 32568484,
+        "MemAvailable": 22155600,
+        "SwapTotal": 51935736,
+        "SwapFree": 34032348
+      },
+      "visibility": {
+        "visible_pids": 642,
+        "unreadable_stat_pids": 0,
+        "unreadable_cwd_pids": 438
+      },
+      "groups": {
+        "project:build": {
+          "state": "no_matching_processes",
+          "processes": [],
+          "summed_rss_kib": null,
+          "complete_pss_kib": null,
+          "pss_readable_pids": 0,
+          "complete_vm_swap_kib": null,
+          "cpu_percent": null,
+          "cpu_source": "process_ticks_lower_bound",
+          "cgroup": null
+        }
+      },
+      "excluded_project_processes": []
+    }
+  ],
+  "schema_version": 1,
+  "selection": {
+    "projects": {
+      "build": "/tmp/qingzhou-production-baseline-20261010-head"
+    },
+    "service_roots": {},
+    "containers": [],
+    "exclude_pids": [1, 1738, 573741, 734933, 3262822],
+    "exclude_comms": []
+  },
+  "started_at_utc": "2026-10-10T03:21:13.483828+00:00",
+  "summary": {
+    "project:build": {
+      "summed_rss_kib": {
+        "min": 5688628,
+        "mean": 5688628.0,
+        "max": 5688628,
+        "observations": 1
+      },
+      "complete_pss_kib": {
+        "min": 4461773,
+        "mean": 4461773.0,
+        "max": 4461773,
+        "observations": 1
+      },
+      "cpu_percent": null,
+      "cgroup_memory_current_bytes": null,
+      "cgroup_memory_swap_current_bytes": null,
+      "max_process_count": 22
+    }
+  },
+  "warnings": [
+    "CWD groups can contain development tools; selection does not prove a web service is running.",
+    "RSS sums count shared pages repeatedly. PSS is complete only when every selected PID is readable.",
+    "Never add a container cgroup value to its process RSS/PSS; they describe the same group.",
+    "Process CPU excludes unobserved/first-seen/exited processes; cgroup CPU includes short-lived children.",
+    "Sampled peaks can miss sub-interval bursts. No workload or startup was triggered by this sampler.",
+    "Cgroup limits are local limits; an ancestor cgroup may impose a stricter effective limit."
+  ]
+}

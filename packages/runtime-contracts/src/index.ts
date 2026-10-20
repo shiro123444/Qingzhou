@@ -1,6 +1,15 @@
 /** The wire protocol version shared by RuntimeFacade and its clients. */
 export const RUNTIME_PROTOCOL_VERSION = 'runtime.v1' as const;
 
+/** PPTX templates can legitimately carry high-resolution media and embedded video. */
+export const PRESENTATION_PPTX_MAX_UPLOAD_MIB = 100;
+export const PRESENTATION_PPTX_MAX_UPLOAD_BYTES = PRESENTATION_PPTX_MAX_UPLOAD_MIB * 1024 * 1024;
+
+/** Keep the broader attachment surface bounded independently from native PPTX imports. */
+export const PRESENTATION_ATTACHMENT_MAX_UPLOAD_MIB = 32;
+export const PRESENTATION_ATTACHMENT_MAX_UPLOAD_BYTES =
+  PRESENTATION_ATTACHMENT_MAX_UPLOAD_MIB * 1024 * 1024;
+
 export const PLUGIN_KINDS = ['kernel', 'capability', 'agent-strategy', 'ui'] as const;
 export type RuntimePluginKind = (typeof PLUGIN_KINDS)[number];
 
@@ -36,10 +45,7 @@ export interface Disposer {
 
 export type Disposable = Disposer;
 export type Effect =
-  | Disposable
-  | Iterable<Disposable>
-  | AsyncIterable<Disposable>
-  | Promise<Effect | void>;
+  Disposable | Iterable<Disposable> | AsyncIterable<Disposable> | Promise<Effect | void>;
 
 export interface Fiber {
   collect: (disposer: Disposer) => Disposable;
@@ -246,7 +252,54 @@ export interface PresentationPlanner {
   plan: (input: PresentationJobInput, context: PlannerContext) => Promise<PresentationPlan>;
 }
 
-export type PresentationJobState = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type PresentationJobState =
+  'queued' | 'running' | 'waiting_input' | 'completed' | 'failed' | 'cancelled';
+
+export type PresentationCollaborationMode = 'adaptive' | 'ask' | 'auto';
+export interface PresentationDecision {
+  answer?: { action: 'retry' | 'revise'; content?: string; requestId: string; answeredAt: string };
+  category: 'quality' | 'provider' | 'input' | 'conflict';
+  choices?: { id: string; label: string; description?: string }[];
+  createdAt: string;
+  detail: string;
+  id: string;
+  options: Array<{ id: 'retry' | 'revise' | 'defer'; label: string; description: string }>;
+  status: 'pending' | 'deferred' | 'answered';
+  title: string;
+}
+export interface PresentationDecisionAnswer {
+  action: 'retry' | 'revise' | 'defer';
+  content?: string;
+  decisionId: string;
+  requestId: string;
+}
+export interface PresentationPresenceInput {
+  focused: boolean;
+  mode?: PresentationCollaborationMode;
+  tabId: string;
+  visible: boolean;
+}
+export interface PresentationCollaborationState {
+  automaticAttempts: number;
+  decisions: PresentationDecision[];
+  lastErrorCode?: string;
+  mode: PresentationCollaborationMode;
+}
+
+/** Durable creation conversation; data is revalidated by its owning capability. */
+export interface PresentationPlanningSession {
+  activity?: string;
+  checkpoint?: { brief: Record<string, unknown>; slides?: unknown[] };
+  collaboration: PresentationCollaborationState;
+  command: Record<string, unknown>;
+  heartbeatAt: string;
+  recoveryAttempts: number;
+  requestId: string;
+  result?: Record<string, unknown>;
+  state: PresentationJobState;
+  threadId: string;
+  updatedAt: string;
+}
 
 export interface PresentationAnnotation {
   baseSvgHash: string;
@@ -281,11 +334,14 @@ export interface PresentationRevision {
 export interface PresentationJob {
   artifactIds?: string[];
   aspectRatio?: string;
+  collaboration?: PresentationCollaborationState;
   createdAt: string;
   error?: RunError;
+  heartbeatAt?: string;
   jobId: string;
   messages?: PresentationMessage[];
   projectId?: string;
+  recovery?: { attempts: number; resumedAt: string; completedSlides: number };
   revisions?: PresentationRevision[];
   slideCount?: number;
   state: PresentationJobState;
@@ -487,6 +543,8 @@ export interface ImageGenerationResult {
 
 /** Request for a batch of images. All values are JSON-serializable. */
 export interface ImageGenerationRequest {
+  /** Requested real alpha channel; providers may require a separate cutout step. */
+  background?: 'transparent' | 'opaque' | 'auto';
   /** Number of images requested (>= 1). Providers may clamp and report. */
   count?: number;
   /** Caller-supplied stable key; identical keys may be served idempotently. */
@@ -499,6 +557,8 @@ export interface ImageGenerationRequest {
   prompt: string;
   /** Opaque vendor-neutral style/quality hint (e.g. `standard` | `hd`). */
   quality?: string;
+  /** Owned raster references resolved by the server, never caller-supplied URLs or bytes. */
+  referenceAssetRefs?: readonly string[];
   /** Requested pixel size as `WIDTHxHEIGHT` (e.g. `1024x1024`), if supported. */
   size?: string;
 }
@@ -653,6 +713,16 @@ export interface SceneTextNode extends SceneNodeBase {
   text: string;
 }
 
+/** A mathematical expression rendered from editable LaTeX source. */
+export interface SceneFormulaNode extends SceneNodeBase {
+  color?: string;
+  display?: boolean;
+  fontSize?: number;
+  kind: 'formula';
+  /** Retained independently of vector output so the expression can be re-edited. */
+  latex: string;
+}
+
 /** A primitive vector shape node. */
 export interface SceneShapeNode extends SceneNodeBase {
   /** Fill color as CSS color string; `transparent` is allowed. */
@@ -704,6 +774,7 @@ export interface SceneGroupNode extends SceneNodeBase {
 /** Discriminated union of all scene nodes. */
 export type SceneNode =
   | SceneChartNode
+  | SceneFormulaNode
   | SceneGroupNode
   | SceneImageNode
   | SceneShapeNode
@@ -732,8 +803,7 @@ export interface SlideScene {
 
 /** Validation result: either the scene data or one stable `SlideSceneError`. */
 export type SlideSceneValidation =
-  | { ok: true; scene: SlideScene }
-  | { ok: false; error: SlideSceneError };
+  { ok: true; scene: SlideScene } | { ok: false; error: SlideSceneError };
 
 const isFiniteNumber = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value);
@@ -806,6 +876,15 @@ export const validateSlideScene = (scene: unknown): SlideSceneValidation => {
   ): boolean => {
     for (const node of nodes) {
       if (!isWireRecord(node)) return false;
+      if (
+        node.kind === 'formula' &&
+        (typeof node.latex !== 'string' ||
+          !node.latex.trim() ||
+          node.latex.length > 2000 ||
+          (node.fontSize !== undefined &&
+            (!isFiniteNumber(node.fontSize) || node.fontSize < 24 || node.fontSize > 64)))
+      )
+        return false;
       const rect = (node as { rect?: unknown }).rect;
       if (
         !isWireRecord(rect) ||

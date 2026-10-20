@@ -783,12 +783,26 @@ export class MessengerRouter {
             );
             return;
           }
-          const isActive = AgentBridgeService.isThreadActive(ctx.thread.id);
-          if (!isActive) {
+          const { BotInboundModel } = await import('@/database/models/botInbound');
+          const { botSessionKey } = await import('@/server/services/bot/sessionScope');
+          const platform = ctx.platform;
+          const key = botSessionKey(ctx.link.userId, {
+            applicationId: ctx.link.tenantId
+              ? `messenger-${platform}-${ctx.link.tenantId}`
+              : `messenger-${platform}`,
+            platform,
+            platformThreadId: ctx.thread.id,
+            messengerInstallationKey: ctx.link.tenantId
+              ? `${platform}:${ctx.link.tenantId}`
+              : `${platform}:singleton`,
+          });
+          const sessions = new BotInboundModel(ctx.serverDB);
+          const active = await sessions.getSession(ctx.link.userId, key);
+          if (!active) {
             await ctx.reply('No active execution to stop.');
             return;
           }
-          const operationId = AgentBridgeService.getActiveOperationId(ctx.thread.id);
+          const operationId = active.operationId;
           if (operationId) {
             try {
               const aiAgentService = new AiAgentService(ctx.serverDB, ctx.link.userId);
@@ -798,7 +812,8 @@ export class MessengerRouter {
                 await ctx.reply('Unable to stop the current execution.');
                 return;
               }
-              AgentBridgeService.clearActiveThread(ctx.thread.id);
+              await sessions.releaseSession(ctx.link.userId, key, { operationId });
+              AgentBridgeService.clearActiveThread(key);
               log('command /stop: interrupted op=%s', operationId);
             } catch (error) {
               log('command /stop: interruptTask failed: %O', error);
@@ -808,7 +823,8 @@ export class MessengerRouter {
           } else {
             // execAgent hasn't returned an operationId yet — queue the stop so
             // it fires the moment startup completes.
-            AgentBridgeService.requestStop(ctx.thread.id);
+            await sessions.requestStop(ctx.link.userId, key);
+            AgentBridgeService.requestStop(key);
             log('command /stop: queued deferred stop for thread=%s', ctx.thread.id);
           }
           await ctx.reply('Stop requested.');

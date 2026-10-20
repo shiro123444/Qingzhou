@@ -1,17 +1,20 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 
-import sharp from 'sharp';
+import type { OverlayOptions } from 'sharp';
 import { z } from 'zod';
 
+import type { ArtifactStore } from '../artifacts/contracts';
 import type { AtomicInvocation, AtomicOperation, AtomicPlugin } from '../atomic-runtime';
-import type { PresentationArtifactStore } from '../presentation/artifact-store';
+import { ExecutionLimiter } from '../execution-limiter';
 import type { ImageGenerationCapability } from '../presentation/image-generation-capability';
+import { getResourceBudget, type ResourceBudget } from '../resource-budget';
 
 const MAX_PIXELS = 16_777_216;
 const MAX_BYTES = 24 * 1024 * 1024;
 const id = z.string().min(1).max(256);
 const dimension = z.number().int().min(1).max(4096);
+const loadSharp = async () => (await import('sharp')).default;
 const fail = (message: string) =>
   Object.assign(new Error(message), { code: 'PRESENTATION_INVALID' });
 export const assetIdFromRef = (ref: string) =>
@@ -20,10 +23,12 @@ export const assetIdFromRef = (ref: string) =>
     : ref;
 
 export function createAssetPlugin(
-  store: PresentationArtifactStore,
+  store: ArtifactStore,
   imageGeneration?: ImageGenerationCapability,
   python = process.env.CORDIS_ASSET_PYTHON ?? 'python3',
+  budget: ResourceBudget = getResourceBudget(),
 ): AtomicPlugin {
+  const processing = new ExecutionLimiter(budget.assetConcurrency, budget.assetQueue);
   async function read(ref: string, context: AtomicInvocation) {
     const artifact = await store.get(context.scope, assetIdFromRef(ref));
     if (
@@ -32,6 +37,7 @@ export function createAssetPlugin(
       artifact.bytes.length > MAX_BYTES
     )
       throw fail('A readable owned raster asset is required');
+    const sharp = await loadSharp();
     const image = sharp(artifact.bytes, {
       limitInputPixels: MAX_PIXELS,
       animated: false,
@@ -55,6 +61,7 @@ export function createAssetPlugin(
       .update(bytes)
       .digest('hex');
     const artifactId = `asset-${fingerprint.slice(0, 40)}`;
+    const sharp = await loadSharp();
     const metadata = await sharp(bytes, { limitInputPixels: MAX_PIXELS }).metadata();
     const existing = await store.get(context.scope, artifactId);
     const artifact =
@@ -120,6 +127,7 @@ export function createAssetPlugin(
       execute: async (input, ctx) => {
         const source = await read(input.ref, ctx);
         const mask = await read(input.maskRef, ctx);
+        const sharp = await loadSharp();
         const { data, info } = await source.image
           .ensureAlpha()
           .raw()
@@ -185,6 +193,7 @@ export function createAssetPlugin(
         .strict(),
       execute: async (input, ctx) => {
         const { image, metadata } = await read(input.ref, ctx);
+        const sharp = await loadSharp();
         if (input.crop) {
           if (
             input.crop.left + input.crop.width > metadata.width! ||
@@ -225,7 +234,7 @@ export function createAssetPlugin(
           .png()
           .toBuffer();
         const script =
-          'import sys,os\nfrom pathlib import Path\nfrom rembg import remove,new_session\nmodel=sys.argv[1]\nassert (Path(os.environ.get("U2NET_HOME",str(Path.home()/".u2net")))/(model+".onnx")).is_file(), "Segmentation model is not installed"\nsys.stdout.buffer.write(remove(sys.stdin.buffer.read(),session=new_session(model,providers=["CPUExecutionProvider"])))';
+          'import sys,os\nfrom pathlib import Path\nfrom rembg import remove,new_session\nmodel=sys.argv[1]\nroots=[Path(os.environ.get("U2NET_HOME",str(Path.home()/".u2net"))),Path.home()/".rembg"]\nassert any((root/(model+".onnx")).is_file() or (root/"models"/model/(model+".onnx")).is_file() for root in roots), "Segmentation model is not installed"\nsys.stdout.buffer.write(remove(sys.stdin.buffer.read(),session=new_session(model,providers=["CPUExecutionProvider"])))';
         const bytes = await new Promise<Buffer>((resolve, reject) => {
           const child = spawn(python, ['-c', script, input.model], {
             stdio: ['pipe', 'pipe', 'pipe'],
@@ -282,6 +291,7 @@ export function createAssetPlugin(
           .ensureAlpha()
           .raw()
           .toBuffer({ resolveWithObject: true });
+        const sharp = await loadSharp();
         const rgb = [1, 3, 5].map((i) => parseInt(input.color.slice(i, i + 2), 16));
         const seen = new Uint8Array(info.width * info.height);
         const queue = new Int32Array(seen.length);
@@ -358,7 +368,8 @@ export function createAssetPlugin(
         })
         .strict(),
       execute: async (input, ctx) => {
-        const layers: sharp.OverlayOptions[] = [];
+        const sharp = await loadSharp();
+        const layers: OverlayOptions[] = [];
         for (const layer of input.layers) {
           if (layer.x + layer.width > input.width || layer.y + layer.height > input.height)
             throw fail('Layer is outside the canvas');
@@ -399,11 +410,13 @@ export function createAssetPlugin(
     operations.push({
       name: 'assets.generate',
       description:
-        'Generate a real raster asset. The returned ref can feed cutout, transform, compose and slide placement.',
+        'Generate artwork from a subject brief and owned visual reference images. Use referenceAssetRefs to inherit the learned palette, brushwork and rendering language while drawing new content. The returned ref can feed cutout, transform, compose and slide placement.',
       input: z
         .object({
           prompt: z.string().min(1).max(4000),
           requestId: z.string().min(1).max(128),
+          referenceAssetRefs: z.array(id).max(4).optional(),
+          background: z.enum(['transparent', 'opaque', 'auto']).optional(),
           size: z.enum(['1024x1024', '1024x1536', '1536x1024']).default('1024x1024'),
         })
         .strict(),
@@ -413,6 +426,8 @@ export function createAssetPlugin(
           [
             {
               prompt: input.prompt,
+              referenceAssetRefs: input.referenceAssetRefs,
+              background: input.background,
               idempotencyKey: input.requestId,
               size: input.size,
               slideId: 'asset',
@@ -429,11 +444,15 @@ export function createAssetPlugin(
     });
   return {
     id: 'assets',
-    version: '1.0.0',
+    version: '1.1.0',
     operations: operations.map((operation) => ({
       ...operation,
+      execute:
+        operation.name === 'assets.list' || operation.name === 'assets.generate'
+          ? operation.execute
+          : (input, ctx) => processing.run(async () => operation.execute(input, ctx), ctx.signal),
       agent: {
-        contexts: ['presentation.intake'],
+        contexts: ['presentation.intake', 'skills'],
         maxCalls: operation.name === 'assets.generate' ? 2 : 4,
       },
     })),

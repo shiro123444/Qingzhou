@@ -495,4 +495,130 @@ describe('InMemoryAgentStateManager', () => {
       expect(history[1]).toEqual(events1);
     });
   });
+  describe('owned step leases', () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it('allows exactly one concurrent owner for a step, independent of other steps', async () => {
+      const results = await Promise.all(
+        Array.from({ length: 20 }, () => manager.acquireStepLease('op', 1)),
+      );
+      expect(results.filter(Boolean)).toHaveLength(1);
+      expect(await manager.acquireStepLease('op', 2)).not.toBeNull();
+      expect(await manager.acquireStepLease('other', 1)).not.toBeNull();
+    });
+
+    it('an expired worker cannot renew or delete a new worker lease', async () => {
+      const old = (await manager.acquireStepLease('op', 1))!;
+      vi.advanceTimersByTime(35000);
+      const current = (await manager.acquireStepLease('op', 1))!;
+      expect(old.ownerToken).not.toBe(current.ownerToken);
+      expect(await manager.renewStepLease(old)).toBe(false);
+      expect(await manager.releaseStepLease(old)).toBe(false);
+      expect(await manager.acquireStepLease('op', 1)).toBeNull();
+      expect(await manager.renewStepLease(current)).toBe(true);
+      expect(await manager.releaseStepLease(current)).toBe(true);
+      expect(await manager.releaseStepLease(current)).toBe(false);
+    });
+
+    it('rejects renewal, release and commit at the exact expiry boundary', async () => {
+      const lease = (await manager.acquireStepLease('op', 1, 1))!;
+      vi.advanceTimersByTime(1000);
+      expect(await manager.renewStepLease(lease)).toBe(false);
+      expect(await manager.releaseStepLease(lease)).toBe(false);
+      expect(await manager.saveAgentStateWithLease('op', makeState(), lease)).toBe(false);
+      expect(await manager.loadAgentState('op')).toBeNull();
+    });
+
+    it('renewal extends expiry only for the matching owner', async () => {
+      const lease = (await manager.acquireStepLease('op', 1, 1))!;
+      vi.advanceTimersByTime(500);
+      expect(await manager.renewStepLease({ ...lease, ownerToken: 'wrong' }, 99)).toBe(false);
+      expect(await manager.renewStepLease(lease, 2)).toBe(true);
+      vi.advanceTimersByTime(1999);
+      expect(await manager.acquireStepLease('op', 1)).toBeNull();
+      vi.advanceTimersByTime(1);
+      expect(await manager.acquireStepLease('op', 1)).not.toBeNull();
+    });
+
+    it('fences state, metadata, history and events against the expired worker', async () => {
+      await manager.createOperationMetadata('op', {});
+      const old = (await manager.acquireStepLease('op', 1, 1))!;
+      vi.advanceTimersByTime(1000);
+      const current = (await manager.acquireStepLease('op', 1))!;
+      const result = makeStepResult({ events: [{ type: 'current' }] });
+      expect(await manager.saveStepResultWithLease('op', result, current)).toBe(true);
+      const metadata = structuredClone(await manager.getOperationMetadata('op'));
+      const stale = makeState({ cost: { total: 999 }, status: 'error', stepCount: 99 });
+      expect(await manager.saveAgentStateWithLease('op', stale, old)).toBe(false);
+      expect(
+        await manager.saveStepResultWithLease(
+          'op',
+          makeStepResult({ newState: stale, events: [{ type: 'stale' }] }),
+          old,
+        ),
+      ).toBe(false);
+      expect(await manager.loadAgentState('op')).toEqual(result.newState);
+      expect(await manager.getOperationMetadata('op')).toEqual(metadata);
+      expect(await manager.getExecutionHistory('op')).toHaveLength(1);
+      expect(manager.getEventHistory('op')).toEqual([result.events]);
+    });
+
+    it('commits owned state and rejects operation/step mismatch', async () => {
+      await manager.createOperationMetadata('op', {});
+      const lease = (await manager.acquireStepLease('op', 1))!;
+      const state = makeState({ status: 'done', stepCount: 2 });
+      expect(await manager.saveAgentStateWithLease('op', state, lease)).toBe(true);
+      expect(await manager.getOperationMetadata('op')).toMatchObject({
+        status: 'done',
+        totalSteps: 2,
+      });
+      await expect(manager.saveAgentStateWithLease('other', state, lease)).rejects.toThrow(
+        'operation mismatch',
+      );
+      await expect(
+        manager.saveStepResultWithLease('op', makeStepResult({ stepIndex: 2 }), lease),
+      ).rejects.toThrow('index mismatch');
+    });
+
+    it('rejects duplicate step results and cross-step stale commits even with a valid token', async () => {
+      await manager.createOperationMetadata('op', {});
+      await manager.saveAgentState('op', makeState({ stepCount: 1 }));
+      const first = (await manager.acquireStepLease('op', 1))!;
+      const firstResult = makeStepResult({ newState: makeState({ stepCount: 2 }) });
+      expect(await manager.saveStepResultWithLease('op', firstResult, first)).toBe(true);
+      expect(await manager.saveStepResultWithLease('op', firstResult, first)).toBe(false);
+      // No backward writes, including same-step error fallback after a successful commit.
+      expect(await manager.saveAgentStateWithLease('op', makeState({ stepCount: 1 }), first)).toBe(
+        false,
+      );
+      const second = (await manager.acquireStepLease('op', 2))!;
+      const secondResult = makeStepResult({ newState: makeState({ stepCount: 3 }), stepIndex: 2 });
+      expect(await manager.saveStepResultWithLease('op', secondResult, second)).toBe(true);
+      // The old token is still live on step 1, but may not overwrite a later step.
+      expect(await manager.renewStepLease(first)).toBe(true);
+      expect(
+        await manager.saveAgentStateWithLease(
+          'op',
+          makeState({ status: 'error', stepCount: 3 }),
+          first,
+        ),
+      ).toBe(false);
+      expect(await manager.loadAgentState('op')).toEqual(secondResult.newState);
+      expect(await manager.getOperationMetadata('op')).toMatchObject({ totalSteps: 3 });
+      expect(await manager.getExecutionHistory('op')).toHaveLength(2);
+    });
+
+    it('clear invalidates tokens without allowing an old release to delete a new lease', async () => {
+      const old = (await manager.acquireStepLease('op', 1))!;
+      manager.clear();
+      const current = (await manager.acquireStepLease('op', 1))!;
+      expect(await manager.releaseStepLease(old)).toBe(false);
+      expect(await manager.renewStepLease(current)).toBe(true);
+    });
+
+    it.each([0, -1, NaN, Infinity])('rejects invalid TTL %s', async (ttl) => {
+      await expect(manager.acquireStepLease('op', 1, ttl)).rejects.toBeInstanceOf(RangeError);
+    });
+  });
 });

@@ -16,7 +16,6 @@ import type {
 import { Message, parseMarkdown } from 'chat';
 
 import { LarkApiClient } from './api';
-import { decryptLarkEvent } from './crypto';
 import { LarkFormatConverter } from './format-converter';
 import type {
   LarkAdapterConfig,
@@ -25,6 +24,7 @@ import type {
   LarkThreadId,
   LarkWebhookPayload,
 } from './types';
+import { authenticateLarkWebhook } from './webhook-security';
 
 type WarnFn = (message: string, ...args: unknown[]) => void;
 
@@ -259,8 +259,7 @@ export async function downloadMediaFromRawMessage(
 export class LarkAdapter implements Adapter<LarkThreadId, LarkRawMessage> {
   readonly name: string;
   private readonly api: LarkApiClient;
-  private readonly encryptKey?: string;
-  private readonly verificationToken?: string;
+  private readonly webhookConfig: LarkAdapterConfig;
   private readonly platform: 'lark' | 'feishu';
   private readonly formatConverter: LarkFormatConverter;
   private _userName: string;
@@ -297,8 +296,7 @@ export class LarkAdapter implements Adapter<LarkThreadId, LarkRawMessage> {
     this.platform = config.platform || 'lark';
     this.name = this.platform;
     this.api = new LarkApiClient(config.appId, config.appSecret, this.platform);
-    this.encryptKey = config.encryptKey;
-    this.verificationToken = config.verificationToken;
+    this.webhookConfig = { ...config };
     this.formatConverter = new LarkFormatConverter();
     this._userName = config.userName || 'lark-bot';
   }
@@ -330,48 +328,18 @@ export class LarkAdapter implements Adapter<LarkThreadId, LarkRawMessage> {
   // ------------------------------------------------------------------
 
   async handleWebhook(request: Request, options?: WebhookOptions): Promise<Response> {
-    const bodyText = await request.text();
+    const body = await authenticateLarkWebhook(request, this.webhookConfig);
+    if (body instanceof Response) return body;
 
-    let body: LarkWebhookPayload;
-    try {
-      body = JSON.parse(bodyText);
-    } catch {
-      return new Response('Invalid JSON', { status: 400 });
-    }
+    return this.dispatchVerifiedWebhook(body, options, true);
+  }
 
-    // Decrypt encrypted events if needed
-    if (body.encrypt) {
-      if (!this.encryptKey) {
-        return new Response('Encrypted event but no encrypt key configured', { status: 401 });
-      }
-      try {
-        const decrypted = decryptLarkEvent(body.encrypt, this.encryptKey);
-        body = JSON.parse(decrypted);
-      } catch {
-        this.logger.error('Event decryption failed');
-        return new Response('Decryption failed', { status: 401 });
-      }
-    }
-
-    // Verify token (skip when no verification token is configured).
-    // Token location varies: v2 events use header.token, url_verification uses body.token.
-    if (this.verificationToken) {
-      const token = body.header?.token ?? body.token;
-      if (this.verificationToken !== token) {
-        this.logger.error(
-          'Verification token mismatch (configured=%s, received=%s)',
-          '***',
-          token ? '***' : '(empty)',
-        );
-        return new Response('Invalid verification token', { status: 401 });
-      }
-    }
-
-    // URL verification challenge (after token check)
-    if (body.type === 'url_verification') {
-      return Response.json({ challenge: body.challenge });
-    }
-
+  /** Replay an authenticated receipt without reusing an expired platform signature. */
+  async dispatchVerifiedWebhook(
+    body: LarkWebhookPayload,
+    options?: WebhookOptions,
+    persist = false,
+  ): Promise<Response> {
     // Only handle message events
     const eventType = body.header?.event_type;
     if (eventType !== 'im.message.receive_v1') {
@@ -436,11 +404,23 @@ export class LarkAdapter implements Adapter<LarkThreadId, LarkRawMessage> {
       platform: this.platform,
     });
 
+    if (persist && this.webhookConfig.persistVerifiedWebhook) {
+      const eventId = body.header?.event_id || message.message_id;
+      if (!eventId) return new Response('Missing event ID', { status: 400 });
+      try {
+        await this.webhookConfig.persistVerifiedWebhook(body, eventId, threadId);
+        return Response.json({ accepted: true }, { status: 202 });
+      } catch {
+        return new Response('Durable receipt unavailable', { status: 503 });
+      }
+    }
+
     // Create message lazily via factory
     const messageFactory = () => this.parseRawEvent(message, sender, threadId, messageText);
 
     // Delegate to Chat SDK pipeline
-    this.chat.processMessage(this, threadId, messageFactory, options);
+    const task = this.chat.processMessage(this, threadId, messageFactory, options);
+    if (!persist) await task;
 
     return Response.json({ ok: true });
   }

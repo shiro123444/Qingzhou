@@ -1,4 +1,7 @@
+import type { PresentationLearningStatus } from '@/types/presentationLearning';
+
 import type { PresentationPlan } from '../../../../../packages/runtime-contracts/src';
+import type { TemplateComponentSource } from './composition';
 import type { TemplateVisualProfile } from './visual-types';
 
 /** Geometry is relative to the slide viewport, independent of PPTX/SVG units. */
@@ -25,11 +28,33 @@ export interface TemplateAssetSlot {
   fit: 'contain' | 'cover';
   reference?: string;
   slotId: string;
+  /** Native OOXML source crop; retain it instead of cropping a flattened slide. */
+  sourceCrop?: { bottom: number; left: number; right: number; top: number };
+  sourceTransform?: { approximate?: boolean; flipH: boolean; flipV: boolean; rotation: number };
+}
+
+/** Embedded media is recorded as evidence; source bytes remain inside the owned PPTX. */
+export interface TemplateMediaReference {
+  box?: TemplateBox;
+  kind: 'audio' | 'video';
+  mediaId: string;
+  mimeType?: string;
+  page: number;
+  path: string;
+  posterReference?: string;
+  relationshipId: string;
+  sizeBytes: number;
 }
 
 export interface TemplateLayout {
   assetSlots: TemplateAssetSlot[];
   elements: TemplateElement[];
+  /** Measured structure only; source cells are not imported as new report facts. */
+  evidence?: {
+    tables: Array<{ box: TemplateBox; rows: number; columns: number; columnWeights: number[] }>;
+    chartCount: number;
+    textCharacters: number;
+  };
   kind: 'cover' | 'text' | 'two-column' | 'image-left' | 'image-right' | 'image-led';
   layoutId: string;
   notes?: string;
@@ -57,6 +82,7 @@ export interface TemplateProfile {
   createdAt: string;
   designSpec?: Record<string, unknown>;
   layouts: TemplateLayout[];
+  media?: TemplateMediaReference[];
   name: string;
   schemaVersion: 1;
   source: { kind: 'plan' | 'pptx'; planId?: string; sha256?: string };
@@ -65,8 +91,14 @@ export interface TemplateProfile {
   warnings: string[];
 }
 
-export type TemplateSummary = Omit<TemplateProfile, 'layouts' | 'designSpec'> & {
+export type TemplateSummary = Omit<TemplateProfile, 'layouts' | 'designSpec' | 'media'> & {
+  learning?: Pick<
+    PresentationLearningStatus,
+    'state' | 'observedPages' | 'remainingPages' | 'totalPages'
+  >;
   layoutCount: number;
+  mediaCount: number;
+  videoCount: number;
 };
 
 export interface TemplateReference {
@@ -75,9 +107,18 @@ export interface TemplateReference {
 }
 
 export interface TemplateApplication {
+  componentSources?: Record<string, TemplateComponentSource>;
+  compositionPolicy?: {
+    mode: 'capabilities';
+    primaryTemplateId: string;
+    palette: string[];
+    typography: string;
+  };
   constraints: TemplateConstraints;
   layouts: TemplateLayout[];
+  media?: TemplateMediaReference[];
   name: string;
+  sources?: Array<{ name: string; templateId: string; versionId: string }>;
   templateId: string;
   versionId: string;
   visual?: TemplateVisualProfile;

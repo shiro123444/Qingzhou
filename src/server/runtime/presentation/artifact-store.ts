@@ -3,32 +3,10 @@ import type {
   ArtifactStatus,
   RuntimeScope,
 } from '../../../../packages/runtime-contracts/src';
+import type { ArtifactInput, ArtifactStore, StoredArtifact } from '../artifacts/contracts';
 
-export interface ArtifactInput {
-  artifactId: string;
-  bytes?: Uint8Array;
-  createdAt?: string;
-  metadata?: Record<string, unknown>;
-  mimeType: string;
-  name: string;
-  sizeBytes?: number;
-  status?: ArtifactStatus;
-  type: string;
-  updatedAt?: string;
-  uri?: string;
-}
-
-export interface StoredArtifact extends ArtifactSnapshot {
-  readonly bytes?: Uint8Array;
-}
-
-export interface PresentationArtifactStore {
-  get: (scope: RuntimeScope, artifactId: string) => Promise<StoredArtifact | null>;
-  list?: (scope: RuntimeScope) => Promise<ArtifactSnapshot[]>;
-  listByJob?: (scope: RuntimeScope, jobId: string) => Promise<readonly StoredArtifact[]>;
-  put: (scope: RuntimeScope, artifact: ArtifactInput) => Promise<ArtifactSnapshot>;
-  remove: (scope: RuntimeScope, artifactId: string) => Promise<void>;
-}
+export type { ArtifactInput, StoredArtifact } from '../artifacts/contracts';
+export type PresentationArtifactStore = ArtifactStore;
 
 export type PresentationArtifactStoreErrorCode =
   | 'ARTIFACT_BYTES_UNAVAILABLE'

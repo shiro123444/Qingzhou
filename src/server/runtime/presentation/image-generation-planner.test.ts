@@ -97,6 +97,10 @@ describe('C-84 image-generation planner', () => {
       'slide-1/slot-a',
       'slide-2/slot-b',
     ]);
+    expect(generate).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: 'slide-1-slot-a' }),
+      expect.objectContaining({ scope }),
+    );
     expect(generate).toHaveBeenCalledTimes(2);
     const events = journal.replay('image-job-1');
     expect(events).toHaveLength(8);
@@ -110,6 +114,30 @@ describe('C-84 image-generation planner', () => {
         IMAGE_GENERATION_EVENT_TYPES.assetReady,
       ]);
     }
+  });
+
+  it('forwards owned style references and background mode to the image port', async () => {
+    const generate = vi.fn(async (request) => resultFor(request));
+    const { planner } = makeHarness(generate);
+    await planner.plan({
+      ...planInput([
+        {
+          background: 'opaque',
+          prompt: 'watercolor robot',
+          referenceAssetRefs: ['template-page-1'],
+          slideId: 'slide-1',
+          slotId: 'hero',
+        },
+      ]),
+    });
+    expect(generate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        background: 'opaque',
+        prompt: 'watercolor robot',
+        referenceAssetRefs: ['template-page-1'],
+      }),
+      expect.anything(),
+    );
   });
 
   it('caches successful slots idempotently without repeating provider or events', async () => {

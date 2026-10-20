@@ -46,6 +46,44 @@ const artifactShape = (artifactId: string, extra: Record<string, unknown> = {}) 
 });
 
 describe('PresentationStudio event payload projection (C-68)', () => {
+  it('consumes an old failure replay without replacing a newer completed snapshot', () => {
+    const store = createPresentationStudioStore(baseClient());
+    const completed = jobShape('j', 'completed', {
+      artifactIds: ['new-slide'],
+      updatedAt: '2026-09-21T06:10:00Z',
+    });
+    store.setState({ jobs: { j: completed } });
+    store.getState().applyPresentationEvent(
+      event('j', 12, {
+        job: jobShape('j', 'failed'),
+        activity: 'old failure',
+        artifactIds: ['old-slide'],
+      }),
+    );
+    expect(store.getState().jobs.j).toEqual(completed);
+    expect(store.getState().lastSeqByJob.j).toBe(12);
+    expect(store.getState().generationProgressByJob.j).toBeUndefined();
+  });
+
+  it('accepts a newer HTTP result even if an older event arrives while fetching', async () => {
+    let resolve!: (job: PresentationJob) => void;
+    const client = baseClient();
+    client.getPresentationJob = vi.fn(
+      () =>
+        new Promise<PresentationJob>((done) => {
+          resolve = done;
+        }),
+    );
+    const store = createPresentationStudioStore(client);
+    store.setState({ jobs: { j: jobShape('j') } });
+    const fetching = store.getState().refreshJob('j');
+    store.getState().applyPresentationEvent(event('j', 13, jobShape('j', 'failed')));
+    const completed = jobShape('j', 'completed', { updatedAt: '2026-09-21T06:10:00Z' });
+    resolve(completed);
+    await fetching;
+    expect(store.getState().jobs.j).toEqual(completed);
+  });
+
   it('classifies legacy top-level shapes and the C-63 nested bundle', () => {
     expect(projectPresentationEventData(jobShape('j'))?.kind).toBe('job');
     expect(projectPresentationEventData(artifactShape('a'))?.kind).toBe('artifact');
@@ -516,6 +554,42 @@ describe('PresentationStudio nested event job ownership (C-72)', () => {
       expect(progress.artifactIds).toEqual(['slide-1', 'slide-2']);
       expect(progress.currentSlide).toBe(2);
       expect(progress.progress).toBe(50);
+    });
+
+    it('keeps bounded activity feeds, cursors and artifacts isolated between parallel jobs', () => {
+      const store = createPresentationStudioStore(baseClient());
+
+      store
+        .getState()
+        .applyPresentationEvent(
+          event('job-a', 1, { activity: '正在绘画第一张素材', artifactIds: ['asset-a'] }),
+        );
+      store
+        .getState()
+        .applyPresentationEvent(
+          event('job-b', 9, { activity: '正在处理透明度', artifactIds: ['asset-b'] }),
+        );
+      store
+        .getState()
+        .applyPresentationEvent(
+          event('job-a', 2, { activity: '正在剪切第一张素材', artifactIds: ['asset-a-cut'] }),
+        );
+
+      const state = store.getState();
+      expect(state.lastSeqByJob).toMatchObject({ 'job-a': 2, 'job-b': 9 });
+      expect(state.generationProgressByJob['job-a']).toMatchObject({
+        activity: '正在剪切第一张素材',
+        artifactIds: ['asset-a', 'asset-a-cut'],
+        activityHistory: [
+          { id: 'job:1', text: '正在绘画第一张素材' },
+          { id: 'job:2', text: '正在剪切第一张素材' },
+        ],
+      });
+      expect(state.generationProgressByJob['job-b']).toMatchObject({
+        activity: '正在处理透明度',
+        artifactIds: ['asset-b'],
+        activityHistory: [{ id: 'job:9', text: '正在处理透明度' }],
+      });
     });
 
     it('recovers from lastSeq + 1 and safely ignores replayed or out-of-order events', () => {

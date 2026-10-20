@@ -70,7 +70,10 @@ describe('ModelsService', () => {
       await modelsService.getModels('openai');
 
       expect(mockedResolveRuntimeProvider).toHaveBeenCalledWith('openai');
-      expect(fetch).toHaveBeenCalledWith('/webapi/models/openai', { headers: {} });
+      expect(fetch).toHaveBeenCalledWith('/webapi/models/openai', {
+        headers: {},
+        signal: expect.any(AbortSignal),
+      });
       expect(mockedInitializeWithClientStore).not.toHaveBeenCalled();
     });
 
@@ -84,8 +87,31 @@ describe('ModelsService', () => {
 
       expect(mockedResolveRuntimeProvider).toHaveBeenCalledWith('custom-provider');
       // API endpoint uses original provider, allowing server to query correct config
-      expect(fetch).toHaveBeenCalledWith('/webapi/models/custom-provider', { headers: {} });
+      expect(fetch).toHaveBeenCalledWith('/webapi/models/custom-provider', {
+        headers: {},
+        signal: expect.any(AbortSignal),
+      });
       expect(mockedInitializeWithClientStore).not.toHaveBeenCalled();
+    });
+
+    it('surfaces authentication errors instead of treating failure as an empty result', async () => {
+      (fetch as Mock).mockResolvedValueOnce(
+        new Response(JSON.stringify({ errorType: 'InvalidProviderAPIKey' }), { status: 401 }),
+      );
+      await expect(modelsService.getModels('nexus')).rejects.toBeInstanceOf(Error);
+    });
+
+    it('propagates network errors so the fetcher can stop loading and show an error', async () => {
+      (fetch as Mock).mockRejectedValueOnce(new TypeError('Failed to fetch'));
+      await expect(modelsService.getModels('nexus')).rejects.toThrow('Failed to fetch');
+    });
+
+    it('bounds requests with a timeout', async () => {
+      const timeout = vi.spyOn(AbortSignal, 'timeout');
+      (fetch as Mock).mockResolvedValueOnce(new Response('[]'));
+      await modelsService.getModels('nexus');
+      expect(timeout).toHaveBeenCalledWith(60_000);
+      timeout.mockRestore();
     });
 
     it('should fetch models on client when isProviderFetchOnClient is true', async () => {

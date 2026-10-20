@@ -169,6 +169,8 @@ export function defineConfig() {
   const isPublicRoute = createRouteMatcher([
     // backend api
     '/api/v1(.*)', // OpenAPI routes should use OpenAPI auth (API Key/OIDC), not BetterAuth session
+    '/api/runtime/sites', // Authenticated by checkAuth, including OIDC CLI tokens
+    '/api/sites/public/(.*)', // Published content only; no account session required
     '/api/auth-check-user',
     '/api/auth-resolve-username',
     '/api/auth(.*)',
@@ -197,6 +199,7 @@ export function defineConfig() {
     '/market-auth-callback',
     // public share pages
     '/share(.*)',
+    '/sites/view/(.*)',
     // messenger verify-im — page itself handles unauth (in-page sign-in CTA)
     // and the random_id token is the actual capability check; no need for
     // session-protected access at the middleware layer.
@@ -211,7 +214,7 @@ export function defineConfig() {
     // when enable auth protection, only public route is not protected, others are all protected
     const isProtected = !isPublicRoute(req);
 
-    console.log(`[Middleware] Path: ${req.nextUrl.pathname}, isProtected: ${isProtected}`);
+    console.info(`[Middleware] Path: ${req.nextUrl.pathname}, isProtected: ${isProtected}`);
 
     logBetterAuth('Route protection status: %s, %s', req.url, isProtected ? 'protected' : 'public');
 
@@ -225,7 +228,7 @@ export function defineConfig() {
 
     const isLoggedIn = !!session?.user;
 
-    console.log(`[Middleware] Path: ${req.nextUrl.pathname}, isLoggedIn: ${isLoggedIn}`);
+    console.info(`[Middleware] Path: ${req.nextUrl.pathname}, isLoggedIn: ${isLoggedIn}`);
 
     logBetterAuth('BetterAuth session status: %O', {
       isLoggedIn,
@@ -242,7 +245,7 @@ export function defineConfig() {
         if (hl) {
           signInUrl.searchParams.set('hl', hl);
         }
-        console.log(`[Middleware] Redirecting to: ${signInUrl.toString()}`);
+        console.info(`[Middleware] Redirecting to: ${signInUrl.toString()}`);
         return Response.redirect(signInUrl);
       }
       logBetterAuth('Request a free route but not login, allow visit without auth header');

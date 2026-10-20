@@ -92,6 +92,13 @@ export interface PlatformMessenger {
   addReaction?: (messageId: string, emoji: string) => Promise<void>;
   createMessage: (content: string) => Promise<void>;
   editMessage: (messageId: string, content: string) => Promise<void>;
+  /** Upload privately, then return the separately ledgered user-visible send. */
+  prepareFile?: (file: {
+    bytes: Buffer;
+    filename: string;
+    mimeType: string;
+    deliveryId: string;
+  }) => Promise<() => Promise<void>>;
   removeReaction: (messageId: string, emoji: string) => Promise<void>;
   /**
    * Transition the bot's reaction on a message from `prevEmoji` to
@@ -310,15 +317,24 @@ export interface BotProviderConfig {
 
 export interface BotPlatformRedisClient {
   del: (key: string) => Promise<number>;
+  expire?: (key: string, seconds: number) => Promise<number>;
   get: (key: string) => Promise<string | null>;
+  incr?: (key: string) => Promise<number>;
   set: (key: string, value: string, options?: { ex?: number }) => Promise<string | null>;
   subscribe?: (channel: string, callback: (message: string) => void) => Promise<void>;
 }
 
 export interface BotPlatformRuntimeContext {
   appUrl?: string;
+  persistVerifiedWebhook?: (payload: unknown, eventId: string, threadId: string) => Promise<void>;
+  pollingCursorStore?: {
+    load: () => Promise<string | undefined>;
+    save: (cursor: string) => Promise<void>;
+  };
   redisClient?: BotPlatformRedisClient;
   registerByToken?: (token: string) => void;
+  /** Original inbound message ID for passive platform replies. */
+  replyToMessageId?: string;
 }
 
 // --------------- Validation ---------------

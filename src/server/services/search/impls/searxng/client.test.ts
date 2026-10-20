@@ -39,79 +39,33 @@ describe('SearXNGClient', () => {
     expect(result).toEqual(mockResponse);
   });
 
-  it('should return empty response when SearXNG 500 body contains "empty results"', async () => {
+  it('should throw error with HTTP status when response is not ok (e.g. 500)', async () => {
     mockFetch.mockResolvedValue({
       ok: false,
       status: 500,
-      statusText: 'Internal Server Error',
-      text: () => Promise.resolve('SearxNG returned empty results'),
     });
 
-    const result = await client.search('杭州天气');
-
-    expect(result).toEqual({
-      answers: [],
-      corrections: [],
-      infoboxes: [],
-      number_of_results: 0,
-      query: '杭州天气',
-      results: [],
-      suggestions: [],
-      unresponsive_engines: [],
-    });
+    await expect(client.search('杭州天气')).rejects.toThrow('Failed to search: HTTP 500');
   });
 
-  it('should return empty response when body contains "Empty Results" (case insensitive)', async () => {
+  it('should not read or include response body in HTTP error message', async () => {
+    const textFn = vi.fn().mockResolvedValue('sensitive config or html');
     mockFetch.mockResolvedValue({
       ok: false,
       status: 500,
-      statusText: 'Internal Server Error',
-      text: () =>
-        Promise.resolve('{"error":"Search failed","message":"SearxNG returned Empty Results"}'),
+      text: textFn,
     });
 
-    const result = await client.search('test query');
-
-    expect(result.results).toEqual([]);
-    expect(result.number_of_results).toBe(0);
+    await expect(client.search('test')).rejects.toThrow('Failed to search: HTTP 500');
+    expect(textFn).not.toHaveBeenCalled();
   });
 
-  it('should throw error for non-empty-results 500 responses', async () => {
-    mockFetch.mockResolvedValue({
-      ok: false,
-      status: 500,
-      statusText: 'Internal Server Error',
-      text: () => Promise.resolve('something went wrong'),
-    });
-
-    await expect(client.search('test')).rejects.toThrow(
-      'Failed to search: 500 Internal Server Error - something went wrong',
-    );
-  });
-
-  it('should include response body in error message', async () => {
+  it('should throw error with numeric status for 502 Bad Gateway', async () => {
     mockFetch.mockResolvedValue({
       ok: false,
       status: 502,
-      statusText: 'Bad Gateway',
-      text: () => Promise.resolve('upstream timeout'),
     });
 
-    await expect(client.search('test')).rejects.toThrow(
-      'Failed to search: 502 Bad Gateway - upstream timeout',
-    );
-  });
-
-  it('should handle text() failure gracefully', async () => {
-    mockFetch.mockResolvedValue({
-      ok: false,
-      status: 500,
-      statusText: 'Internal Server Error',
-      text: () => Promise.reject(new Error('read failed')),
-    });
-
-    await expect(client.search('test')).rejects.toThrow(
-      'Failed to search: 500 Internal Server Error',
-    );
+    await expect(client.search('test')).rejects.toThrow('Failed to search: HTTP 502');
   });
 });

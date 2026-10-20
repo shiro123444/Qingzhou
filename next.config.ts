@@ -1,5 +1,7 @@
 import { networkInterfaces } from 'node:os';
 
+import { ensureSpaDevTemplates } from './scripts/_shared/ensureSpaDevTemplates';
+import { getBuildBudget } from './src/libs/next/config/build-budget';
 import { defineConfig } from './src/libs/next/config/define-config';
 
 const isVercel = !!process.env.VERCEL_ENV;
@@ -41,14 +43,21 @@ const getLocalIPs = () => {
 
 const nextConfig = defineConfig({
   ...(isVercel ? vercelConfig : {}),
+  outputFileTracingIncludes: {
+    '/api/**': ['node_modules/pdfjs-dist/cmaps/**', 'node_modules/pdfjs-dist/standard_fonts/**'],
+  },
   experimental: {
-    // PPT uploads allow 32 MiB files; preserve the full multipart body through
-    // Next's proxy (its 10 MiB default otherwise truncates valid uploads).
-    proxyClientMaxBodySize: '40mb',
+    ...getBuildBudget(),
+    // Activate route modules on demand on small servers. Warm routes stay cached.
+    preloadEntriesOnStart: false,
+    // PPTX templates allow 100 MiB files. Leave bounded multipart overhead so
+    // Next's proxy does not truncate an otherwise valid upload.
+    proxyClientMaxBodySize: '110mb',
   },
 });
 
 if (process.env.NODE_ENV === 'development') {
+  ensureSpaDevTemplates(process.cwd());
   const allowedOrigins = getLocalIPs();
   (nextConfig as any).allowedDevOrigins = allowedOrigins;
 }

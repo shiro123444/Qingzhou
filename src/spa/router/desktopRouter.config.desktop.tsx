@@ -82,8 +82,10 @@ import RuntimePage from '@/routes/(main)/runtime';
 import SettingsTabPage from '@/routes/(main)/settings';
 import SettingsLayout from '@/routes/(main)/settings/_layout';
 import { ProviderDetailPage, ProviderLayout } from '@/routes/(main)/settings/provider';
+import SitesPage from '@/routes/(main)/sites';
 import TaskDetailRoute from '@/routes/(main)/task/[taskId]';
 import AllTasksPage from '@/routes/(main)/tasks';
+import PublicBlogPage from '@/routes/share/sites/[siteId]';
 import ShareTopicPage from '@/routes/share/t/[id]';
 import ShareTopicLayout from '@/routes/share/t/[id]/_layout';
 import { ErrorBoundary, redirectElement } from '@/utils/router';
@@ -517,6 +519,7 @@ export const desktopRoutes: RouteObject[] = [
         path: 'page',
       },
 
+      { element: <SitesPage />, path: 'sites' },
       // Runtime routes
       {
         children: [
@@ -558,6 +561,7 @@ export const desktopRoutes: RouteObject[] = [
 
   ...BusinessDesktopRoutesWithoutMainLayout,
 
+  { element: <PublicBlogPage />, path: '/sites/view/:siteId' },
   // Share topic route (outside main layout)
   {
     children: [

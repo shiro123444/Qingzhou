@@ -7,6 +7,8 @@ import { type TrustedClientUserInfo } from '@/libs/trusted-client';
 import { generateTrustedClientToken, getTrustedClientTokenForSession } from '@/libs/trusted-client';
 import { getMarketBaseUrl } from '@/services/_url';
 
+import { readPublicMarketDetail } from './readPublicDetail';
+
 const log = debug('lobe-server:market-service');
 
 const MARKET_BASE_URL = getMarketBaseUrl();
@@ -426,7 +428,9 @@ export class MarketService {
   async getSkillDetail(identifier: string, options?: { locale?: string; version?: string }) {
     log('getSkillDetail: %s, options: %O', identifier, options);
 
-    const result = await this.market.marketSkills.getSkillDetail(identifier, options);
+    const result = await readPublicMarketDetail(this.market, (client) =>
+      client.marketSkills.getSkillDetail(identifier, options),
+    );
 
     log('getSkillDetail response: %O', result);
 

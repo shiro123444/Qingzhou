@@ -1,10 +1,14 @@
 import { Button, Flexbox, Icon, Tag } from '@lobehub/ui';
-import { Alert, Spin } from 'antd';
-import { FlaskConical, Presentation } from 'lucide-react';
-import { memo, useMemo, useState } from 'react';
+import { Dropdown, Spin } from 'antd';
+import { FlaskConical } from 'lucide-react';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import ToggleLeftPanelButton from '@/features/NavPanel/ToggleLeftPanelButton';
 import type { PresentationTemplateSummary } from '@/services/runtime/templateClient';
+import { useGlobalStore } from '@/store/global';
+import { systemStatusSelectors } from '@/store/global/selectors';
+import type { PresentationMaterials } from '@/types/presentationMaterial';
 
 import type {
   ArtifactSnapshot,
@@ -21,17 +25,20 @@ import {
 import AnnotationBar from './AnnotationBar';
 import ArtifactPanel from './ArtifactPanel';
 import AssetSlotPanel from './AssetSlotPanel';
+import CollaborationPanel from './CollaborationPanel';
 import CompletedWorkspace from './CompletedWorkspace';
 import TemplateLibraryButton from './CompletedWorkspace/TemplateLibraryButton';
 import { ConversationPanel } from './ConversationPanel';
 import { defaultPresentationDemoClient } from './demo/presentationDemoClient';
 import type { UseJobPollingOptions } from './hooks/useJobPolling';
+import { usePresentationPresence } from './hooks/usePresentationPresence';
 import { usePresentationStudio } from './hooks/usePresentationStudio';
 import PresentationComposer from './PresentationComposer';
 import PresentationGenerationWorkspace from './PresentationGenerationWorkspace';
 import PresentationJobList from './PresentationJobList';
 import PresentationProgress from './PresentationProgress';
-import SlideInspector from './SlideInspector';
+import PresentationRecoveryWorkspace from './PresentationRecoveryWorkspace';
+import { currentSlideArtifacts } from './slideArtifacts';
 import SlideNavigator from './SlideNavigator';
 import SlidePreview from './SlidePreview';
 import {
@@ -39,16 +46,21 @@ import {
   type PresentationClient,
   type PresentationTransportMode,
 } from './store/presentationStore';
+import { StudioNotice } from './StudioNotice';
 import { styles } from './style';
 
 const updatePresentationLocation = (jobId: string | null) => {
   if (typeof window === 'undefined') return;
   try {
     const url = new URL(window.location.href);
-    if (jobId) url.searchParams.set('jobId', jobId);
-    else url.searchParams.delete('jobId');
+    if (jobId) {
+      url.searchParams.set('jobId', jobId);
+      url.searchParams.delete('planningThreadId');
+    } else url.searchParams.delete('jobId');
     window.history.replaceState(null, '', url.toString());
-  } catch {}
+  } catch {
+    // Browser history can be unavailable in embedded or test environments.
+  }
 };
 
 export interface PresentationStudioProps {
@@ -111,11 +123,13 @@ export const PresentationStudio = memo<PresentationStudioProps>(
         try {
           const paramId = new URLSearchParams(window.location.search).get('jobId');
           if (paramId) return [paramId];
-          const storedId = window.sessionStorage?.getItem('presentation_studio_active_job_id');
-          if (storedId) return [storedId];
-        } catch {}
+        } catch {
+          // URL access can be unavailable in privacy-restricted contexts.
+        }
       }
-      return undefined;
+      // Opening /presentation always starts from the creator. Saved works stay
+      // available in history and resume only after an explicit selection.
+      return [];
     }, [initialJobIds]);
 
     const [store] = useState(() =>
@@ -146,6 +160,7 @@ export const PresentationStudio = memo<PresentationStudioProps>(
     );
     const generationProgressByJob = store((s) => s.generationProgressByJob);
     const selectedJob = store((s) => (s.selectedJobId ? s.jobs[s.selectedJobId] : undefined));
+    const presenceTabId = usePresentationPresence(store, selectedJob?.jobId);
     const artifacts = store((s) => s.artifacts);
     const selectedArtifactId = store((s) => s.selectedArtifactId);
     const exporting = store((s) => s.exporting);
@@ -157,18 +172,23 @@ export const PresentationStudio = memo<PresentationStudioProps>(
     const resubmitLastInput = store((s) => s.resubmitLastInput);
     const resubmitting = store((s) => s.resubmitting);
     const { t } = useTranslation('common');
+    const showLeftPanel = useGlobalStore(systemStatusSelectors.showLeftPanel);
     const [showQuickComposer, setShowQuickComposer] = useState(false);
     const [selectedTemplate, setSelectedTemplate] = useState<PresentationTemplateSummary | null>(
       null,
     );
     const [creating, setCreating] = useState(false);
-    const [aiPrompt, setAiPrompt] = useState('');
-    const [aiPopoverOpen, setAiPopoverOpen] = useState(false);
     const [initialTopic, setInitialTopic] = useState(initialTopicProp || '');
     const presentationAgentClient = useMemo(
       () => agentClient ?? createPresentationAgentClient(),
       [agentClient],
     );
+    const handleTemplateSelection = useCallback((template: PresentationTemplateSummary | null) => {
+      setSelectedTemplate(template);
+      // Template learning belongs to the conversation. Selecting or importing one
+      // from the compact creator returns to the Agent workspace immediately.
+      if (template) setShowQuickComposer(false);
+    }, []);
 
     // C-66: generation UI consumes the selected job's stream status only.
     const selectedStreamStatus = store((s) =>
@@ -230,6 +250,34 @@ export const PresentationStudio = memo<PresentationStudioProps>(
     };
     const cancelJob = store((s) => s.cancelJob);
     const retryJob = store((s) => s.retryJob);
+
+    useEffect(() => {
+      const errorCode = selectedJob?.error?.code;
+      const unfinished = selectedJob?.messages?.findLast((message) => message.status !== 'applied');
+      const isRecoverableAnnotationPatch =
+        Boolean(unfinished?.annotation) &&
+        (errorCode === 'PRESENTATION_ANNOTATION_PATCH_INVALID' ||
+          (errorCode === 'PRESENTATION_INTERNAL_ERROR' &&
+            selectedJob?.error?.message === 'Unsafe annotation patch'));
+      if (
+        selectedJob?.state !== 'failed' ||
+        !errorCode ||
+        (!['IMAGE_UNAVAILABLE', 'PRESENTATION_WORKER_FAILED'].includes(errorCode) &&
+          !isRecoverableAnnotationPatch)
+      ) {
+        return;
+      }
+      if (!unfinished) return;
+
+      const resumeKey = `presentation_studio_auto_resume:${selectedJob.jobId}:${unfinished.requestId}:${errorCode}`;
+      try {
+        if (window.sessionStorage.getItem(resumeKey)) return;
+        window.sessionStorage.setItem(resumeKey, '1');
+      } catch {
+        return;
+      }
+      void retryJob(selectedJob.jobId);
+    }, [retryJob, selectedJob]);
     // C-87: material slot actions for the selected job.
     const slots = store((s) => s.slots);
     const slotRetryPending = store((s) => s.slotRetryPending);
@@ -239,6 +287,10 @@ export const PresentationStudio = memo<PresentationStudioProps>(
       store.getState().selectJob(jobId);
       updatePresentationLocation(jobId);
       if (jobId) void store.getState().refreshJob(jobId);
+    };
+    const handleDeleteJob = async (jobId: string) => {
+      const deleted = await store.getState().deleteJob(jobId);
+      if (deleted && selectedJobId === jobId) updatePresentationLocation(null);
     };
     const selectArtifact = store((s) => s.selectArtifact);
     const exportArtifact = store((s) => s.exportArtifact);
@@ -264,15 +316,7 @@ export const PresentationStudio = memo<PresentationStudioProps>(
     const isGenerating = isJobRunning || isHydratingArtifacts;
 
     const slideArtifacts = useMemo(
-      () =>
-        selectedJobArtifacts
-          .filter(
-            (a) =>
-              a.status === 'ready' && (a.type === 'svg' || a.metadata?.artifactRole === 'slide'),
-          )
-          .sort(
-            (a, b) => Number(a.metadata?.slideNumber ?? 0) - Number(b.metadata?.slideNumber ?? 0),
-          ),
+      () => currentSlideArtifacts(selectedJobArtifacts),
       [selectedJobArtifacts],
     );
 
@@ -338,26 +382,8 @@ export const PresentationStudio = memo<PresentationStudioProps>(
       }
     };
 
-    const handleAiModify = async (overridePrompt?: string) => {
-      const promptToUse = (typeof overridePrompt === 'string' ? overridePrompt : aiPrompt).trim();
-      if (!promptToUse || creating) return;
-      setCreating(true);
-      try {
-        if (!selectedJobId) return;
-        const applied = await store.getState().sendMessage(selectedJobId, {
-          content: promptToUse,
-          requestId: crypto.randomUUID(),
-          target: { type: 'deck' },
-        });
-        if (!applied) return;
-        setAiPrompt('');
-        setAiPopoverOpen(false);
-      } finally {
-        setCreating(false);
-      }
-    };
-
     const handleOutlineAiRewrite = async (input: {
+      materials?: PresentationMaterials;
       allSlides: OutlineSlide[];
       index?: number;
       mode: 'all' | 'slide';
@@ -388,11 +414,14 @@ export const PresentationStudio = memo<PresentationStudioProps>(
       ((jobState === 'completed' && selectedReady) ||
         ((jobState === 'failed' || jobState === 'cancelled') && hasReadyDeck));
     const handleNewPresentation = () => {
+      localStorage.removeItem('qingzhou:presentation:planning:active');
+      const location = new URL(window.location.href);
+      location.searchParams.delete('planningThreadId');
+      window.history.replaceState(null, '', location);
       selectJob(null);
       setShowQuickComposer(false);
       setSelectedTemplate(null);
       setInitialTopic('');
-      setAiPrompt('');
       dismissError();
       dismissExport();
     };
@@ -401,7 +430,7 @@ export const PresentationStudio = memo<PresentationStudioProps>(
       <Flexbox horizontal align="center" gap={6}>
         <TemplateLibraryButton
           selectedTemplate={selectedTemplate}
-          onSelectTemplate={setSelectedTemplate}
+          onSelectTemplate={handleTemplateSelection}
         />
         {selectedTemplate && (
           <span
@@ -441,12 +470,39 @@ export const PresentationStudio = memo<PresentationStudioProps>(
           </Flexbox>
         ) : (
           <div className={styles.emptyArea} data-testid="studio-empty-state">
-            <Flexbox horizontal align="center" gap={8} justify="center">
-              <Button type="text" onClick={() => setShowQuickComposer(true)}>
-                {t('presentationConversation.quickCreate')}
-              </Button>
-              {templatePicker}
-            </Flexbox>
+            <div className={styles.emptyHeader}>
+              <Flexbox horizontal align="center" gap={8}>
+                {!showLeftPanel && (
+                  <div data-testid="presentation-sidebar-reopen">
+                    <ToggleLeftPanelButton />
+                  </div>
+                )}
+                <Button type="text" onClick={() => setShowQuickComposer(true)}>
+                  {t('presentationConversation.quickCreate')}
+                </Button>
+                {templatePicker}
+              </Flexbox>
+              {jobs.length > 0 && (
+                <Dropdown
+                  trigger={['click']}
+                  popupRender={() => (
+                    <div className={styles.worksPanel} data-testid="presentation-works-panel">
+                      <PresentationJobList
+                        jobs={jobs}
+                        selectedJobId={selectedJobId}
+                        titles={jobTitles}
+                        onDelete={handleDeleteJob}
+                        onSelect={selectJob}
+                      />
+                    </div>
+                  )}
+                >
+                  <Button className={styles.emptyWorks} type="text">
+                    我的作品
+                  </Button>
+                </Dropdown>
+              )}
+            </div>
             <PresentationAgentFlow
               agentClient={presentationAgentClient}
               creating={creating}
@@ -470,70 +526,49 @@ export const PresentationStudio = memo<PresentationStudioProps>(
         )
       ) : null;
 
+    const showCompletedWorkspace = Boolean(
+      selectedJob && !emptyState && (jobState === 'completed' || slideArtifacts.length > 0),
+    );
+    const showGenerationWorkspace = Boolean(isGenerating && selectedJob && !showCompletedWorkspace);
+    const liveActivity =
+      typeof (generatingJob as Record<string, unknown> | undefined)?.activity === 'string'
+        ? ((generatingJob as Record<string, unknown>).activity as string)
+        : undefined;
+
     return (
       <div
         className={className ? `${styles.studio} ${className}` : styles.studio}
         data-testid="presentation-studio"
       >
-        {selectedJob && !isGenerating && jobState !== 'completed' ? (
-          <header aria-label="Presentation studio header" className={styles.banner}>
-            <Flexbox horizontal align="center" gap={12}>
-              <Icon icon={Presentation} size={18} />
-              <div className={styles.bannerMeta}>
-                <h1 className={styles.title}>{conciseTitle ?? 'PPT 工作台'}</h1>
-              </div>
-            </Flexbox>
+        <header aria-label="Presentation studio header" className={styles.srOnly}>
+          <h1 className={styles.title}>PPT 工作台</h1>
+          {transportMode === 'demo' ? (
+            <Tag
+              className={styles.demoBadge}
+              color="gold"
+              data-testid="presentation-demo-badge"
+              icon={<Icon icon={FlaskConical} size={12} />}
+            >
+              Demo data — fake transport, no real provider
+            </Tag>
+          ) : (
+            <Tag color="default" data-testid="presentation-transport-badge">
+              运行时连接
+              <span className={styles.srOnly}>Runtime HTTP transport</span>
+            </Tag>
+          )}
+        </header>
 
-            <Flexbox horizontal align="center" gap={8}>
-              {transportMode === 'demo' ? (
-                <Tag
-                  className={styles.demoBadge}
-                  color="gold"
-                  data-testid="presentation-demo-badge"
-                  icon={<Icon icon={FlaskConical} size={12} />}
-                >
-                  Demo data — fake transport, no real provider
-                </Tag>
-              ) : (
-                <Tag color="default" data-testid="presentation-transport-badge">
-                  运行时连接
-                  <span className={styles.srOnly}>Runtime HTTP transport</span>
-                </Tag>
-              )}
-            </Flexbox>
-          </header>
-        ) : (
-          <header aria-label="Presentation studio header" className={styles.srOnly}>
-            <h1 className={styles.title}>PPT 工作台</h1>
-            {transportMode === 'demo' ? (
-              <Tag
-                className={styles.demoBadge}
-                color="gold"
-                data-testid="presentation-demo-badge"
-                icon={<Icon icon={FlaskConical} size={12} />}
-              >
-                Demo data — fake transport, no real provider
-              </Tag>
-            ) : (
-              <Tag color="default" data-testid="presentation-transport-badge">
-                运行时连接
-                <span className={styles.srOnly}>Runtime HTTP transport</span>
-              </Tag>
-            )}
-          </header>
-        )}
-
-        {/* C-80: while a dedicated export-failure alert is showing, the generic
-            clientError alert is suppressed for export-origin codes. */}
-        {clientError && !(exportError && clientError.code === exportError.code) && (
-          <div className={styles.errorBox} data-testid="presentation-client-error">
-            {clientError.code === 'PROVIDER_UNAVAILABLE' ? (
-              <Alert
-                closable
-                showIcon
-                data-testid="presentation-provider-unavailable"
-                role="alert"
-                type="warning"
+        <div className={styles.noticeHost} data-testid="presentation-notice-host">
+          {/* Overlay notices keep the canvas from shifting. Export-origin client
+              errors stay on the dedicated export bubble. */}
+          {clientError && !(exportError && clientError.code === exportError.code) ? (
+            clientError.code === 'PROVIDER_UNAVAILABLE' ? (
+              <StudioNotice
+                key="provider-unavailable"
+                resetKey={clientError}
+                testId="presentation-provider-unavailable"
+                tone="warning"
                 action={
                   <Flexbox gap={8}>
                     <Button
@@ -571,7 +606,7 @@ export const PresentationStudio = memo<PresentationStudioProps>(
                     </span>
                   </span>
                 }
-                message={
+                title={
                   <span>
                     演示文稿生成服务当前不可用
                     <span style={{ display: 'none' }}>
@@ -582,13 +617,13 @@ export const PresentationStudio = memo<PresentationStudioProps>(
                 onClose={dismissError}
               />
             ) : (
-              <Alert
-                closable
-                showIcon
+              <StudioNotice
                 description={clientError.message}
-                role="alert"
-                type="error"
-                message={
+                key={`client-${clientError.code}`}
+                resetKey={clientError}
+                testId="presentation-client-error"
+                tone="error"
+                title={
                   <span>
                     运行时错误: {clientError.code}
                     <span style={{ display: 'none' }}>
@@ -598,17 +633,15 @@ export const PresentationStudio = memo<PresentationStudioProps>(
                 }
                 onClose={dismissError}
               />
-            )}
-          </div>
-        )}
+            )
+          ) : null}
 
-        {exportError && (
-          <div className={styles.errorBox} data-testid="presentation-export-error">
-            <Alert
-              closable
-              showIcon
-              role="alert"
-              type="error"
+          {exportError ? (
+            <StudioNotice
+              key={`export-error-${exportError.artifactId}-${exportError.format}`}
+              resetKey={exportError}
+              testId="presentation-export-error"
+              tone="error"
               action={
                 <Button
                   aria-busy={Boolean(exporting)}
@@ -632,7 +665,7 @@ export const PresentationStudio = memo<PresentationStudioProps>(
                   </span>
                 </span>
               }
-              message={
+              title={
                 <span>
                   {`导出失败: ${exportError.code}`}
                   <span style={{ display: 'none' }}>{`Export failed: ${exportError.code}`}</span>
@@ -640,15 +673,14 @@ export const PresentationStudio = memo<PresentationStudioProps>(
               }
               onClose={dismissExport}
             />
-          </div>
-        )}
+          ) : null}
 
-        {exported && (
-          <div className={styles.exportNotice} data-testid="presentation-export-notice">
-            <Alert
-              closable
-              showIcon
-              type="success"
+          {exported ? (
+            <StudioNotice
+              key={`export-${exported.artifactId}-${exported.format}`}
+              resetKey={exported}
+              testId="presentation-export-notice"
+              tone="success"
               description={
                 exported.uri ? (
                   <a download data-testid="presentation-export-download" href={exported.uri}>
@@ -656,7 +688,7 @@ export const PresentationStudio = memo<PresentationStudioProps>(
                   </a>
                 ) : undefined
               }
-              message={
+              title={
                 <span>
                   {`${exported.format.toUpperCase()} 已就绪`}
                   <span style={{ display: 'none' }}>
@@ -666,11 +698,19 @@ export const PresentationStudio = memo<PresentationStudioProps>(
               }
               onClose={dismissExport}
             />
-          </div>
-        )}
+          ) : null}
+        </div>
 
-        <div className={selectedJob ? styles.conversationLayout : undefined}>
-          <div className={styles.conversationMain}>
+        {selectedJob && (
+          <CollaborationPanel
+            job={selectedJob}
+            key={selectedJob.jobId}
+            store={store}
+            tabId={presenceTabId}
+          />
+        )}
+        <div className={styles.conversationLayout}>
+          <div className={`${styles.conversationMain} ${styles.conversationMainFill}`}>
             {emptyState ? (
               <div className={styles.emptyShell} data-testid="presentation-empty-shell">
                 <div className={showQuickComposer ? styles.columnMain : styles.srOnly}>
@@ -690,29 +730,16 @@ export const PresentationStudio = memo<PresentationStudioProps>(
                   />
                 </div>
                 {emptyState}
-                {jobs.length > 0 && (
-                  <details style={{ alignSelf: 'center', marginTop: 12 }}>
-                    <summary
-                      style={{
-                        cursor: 'pointer',
-                        color: 'var(--ant-color-text-tertiary)',
-                        fontSize: 12,
-                      }}
-                    >
-                      我的作品
-                    </summary>
-                    <PresentationJobList
-                      jobs={jobs}
-                      selectedJobId={selectedJobId}
-                      titles={jobTitles}
-                      onSelect={selectJob}
-                    />
-                  </details>
-                )}
               </div>
-            ) : isGenerating && selectedJob ? (
+            ) : showGenerationWorkspace && selectedJob ? (
               <>
+                {!showLeftPanel && (
+                  <div data-testid="presentation-sidebar-reopen">
+                    <ToggleLeftPanelButton />
+                  </div>
+                )}
                 <PresentationGenerationWorkspace
+                  activityHistory={generationProgressByJob[selectedJob.jobId]?.activityHistory}
                   artifacts={selectedJobArtifactMap}
                   busyState={busyState}
                   job={generatingJob ?? selectedJob}
@@ -725,6 +752,7 @@ export const PresentationStudio = memo<PresentationStudioProps>(
                     jobs={jobs}
                     selectedJobId={selectedJobId}
                     titles={jobTitles}
+                    onDelete={handleDeleteJob}
                     onSelect={selectJob}
                   />
                   <PresentationComposer
@@ -763,11 +791,12 @@ export const PresentationStudio = memo<PresentationStudioProps>(
                   <SlidePreview artifact={selectedSlide ?? null} />
                 </div>
               </>
-            ) : selectedJob && (jobState === 'completed' || slideArtifacts.length > 0) ? (
+            ) : showCompletedWorkspace && selectedJob ? (
               <div className={styles.completedMain}>
                 <CompletedWorkspace
+                  activity={liveActivity}
+                  activityHistory={generationProgressByJob[selectedJob.jobId]?.activityHistory}
                   canExport={canExport}
-                  creating={creating}
                   dismissSlotError={dismissSlotError}
                   effectiveSelectedArtifactId={effectiveSelectedArtifactId}
                   exported={exported}
@@ -781,11 +810,13 @@ export const PresentationStudio = memo<PresentationStudioProps>(
                   selectedJobSlots={selectedJobSlots}
                   selectedSlide={selectedSlide ?? null}
                   showInspector={showInspector}
+                  showSidebarReopen={!showLeftPanel}
                   slideArtifacts={slideArtifacts}
                   retrySlot={async (...args) => {
                     await retrySlot(...args);
                   }}
-                  onAiModify={handleAiModify}
+                  onCancel={cancelJob}
+                  onDeleteJob={handleDeleteJob}
                   onExport={handleExport}
                   onJobChanged={() => store.getState().refreshJob(selectedJob!.jobId)}
                   onNewPresentation={handleNewPresentation}
@@ -800,6 +831,7 @@ export const PresentationStudio = memo<PresentationStudioProps>(
                     jobs={jobs}
                     selectedJobId={selectedJobId}
                     titles={jobTitles}
+                    onDelete={handleDeleteJob}
                     onSelect={selectJob}
                   />
                   <PresentationComposer
@@ -820,72 +852,37 @@ export const PresentationStudio = memo<PresentationStudioProps>(
                 </div>
               </div>
             ) : (
-              <div className={styles.grid}>
-                <div className={styles.columnLeft}>
-                  <PresentationJobList
-                    jobs={jobs}
-                    selectedJobId={selectedJobId}
-                    titles={jobTitles}
-                    onSelect={selectJob}
-                  />
-                  <div className={styles.srOnly}>
-                    <PresentationComposer
-                      defaultLanguage={defaultLanguage}
-                      defaultNotebookId={defaultNotebookId}
-                      defaultSourceVersionIds={defaultSourceVersionIds}
-                      onCreate={createJobWithTemplate}
-                    />
-                  </div>
-                </div>
-
-                <div className={styles.columnMain}>
-                  <PresentationProgress
-                    busyState={busyState}
-                    job={selectedJob ?? null}
-                    streamStatus={selectedStreamStatus}
-                    title={selectedJob ? jobTitles[selectedJob.jobId] : undefined}
-                    onCancel={cancelJob}
-                    onRetry={retryJob}
-                  />
-
-                  <SlideNavigator
-                    hasSelection={Boolean(selectedJob)}
-                    selectedArtifactId={effectiveSelectedArtifactId}
-                    slides={slideArtifacts}
-                    onSelect={selectArtifact}
-                  />
-                  <SlidePreview artifact={selectedSlide ?? null} />
-                </div>
-
-                <div className={styles.columnRight}>
-                  <ArtifactPanel
-                    artifacts={selectedJobArtifacts}
-                    exporting={Boolean(exporting)}
-                    jobState={jobState ?? null}
-                    selectedArtifactId={effectiveSelectedArtifactId}
-                    onExport={handleExport}
-                    onSelect={selectArtifact}
-                  />
-                  {selectedJobId && (
-                    <AssetSlotPanel
-                      resolveArtifactUri={resolveArtifactUri}
-                      retryPendingKeys={retryPendingKeys}
-                      slots={selectedJobSlots}
-                      onDismissError={(slideId, slotId) => {
-                        dismissSlotError(selectedJobId, slideId, slotId);
-                      }}
-                      onRetry={(slideId, slotId) => {
-                        void retrySlot(selectedJobId, slideId, slotId);
-                      }}
-                    />
-                  )}
-                  {showInspector && <SlideInspector artifact={selectedArtifact ?? null} />}
-                  {showAnnotationBar && <AnnotationBar />}
-                </div>
-              </div>
+              selectedJob && (
+                <PresentationRecoveryWorkspace
+                  busy={Boolean(busyState)}
+                  job={selectedJob}
+                  showSidebarReopen={!showLeftPanel}
+                  title={conciseTitle}
+                  history={
+                    <Dropdown
+                      trigger={['click']}
+                      popupRender={() => (
+                        <div className={styles.worksPanel}>
+                          <PresentationJobList
+                            jobs={jobs}
+                            selectedJobId={selectedJobId}
+                            titles={jobTitles}
+                            onDelete={handleDeleteJob}
+                            onSelect={selectJob}
+                          />
+                        </div>
+                      )}
+                    >
+                      <Button type="text">{t('presentationTemplates.history')}</Button>
+                    </Dropdown>
+                  }
+                  onNew={handleNewPresentation}
+                  onRetry={retryJob}
+                />
+              )
             )}
           </div>
-          {selectedJob && (
+          {!emptyState && !showCompletedWorkspace && selectedJob && (
             <ConversationPanel
               job={selectedJob}
               key={selectedJob.jobId}

@@ -4,6 +4,7 @@ import { Flexbox } from '@lobehub/ui';
 import { memo } from 'react';
 import { useParams } from 'react-router-dom';
 
+import CommunityDetailFetchError from '@/features/CommunityDetail/FetchError';
 import { useQuery } from '@/hooks/useQuery';
 import { useDiscoverStore } from '@/store/discover';
 import { type AssistantMarketSource } from '@/types/discover';
@@ -26,9 +27,11 @@ const AssistantDetailPage = memo<AssistantDetailPageProps>(({ mobile }) => {
   const { version, source } = useQuery() as { source?: AssistantMarketSource; version?: string };
 
   const useAssistantDetail = useDiscoverStore((s) => s.useAssistantDetail);
-  const { data, isLoading } = useAssistantDetail({ identifier, source, version });
+  const { data, error, isLoading, mutate } = useAssistantDetail({ identifier, source, version });
 
   if (isLoading) return <Loading />;
+  if (error && !data)
+    return <CommunityDetailFetchError error={error} onRetry={() => void mutate()} />;
   if (!data) return <NotFound />;
 
   // Check assistant status

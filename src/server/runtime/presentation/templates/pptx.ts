@@ -1,7 +1,13 @@
-import { posix } from 'node:path';
+import nodePath from 'node:path';
 
 import { strFromU8, unzipSync } from 'fflate';
 
+import type { TeachingPageObservation } from '@/types/presentationTeaching';
+
+import {
+  PRESENTATION_PPTX_MAX_UPLOAD_BYTES,
+  PRESENTATION_PPTX_MAX_UPLOAD_MIB,
+} from '../../../../../packages/runtime-contracts/src';
 import { constraintsFromLayouts, layoutKind } from './extract';
 import type {
   TemplateAssetSlot,
@@ -9,6 +15,7 @@ import type {
   TemplateConstraints,
   TemplateElement,
   TemplateLayout,
+  TemplateMediaReference,
 } from './types';
 import { PresentationTemplateError } from './types';
 import {
@@ -23,9 +30,34 @@ import {
   xml,
 } from './xml';
 
-const MAX_INPUT = 32 * 1024 * 1024;
 const MAX_XML = 64 * 1024 * 1024;
+const MAX_ARCHIVE_UNCOMPRESSED = 512 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRY = 256 * 1024 * 1024;
 const round = (value: number): number => Math.round(value * 10_000) / 10_000;
+const embeddedMedia = (path: string): { kind: 'audio' | 'video'; mimeType?: string } | null => {
+  const extension = nodePath.posix.extname(path).toLowerCase();
+  const videos: Record<string, string> = {
+    '.avi': 'video/x-msvideo',
+    '.m4v': 'video/x-m4v',
+    '.mov': 'video/quicktime',
+    '.mp4': 'video/mp4',
+    '.mpeg': 'video/mpeg',
+    '.mpg': 'video/mpeg',
+    '.webm': 'video/webm',
+    '.wmv': 'video/x-ms-wmv',
+  };
+  const audio: Record<string, string> = {
+    '.aac': 'audio/aac',
+    '.m4a': 'audio/mp4',
+    '.mp3': 'audio/mpeg',
+    '.ogg': 'audio/ogg',
+    '.wav': 'audio/wav',
+    '.wma': 'audio/x-ms-wma',
+  };
+  if (videos[extension]) return { kind: 'video', mimeType: videos[extension] };
+  if (audio[extension]) return { kind: 'audio', mimeType: audio[extension] };
+  return null;
+};
 
 interface Relationship {
   id: string;
@@ -41,34 +73,64 @@ interface Transform {
   sy: number;
   tx: number;
   ty: number;
+  unsafeNative?: boolean;
 }
 
 /** Read OOXML as data only. Embedded programs, external relations and macros are never executed. */
 export const extractPptxTemplate = (
   bytes: Uint8Array,
+  observe?: (page: TeachingPageObservation) => void,
+  options?: { trustedLocalSource?: boolean },
 ): {
   constraints: TemplateConstraints;
   layouts: TemplateLayout[];
+  media: TemplateMediaReference[];
   warnings: string[];
 } => {
-  if (!bytes.byteLength || bytes.byteLength > MAX_INPUT)
-    throw new PresentationTemplateError('PPTX upload must be between 1 byte and 32 MiB');
-  let total = 0;
+  if (
+    !bytes.byteLength ||
+    bytes.byteLength >
+      (options?.trustedLocalSource ? 512 * 1024 * 1024 : PRESENTATION_PPTX_MAX_UPLOAD_BYTES)
+  )
+    throw new PresentationTemplateError(
+      `PPTX upload must be between 1 byte and ${PRESENTATION_PPTX_MAX_UPLOAD_MIB} MiB`,
+    );
+  let archiveTotal = 0;
+  let xmlTotal = 0;
   let count = 0;
+  const mediaEntries = new Map<
+    string,
+    { kind: 'audio' | 'video'; mimeType?: string; sizeBytes: number }
+  >();
   let files: Record<string, Uint8Array>;
   try {
     files = unzipSync(bytes, {
       filter: (entry) => {
         if (++count > 5000) throw new PresentationTemplateError('PPTX has too many entries');
+        if (entry.name.split('/').includes('..') || entry.name.startsWith('/'))
+          throw new PresentationTemplateError('PPTX contains an invalid entry path');
+        archiveTotal += entry.originalSize;
+        if (
+          !options?.trustedLocalSource &&
+          (entry.originalSize > MAX_ARCHIVE_ENTRY || archiveTotal > MAX_ARCHIVE_UNCOMPRESSED)
+        )
+          throw new PresentationTemplateError('PPTX expanded content exceeds the import budget');
+        const media = /^ppt\/media\/[^/]+$/u.test(entry.name) ? embeddedMedia(entry.name) : null;
+        if (media)
+          mediaEntries.set(entry.name, {
+            ...media,
+            sizeBytes: entry.originalSize,
+          });
         if (
           !/^(?:ppt\/|\[Content_Types\]\.xml$)/u.test(entry.name) ||
           !/\.(?:xml|rels)$/u.test(entry.name)
         )
           return false;
-        if (entry.name.split('/').includes('..'))
-          throw new PresentationTemplateError('PPTX contains an invalid entry path');
-        total += entry.originalSize;
-        if (entry.originalSize > 8 * 1024 * 1024 || total > MAX_XML)
+        xmlTotal += entry.originalSize;
+        if (
+          entry.originalSize > (options?.trustedLocalSource ? 16 : 8) * 1024 * 1024 ||
+          xmlTotal > MAX_XML
+        )
           throw new PresentationTemplateError('PPTX XML exceeds the import budget');
         return true;
       },
@@ -85,7 +147,11 @@ export const extractPptxTemplate = (
     'Imported reference SVGs approximate native PPTX shapes; the original PPTX is retained for native template filling.',
   ]);
   const relationships = (path: string): Relationship[] => {
-    const relPath = posix.join(posix.dirname(path), '_rels', `${posix.basename(path)}.rels`);
+    const relPath = nodePath.posix.join(
+      nodePath.posix.dirname(path),
+      '_rels',
+      `${nodePath.posix.basename(path)}.rels`,
+    );
     return array(object(read(relPath).Relationships).Relationship).flatMap((relation) => {
       if (attribute(relation, 'TargetMode') === 'External') {
         warnings.add('External PPTX relationships were ignored.');
@@ -94,7 +160,7 @@ export const extractPptxTemplate = (
       const target = attribute(relation, 'Target') ?? '';
       const resolved = target.startsWith('/')
         ? target.slice(1)
-        : posix.normalize(posix.join(posix.dirname(path), target));
+        : nodePath.posix.normalize(nodePath.posix.join(nodePath.posix.dirname(path), target));
       if (!resolved.startsWith('ppt/')) return [];
       return [
         {
@@ -137,6 +203,7 @@ export const extractPptxTemplate = (
         : `${width}:${height}`;
   const allColors: string[] = [];
   const allFonts: string[] = [];
+  const media: TemplateMediaReference[] = [];
   const themes = new Map<string, Theme>();
   const themeFor = (path?: string): Theme => {
     if (!path) return { colors: {}, fonts: {} };
@@ -197,6 +264,11 @@ export const extractPptxTemplate = (
     const colorMap = object(master.clrMap);
     const elements: TemplateElement[] = [];
     const assetSlots: TemplateAssetSlot[] = [];
+    const evidence: NonNullable<TemplateLayout['evidence']> = {
+      tables: [],
+      chartCount: 0,
+      textCharacters: 0,
+    };
     const sourceSlideId = `slide-${index + 1}`;
     const content: string[] = [];
     const background =
@@ -235,6 +307,11 @@ export const extractPptxTemplate = (
             const sy =
               number(attribute(ext, 'cy'), 1) / (number(attribute(childExt, 'cy'), 1) || 1);
             visit(shape, {
+              unsafeNative:
+                transform.unsafeNative ||
+                Boolean(attribute(xfrm, 'rot')) ||
+                ['1', 'true'].includes(attribute(xfrm, 'flipH') ?? '') ||
+                ['1', 'true'].includes(attribute(xfrm, 'flipV') ?? ''),
               sx: transform.sx * sx,
               sy: transform.sy * sy,
               tx:
@@ -267,7 +344,37 @@ export const extractPptxTemplate = (
             x: round((number(attribute(off, 'x')) * transform.sx + transform.tx) / width),
             y: round((number(attribute(off, 'y')) * transform.sy + transform.ty) / height),
           };
+          const relationIds = new Set(
+            ['videoFile', 'audioFile', 'media'].flatMap((tag) =>
+              descendants(shape, tag).flatMap((node) =>
+                [attribute(node, 'link'), attribute(node, 'embed')].filter((id): id is string =>
+                  Boolean(id),
+                ),
+              ),
+            ),
+          );
+          const shapeMedia = relations.filter(
+            (relation) => relationIds.has(relation.id) && mediaEntries.has(relation.path),
+          );
           const text = textContent(shape.txBody).trim();
+          const table = descendants(shape, 'tbl')[0];
+          if (table) {
+            const widths = descendants(table, 'gridCol').map((column) =>
+              number(attribute(column, 'w')),
+            );
+            const total = widths.reduce((a, b) => a + b, 0);
+            evidence.tables.push({
+              box,
+              rows: descendants(table, 'tr').length,
+              columns: widths.length,
+              columnWeights: widths.map((value) =>
+                total > 0 ? round(value / total) : 1 / widths.length,
+              ),
+            });
+            evidence.textCharacters += [...textContent(table)].length;
+          }
+          evidence.chartCount += descendants(shape, 'chart').length;
+          evidence.textCharacters += [...text].length;
           const runProperties =
             descendants(shape.txBody, 'rPr')[0] ??
             descendants(shape.txBody, 'defRPr')[0] ??
@@ -302,15 +409,62 @@ export const extractPptxTemplate = (
             kind: kind === 'pic' ? 'image' : text ? 'text' : 'shape',
             role,
           });
+          const blip = descendants(shape, 'blip')[0] ?? {};
+          const poster = relations.find((relation) => relation.id === attribute(blip, 'embed'));
           if (kind === 'pic') {
-            const blip = descendants(shape, 'blip')[0] ?? {};
-            const image = relations.find((relation) => relation.id === attribute(blip, 'embed'));
+            const crop = descendants(shape, 'srcRect')[0];
             assetSlots.push({
               aspectRatio: round((box.width * width) / Math.max(1, box.height * height)),
               box,
               fit: descendants(shape, 'srcRect').length ? 'cover' : 'contain',
-              reference: image ? `pptx:${image.path}` : undefined,
+              reference: poster ? `pptx:${poster.path}` : undefined,
+              ...(crop
+                ? {
+                    sourceCrop: {
+                      bottom: number(attribute(crop, 'b')) / 100_000,
+                      left: number(attribute(crop, 'l')) / 100_000,
+                      right: number(attribute(crop, 'r')) / 100_000,
+                      top: number(attribute(crop, 't')) / 100_000,
+                    },
+                  }
+                : {}),
+              sourceTransform: {
+                approximate:
+                  transform.unsafeNative ||
+                  [
+                    'alphaModFix',
+                    'alpha',
+                    'lum',
+                    'duotone',
+                    'clrChange',
+                    'clrRepl',
+                    'grayscl',
+                    'hsl',
+                    'tint',
+                  ].some((effect) => descendants(blip, effect).length > 0) ||
+                  Boolean(object(object(shape.spPr).custGeom).pathLst) ||
+                  !['rect', ''].includes(
+                    attribute(object(object(shape.spPr).prstGeom), 'prst') ?? '',
+                  ),
+                flipH: ['1', 'true'].includes(attribute(xfrm, 'flipH') ?? ''),
+                flipV: ['1', 'true'].includes(attribute(xfrm, 'flipV') ?? ''),
+                rotation: number(attribute(xfrm, 'rot')) / 60_000,
+              },
               slotId: `${sourceSlideId}:image:${assetSlots.length + 1}`,
+            });
+          }
+          for (const relation of shapeMedia) {
+            const entry = mediaEntries.get(relation.path)!;
+            media.push({
+              box,
+              kind: entry.kind,
+              mediaId: `${sourceSlideId}:${entry.kind}:${media.length + 1}`,
+              mimeType: entry.mimeType,
+              page: index + 1,
+              path: relation.path,
+              posterReference: poster ? `pptx:${poster.path}` : undefined,
+              relationshipId: relation.id,
+              sizeBytes: entry.sizeBytes,
             });
           }
           const x = round(box.x * 960),
@@ -345,8 +499,50 @@ export const extractPptxTemplate = (
     const notes = notesPath
       ? textContent(object(object(read(notesPath).notes).cSld)).trim()
       : undefined;
+    if (observe) {
+      const timing = object(slide.timing);
+      const targets = descendants(timing, 'spTgt').map((node) => attribute(node, 'spid'));
+      const builds = descendants(timing, 'cTn').filter((node) =>
+        ['clickEffect', 'withEffect', 'afterEffect'].includes(attribute(node, 'nodeType') ?? ''),
+      );
+      observe({
+        builds: builds.slice(0, 64).map((node) => ({
+          id: (attribute(node, 'id') ?? '').slice(0, 80),
+          nodeType: (attribute(node, 'nodeType') ?? '').slice(0, 80),
+          presetClass: (attribute(node, 'presetClass') ?? '').slice(0, 80),
+          targets: [
+            ...new Set(
+              descendants(node, 'spTgt').map((target) =>
+                (attribute(target, 'spid') ?? '').slice(0, 80),
+              ),
+            ),
+          ].slice(0, 64),
+          effects: descendants(node, 'animEffect')
+            .map((effect) => (attribute(effect, 'filter') ?? '').slice(0, 120))
+            .slice(0, 64),
+        })),
+        buildsTruncated: builds.length > 64,
+        page: index + 1,
+        text: descendants(object(slide.cSld), 'txBody')
+          .flatMap((body) => array(body.p).map(textContent))
+          .filter(Boolean)
+          .join('\n'),
+        notes: notes ?? '',
+        imageRefs: assetSlots.flatMap((slot) => (slot.reference ? [slot.reference] : [])),
+        cues: `Page ${index + 1}; text elements ${elements.filter((el) => el.kind === 'text').length}; image slots ${assetSlots.length}; timing present ${Boolean(slide.timing)}; timing nodes ${descendants(timing, 'cTn').length}; target shape IDs ${[...new Set(targets)].join(',')}; effects ${descendants(
+          timing,
+          'animEffect',
+        )
+          .map((node) => attribute(node, 'filter'))
+          .filter(Boolean)
+          .join(
+            ',',
+          )}. Timing is structural evidence, not lecture duration or a reconstructed click sequence.`,
+      });
+    }
     return {
       assetSlots,
+      evidence,
       elements,
       kind: layoutKind(elements),
       layoutId: `layout:${sourceSlideId}`,
@@ -356,9 +552,18 @@ export const extractPptxTemplate = (
       textCapacity: elements.reduce((sum, element) => sum + (element.textCapacity ?? 0), 0),
     };
   });
+  if (media.some((item) => item.kind === 'video'))
+    warnings.add(
+      'Embedded videos are preserved and sampled as visual evidence; audio content is not inferred.',
+    );
+  if (media.some((item) => item.kind === 'audio'))
+    warnings.add(
+      'Embedded audio is preserved, but its semantic content requires user confirmation.',
+    );
   return {
     constraints: constraintsFromLayouts(ratio, layouts, allColors, allFonts),
     layouts,
+    media,
     warnings: [...warnings],
   };
 };

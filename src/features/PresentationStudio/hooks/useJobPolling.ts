@@ -31,7 +31,8 @@ export interface UseJobPollingOptions {
   wait?: (delayMs: number, signal: AbortSignal) => Promise<void>;
 }
 
-const isActiveState = (state: string): boolean => state === 'queued' || state === 'running';
+const isActiveState = (state: string): boolean =>
+  ['queued', 'running', 'waiting_input'].includes(state);
 
 export const defaultReconnectWait = (delayMs: number, signal: AbortSignal): Promise<void> =>
   new Promise((resolve, reject) => {
@@ -96,6 +97,24 @@ export const useJobPolling = (
     // Jobs whose reconnect budget is exhausted stay on polling for this
     // session; the last known seq is preserved on the store for later resume.
     const endedJobs = new Set<string>();
+    const reconciledAt = new Map<string, number>(
+      Object.keys(store.getState().jobs).map((jobId) => [jobId, Date.now()]),
+    );
+
+    // A terminal state can be superseded by a retry in another tab. SSE can
+    // also stay connected to an old dev worker without delivering new events.
+    const reconcileJob = async (jobId: string) => {
+      if (disposed || store.getState().pendingActions[jobId]) return;
+      reconciledAt.set(jobId, Date.now());
+      await store.getState().refreshJob(jobId);
+    };
+    const reconcileSelected = () => {
+      const jobId = store.getState().selectedJobId;
+      if (jobId && document.visibilityState !== 'hidden') void reconcileJob(jobId);
+    };
+    window.addEventListener('focus', reconcileSelected);
+    window.addEventListener('online', reconcileSelected);
+    document.addEventListener('visibilitychange', reconcileSelected);
 
     const runStreamLoop = (
       jobId: string,
@@ -143,12 +162,10 @@ export const useJobPolling = (
                   store.getState().setStreamStatusForJob(jobId, 'live');
                 }
                 const currentJob = store.getState().jobs[jobId];
-                if (currentJob?.state === 'completed') {
-                  const ids = currentJob.artifactIds ?? [];
-                  const hasAll = ids.every((id) => store.getState().artifacts[id]);
-                  if (ids.length > 0 && !hasAll) {
-                    void store.getState().refreshArtifacts(jobId);
-                  }
+                // The store also recognizes partial ready snapshots. Hydrate
+                // pages as they arrive, without waiting for the whole deck.
+                if (currentJob?.artifactIds?.length) {
+                  void store.getState().refreshArtifacts(jobId);
                 }
               }
             } catch (err) {
@@ -245,6 +262,19 @@ export const useJobPolling = (
         await store.getState().refreshJob(jobId);
       }
 
+      // Reconcile only the visible work and live jobs, not the whole history.
+      // Keep this slower than event delivery; it is a safety net, not progress.
+      const monitored = new Set([
+        ...streamedJobs,
+        ...(state.selectedJobId ? [state.selectedJobId] : []),
+      ]);
+      if (document.visibilityState !== 'hidden') {
+        for (const jobId of monitored) {
+          if (!reconciledAt.has(jobId)) reconciledAt.set(jobId, Date.now());
+          if (Date.now() - reconciledAt.get(jobId)! >= 15_000) await reconcileJob(jobId);
+        }
+      }
+
       if (disposed) return;
 
       // Completed jobs expose artifactIds; fetch snapshots until all known.
@@ -252,8 +282,7 @@ export const useJobPolling = (
       for (const job of Object.values(refreshed.jobs)) {
         if (!job || !job.state || job.state !== 'completed') continue;
         const ids = job.artifactIds ?? [];
-        const hasAll = ids.every((id) => refreshed.artifacts[id]);
-        if (ids.length > 0 && !hasAll) {
+        if (ids.length > 0) {
           await refreshed.refreshArtifacts(job.jobId);
         }
       }
@@ -265,6 +294,9 @@ export const useJobPolling = (
     return () => {
       disposed = true;
       clearInterval(timer);
+      window.removeEventListener('focus', reconcileSelected);
+      window.removeEventListener('online', reconcileSelected);
+      document.removeEventListener('visibilitychange', reconcileSelected);
       for (const cancel of jobStreams.values()) {
         cancel();
       }

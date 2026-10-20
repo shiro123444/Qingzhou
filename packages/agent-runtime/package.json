@@ -9,6 +9,8 @@
     "test:coverage": "vitest --coverage --silent='passed-only'"
   },
   "dependencies": {
+    "@lobechat/cordis-foundation": "workspace:*",
+    "@lobechat/cordis-runtime": "workspace:*",
     "p-map": "^7.0.4"
   },
   "devDependencies": {

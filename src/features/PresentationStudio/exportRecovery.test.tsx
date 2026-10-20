@@ -86,6 +86,64 @@ const openExportMenu = async (format: 'pptx' | 'svg') => {
 };
 
 describe('PresentationStudio export failure recovery (C-80)', () => {
+  it.each([
+    {
+      annotation: undefined,
+      code: 'IMAGE_UNAVAILABLE',
+      message: 'The image provider is unavailable.',
+      requestId: 'resume-image-edit',
+    },
+    {
+      annotation: {
+        baseSvgHash: 'hash',
+        elementIndices: [6],
+        expectedVersionId: 'v1',
+        region: { height: 0.2, width: 0.2, x: 0.1, y: 0.1 },
+        slideId: 'slide-1',
+      },
+      code: 'PRESENTATION_INTERNAL_ERROR',
+      message: 'Unsafe annotation patch',
+      requestId: 'resume-annotation-edit',
+    },
+  ])(
+    'automatically resumes the latest unfinished edit once after $code',
+    async ({ annotation, code, message, requestId }) => {
+      const failed: PresentationJob = {
+        ...completedJob(['slide-1', 'slide-2']),
+        error: { code, message },
+        messages: [
+          {
+            annotation,
+            content: '继续完成当前修改',
+            createdAt: t0,
+            error: message,
+            requestId,
+            status: 'failed',
+            target: annotation ? { type: 'slide', slideNumber: 1 } : { type: 'deck' },
+          },
+        ],
+        state: 'failed',
+      };
+      const retryPresentationJob = vi.fn(async () => ({
+        ...failed,
+        error: undefined,
+        messages: failed.messages?.map((message) => ({ ...message, status: 'queued' as const })),
+        state: 'queued' as const,
+      }));
+      window.sessionStorage.removeItem(
+        `presentation_studio_auto_resume:job-done:${requestId}:${code}`,
+      );
+
+      await renderRestoredStudio({
+        getPresentationJob: vi.fn().mockResolvedValue(failed),
+        retryPresentationJob,
+      });
+
+      await waitFor(() => expect(retryPresentationJob).toHaveBeenCalledTimes(1));
+      expect(retryPresentationJob).toHaveBeenCalledWith('job-done');
+    },
+  );
+
   it('exports the retained PPTX after regeneration fails without treating it as a new version', async () => {
     const previous = { ...completedJob(['slide-1', 'slide-2', 'deck-pptx']), versionId: 'v1' };
     const failed: PresentationJob = {
@@ -108,7 +166,9 @@ describe('PresentationStudio export failure recovery (C-80)', () => {
     fireEvent.click(screen.getByRole('button', { name: /Retry presentation job/i }));
     await waitFor(() => {
       expect(retryPresentationJob).toHaveBeenCalledWith('job-done');
-      expect(screen.getByTestId('presentation-completed-tag')).toHaveTextContent('已暂停');
+      expect(screen.getByTestId('presentation-completed-tag')).toHaveTextContent(
+        'Upstream HTTP 500',
+      );
     });
     expect(screen.getByRole('button', { name: /Quick export presentation/i })).toBeEnabled();
     expect(screen.getByRole('button', { name: /Export presentation artifact/i })).toBeEnabled();
@@ -122,7 +182,7 @@ describe('PresentationStudio export failure recovery (C-80)', () => {
     await openExportMenu('pptx');
     await waitFor(() => expect(exportArtifact).toHaveBeenCalledTimes(2));
     expect(exportArtifact).toHaveBeenLastCalledWith('deck-pptx', 'pptx');
-    expect(screen.getByTestId('presentation-completed-tag')).toHaveTextContent('已暂停');
+    expect(screen.getByTestId('presentation-completed-tag')).toHaveTextContent('Upstream HTTP 500');
   }, 20000);
 
   it('keeps export disabled after a failed job when no ready PPTX remains', async () => {
@@ -207,7 +267,7 @@ describe('PresentationStudio export failure recovery (C-80)', () => {
         'blob:https://studio/svg-1',
       );
     });
-  });
+  }, 20000);
 
   it('shows a stable alert for network failures with a keyboard-reachable retry', async () => {
     const exportArtifact = vi

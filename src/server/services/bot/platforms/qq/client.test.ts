@@ -1,3 +1,4 @@
+import { QQApiClient } from '@lobechat/chat-adapter-qq';
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('@lobechat/chat-adapter-qq', () => ({
@@ -17,6 +18,72 @@ vi.mock('@/server/services/gateway/runtimeStatus', () => ({
 }));
 
 const { QQClientFactory } = await import('./client');
+
+describe('QQ passive reply context', () => {
+  it.each(['websocket', 'webhook'])(
+    'prepares file uploads privately and assigns the reply sequence at the visible send in %s mode',
+    async (connectionMode) => {
+      const uploadFile = vi.fn().mockResolvedValue('file-info');
+      const sendFile = vi.fn().mockResolvedValue({ id: 'sent' });
+      vi.mocked(QQApiClient).mockImplementation(() => ({ uploadFile, sendFile }) as any);
+      const incr = vi.fn().mockResolvedValue(4);
+      const client = new QQClientFactory().createClient(
+        {
+          applicationId: 'app',
+          credentials: { appSecret: 'test' },
+          platform: 'qq',
+          settings: { connectionMode },
+        },
+        { replyToMessageId: 'original', redisClient: { incr } as any },
+      );
+      const messenger = client.getMessenger('qq:group:target');
+      const file = {
+        bytes: Buffer.from('PNG'),
+        filename: 'formula.png',
+        mimeType: 'image/png',
+        deliveryId: 'delivery',
+      };
+      const send = await messenger.prepareFile!(file);
+      expect(uploadFile).toHaveBeenCalledWith('group', 'target', file);
+      expect(sendFile).not.toHaveBeenCalled();
+      expect(incr).not.toHaveBeenCalled();
+      await send();
+      expect(sendFile).toHaveBeenCalledWith('group', 'target', 'file-info', {
+        msgId: 'original',
+        msgSeq: 4,
+      });
+      expect(client.getMessenger('qq:guild:target').prepareFile).toBeUndefined();
+    },
+  );
+
+  it.each(['websocket', 'webhook'])(
+    'preserves message ID and reply sequence in %s mode across callback clients',
+    async (connectionMode) => {
+      const send = vi.fn().mockResolvedValue({ id: 'reply' });
+      vi.mocked(QQApiClient).mockImplementation(() => ({ sendGroupMessage: send }) as any);
+      const incr = vi.fn().mockResolvedValueOnce(1).mockResolvedValueOnce(2);
+      const expire = vi.fn().mockResolvedValue(1);
+      const create = () =>
+        new QQClientFactory().createClient(
+          {
+            applicationId: 'app',
+            credentials: { appSecret: 'test' },
+            platform: 'qq',
+            settings: { connectionMode },
+          },
+          { replyToMessageId: 'original-id', redisClient: { incr, expire } as any },
+        );
+      await create().getMessenger('qq:group:test').createMessage('first');
+      await create().getMessenger('qq:group:test').createMessage('second');
+      expect(send).toHaveBeenNthCalledWith(1, 'test', 'first', { msgId: 'original-id', msgSeq: 1 });
+      expect(send).toHaveBeenNthCalledWith(2, 'test', 'second', {
+        msgId: 'original-id',
+        msgSeq: 2,
+      });
+      expect(incr.mock.calls[1][0]).toBe(incr.mock.calls[0][0]);
+    },
+  );
+});
 
 describe('QQGatewayClient.extractFiles', () => {
   // QQ is the simplest case among all platforms — public CDN URLs survive

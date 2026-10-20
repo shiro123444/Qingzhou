@@ -15,8 +15,10 @@ QQ 开放平台机器人 API 是腾讯 QQ 机器人功能的 HTTP/JSON 协议。
 | 用途          | 地址                                        |
 | ------------- | ------------------------------------------- |
 | 认证服务      | `https://bots.qq.com/app/getAppAccessToken` |
-| API 基座      | `https://api.sgroup.qq.com`                 |
+| API 基座      | `https://api.bot.qq.com`                    |
 | 沙箱 API 基座 | `https://sandbox.api.sgroup.qq.com`         |
+
+官方在 2026-08-10 统一接口域名为 `api.bot.qq.com`，本项目使用该统一地址；表中的沙箱域名为旧版资料，实际测试权限和环境以当前控制台为准。[官方变更记录](https://bot.q.qq.com/wiki/develop/api-v2/changelog.html)
 
 ## 2. 认证流程
 
@@ -590,6 +592,10 @@ curl 'https://api.sgroup.qq.com/users/@me' \
 
 群聊和单聊使用 v2 API 事件结构。
 
+群里启用“接收所有消息”后，平台会推送 `GROUP_MESSAGE_CREATE`，字段与 `GROUP_AT_MESSAGE_CREATE` 一致，需同时识别这两种群事件。群 @ 事件的 `content` 已去掉 @ 前缀，进入 Chat SDK 时须根据事件类型保留 `isMention`；全量群事件则结合真实提及字段判断，避免把普通群聊全部当作 @ 机器人。[官方群消息事件说明](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_message_create.html)
+
+全量群事件应优先识别 `mentions[].is_you === true`。提及数组中的 OpenID 不一定与 `/users/@me` 返回的数字 ID 相同，不能仅比较这两个 ID，也不能把 `bot: true` 当作提及当前机器人。[腾讯官方 SDK 的提及判断](https://github.com/tencent-connect/qqbot-nodejs/blob/main/src/middleware/mention-gate.ts)
+
 **`GROUP_AT_MESSAGE_CREATE` 事件 `d` 字段：**
 
 ```json
@@ -1089,6 +1095,7 @@ HTTP 状态码 `200`。
 | ------------------------- | --------------------------------- | ------------------------------ |
 | `C2C_MESSAGE_CREATE`      | `GROUP_AND_C2C_EVENT` (1 << 25)   | 用户单聊消息。                 |
 | `GROUP_AT_MESSAGE_CREATE` | `GROUP_AND_C2C_EVENT` (1 << 25)   | 用户在群内 @机器人。           |
+| `GROUP_MESSAGE_CREATE`    | `GROUP_AND_C2C_EVENT` (1 << 25)   | 开启接收全部群消息后的群事件。 |
 | `AT_MESSAGE_CREATE`       | `PUBLIC_GUILD_MESSAGES` (1 << 30) | 频道内 @机器人（公域）。       |
 | `MESSAGE_CREATE`          | `GUILD_MESSAGES` (1 << 9)         | 频道全量消息（私域，需权限）。 |
 | `DIRECT_MESSAGE_CREATE`   | `DIRECT_MESSAGE` (1 << 12)        | 频道私信消息。                 |

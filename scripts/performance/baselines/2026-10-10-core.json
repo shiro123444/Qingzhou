@@ -1,0 +1,765 @@
+{
+  "baselineContext": {
+    "status": "completed-with-load-variation-recorded",
+    "primaryRun": "coordinated window after the other agent reported its Next production build had ended",
+    "notSteadyState": "The primary run is one local diagnostic sample, not a repeated steady-state estimate or a 4 GB/8 GB deployment capacity result.",
+    "hostLoadBefore": "0.96 13.29 14.68 1/2552 70",
+    "hostLoadAfter": "0.58 12.02 14.22 2/2548 70",
+    "hostLoadObservation": "Separate read-only /proc/loadavg captures around the run; host processes were not enumerated outside the sandbox namespace.",
+    "buildCommand": "bun build scripts/performance/benchmark-runtime.mts --target=node --format=esm --outfile=/tmp/qingzhou-runtime-benchmark-20261010.mjs",
+    "buildModuleCount": 101,
+    "bundleBuiltAt": "2026-10-10T03:29:45.502531+00:00",
+    "runCommand": "/usr/bin/time -v -o /tmp/qingzhou-runtime-benchmark-20261010-final.time node --expose-gc /tmp/qingzhou-runtime-benchmark-20261010.mjs --build-bun-version 1.3.14 --source-revision 076b84a24b1e20f750a09e76f41f4a06ff004991 --working-tree dirty",
+    "timingBoundaries": "Replacement latency times runtime.replace; candidate factory and verification calls are outside it. Operation CPU includes result assertions. Process CPU includes GC and V8 background threads and may exceed wall time.",
+    "previousObservationsRetained": true
+  },
+  "coldImportMs": {
+    "core": 3.27959,
+    "skills": 0.608043,
+    "teaching": 1.501938,
+    "total": 5.389571
+  },
+  "completedAt": "2026-10-10T03:43:17.092Z",
+  "externalMeasurement": {
+    "collector": "/usr/bin/time -v",
+    "userCpuSeconds": 0.7,
+    "systemCpuSeconds": 0.04,
+    "wallSeconds": 0.37,
+    "cpuPercent": "201%",
+    "maxRssKiB": 115568,
+    "majorPageFaults": 0,
+    "involuntaryContextSwitches": 27,
+    "exitStatus": 0,
+    "rawOutput": "Command being timed: \"node --expose-gc /tmp/qingzhou-runtime-benchmark-20261010.mjs --build-bun-version 1.3.14 --source-revision 076b84a24b1e20f750a09e76f41f4a06ff004991 --working-tree dirty\"\n\tUser time (seconds): 0.70\n\tSystem time (seconds): 0.04\n\tPercent of CPU this job got: 201%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:00.37\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 115568\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 24841\n\tVoluntary context switches: 715\n\tInvoluntary context switches: 27\n\tSwaps: 0\n\tFile system inputs: 872\n\tFile system outputs: 0\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0"
+  },
+  "historyModes": [
+    {
+      "mode": "bounded-history",
+      "options": {
+        "maxEventScopes": 256,
+        "maxEventsPerScope": 200
+      },
+      "assemblyMs": 6.543171,
+      "pluginCount": 2,
+      "operationCount": 5,
+      "direct": {
+        "callLatency": {
+          "count": 1500,
+          "totalMs": 50.781753,
+          "p50Ms": 0.026073,
+          "p95Ms": 0.050586,
+          "p99Ms": 0.203476,
+          "maximumMs": 0.831785
+        },
+        "wallIncludingAssertionsMs": 51.614038,
+        "cpuIncludingAssertionsMs": {
+          "user": 107.111,
+          "system": 6.899
+        }
+      },
+      "composition": {
+        "callLatency": {
+          "count": 250,
+          "totalMs": 26.224825,
+          "p50Ms": 0.087266,
+          "p95Ms": 0.146361,
+          "p99Ms": 0.548973,
+          "maximumMs": 1.058871
+        },
+        "wallIncludingAssertionsMs": 26.419967,
+        "cpuIncludingAssertionsMs": {
+          "user": 44.723,
+          "system": 4.179
+        },
+        "operationsPerIteration": 3
+      },
+      "scopeChurn": {
+        "callLatency": {
+          "count": 384,
+          "totalMs": 13.004973,
+          "p50Ms": 0.029546,
+          "p95Ms": 0.040541,
+          "p99Ms": 0.15091,
+          "maximumMs": 0.945083
+        },
+        "wallIncludingAssertionsMs": 13.134051,
+        "cpuIncludingAssertionsMs": {
+          "user": 27.887,
+          "system": 1.668
+        },
+        "distinctScopes": 384,
+        "retainedScopes": 256,
+        "retainedEvents": 512
+      },
+      "sameScopeEventsBeforeChurn": 200,
+      "memoryBytes": {
+        "beforeAssembly": {
+          "rss": 61038592,
+          "heapTotal": 15794176,
+          "heapUsed": 6137056,
+          "external": 2140651,
+          "arrayBuffers": 16623
+        },
+        "afterAssembly": {
+          "rss": 61431808,
+          "heapTotal": 16056320,
+          "heapUsed": 6567840,
+          "external": 2169776,
+          "arrayBuffers": 16623
+        },
+        "afterWarmup": {
+          "rss": 77651968,
+          "heapTotal": 16580608,
+          "heapUsed": 7013816,
+          "external": 2171824,
+          "arrayBuffers": 16623
+        },
+        "afterWork": {
+          "rss": 112168960,
+          "heapTotal": 50397184,
+          "heapUsed": 8462880,
+          "external": 2171840,
+          "arrayBuffers": 16639
+        },
+        "afterDispose": {
+          "rss": 112693248,
+          "heapTotal": 42795008,
+          "heapUsed": 8153008,
+          "external": 2171840,
+          "arrayBuffers": 16639
+        }
+      },
+      "disposeMs": 0.671649
+    },
+    {
+      "mode": "history-disabled",
+      "options": {
+        "maxEventScopes": 0,
+        "maxEventsPerScope": 200
+      },
+      "assemblyMs": 1.584833,
+      "pluginCount": 2,
+      "operationCount": 5,
+      "direct": {
+        "callLatency": {
+          "count": 1500,
+          "totalMs": 37.231717,
+          "p50Ms": 0.018998,
+          "p95Ms": 0.038781,
+          "p99Ms": 0.060746,
+          "maximumMs": 1.053156
+        },
+        "wallIncludingAssertionsMs": 37.792475,
+        "cpuIncludingAssertionsMs": {
+          "user": 113.629,
+          "system": 0
+        }
+      },
+      "composition": {
+        "callLatency": {
+          "count": 250,
+          "totalMs": 19.583277,
+          "p50Ms": 0.066953,
+          "p95Ms": 0.089723,
+          "p99Ms": 0.71071,
+          "maximumMs": 0.893803
+        },
+        "wallIncludingAssertionsMs": 19.634259,
+        "cpuIncludingAssertionsMs": {
+          "user": 40.267,
+          "system": 2.61
+        },
+        "operationsPerIteration": 3
+      },
+      "scopeChurn": {
+        "callLatency": {
+          "count": 384,
+          "totalMs": 7.467566,
+          "p50Ms": 0.016299,
+          "p95Ms": 0.020921,
+          "p99Ms": 0.041534,
+          "maximumMs": 0.744117
+        },
+        "wallIncludingAssertionsMs": 7.505395,
+        "cpuIncludingAssertionsMs": {
+          "user": 15.163,
+          "system": 0
+        },
+        "distinctScopes": 384,
+        "retainedScopes": 0,
+        "retainedEvents": 0
+      },
+      "sameScopeEventsBeforeChurn": 0,
+      "memoryBytes": {
+        "beforeAssembly": {
+          "rss": 112693248,
+          "heapTotal": 42795008,
+          "heapUsed": 8136952,
+          "external": 2171840,
+          "arrayBuffers": 16639
+        },
+        "afterAssembly": {
+          "rss": 112693248,
+          "heapTotal": 43057152,
+          "heapUsed": 8173960,
+          "external": 2171840,
+          "arrayBuffers": 16639
+        },
+        "afterWarmup": {
+          "rss": 113164288,
+          "heapTotal": 43319296,
+          "heapUsed": 8270504,
+          "external": 2171840,
+          "arrayBuffers": 16639
+        },
+        "afterWork": {
+          "rss": 115863552,
+          "heapTotal": 49872896,
+          "heapUsed": 9610088,
+          "external": 2171840,
+          "arrayBuffers": 16639
+        },
+        "afterDispose": {
+          "rss": 114851840,
+          "heapTotal": 44367872,
+          "heapUsed": 9529832,
+          "external": 2171840,
+          "arrayBuffers": 16639
+        }
+      },
+      "disposeMs": 0.41386
+    }
+  ],
+  "kind": "qingzhou-cordis-core-microbenchmark",
+  "lifecycle": {
+    "assemblyMs": 1.373854,
+    "replacements": {
+      "count": 75,
+      "totalMs": 31.58291,
+      "p50Ms": 0.354885,
+      "p95Ms": 0.882536,
+      "p99Ms": 1.863413,
+      "maximumMs": 1.863413
+    },
+    "unloads": {
+      "count": 25,
+      "totalMs": 0.971322,
+      "p50Ms": 0.036826,
+      "p95Ms": 0.057967,
+      "p99Ms": 0.060674,
+      "maximumMs": 0.060674
+    },
+    "remounts": {
+      "count": 25,
+      "totalMs": 7.170932,
+      "p50Ms": 0.215411,
+      "p95Ms": 0.305674,
+      "p99Ms": 1.743567,
+      "maximumMs": 1.743567
+    },
+    "memoryBytes": {
+      "before": {
+        "rss": 114851840,
+        "heapTotal": 44630016,
+        "heapUsed": 9618360,
+        "external": 2171840,
+        "arrayBuffers": 16639
+      },
+      "after": {
+        "rss": 114937856,
+        "heapTotal": 47251456,
+        "heapUsed": 9847792,
+        "external": 2171840,
+        "arrayBuffers": 16639
+      },
+      "afterDispose": {
+        "rss": 114937856,
+        "heapTotal": 44630016,
+        "heapUsed": 9787264,
+        "external": 2171840,
+        "arrayBuffers": 16639
+      }
+    },
+    "disposeMs": 0.234598,
+    "checks": {
+      "leaseBlocksReplacementAndRemoval": true,
+      "removedToolsDisappearFromSkills": true,
+      "replacementVersionObservedOnInvocation": true,
+      "disposalIdempotent": true
+    }
+  },
+  "limits": [
+    "Core and composition mechanisms only; not the full Qingzhou/docs/blog/PPT service.",
+    "No model, database, HTTP server, renderer, browser or network workload; not a 4 GB capacity proof.",
+    "One process and serial operations on a shared developer host; no CPU or memory cgroup limit.",
+    "Cold import times measure first module evaluation in a prebuilt bundle, not a cleared OS page cache.",
+    "History-on runs before history-off after equal warmups; differences may include JIT and host noise.",
+    "Memory snapshots across modes are not isolated; retained scope/event counts validate cache behavior, not RSS subtraction.",
+    "RSS includes V8, the bundled libraries and this assertion harness. Per-call timings exclude output assertions."
+  ],
+  "measuredHarnessWallMs": 287.694577,
+  "memoryAfterImportsBytes": {
+    "rss": 60645376,
+    "heapTotal": 11337728,
+    "heapUsed": 6126376,
+    "external": 2140651,
+    "arrayBuffers": 16623
+  },
+  "memoryBeforeImportsBytes": {
+    "rss": 59813888,
+    "heapTotal": 10551296,
+    "heapUsed": 5443528,
+    "external": 2140611,
+    "arrayBuffers": 16623
+  },
+  "method": {
+    "directOperation": "teaching.lesson.compile",
+    "plugins": ["teaching", "skills"],
+    "compositionSteps": ["teaching.lesson.revise", "teaching.lesson.compile"],
+    "iterations": 1500,
+    "compositionIterations": 250,
+    "warmupDirectPerMode": 100,
+    "warmupCompositionsPerMode": 20,
+    "scopeCountPerMode": 384,
+    "replacements": 75,
+    "unloadCycles": 25,
+    "retainedScopeLimit": 256,
+    "eventsPerScopeLimit": 200,
+    "modelConfigured": false,
+    "storageConfigured": false
+  },
+  "previousObservations": [
+    {
+      "label": "initial diagnostic run before non-functional script cleanup",
+      "loadState": "not recorded; do not describe this as an idle-host run",
+      "source": "summary transcribed from the completed first run tool output; its temporary full report was superseded by the next run",
+      "startedAt": "2026-10-10T03:22:18.500Z",
+      "completedAt": "2026-10-10T03:22:18.827Z",
+      "bundleBytes": 416939,
+      "bundleSha256": "b76311ef213165977bd95d9cedb4ec5016933b40bc4bc33263320cbd0880025a",
+      "differencesFromSubsequentBundle": "prefer-const cleanup and explicit warning against subtracting RSS between sequential history modes; no product source edits by the benchmark task",
+      "coldImportTotalMs": 5.93249,
+      "firstAssemblyMs": 7.118001,
+      "historyOnDirectP95Ms": 0.059764,
+      "historyOffDirectP95Ms": 0.032003,
+      "historyOnCompositionP95Ms": 0.160031,
+      "historyOffCompositionP95Ms": 0.099601,
+      "replacementP95Ms": 0.713677,
+      "unloadP95Ms": 0.077358,
+      "externalTime": {
+        "maxRssKiB": 114420,
+        "userCpuSeconds": 0.78,
+        "systemCpuSeconds": 0.04,
+        "wallSeconds": 0.41,
+        "cpuPercent": "199%",
+        "involuntaryContextSwitches": 26,
+        "exitStatus": 0
+      },
+      "verification": {
+        "started": 5713,
+        "completed": 5713,
+        "failed": 0,
+        "expectedUnavailableRejections": 28,
+        "allAssertionsPassed": true
+      }
+    },
+    {
+      "label": "same final bundle during concurrent production Next build and type-check activity",
+      "hostLoadObservedAfter": "26.56 24.64 13.75 30/3651 69",
+      "activitySource": "parent and production measurement agent; exact concurrent process CPU was not measured in this benchmark",
+      "report": {
+        "schemaVersion": 1,
+        "kind": "qingzhou-cordis-core-microbenchmark",
+        "startedAt": "2026-10-10T03:30:17.509Z",
+        "completedAt": "2026-10-10T03:30:23.482Z",
+        "limits": [
+          "Core and composition mechanisms only; not the full Qingzhou/docs/blog/PPT service.",
+          "No model, database, HTTP server, renderer, browser or network workload; not a 4 GB capacity proof.",
+          "One process and serial operations on a shared developer host; no CPU or memory cgroup limit.",
+          "Cold import times measure first module evaluation in a prebuilt bundle, not a cleared OS page cache.",
+          "History-on runs before history-off after equal warmups; differences may include JIT and host noise.",
+          "Memory snapshots across modes are not isolated; retained scope/event counts validate cache behavior, not RSS subtraction.",
+          "RSS includes V8, the bundled libraries and this assertion harness. Per-call timings exclude output assertions."
+        ],
+        "runtime": {
+          "node": "v22.23.1",
+          "v8": "12.4.254.21-node.56",
+          "buildBun": "1.3.14",
+          "platform": "linux",
+          "architecture": "x64",
+          "kernel": "7.1.8-200.fc44.x86_64",
+          "cpuModel": "13th Gen Intel(R) Core(TM) i7-1360P",
+          "availableParallelism": 16,
+          "logicalCpus": 16,
+          "hostMemoryBytes": 33350127616,
+          "explicitGc": true,
+          "executable": "/usr/bin/node-22"
+        },
+        "source": {
+          "revision": "076b84a24b1e20f750a09e76f41f4a06ff004991",
+          "workingTree": "dirty",
+          "entry": "scripts/performance/benchmark-runtime.mts",
+          "bundlePath": "/tmp/qingzhou-runtime-benchmark-20261010.mjs",
+          "bundleBytes": 417059,
+          "bundleSha256": "2b5e8af4938b04451997a75d6390e7f8bc436301102993a67a1c22b9a2fae6b3"
+        },
+        "method": {
+          "directOperation": "teaching.lesson.compile",
+          "plugins": ["teaching", "skills"],
+          "compositionSteps": ["teaching.lesson.revise", "teaching.lesson.compile"],
+          "iterations": 1500,
+          "compositionIterations": 250,
+          "warmupDirectPerMode": 100,
+          "warmupCompositionsPerMode": 20,
+          "scopeCountPerMode": 384,
+          "replacements": 75,
+          "unloadCycles": 25,
+          "retainedScopeLimit": 256,
+          "eventsPerScopeLimit": 200,
+          "modelConfigured": false,
+          "storageConfigured": false
+        },
+        "coldImportMs": {
+          "core": 156.269435,
+          "skills": 59.75524,
+          "teaching": 123.879887,
+          "total": 339.904562
+        },
+        "memoryBeforeImportsBytes": {
+          "rss": 59154432,
+          "heapTotal": 10551296,
+          "heapUsed": 5443464,
+          "external": 2140611,
+          "arrayBuffers": 16623
+        },
+        "memoryAfterImportsBytes": {
+          "rss": 59883520,
+          "heapTotal": 11337728,
+          "heapUsed": 6126232,
+          "external": 2140651,
+          "arrayBuffers": 16623
+        },
+        "historyModes": [
+          {
+            "mode": "bounded-history",
+            "options": {
+              "maxEventScopes": 256,
+              "maxEventsPerScope": 200
+            },
+            "assemblyMs": 308.909388,
+            "pluginCount": 2,
+            "operationCount": 5,
+            "direct": {
+              "callLatency": {
+                "count": 1500,
+                "totalMs": 826.263432,
+                "p50Ms": 0.186976,
+                "p95Ms": 2.807499,
+                "p99Ms": 6.731776,
+                "maximumMs": 24.11011
+              },
+              "wallIncludingAssertionsMs": 848.669022,
+              "cpuIncludingAssertionsMs": {
+                "user": 758.348,
+                "system": 38.086
+              }
+            },
+            "composition": {
+              "callLatency": {
+                "count": 250,
+                "totalMs": 345.831524,
+                "p50Ms": 0.692281,
+                "p95Ms": 5.229471,
+                "p99Ms": 8.979641,
+                "maximumMs": 17.188945
+              },
+              "wallIncludingAssertionsMs": 354.173022,
+              "cpuIncludingAssertionsMs": {
+                "user": 308.97,
+                "system": 14.506
+              },
+              "operationsPerIteration": 3
+            },
+            "scopeChurn": {
+              "callLatency": {
+                "count": 384,
+                "totalMs": 242.742751,
+                "p50Ms": 0.220958,
+                "p95Ms": 3.564166,
+                "p99Ms": 6.567845,
+                "maximumMs": 16.676411
+              },
+              "wallIncludingAssertionsMs": 250.234865,
+              "cpuIncludingAssertionsMs": {
+                "user": 167.221,
+                "system": 14.54
+              },
+              "distinctScopes": 384,
+              "retainedScopes": 256,
+              "retainedEvents": 512
+            },
+            "sameScopeEventsBeforeChurn": 200,
+            "memoryBytes": {
+              "beforeAssembly": {
+                "rss": 60338176,
+                "heapTotal": 15794176,
+                "heapUsed": 6136912,
+                "external": 2140651,
+                "arrayBuffers": 16623
+              },
+              "afterAssembly": {
+                "rss": 60862464,
+                "heapTotal": 16056320,
+                "heapUsed": 6567696,
+                "external": 2169776,
+                "arrayBuffers": 16623
+              },
+              "afterWarmup": {
+                "rss": 76324864,
+                "heapTotal": 16580608,
+                "heapUsed": 7013448,
+                "external": 2171824,
+                "arrayBuffers": 16623
+              },
+              "afterWork": {
+                "rss": 109133824,
+                "heapTotal": 48824320,
+                "heapUsed": 8462696,
+                "external": 2171840,
+                "arrayBuffers": 16639
+              },
+              "afterDispose": {
+                "rss": 108363776,
+                "heapTotal": 44105728,
+                "heapUsed": 8164920,
+                "external": 2171840,
+                "arrayBuffers": 16639
+              }
+            },
+            "disposeMs": 31.517043
+          },
+          {
+            "mode": "history-disabled",
+            "options": {
+              "maxEventScopes": 0,
+              "maxEventsPerScope": 200
+            },
+            "assemblyMs": 29.487521,
+            "pluginCount": 2,
+            "operationCount": 5,
+            "direct": {
+              "callLatency": {
+                "count": 1500,
+                "totalMs": 826.9163,
+                "p50Ms": 0.135887,
+                "p95Ms": 1.828984,
+                "p99Ms": 10.325945,
+                "maximumMs": 42.900286
+              },
+              "wallIncludingAssertionsMs": 846.882628,
+              "cpuIncludingAssertionsMs": {
+                "user": 714.256,
+                "system": 21.514
+              }
+            },
+            "composition": {
+              "callLatency": {
+                "count": 250,
+                "totalMs": 239.846849,
+                "p50Ms": 0.34336,
+                "p95Ms": 4.089675,
+                "p99Ms": 7.883553,
+                "maximumMs": 25.947435
+              },
+              "wallIncludingAssertionsMs": 240.569089,
+              "cpuIncludingAssertionsMs": {
+                "user": 234.571,
+                "system": 9.035
+              },
+              "operationsPerIteration": 3
+            },
+            "scopeChurn": {
+              "callLatency": {
+                "count": 384,
+                "totalMs": 86.244129,
+                "p50Ms": 0.156773,
+                "p95Ms": 0.345892,
+                "p99Ms": 1.277122,
+                "maximumMs": 11.740692
+              },
+              "wallIncludingAssertionsMs": 86.891493,
+              "cpuIncludingAssertionsMs": {
+                "user": 103.082,
+                "system": 7.761
+              },
+              "distinctScopes": 384,
+              "retainedScopes": 0,
+              "retainedEvents": 0
+            },
+            "sameScopeEventsBeforeChurn": 0,
+            "memoryBytes": {
+              "beforeAssembly": {
+                "rss": 108363776,
+                "heapTotal": 44105728,
+                "heapUsed": 8134584,
+                "external": 2171840,
+                "arrayBuffers": 16639
+              },
+              "afterAssembly": {
+                "rss": 108363776,
+                "heapTotal": 44367872,
+                "heapUsed": 8162072,
+                "external": 2171840,
+                "arrayBuffers": 16639
+              },
+              "afterWarmup": {
+                "rss": 109568000,
+                "heapTotal": 44630016,
+                "heapUsed": 8287568,
+                "external": 2171840,
+                "arrayBuffers": 16639
+              },
+              "afterWork": {
+                "rss": 112734208,
+                "heapTotal": 50397184,
+                "heapUsed": 9601328,
+                "external": 2171840,
+                "arrayBuffers": 16639
+              },
+              "afterDispose": {
+                "rss": 112734208,
+                "heapTotal": 46727168,
+                "heapUsed": 9523896,
+                "external": 2171840,
+                "arrayBuffers": 16639
+              }
+            },
+            "disposeMs": 14.237699
+          }
+        ],
+        "lifecycle": {
+          "assemblyMs": 13.477875,
+          "replacements": {
+            "count": 75,
+            "totalMs": 517.775118,
+            "p50Ms": 4.787487,
+            "p95Ms": 25.76979,
+            "p99Ms": 47.409326,
+            "maximumMs": 47.409326
+          },
+          "unloads": {
+            "count": 25,
+            "totalMs": 13.373136,
+            "p50Ms": 0.574218,
+            "p95Ms": 0.773172,
+            "p99Ms": 0.833915,
+            "maximumMs": 0.833915
+          },
+          "remounts": {
+            "count": 25,
+            "totalMs": 86.822703,
+            "p50Ms": 2.883407,
+            "p95Ms": 3.693361,
+            "p99Ms": 20.689664,
+            "maximumMs": 20.689664
+          },
+          "memoryBytes": {
+            "before": {
+              "rss": 112734208,
+              "heapTotal": 46989312,
+              "heapUsed": 9611440,
+              "external": 2171840,
+              "arrayBuffers": 16639
+            },
+            "after": {
+              "rss": 114237440,
+              "heapTotal": 49348608,
+              "heapUsed": 9844360,
+              "external": 2171840,
+              "arrayBuffers": 16639
+            },
+            "afterDispose": {
+              "rss": 114237440,
+              "heapTotal": 47251456,
+              "heapUsed": 9784360,
+              "external": 2171840,
+              "arrayBuffers": 16639
+            }
+          },
+          "disposeMs": 8.464274,
+          "checks": {
+            "leaseBlocksReplacementAndRemoval": true,
+            "removedToolsDisappearFromSkills": true,
+            "replacementVersionObservedOnInvocation": true,
+            "disposalIdempotent": true
+          }
+        },
+        "verification": {
+          "started": 5713,
+          "completed": 5713,
+          "failed": 0,
+          "expectedUnavailableRejections": 28,
+          "allAssertionsPassed": true
+        },
+        "measuredHarnessWallMs": 5940.231315,
+        "processResourceUsage": {
+          "maxRssKiB": 112300,
+          "userCpuMs": 4823.906,
+          "systemCpuMs": 320.006,
+          "voluntaryContextSwitches": 948,
+          "involuntaryContextSwitches": 2967
+        }
+      },
+      "externalMeasurement": {
+        "collector": "/usr/bin/time -v",
+        "userCpuSeconds": 4.83,
+        "systemCpuSeconds": 0.34,
+        "wallSeconds": 7.53,
+        "cpuPercent": "68%",
+        "maxRssKiB": 112300,
+        "majorPageFaults": 47,
+        "involuntaryContextSwitches": 2984,
+        "exitStatus": 0,
+        "rawOutput": "Command being timed: \"node --expose-gc /tmp/qingzhou-runtime-benchmark-20261010.mjs --build-bun-version 1.3.14 --source-revision 076b84a24b1e20f750a09e76f41f4a06ff004991 --working-tree dirty\"\n\tUser time (seconds): 4.83\n\tSystem time (seconds): 0.34\n\tPercent of CPU this job got: 68%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:07.53\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 112300\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 47\n\tMinor (reclaiming a frame) page faults: 26057\n\tVoluntary context switches: 956\n\tInvoluntary context switches: 2984\n\tSwaps: 0\n\tFile system inputs: 88216\n\tFile system outputs: 0\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0"
+      }
+    }
+  ],
+  "processResourceUsage": {
+    "maxRssKiB": 115568,
+    "userCpuMs": 705.524,
+    "systemCpuMs": 37.443,
+    "voluntaryContextSwitches": 708,
+    "involuntaryContextSwitches": 27
+  },
+  "runtime": {
+    "node": "v22.23.1",
+    "v8": "12.4.254.21-node.56",
+    "buildBun": "1.3.14",
+    "platform": "linux",
+    "architecture": "x64",
+    "kernel": "7.1.8-200.fc44.x86_64",
+    "cpuModel": "13th Gen Intel(R) Core(TM) i7-1360P",
+    "availableParallelism": 16,
+    "logicalCpus": 16,
+    "hostMemoryBytes": 33350127616,
+    "explicitGc": true,
+    "executable": "/usr/bin/node-22"
+  },
+  "schemaVersion": 1,
+  "source": {
+    "revision": "076b84a24b1e20f750a09e76f41f4a06ff004991",
+    "workingTree": "dirty",
+    "entry": "scripts/performance/benchmark-runtime.mts",
+    "bundlePath": "/tmp/qingzhou-runtime-benchmark-20261010.mjs",
+    "bundleBytes": 417059,
+    "bundleSha256": "2b5e8af4938b04451997a75d6390e7f8bc436301102993a67a1c22b9a2fae6b3"
+  },
+  "startedAt": "2026-10-10T03:43:16.805Z",
+  "verification": {
+    "started": 5713,
+    "completed": 5713,
+    "failed": 0,
+    "expectedUnavailableRejections": 28,
+    "allAssertionsPassed": true
+  }
+}

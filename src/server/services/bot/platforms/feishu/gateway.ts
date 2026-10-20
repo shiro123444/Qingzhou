@@ -1,5 +1,7 @@
 import debug from 'debug';
 
+import { signGatewayRequest } from '@/server/services/bot/security/gatewayAuth';
+
 const log = debug('bot-platform:feishu:gateway');
 
 export interface FeishuWSOptions {
@@ -7,12 +9,6 @@ export interface FeishuWSOptions {
   appSecret: string;
   /** 'feishu' or 'lark' — determines the API domain */
   domain: 'feishu' | 'lark';
-  /**
-   * Verification token configured by the user. When provided, it is injected
-   * into the forwarded webhook payload's `header.token` so the downstream
-   * webhook handler's token check passes.
-   */
-  verificationToken?: string;
   /** URL to forward events to (POST) */
   webhookUrl: string;
 }
@@ -77,19 +73,10 @@ export class FeishuWSConnection {
    * Forward an event to the webhook URL.
    * The webhook handler expects the Lark event payload wrapped in the standard format.
    *
-   * Note: events received via WebSocket are pre-authenticated by the SDK, but the
-   * downstream webhook handler still validates `header.token` against the user's
-   * configured `verificationToken`. We inject the configured token into the payload
-   * so the check passes.
+   * SDK-authenticated events use a separate, app-secret-signed internal envelope.
    */
   private async forwardEvent(eventType: string, data: any): Promise<void> {
-    // Construct a webhook-compatible payload matching what handleWebhook() expects
-    const header: Record<string, string> = {
-      event_type: eventType,
-    };
-    if (this.options.verificationToken) {
-      header.token = this.options.verificationToken;
-    }
+    const header = { app_id: this.options.appId, event_type: eventType };
 
     const webhookPayload = {
       event: data,
@@ -98,14 +85,21 @@ export class FeishuWSConnection {
     };
 
     try {
-      await fetch(this.options.webhookUrl, {
+      const init = signGatewayRequest({
+        applicationId: this.options.appId,
         body: JSON.stringify(webhookPayload),
-        headers: { 'Content-Type': 'application/json' },
-        method: 'POST',
+        platform: this.options.domain,
+        secret: this.options.appSecret,
+        url: this.options.webhookUrl,
+      });
+      const response = await fetch(this.options.webhookUrl, {
+        ...init,
         signal: AbortSignal.timeout(30_000),
       });
+      if (!response.ok) throw new Error(`Webhook forwarding failed (HTTP ${response.status})`);
     } catch (err) {
       log('Failed to forward event %s to webhook: %O', eventType, err);
+      throw err;
     }
   }
 }

@@ -19,6 +19,14 @@ beforeEach(() => {
 });
 
 describe('PdfLoader', () => {
+  it('extracts Chinese CID-font pages with local character maps', async () => {
+    const pages = await loader.loadPages(fixturePath('chinese-cid.pdf'));
+    expect(pages).toHaveLength(3);
+    expect(pages.map((page) => page.metadata.pageNumber)).toEqual([1, 2, 3]);
+    expect(pages[0].pageContent).toContain('本学期拟建设12门课程');
+    expect(pages[2].pageContent).toContain('预算为37万元');
+    expect(pages.every((page) => !page.metadata.error)).toBe(true);
+  });
   it('should load pages correctly from a PDF file', async () => {
     const pages = await loader.loadPages(testFile);
 

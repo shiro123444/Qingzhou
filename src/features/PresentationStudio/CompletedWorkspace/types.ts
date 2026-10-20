@@ -9,8 +9,10 @@ import type { PresentationSlotState } from '../store/presentationStore';
 export type CompletedViewMode = 'focus' | 'lightbox';
 
 export interface CompletedWorkspaceProps {
+  /** Live generation overlay on retained slides while a template/edit is running. */
+  activity?: string;
+  activityHistory?: { id: string; text: string }[];
   canExport: boolean;
-  creating?: boolean;
   defaultLanguage?: string;
   defaultNotebookId?: string;
   defaultSourceVersionIds?: string[];
@@ -20,7 +22,8 @@ export interface CompletedWorkspaceProps {
   exporting: boolean | string | null;
   jobs?: PresentationJob[];
   jobTitles: Record<string, string>;
-  onAiModify: (prompt: string) => Promise<void>;
+  onCancel?: (jobId: string) => Promise<void>;
+  onDeleteJob?: (jobId: string) => Promise<void> | void;
   onExport: (artifactId: string, format: PresentationExportFormat) => void;
   onJobChanged?: () => Promise<void>;
   onNewPresentation?: () => void;
@@ -37,5 +40,6 @@ export interface CompletedWorkspaceProps {
   selectedSlide: ArtifactSnapshot | null;
   showAnnotationBar?: boolean;
   showInspector?: boolean;
+  showSidebarReopen?: boolean;
   slideArtifacts: ArtifactSnapshot[];
 }

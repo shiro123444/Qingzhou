@@ -1,5 +1,8 @@
 import type { PresentationPlan } from '../../../../packages/runtime-contracts/src';
+import { assertPresentationPublishable } from './content-quality';
+import { lessonHandout } from './lesson';
 import { validatePresentationPlan } from './planner';
+import { pptMasterProjectLock } from './ppt-master-project';
 import {
   createPresentationArtifactSnapshot,
   createPresentationJobSnapshot,
@@ -58,9 +61,7 @@ export interface PresentationWorkerResult {
 }
 
 export type PresentationWorkerErrorCode =
-  | 'PRESENTATION_QUALITY_FAILED'
-  | 'PRESENTATION_WORKER_CANCELLED'
-  | 'PRESENTATION_WORKER_FAILED';
+  'PRESENTATION_QUALITY_FAILED' | 'PRESENTATION_WORKER_CANCELLED' | 'PRESENTATION_WORKER_FAILED';
 
 export class PresentationWorkerError extends Error {
   constructor(
@@ -183,6 +184,7 @@ export class InMemoryPresentationPlanWorker {
     let validated: PresentationPlan;
     try {
       validated = validatePresentationPlan(plan);
+      assertPresentationPublishable(validated);
     } catch (error) {
       try {
         publishWorkerEvent(
@@ -259,6 +261,7 @@ export class InMemoryPresentationPlanWorker {
         'design_spec.json',
         JSON.stringify(cloneValue(validated.designSpec ?? {})),
       );
+      await workspace.write('spec_lock.md', pptMasterProjectLock(validated));
       throwIfAborted(context.abortSignal);
       let qualityReport: PresentationQualityReport;
       try {
@@ -329,6 +332,22 @@ export class InMemoryPresentationPlanWorker {
         ? `${context.jobId}:${context.versionId}`
         : context.jobId;
       const allArtifacts: PresentationWorkerArtifact[] = [
+        ...(lessonHandout(validated)
+          ? [
+              {
+                artifactId: `${artifactPrefix}:lesson-handout`,
+                bytes: new TextEncoder().encode(lessonHandout(validated)!),
+                mimeType: 'text/markdown',
+                name: 'student-handout.md',
+                type: 'document',
+                metadata: {
+                  artifactRole: 'student-handout',
+                  versionId: context.versionId,
+                  excludesTeacherNotes: true,
+                },
+              },
+            ]
+          : []),
         ...cloned
           .filter((artifact) => artifact.type !== 'svg')
           .map((artifact, index) => ({

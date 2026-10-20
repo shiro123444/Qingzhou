@@ -630,351 +630,361 @@ export class StreamingExecutorActionImpl {
       operationId,
     });
 
-    let state = initialAgentState;
-    let nextContext = initialAgentContext;
+    try {
+      let state = initialAgentState;
+      let nextContext = initialAgentContext;
 
-    log('[executeClientAgent] Agent runtime loop start, initial phase: %s', nextContext.phase);
+      log('[executeClientAgent] Agent runtime loop start, initial phase: %s', nextContext.phase);
 
-    // Compute contextKey for message queue (per-context, not per-operation)
-    const contextKey = messageKey;
+      // Compute contextKey for message queue (per-context, not per-operation)
+      const contextKey = messageKey;
 
-    const emitRuntimeCompleteSource = () => {
-      const finalMessages = this.#get().messagesMap[messageKey] || [];
-      const assistantMessageId =
-        findCompletionAssistantMessageId(finalMessages, parentMessageId, parentMessageType) ??
-        findCompletionAssistantMessageId(
-          this.#get().dbMessagesMap[messageKey] || [],
-          parentMessageId,
-          parentMessageType,
-        );
-      const operationStatus = this.#get().operations[operationId]?.status;
+      const emitRuntimeCompleteSource = () => {
+        const finalMessages = this.#get().messagesMap[messageKey] || [];
+        const assistantMessageId =
+          findCompletionAssistantMessageId(finalMessages, parentMessageId, parentMessageType) ??
+          findCompletionAssistantMessageId(
+            this.#get().dbMessagesMap[messageKey] || [],
+            parentMessageId,
+            parentMessageType,
+          );
+        const operationStatus = this.#get().operations[operationId]?.status;
 
-      void emitClientAgentSignalSourceEvent({
-        payload: {
-          agentId,
-          assistantMessageId,
-          operationId,
-          status: normalizeClientRuntimeCompleteStatus(state.status, operationStatus),
-          threadId: threadId ?? undefined,
-          topicId: topicId ?? undefined,
-        },
-        sourceId: `${operationId}:client:complete`,
-        sourceType: 'client.runtime.complete',
-      });
-    };
+        void emitClientAgentSignalSourceEvent({
+          payload: {
+            agentId,
+            assistantMessageId,
+            operationId,
+            status: normalizeClientRuntimeCompleteStatus(state.status, operationStatus),
+            threadId: threadId ?? undefined,
+            topicId: topicId ?? undefined,
+          },
+          sourceId: `${operationId}:client:complete`,
+          sourceType: 'client.runtime.complete',
+        });
+      };
 
-    // Execute the agent runtime loop
-    let stepCount = 0;
-    while (state.status !== 'done' && state.status !== 'error') {
-      // Check if operation has been cancelled
-      const currentOperation = this.#get().operations[operationId];
-      if (currentOperation?.status === 'cancelled') {
-        log('[executeClientAgent] Operation cancelled, marking state as interrupted');
+      // Execute the agent runtime loop
+      let stepCount = 0;
+      while (state.status !== 'done' && state.status !== 'error') {
+        // Check if operation has been cancelled
+        const currentOperation = this.#get().operations[operationId];
+        if (currentOperation?.status === 'cancelled') {
+          log('[executeClientAgent] Operation cancelled, marking state as interrupted');
 
-        // Update state status to 'interrupted' so agent can handle abort
-        state = { ...state, status: 'interrupted' };
+          // Update state status to 'interrupted' so agent can handle abort
+          state = { ...state, status: 'interrupted' };
 
-        // Let agent handle the abort (will clean up pending tools if needed)
-        const result = await runtime.step(state, nextContext);
-        state = result.newState;
+          // Let agent handle the abort (will clean up pending tools if needed)
+          const result = await runtime.step(state, nextContext);
+          state = result.newState;
 
-        log('[executeClientAgent] Operation cancelled, stopping loop');
-        break;
-      }
-
-      stepCount++;
-
-      // Compute step context from current db messages before each step
-      // Use dbMessagesMap which contains persisted state (including pluginState.todos)
-      const currentDBMessages = this.#get().dbMessagesMap[messageKey] || [];
-      // Use selectTodosFromMessages selector (shared with UI display)
-      const todos = selectTodosFromMessages(currentDBMessages);
-      // Accumulate activated tool IDs from lobe-activator messages
-      const activatedToolIds = selectActivatedToolIdsFromMessages(currentDBMessages)?.filter(
-        (id) => scope === 'page' || id !== PageAgentIdentifier,
-      );
-      // Accumulate activated skills from activateSkill messages
-      const activatedSkills = selectActivatedSkillsFromMessages(currentDBMessages);
-      const hasQueuedMessages = (this.#get().queuedMessages[contextKey]?.length ?? 0) > 0;
-      const stepContext = computeStepContext({
-        activatedSkills,
-        activatedToolIds,
-        hasQueuedMessages,
-        todos,
-      });
-
-      // If page agent is enabled, get the latest XML for stepPageEditor
-      if (scope === 'page' && nextContext.initialContext?.pageEditor) {
-        try {
-          const pageContentContext = pageAgentRuntime.getPageContentContext('xml');
-          stepContext.stepPageEditor = {
-            xml: pageContentContext.xml || '',
-          };
-        } catch (error) {
-          // Page agent runtime may not be available, ignore errors
-          log('[executeClientAgent] Failed to get page XML for step: %o', error);
+          log('[executeClientAgent] Operation cancelled, stopping loop');
+          break;
         }
-      }
 
-      // Inject stepContext into the runtime context for this step
-      nextContext = { ...nextContext, stepContext };
+        stepCount++;
 
-      log(
-        '[executeClientAgent][step-%d]: phase=%s, status=%s, state.messages=%d, dbMessagesMap[%s]=%d, stepContext=%O',
-        stepCount,
-        nextContext.phase,
-        state.status,
-        state.messages.length,
-        messageKey,
-        currentDBMessages.length,
-        stepContext,
-      );
-
-      const result = await runtime.step(state, nextContext);
-
-      log(
-        '[executeClientAgent] Step %d completed, events: %d, newStatus=%s, newState.messages=%d',
-        stepCount,
-        result.events.length,
-        result.newState.status,
-        result.newState.messages.length,
-      );
-
-      // After parallel tool batch completes, refresh messages to ensure all tool results are synced
-      // This fixes the race condition where each tool's replaceMessages may overwrite others
-      // REMEMBER: There is no test for it (too hard to add), if you want to change it , ask @arvinxx first
-      if (
-        result.nextContext?.phase &&
-        ['sub_agents_batch_result', 'tools_batch_result'].includes(result.nextContext?.phase)
-      ) {
-        log(
-          `[executeClientAgent] ${result.nextContext?.phase} completed, refreshing messages to sync state`,
+        // Compute step context from current db messages before each step
+        // Use dbMessagesMap which contains persisted state (including pluginState.todos)
+        const currentDBMessages = this.#get().dbMessagesMap[messageKey] || [];
+        // Use selectTodosFromMessages selector (shared with UI display)
+        const todos = selectTodosFromMessages(currentDBMessages);
+        // Accumulate activated tool IDs from lobe-activator messages
+        const activatedToolIds = selectActivatedToolIdsFromMessages(currentDBMessages)?.filter(
+          (id) => scope === 'page' || id !== PageAgentIdentifier,
         );
-        await this.#get().refreshMessages(context);
-      }
+        // Accumulate activated skills from activateSkill messages
+        const activatedSkills = selectActivatedSkillsFromMessages(currentDBMessages);
+        const hasQueuedMessages = (this.#get().queuedMessages[contextKey]?.length ?? 0) > 0;
+        const stepContext = computeStepContext({
+          activatedSkills,
+          activatedToolIds,
+          hasQueuedMessages,
+          todos,
+        });
 
-      // Handle completion and error events
-      for (const event of result.events) {
-        switch (event.type) {
-          case 'done': {
-            log('[executeClientAgent] Received done event');
-            break;
+        // If page agent is enabled, get the latest XML for stepPageEditor
+        if (scope === 'page' && nextContext.initialContext?.pageEditor) {
+          try {
+            const pageContentContext = pageAgentRuntime.getPageContentContext('xml');
+            stepContext.stepPageEditor = {
+              xml: pageContentContext.xml || '',
+            };
+          } catch (error) {
+            // Page agent runtime may not be available, ignore errors
+            log('[executeClientAgent] Failed to get page XML for step: %o', error);
           }
+        }
 
-          case 'human_approve_required': {
-            await notifyDesktopHumanApprovalRequired(this.#get, {
-              agentId,
-              groupId,
-              topicId,
-            });
-            break;
-          }
+        // Inject stepContext into the runtime context for this step
+        nextContext = { ...nextContext, stepContext };
 
-          case 'error': {
-            log('[executeClientAgent] Received error event: %o', event.error);
-            // Find the assistant message to update error
-            const currentMessages = this.#get().messagesMap[messageKey] || [];
-            const assistantMessage = currentMessages.findLast((m) => m.role === 'assistant');
-            if (assistantMessage) {
-              await messageService.updateMessageError(assistantMessage.id, event.error, {
+        log(
+          '[executeClientAgent][step-%d]: phase=%s, status=%s, state.messages=%d, dbMessagesMap[%s]=%d, stepContext=%O',
+          stepCount,
+          nextContext.phase,
+          state.status,
+          state.messages.length,
+          messageKey,
+          currentDBMessages.length,
+          stepContext,
+        );
+
+        const result = await runtime.step(state, nextContext);
+
+        log(
+          '[executeClientAgent] Step %d completed, events: %d, newStatus=%s, newState.messages=%d',
+          stepCount,
+          result.events.length,
+          result.newState.status,
+          result.newState.messages.length,
+        );
+
+        // After parallel tool batch completes, refresh messages to ensure all tool results are synced
+        // This fixes the race condition where each tool's replaceMessages may overwrite others
+        // REMEMBER: There is no test for it (too hard to add), if you want to change it , ask @arvinxx first
+        if (
+          result.nextContext?.phase &&
+          ['sub_agents_batch_result', 'tools_batch_result'].includes(result.nextContext?.phase)
+        ) {
+          log(
+            `[executeClientAgent] ${result.nextContext?.phase} completed, refreshing messages to sync state`,
+          );
+          await this.#get().refreshMessages(context);
+        }
+
+        // Handle completion and error events
+        for (const event of result.events) {
+          switch (event.type) {
+            case 'done': {
+              log('[executeClientAgent] Received done event');
+              break;
+            }
+
+            case 'human_approve_required': {
+              await notifyDesktopHumanApprovalRequired(this.#get, {
                 agentId,
                 groupId,
                 topicId,
               });
+              break;
             }
-            const finalMessages = this.#get().messagesMap[messageKey] || [];
-            this.#get().replaceMessages(finalMessages, { context });
-            break;
+
+            case 'error': {
+              log('[executeClientAgent] Received error event: %o', event.error);
+              // Find the assistant message to update error
+              const currentMessages = this.#get().messagesMap[messageKey] || [];
+              const assistantMessage = currentMessages.findLast((m) => m.role === 'assistant');
+              if (assistantMessage) {
+                await messageService.updateMessageError(assistantMessage.id, event.error, {
+                  agentId,
+                  groupId,
+                  topicId,
+                });
+              }
+              const finalMessages = this.#get().messagesMap[messageKey] || [];
+              this.#get().replaceMessages(finalMessages, { context });
+              break;
+            }
           }
         }
+
+        state = result.newState;
+
+        // Check if operation was cancelled after step completion
+        const operationAfterStep = this.#get().operations[operationId];
+        if (operationAfterStep?.status === 'cancelled') {
+          log(
+            '[executeClientAgent] Operation cancelled after step %d, marking state as interrupted',
+            stepCount,
+          );
+
+          // Set state.status to 'interrupted' to trigger agent abort handling
+          state = { ...state, status: 'interrupted' };
+
+          // Let agent handle the abort (will clean up pending tools if needed)
+          // Use result.nextContext if available (e.g., llm_result with tool calls)
+          // otherwise fallback to current nextContext
+          const contextForAbort = result.nextContext || nextContext;
+          const abortResult = await runtime.step(state, contextForAbort);
+          state = abortResult.newState;
+
+          log('[executeClientAgent] Operation cancelled, stopping loop');
+          break;
+        }
+
+        // If no nextContext, stop execution
+        if (!result.nextContext) {
+          log('[executeClientAgent] No next context, stopping loop');
+          break;
+        }
+
+        // Preserve initialContext when updating nextContext
+        // initialContext is set once at the start and should persist through all steps
+        nextContext = { ...result.nextContext, initialContext: nextContext.initialContext };
       }
 
-      state = result.newState;
-
-      // Check if operation was cancelled after step completion
-      const operationAfterStep = this.#get().operations[operationId];
-      if (operationAfterStep?.status === 'cancelled') {
-        log(
-          '[executeClientAgent] Operation cancelled after step %d, marking state as interrupted',
-          stepCount,
-        );
-
-        // Set state.status to 'interrupted' to trigger agent abort handling
-        state = { ...state, status: 'interrupted' };
-
-        // Let agent handle the abort (will clean up pending tools if needed)
-        // Use result.nextContext if available (e.g., llm_result with tool calls)
-        // otherwise fallback to current nextContext
-        const contextForAbort = result.nextContext || nextContext;
-        const abortResult = await runtime.step(state, contextForAbort);
-        state = abortResult.newState;
-
-        log('[executeClientAgent] Operation cancelled, stopping loop');
-        break;
-      }
-
-      // If no nextContext, stop execution
-      if (!result.nextContext) {
-        log('[executeClientAgent] No next context, stopping loop');
-        break;
-      }
-
-      // Preserve initialContext when updating nextContext
-      // initialContext is set once at the start and should persist through all steps
-      nextContext = { ...result.nextContext, initialContext: nextContext.initialContext };
-    }
-
-    log(
-      '[executeClientAgent] Agent runtime loop finished, final status: %s, total steps: %d',
-      state.status,
-      stepCount,
-    );
-
-    // Execute afterCompletion hooks before completing operation
-    // These are registered by tools (e.g., speak/broadcast/delegate) that need to
-    // trigger actions after the AgentRuntime finishes
-    const operation = this.#get().operations[operationId];
-    const afterCompletionCallbacks = operation?.metadata?.runtimeHooks?.afterCompletionCallbacks;
-    if (afterCompletionCallbacks && afterCompletionCallbacks.length > 0) {
       log(
-        '[executeClientAgent] Executing %d afterCompletion callbacks',
-        afterCompletionCallbacks.length,
+        '[executeClientAgent] Agent runtime loop finished, final status: %s, total steps: %d',
+        state.status,
+        stepCount,
       );
 
-      for (const callback of afterCompletionCallbacks) {
-        try {
-          await callback();
-        } catch (error) {
-          console.error('[executeClientAgent] afterCompletion callback error:', error);
-        }
-      }
-
-      log('[executeClientAgent] afterCompletion callbacks executed');
-    }
-
-    // If completed successfully and queue has messages, drain and trigger new sendMessage.
-    // Only drain on success — on error the queue is left intact so messages aren't lost.
-    if (state.status === 'done') {
-      const remainingQueued = this.#get().drainQueuedMessages(contextKey);
-      if (remainingQueued.length > 0) {
-        const merged = mergeQueuedMessages(remainingQueued);
+      // Execute afterCompletion hooks before completing operation
+      // These are registered by tools (e.g., speak/broadcast/delegate) that need to
+      // trigger actions after the AgentRuntime finishes
+      const operation = this.#get().operations[operationId];
+      const afterCompletionCallbacks = operation?.metadata?.runtimeHooks?.afterCompletionCallbacks;
+      if (afterCompletionCallbacks && afterCompletionCallbacks.length > 0) {
         log(
-          '[executeClientAgent] %d queued messages after completion, triggering new sendMessage',
-          remainingQueued.length,
+          '[executeClientAgent] Executing %d afterCompletion callbacks',
+          afterCompletionCallbacks.length,
         );
 
-        this.#get().completeOperation(operationId);
-
-        const completedOp = this.#get().operations[operationId];
-        if (completedOp?.context.agentId) {
-          this.#get().markUnreadCompleted(completedOp.context.agentId, completedOp.context.topicId);
+        for (const callback of afterCompletionCallbacks) {
+          try {
+            await callback();
+          } catch (error) {
+            console.error('[executeClientAgent] afterCompletion callback error:', error);
+          }
         }
 
-        emitRuntimeCompleteSource();
-
-        const execContext = { ...context };
-        const mergedContent = merged.content;
-        // Rebuild UploadFileItem-shaped objects from the queued file previews so
-        // sendMessage can both pass file ids to the server AND construct
-        // imageList/videoList for the optimistic temp message. Falls back to
-        // id-only wrappers if no preview metadata was captured.
-        const mergedFiles =
-          merged.filesPreview.length > 0
-            ? reconstructUploadFilesFromQueue(merged.filesPreview)
-            : merged.files.length > 0
-              ? (merged.files.map((id) => ({ id })) as any)
-              : undefined;
-
-        setTimeout(() => {
-          useChatStore
-            .getState()
-            .sendMessage({
-              context: execContext,
-              editorData: merged.editorData,
-              files: mergedFiles,
-              message: mergedContent,
-              metadata: merged.metadata,
-            })
-            .catch((e: unknown) => {
-              console.error('[executeClientAgent] sendMessage for queued content failed:', e);
-            });
-        }, 100);
-
-        return; // Skip the normal completion below
+        log('[executeClientAgent] afterCompletion callbacks executed');
       }
-    }
 
-    // Complete operation based on final state
-    switch (state.status) {
-      case 'done': {
-        this.#get().completeOperation(operationId);
-        log('[executeClientAgent] Operation completed successfully');
+      // If completed successfully and queue has messages, drain and trigger new sendMessage.
+      // Only drain on success — on error the queue is left intact so messages aren't lost.
+      if (state.status === 'done') {
+        const remainingQueued = this.#get().drainQueuedMessages(contextKey);
+        if (remainingQueued.length > 0) {
+          const merged = mergeQueuedMessages(remainingQueued);
+          log(
+            '[executeClientAgent] %d queued messages after completion, triggering new sendMessage',
+            remainingQueued.length,
+          );
 
-        // Mark unread completion for background conversations
-        const completedOp = this.#get().operations[operationId];
-        if (completedOp?.context.agentId) {
-          this.#get().markUnreadCompleted(completedOp.context.agentId, completedOp.context.topicId);
-        }
-        break;
-      }
-      case 'error': {
-        this.#get().failOperation(operationId, {
-          type: 'runtime_error',
-          message: 'Agent runtime execution failed',
-        });
-        log('[executeClientAgent] Operation failed');
-        break;
-      }
-      case 'waiting_for_human': {
-        // When waiting for human intervention, complete the current operation
-        // A new operation will be created when user approves/rejects
-        this.#get().completeOperation(operationId);
-        log('[executeClientAgent] Operation paused for human intervention');
-        break;
-      }
-    }
+          this.#get().completeOperation(operationId);
 
-    log('[executeClientAgent] completed');
-    emitRuntimeCompleteSource();
-
-    // Desktop notification (if not in tools calling mode)
-    if (isDesktop) {
-      try {
-        const finalMessages = this.#get().messagesMap[messageKey] || [];
-        const lastAssistant = finalMessages.findLast((m) => m.role === 'assistant');
-
-        // Only show notification if there's content and no tools
-        if (lastAssistant?.content && !lastAssistant?.tools) {
-          const { desktopNotificationService } =
-            await import('@/services/electron/desktopNotification');
-
-          // Use topic title or agent title as notification title
-          let notificationTitle = t('notification.finishChatGeneration', { ns: 'electron' });
-          if (topicId) {
-            const key = topicMapKey({ agentId, groupId });
-            const topicData = this.#get().topicDataMap[key];
-            const topic = topicData?.items?.find((item) => item.id === topicId);
-            if (topic?.title) notificationTitle = topic.title;
-          } else {
-            const agentMeta = agentSelectors.getAgentMetaById(agentId)(getAgentStoreState());
-            if (agentMeta?.title) notificationTitle = agentMeta.title;
+          const completedOp = this.#get().operations[operationId];
+          if (completedOp?.context.agentId) {
+            this.#get().markUnreadCompleted(
+              completedOp.context.agentId,
+              completedOp.context.topicId,
+            );
           }
 
-          const navigatePath = resolveNotificationNavigatePath({ agentId, groupId, topicId });
+          emitRuntimeCompleteSource();
 
-          await desktopNotificationService.showNotification({
-            body: markdownToTxt(lastAssistant.content),
-            navigate: navigatePath ? { path: navigatePath } : undefined,
-            title: notificationTitle,
-          });
+          const execContext = { ...context };
+          const mergedContent = merged.content;
+          // Rebuild UploadFileItem-shaped objects from the queued file previews so
+          // sendMessage can both pass file ids to the server AND construct
+          // imageList/videoList for the optimistic temp message. Falls back to
+          // id-only wrappers if no preview metadata was captured.
+          const mergedFiles =
+            merged.filesPreview.length > 0
+              ? reconstructUploadFilesFromQueue(merged.filesPreview)
+              : merged.files.length > 0
+                ? (merged.files.map((id) => ({ id })) as any)
+                : undefined;
+
+          setTimeout(() => {
+            useChatStore
+              .getState()
+              .sendMessage({
+                context: execContext,
+                editorData: merged.editorData,
+                files: mergedFiles,
+                message: mergedContent,
+                metadata: merged.metadata,
+              })
+              .catch((e: unknown) => {
+                console.error('[executeClientAgent] sendMessage for queued content failed:', e);
+              });
+          }, 100);
+
+          return; // Skip the normal completion below
         }
-      } catch (error) {
-        console.error('Desktop notification error:', error);
       }
-    }
 
-    // Return usage and cost data for caller to use
-    return { cost: state.cost, usage: state.usage };
+      // Complete operation based on final state
+      switch (state.status) {
+        case 'done': {
+          this.#get().completeOperation(operationId);
+          log('[executeClientAgent] Operation completed successfully');
+
+          // Mark unread completion for background conversations
+          const completedOp = this.#get().operations[operationId];
+          if (completedOp?.context.agentId) {
+            this.#get().markUnreadCompleted(
+              completedOp.context.agentId,
+              completedOp.context.topicId,
+            );
+          }
+          break;
+        }
+        case 'error': {
+          this.#get().failOperation(operationId, {
+            type: 'runtime_error',
+            message: 'Agent runtime execution failed',
+          });
+          log('[executeClientAgent] Operation failed');
+          break;
+        }
+        case 'waiting_for_human': {
+          // When waiting for human intervention, complete the current operation
+          // A new operation will be created when user approves/rejects
+          this.#get().completeOperation(operationId);
+          log('[executeClientAgent] Operation paused for human intervention');
+          break;
+        }
+      }
+
+      log('[executeClientAgent] completed');
+      emitRuntimeCompleteSource();
+
+      // Desktop notification (if not in tools calling mode)
+      if (isDesktop) {
+        try {
+          const finalMessages = this.#get().messagesMap[messageKey] || [];
+          const lastAssistant = finalMessages.findLast((m) => m.role === 'assistant');
+
+          // Only show notification if there's content and no tools
+          if (lastAssistant?.content && !lastAssistant?.tools) {
+            const { desktopNotificationService } =
+              await import('@/services/electron/desktopNotification');
+
+            // Use topic title or agent title as notification title
+            let notificationTitle = t('notification.finishChatGeneration', { ns: 'electron' });
+            if (topicId) {
+              const key = topicMapKey({ agentId, groupId });
+              const topicData = this.#get().topicDataMap[key];
+              const topic = topicData?.items?.find((item) => item.id === topicId);
+              if (topic?.title) notificationTitle = topic.title;
+            } else {
+              const agentMeta = agentSelectors.getAgentMetaById(agentId)(getAgentStoreState());
+              if (agentMeta?.title) notificationTitle = agentMeta.title;
+            }
+
+            const navigatePath = resolveNotificationNavigatePath({ agentId, groupId, topicId });
+
+            await desktopNotificationService.showNotification({
+              body: markdownToTxt(lastAssistant.content),
+              navigate: navigatePath ? { path: navigatePath } : undefined,
+              title: notificationTitle,
+            });
+          }
+        } catch (error) {
+          console.error('Desktop notification error:', error);
+        }
+      }
+
+      // Return usage and cost data for caller to use
+      return { cost: state.cost, usage: state.usage };
+    } finally {
+      await runtime.dispose();
+    }
   };
 }
 

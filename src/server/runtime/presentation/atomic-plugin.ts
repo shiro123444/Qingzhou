@@ -1,22 +1,48 @@
+import { type PluginProfile } from '@lobechat/cordis-runtime';
 import { z } from 'zod';
 
 import type {
   PlannerContext,
+  PresentationJobInput,
   PresentationPlan,
   PresentationPlanner,
   RuntimeScope,
 } from '../../../../packages/runtime-contracts/src';
 import { createAssetPlugin } from '../assets/plugin';
-import { type AtomicInvocation, type AtomicOperation, AtomicRuntime } from '../atomic-runtime';
+import {
+  type AtomicInvocation,
+  type AtomicOperation,
+  type AtomicPlugin,
+  type AtomicRuntime,
+  createAtomicRuntimeFromProfile,
+} from '../atomic-runtime';
 import { createSkillsPlugin } from '../skills-plugin';
+import { createTeachingPlugin, type TeachingMemory } from '../teaching/atomic-plugin';
+import type { CompiledLesson } from '../teaching/lesson';
 import type { PresentationArtifactStore } from './artifact-store';
+import { createPresentationCollaborationPlugin } from './collaboration-plugin';
+import type { PresentationContentCompiler } from './content-intent';
 import type { PresentationGenerationPort } from './generation-port';
 import type { ImageGenerationCapability } from './image-generation-capability';
+import {
+  assertLessonPublishable,
+  bindLessonPlan,
+  compileLessonInput,
+  readLessonPlan,
+} from './lesson';
 import type { GLMMultimodalChatPort } from './multimodal-chat-provider-glm';
 import { validatePresentationPlan } from './planner';
+import { presentationSkillsOptions } from './recipes';
 import type { PresentationRevisionAssetPlanner } from './revision-assets';
-import type { FilePresentationTemplateLibrary } from './templates';
+import type { TeachingLearning } from './teaching-memory';
+import type { FilePresentationTemplateLibrary, TemplateApplication } from './templates';
 import { nativeTemplateOperations } from './templates/native-operations';
+import { presentationVectorOperations } from './vector-operations';
+import { type PresentationVisualCritic, presentationVisualReviewSchema } from './visual-critic';
+import {
+  type PresentationVisualStoryboardPlanner,
+  presentationVisualStoryboardSchema,
+} from './visual-storyboard';
 import type {
   InMemoryPresentationPlanWorker,
   PresentationWorkerContext,
@@ -68,12 +94,86 @@ export const createPresentationAtomicRuntime = (options: {
   chatPort?: GLMMultimodalChatPort;
   templateLibrary?: FilePresentationTemplateLibrary;
   revisionAssetPlanner?: PresentationRevisionAssetPlanner;
+  visualStoryboardPlanner?: PresentationVisualStoryboardPlanner;
+  visualCritic?: PresentationVisualCritic;
+  contentCompiler?: PresentationContentCompiler;
+  teachingMemory?: TeachingMemory;
+  teachingLearning?: TeachingLearning;
   worker: Pick<InMemoryPresentationPlanWorker, 'run'>;
   artifactStore: PresentationArtifactStore;
   imageGenerationCapability?: ImageGenerationCapability;
   operations?: AtomicOperation[];
+  profile?: PluginProfile;
 }) => {
+  const teaching = createTeachingPlugin({
+    chat: options.chatPort,
+    memory: options.teachingMemory ?? options.teachingLearning?.memory,
+  });
+  const compileTeachingInput = async (
+    input: PresentationJobInput,
+    context: AtomicInvocation,
+  ): Promise<PresentationJobInput> => {
+    const lesson = readLessonPlan(input);
+    if (!lesson) return input;
+    const compiled = await runtime.invoke<CompiledLesson>(
+      'teaching.lesson.compile',
+      { plan: lesson },
+      context,
+    );
+    return compileLessonInput(input, compiled);
+  };
   const operations: AtomicOperation[] = [
+    // Compatibility entry points delegate through Cordis, including its leases and events.
+    ...teaching.operations
+      .filter(({ name }) => !['teaching.lesson.compile', 'teaching.lesson.validate'].includes(name))
+      .map((operation): AtomicOperation => ({
+        ...operation,
+        name: operation.name
+          .replace('teaching.lesson.', 'presentation.lesson.')
+          .replace('teaching.memory.', 'presentation.teaching.'),
+        agent: operation.name.startsWith('teaching.memory.')
+          ? { contexts: ['presentation.intake'], maxCalls: operation.agent?.maxCalls }
+          : undefined,
+        execute: (input, context) => runtime.invoke(operation.name, input, context),
+      })),
+    ...(options.teachingLearning?.operations() ?? []),
+    {
+      name: 'presentation.lesson.compile',
+      description:
+        'Compile a supplied lesson into ordered, teacher-advanced public stages, retaining private cues separately in the owned input.',
+      input: z.object({ input: inputSchema }).strict(),
+      execute: ({ input }, context) => compileTeachingInput(input, context),
+    },
+    {
+      name: 'presentation.lesson.validate',
+      description:
+        'Validate stage identity, withheld literal content and reserved boardwork region. Does not certify learning outcomes or raster-image semantics.',
+      input: z.object({ plan: presentationPlanSchema }).strict(),
+      execute: async ({ plan }, context) => {
+        if (!plan.designSpec?.lessonPlan)
+          throw new Error('A teaching plan is required for lesson validation');
+        await runtime.invoke(
+          'teaching.lesson.validate',
+          { plan: plan.designSpec.lessonPlan },
+          context,
+        );
+        assertLessonPublishable(plan);
+        return { passed: true };
+      },
+    },
+    ...(options.contentCompiler
+      ? [
+          {
+            name: 'presentation.content.compile',
+            description:
+              'Compile confirmed slide content into claims, LaTeX formulas and semantic renderer choices.',
+            input: z.object({ input: inputSchema }).strict(),
+            execute: ({ input }: any, ctx: AtomicInvocation) =>
+              options.contentCompiler!.compile(input, { scope: ctx.scope, signal: ctx.signal }),
+          },
+        ]
+      : []),
+    ...presentationVectorOperations(),
     {
       name: 'presentation.job.list',
       description: 'Recover the authenticated account’s recent presentations across logins.',
@@ -86,12 +186,15 @@ export const createPresentationAtomicRuntime = (options: {
         'Plan a new presentation or revise selected existing slides, returning editable SVG pages.',
       input: z.object({ input: inputSchema }).strict(),
       output: presentationPlanSchema,
-      execute: ({ input }, ctx) =>
-        options.planner.plan(input, {
-          ...(ctx.services?.plannerContext as PlannerContext),
-          scope: ctx.scope,
-          abortSignal: ctx.signal,
-        }),
+      execute: async ({ input }, ctx) =>
+        bindLessonPlan(
+          await options.planner.plan(await compileTeachingInput(input, ctx), {
+            ...(ctx.services?.plannerContext as PlannerContext),
+            scope: ctx.scope,
+            abortSignal: ctx.signal,
+          }),
+          input,
+        ),
     },
     {
       name: 'presentation.slide.read',
@@ -376,10 +479,68 @@ export const createPresentationAtomicRuntime = (options: {
             execute: (input: any, ctx: AtomicInvocation) =>
               options.revisionAssetPlanner!.prepare({
                 ...input,
+                onEvent: ctx.onEvent,
                 scope: ctx.scope,
                 jobId: ctx.jobId!,
                 signal: ctx.signal,
               }),
+          },
+        ]
+      : []),
+    ...(options.visualStoryboardPlanner
+      ? [
+          {
+            name: 'presentation.template.mapDeck',
+            description:
+              'Translate a learned visual template into a deck-level storyboard that assigns semantic page roles, visual families, composition archetypes, reusable components and asset modes before slide composition.',
+            input: z
+              .object({
+                jobInput: inputSchema,
+                template: z
+                  .object({
+                    name: z.string().min(1),
+                    templateId: z.string().min(1),
+                    versionId: z.string().min(1),
+                  })
+                  .passthrough(),
+              })
+              .strict(),
+            output: presentationVisualStoryboardSchema,
+            execute: (
+              input: { jobInput: z.infer<typeof inputSchema>; template: TemplateApplication },
+              ctx: AtomicInvocation,
+            ) =>
+              options.visualStoryboardPlanner!.plan(input, {
+                scope: ctx.scope,
+                signal: ctx.signal,
+              }),
+          },
+        ]
+      : []),
+    ...(options.visualCritic
+      ? [
+          {
+            name: 'presentation.template.reviewDeck',
+            description:
+              'Compare rendered slides with the learned template pixels and design program, returning bounded evidence-based visual corrections.',
+            input: z
+              .object({
+                plan: presentationPlanSchema,
+                template: z
+                  .object({
+                    name: z.string().min(1),
+                    templateId: z.string().min(1),
+                    versionId: z.string().min(1),
+                  })
+                  .passthrough()
+                  .optional(),
+              })
+              .strict(),
+            output: presentationVisualReviewSchema,
+            execute: (
+              input: { plan: PresentationPlan; template?: TemplateApplication },
+              ctx: AtomicInvocation,
+            ) => options.visualCritic!.review(input, { scope: ctx.scope, signal: ctx.signal }),
           },
         ]
       : []),
@@ -388,24 +549,64 @@ export const createPresentationAtomicRuntime = (options: {
       : []),
     ...(options.operations ?? []),
   ];
-  const runtime: AtomicRuntime = new AtomicRuntime([
+  const plugins: AtomicPlugin[] = [
+    createPresentationCollaborationPlugin(),
+    teaching,
     {
       id: 'presentation',
-      version: '2.1.0',
-      operations: operations.map((operation) =>
-        [
+      version: '3.0.0',
+      operations: operations.map((operation) => {
+        const contexts = new Set(operation.agent?.contexts);
+        const intake = [
           'presentation.template.list',
           'presentation.template.resolve',
           'presentation.template.inspectNative',
           'presentation.template.extractAssets',
-        ].includes(operation.name)
-          ? { ...operation, agent: { contexts: ['presentation.intake'], maxCalls: 4 } }
-          : operation,
-      ),
+          'presentation.template.extractMedia',
+        ].includes(operation.name);
+        if (intake) contexts.add('presentation.intake');
+        if (
+          [
+            'presentation.memory.search',
+            'presentation.memory.load',
+            'presentation.memory.compose',
+            'presentation.content.compile',
+            'presentation.formula.render',
+            'presentation.formula.measure',
+            'presentation.diagram.measure',
+            'presentation.diagram.render',
+            'presentation.template.extractAssets',
+            'presentation.template.extractMedia',
+            'presentation.template.inspectNative',
+            'presentation.template.listNativeOutputs',
+            'presentation.template.fillNative',
+            'presentation.template.restoreNative',
+            'presentation.job.list',
+            'presentation.page.read',
+            'presentation.page.replace',
+          ].includes(operation.name)
+        )
+          contexts.add('skills');
+        return contexts.size
+          ? {
+              ...operation,
+              agent: {
+                ...operation.agent,
+                contexts: [...contexts],
+                ...(intake ? { maxCalls: 4 } : {}),
+              },
+            }
+          : operation;
+      }),
     },
     createAssetPlugin(options.artifactStore, options.imageGenerationCapability),
-    createSkillsPlugin(() => runtime, options.chatPort),
-  ]);
+    createSkillsPlugin(() => runtime, options.chatPort, presentationSkillsOptions),
+  ];
+  const runtime: AtomicRuntime = createAtomicRuntimeFromProfile({
+    bundles: { presentation: { entries: plugins.map(({ id }) => ({ id, use: id })) } },
+    modules: Object.fromEntries(plugins.map((plugin) => [plugin.id, plugin])),
+    profile: options.profile ?? { bundles: ['presentation'] },
+  });
   return runtime;
 };
 

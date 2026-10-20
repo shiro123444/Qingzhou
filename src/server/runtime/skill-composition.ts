@@ -1,6 +1,40 @@
 import { z } from 'zod';
 
-import type { AtomicInvocation, AtomicRuntime } from './atomic-runtime';
+import {
+  assertAtomicInvocationActive,
+  type AtomicInvocation,
+  type AtomicRuntime,
+} from './atomic-runtime';
+
+export type SkillCatalogOperation = Awaited<ReturnType<AtomicRuntime['catalog']>>[number];
+
+/** A trusted host policy may narrow the capabilities opted in by plugins. */
+export type SkillOperationPolicy = (
+  name: string,
+  invocation: AtomicInvocation,
+  operation: SkillCatalogOperation,
+) => boolean;
+
+export interface SkillRecipe {
+  description?: string;
+  id: string;
+  steps: readonly string[];
+}
+
+export const isComposableOperation = (operation: SkillCatalogOperation): boolean =>
+  operation.agent?.contexts.includes('skills') === true;
+
+export async function getComposableOperations(
+  runtime: AtomicRuntime,
+  invocation: AtomicInvocation,
+  policy?: SkillOperationPolicy,
+): Promise<SkillCatalogOperation[]> {
+  return (await runtime.catalog()).filter(
+    (operation) =>
+      isComposableOperation(operation) &&
+      (!policy || policy(operation.name, invocation, operation) === true),
+  );
+}
 
 export interface SkillStep {
   id: string;
@@ -24,7 +58,7 @@ export async function runSkillSteps(
   runtime: AtomicRuntime,
   steps: SkillStep[],
   context: AtomicInvocation,
-  allowed: (operation: string) => boolean,
+  allowed?: SkillOperationPolicy,
 ) {
   skillStepsSchema.parse(steps);
   if (
@@ -60,33 +94,22 @@ export async function runSkillSteps(
     }
     return value;
   };
-  for (const step of steps)
-    if (!allowed(step.operation))
-      throw new Error(`Operation cannot be composed: ${step.operation}`);
+  assertAtomicInvocationActive(context);
   return runtime.withPlugins(
     steps.map((step) => step.operation.split('.')[0]),
     async () => {
+      // Read metadata only after leasing every participant: a replacement cannot
+      // change its opt-in, schema or implementation between validation and use.
+      const catalog = await getComposableOperations(runtime, context, allowed);
+      const operations = new Set(catalog.map((operation) => operation.name));
       for (const step of steps)
+        if (!operations.has(step.operation))
+          throw new Error(`Operation cannot be composed: ${step.operation}`);
+      for (const step of steps) {
+        assertAtomicInvocationActive(context);
         results[step.id] = await runtime.invoke(step.operation, resolve(step.input), context);
+      }
       return { results, last: results[steps.at(-1)!.id] };
     },
   );
 }
-export const COMPOSABLE_OPERATIONS = new Set([
-  'assets.inspect',
-  'assets.list',
-  'assets.applyMask',
-  'presentation.template.extractAssets',
-  'assets.transform',
-  'assets.removeBackground',
-  'assets.keyColor',
-  'assets.compose',
-  'assets.generate',
-  'presentation.template.inspectNative',
-  'presentation.template.listNativeOutputs',
-  'presentation.template.fillNative',
-  'presentation.template.restoreNative',
-  'presentation.job.list',
-  'presentation.page.read',
-  'presentation.page.replace',
-]);

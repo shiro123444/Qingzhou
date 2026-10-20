@@ -1,0 +1,220 @@
+{
+  "cases": [
+    {
+      "build_id": "7RIktfEGLa_NA0nVLmEEy",
+      "ready_elapsed_seconds": 2.1380198640399612,
+      "server_profile": "4c4g",
+      "node_oldspace_mib": 1024,
+      "initial_cgroup": {
+        "memory.current": 2916352,
+        "memory.peak": 2916352,
+        "memory.max": 4294967296,
+        "memory.swap.current": 0,
+        "memory.swap.max": 0,
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "cpu.stat": "usage_usec 81619\nuser_usec 53852\nsystem_usec 27766\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "cpu.max": "400000 100000",
+        "cpuset.cpus.effective": null
+      },
+      "after_idle_cgroup": {
+        "memory.current": 224202752,
+        "memory.peak": 306278400,
+        "memory.max": 4294967296,
+        "memory.swap.current": 0,
+        "memory.swap.max": 0,
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "cpu.stat": "usage_usec 2582706\nuser_usec 2369568\nsystem_usec 213138\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 30\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "cpu.max": "400000 100000",
+        "cpuset.cpus.effective": null
+      },
+      "after_load_cgroup": {
+        "memory.current": 283123712,
+        "memory.peak": 306278400,
+        "memory.max": 4294967296,
+        "memory.swap.current": 0,
+        "memory.swap.max": 0,
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "cpu.stat": "usage_usec 5122800\nuser_usec 4819511\nsystem_usec 303289\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 181\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "cpu.max": "400000 100000",
+        "cpuset.cpus.effective": null
+      },
+      "cleanup_state": {
+        "ActiveState": "inactive",
+        "SubState": "dead",
+        "MainPID": "0",
+        "Result": "success",
+        "ExecMainStatus": "0",
+        "ControlGroup": ""
+      },
+      "cleanup_port_no_longer_listening": true,
+      "label": "spawn-wrapper-before",
+      "raw_result": "/tmp/qingzhou-compact-20261011/spawn-before-runtime-4c4g-preload-off-result.json",
+      "idle": {
+        "summed_rss_kib": {
+          "min": 342260,
+          "mean": 374703.5862068966,
+          "max": 377044,
+          "observations": 29
+        },
+        "complete_pss_kib": {
+          "min": 275306,
+          "mean": 308084.9655172414,
+          "max": 310433,
+          "observations": 29
+        },
+        "cpu_percent": {
+          "min": 0.0,
+          "mean": 1.0000892348309243,
+          "max": 31.278381070833724,
+          "observations": 28
+        },
+        "cgroup_memory_current_bytes": null,
+        "cgroup_memory_swap_current_bytes": null,
+        "max_process_count": 2
+      },
+      "load": {
+        "resources": {
+          "summed_rss_kib": {
+            "min": 344564,
+            "mean": 378718.3448275862,
+            "max": 397408,
+            "observations": 29
+          },
+          "complete_pss_kib": {
+            "min": 277906,
+            "mean": 312115.7586206897,
+            "max": 330792,
+            "observations": 29
+          },
+          "cpu_percent": {
+            "min": 3.83429973972978,
+            "mean": 16.58029948049963,
+            "max": 75.10601293127296,
+            "observations": 28
+          },
+          "cgroup_memory_current_bytes": null,
+          "cgroup_memory_swap_current_bytes": null,
+          "max_process_count": 2
+        },
+        "request_count": 150,
+        "success_count": 150,
+        "latency_mean_ms": 13.494380609675622,
+        "latency_p50_ms": 3.737405495485291,
+        "latency_p95_ms": 35.844075959175825,
+        "latency_quantile_method": "nearest_rank_all_attempts",
+        "scheduled_rate_per_second": 10,
+        "client_concurrency_limit": 2
+      },
+      "launcher_sha256": null
+    },
+    {
+      "build_id": "7RIktfEGLa_NA0nVLmEEy",
+      "ready_elapsed_seconds": 1.8444488100358285,
+      "server_profile": "4c4g",
+      "node_oldspace_mib": 1024,
+      "initial_cgroup": {
+        "memory.current": 3125248,
+        "memory.peak": 3125248,
+        "memory.max": 4294967296,
+        "memory.swap.current": 0,
+        "memory.swap.max": 0,
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "cpu.stat": "usage_usec 7226\nuser_usec 5146\nsystem_usec 2080\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "cpu.max": "400000 100000",
+        "cpuset.cpus.effective": null
+      },
+      "after_idle_cgroup": {
+        "memory.current": 216510464,
+        "memory.peak": 291528704,
+        "memory.max": 4294967296,
+        "memory.swap.current": 0,
+        "memory.swap.max": 0,
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "cpu.stat": "usage_usec 2319811\nuser_usec 2180794\nsystem_usec 139017\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 23\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "cpu.max": "400000 100000",
+        "cpuset.cpus.effective": null
+      },
+      "after_load_cgroup": {
+        "memory.current": 269348864,
+        "memory.peak": 291528704,
+        "memory.max": 4294967296,
+        "memory.swap.current": 0,
+        "memory.swap.max": 0,
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "cpu.stat": "usage_usec 5478380\nuser_usec 5213452\nsystem_usec 264928\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 174\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "cpu.max": "400000 100000",
+        "cpuset.cpus.effective": null
+      },
+      "cleanup_state": {
+        "ActiveState": "inactive",
+        "SubState": "dead",
+        "MainPID": "0",
+        "Result": "success",
+        "ExecMainStatus": "0",
+        "ControlGroup": ""
+      },
+      "cleanup_port_no_longer_listening": true,
+      "label": "linux-exec-single-process-after",
+      "raw_result": "/tmp/qingzhou-compact-20261011/runtime-4c4g-preload-off-result.json",
+      "idle": {
+        "summed_rss_kib": {
+          "min": 287760,
+          "mean": 318380.8,
+          "max": 320568,
+          "observations": 30
+        },
+        "complete_pss_kib": {
+          "min": 263410,
+          "mean": 294389.2,
+          "max": 296602,
+          "observations": 30
+        },
+        "cpu_percent": {
+          "min": 0.0,
+          "mean": 0.6668703307321681,
+          "max": 19.170861469170582,
+          "observations": 29
+        },
+        "cgroup_memory_current_bytes": null,
+        "cgroup_memory_swap_current_bytes": null,
+        "max_process_count": 1
+      },
+      "load": {
+        "resources": {
+          "summed_rss_kib": {
+            "min": 289808,
+            "mean": 323251.0344827586,
+            "max": 338504,
+            "observations": 29
+          },
+          "complete_pss_kib": {
+            "min": 265798,
+            "mean": 299321.3103448276,
+            "max": 314418,
+            "observations": 29
+          },
+          "cpu_percent": {
+            "min": 0.0,
+            "mean": 20.790339709053566,
+            "max": 73.610225954709,
+            "observations": 28
+          },
+          "cgroup_memory_current_bytes": null,
+          "cgroup_memory_swap_current_bytes": null,
+          "max_process_count": 1
+        },
+        "request_count": 150,
+        "success_count": 150,
+        "latency_mean_ms": 15.386066710343584,
+        "latency_p50_ms": 2.9754245188087225,
+        "latency_p95_ms": 50.1557809766382,
+        "latency_quantile_method": "nearest_rank_all_attempts",
+        "scheduled_rate_per_second": 10,
+        "client_concurrency_limit": 2
+      },
+      "launcher_sha256": "e4a0073aa35fa0fa729197267ea04acd9f0491e880d151cdcd41f29be1e20ef6"
+    }
+  ],
+  "scope": "Fresh production processes on warm filesystem cache; Webpack artifact; public signin HTML, manifest and favicon only. Placeholder DB, no real models/bot/PPT workloads. 4GiB memory, four CPU quota+affinity, swap disabled.",
+  "verification_date": "2026-10-11"
+}

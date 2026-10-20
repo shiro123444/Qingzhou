@@ -3,10 +3,12 @@ import type {
   ExportResult,
   PluginDescriptor,
   PluginRuntimeState,
+  PresentationDecisionAnswer,
   PresentationExportFormat,
   PresentationJob,
   PresentationJobInput,
   PresentationMessageInput,
+  PresentationPresenceInput,
   ResumeRunInput,
   RunSnapshot,
   RuntimeEvent,
@@ -78,8 +80,11 @@ export type RuntimePresentationClient = Pick<
     Pick<
       RuntimeClient,
       | 'createImageGeneration'
+      | 'deletePresentationJob'
       | 'downloadArtifact'
       | 'sendPresentationMessage'
+      | 'updatePresentationPresence'
+      | 'answerPresentationDecision'
       | 'listPresentationJobs'
     >
   >;
@@ -158,6 +163,10 @@ export interface CreateImageGenerationResult {
 }
 
 export interface RuntimeClient {
+  answerPresentationDecision: (
+    jobId: string,
+    input: PresentationDecisionAnswer,
+  ) => Promise<PresentationJob>;
   cancelPresentationJob: (
     jobId: string,
     options?: { signal?: AbortSignal },
@@ -171,6 +180,7 @@ export interface RuntimeClient {
     input: PresentationJobInput,
     options?: { signal?: AbortSignal },
   ) => Promise<PresentationJob>;
+  deletePresentationJob: (jobId: string, options?: { signal?: AbortSignal }) => Promise<void>;
   downloadArtifact: (artifactId: string, options?: { signal?: AbortSignal }) => Promise<Blob>;
   exportArtifact: (
     artifactId: string,
@@ -218,6 +228,7 @@ export interface RuntimeClient {
     options?: SubscribePresentationJobOptions,
   ) => AsyncIterable<PresentationJobEvent>;
   unmountPlugin: (id: string, options?: { signal?: AbortSignal }) => Promise<PluginRuntimeState>;
+  updatePresentationPresence: (jobId: string, input: PresentationPresenceInput) => Promise<void>;
 }
 
 export class RuntimeClientImpl implements RuntimeClient {
@@ -508,7 +519,11 @@ export class RuntimeClientImpl implements RuntimeClient {
       { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: '{}' },
     );
     if (!response.ok) throw new Error(`Failed to restore presentations (${response.status})`);
-    return ((await response.json()) as { jobs: PresentationJob[] }).jobs;
+    // A body without a `jobs` array means "no saved works": returning undefined here made the store's
+    // `jobs.map(...)` throw, and the studio showed a raw `Cannot read properties of undefined`
+    // notice instead of its honest empty state.
+    const payload = (await response.json()) as { jobs?: PresentationJob[] } | undefined;
+    return Array.isArray(payload?.jobs) ? payload.jobs : [];
   }
 
   async getPresentationJob(
@@ -554,6 +569,53 @@ export class RuntimeClientImpl implements RuntimeClient {
         `Failed to send presentation message (${response.status}): ${await response.text()}`,
       );
     return (await response.json()) as PresentationJob;
+  }
+
+  async updatePresentationPresence(jobId: string, input: PresentationPresenceInput): Promise<void> {
+    const response = await this.fetcher(
+      this.resolveUrl(`${RUNTIME_ENDPOINTS.presentationJob(jobId)}/presence`),
+      {
+        method: 'POST',
+        headers: await this.prepareHeaders(),
+        body: JSON.stringify(input),
+        keepalive: true,
+      },
+    );
+    if (!response.ok)
+      throw new Error(`Failed to update presentation presence (${response.status})`);
+  }
+
+  async answerPresentationDecision(
+    jobId: string,
+    input: PresentationDecisionAnswer,
+  ): Promise<PresentationJob> {
+    const response = await this.fetcher(
+      this.resolveUrl(`${RUNTIME_ENDPOINTS.presentationJob(jobId)}/decisions`),
+      {
+        method: 'POST',
+        headers: await this.prepareHeaders(),
+        body: JSON.stringify(input),
+      },
+    );
+    if (!response.ok)
+      throw new Error(
+        `Failed to answer presentation decision (${response.status}): ${await response.text()}`,
+      );
+    return (await response.json()) as PresentationJob;
+  }
+
+  async deletePresentationJob(jobId: string, options?: { signal?: AbortSignal }): Promise<void> {
+    const response = await this.fetcher(this.resolveUrl(RUNTIME_ENDPOINTS.presentationJob(jobId)), {
+      headers: await this.prepareHeaders(),
+      method: 'DELETE',
+      signal: options?.signal,
+    });
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => '');
+      throw new Error(
+        `Failed to delete presentation job ${jobId} (${response.status} ${response.statusText}): ${errorText}`,
+      );
+    }
   }
 
   async cancelPresentationJob(

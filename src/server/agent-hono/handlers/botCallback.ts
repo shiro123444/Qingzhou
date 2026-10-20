@@ -1,52 +1,38 @@
-import debug from 'debug';
 import type { Context } from 'hono';
 
 import { getServerDB } from '@/database/core/db-adaptor';
-import { BotCallbackService } from '@/server/services/bot/BotCallbackService';
+import { BotDeliveryConflict } from '@/database/models/botDelivery';
+import { BotDeliveryService } from '@/server/services/bot/BotDeliveryService';
+import { durableCallbackSchema, MAX_CALLBACK_BYTES } from '@/server/services/bot/deliveryEnvelope';
+import { wakeBotDelivery } from '@/server/services/bot/deliveryWake';
 
-const log = debug('lobe-server:agent:bot-callback');
-
-/**
- * Bot callback endpoint for agent step/completion webhooks.
- *
- * In queue mode, AgentRuntimeService fires webhooks (via QStash) after each step
- * and on completion. This endpoint verifies the signature (via the `qstashAuth`
- * middleware on the route) and delegates to BotCallbackService.
- */
+/** QStash-authenticated compatibility ingress. ACK means SQL receipt, not platform delivery. */
 export async function botCallback(c: Context): Promise<Response> {
-  let body: any;
+  let body: unknown;
   try {
-    body = await c.req.json();
+    const text = await c.req.text();
+    if (Buffer.byteLength(text) > MAX_CALLBACK_BYTES)
+      return c.json({ error: 'Callback too large' }, 413);
+    body = JSON.parse(text);
   } catch {
     return c.json({ error: 'Invalid JSON body' }, 400);
   }
-
-  const { type, applicationId, platformThreadId, progressMessageId } = body;
-
-  log(
-    'bot-callback: type=%s, applicationId=%s, platformThreadId=%s, progressMessageId=%s',
-    type,
-    applicationId,
-    platformThreadId,
-    progressMessageId,
-  );
-
-  if (!type || !applicationId || !platformThreadId) {
-    return c.json({ error: 'Missing required fields: type, applicationId, platformThreadId' }, 400);
-  }
-
-  if (type !== 'step' && type !== 'completion') {
-    return c.json({ error: `Unknown callback type: ${type}` }, 400);
-  }
+  const parsed = durableCallbackSchema.safeParse(body);
+  if (!parsed.success) return c.json({ error: 'Invalid callback identity or payload' }, 400);
 
   try {
-    const serverDB = await getServerDB();
-    const service = new BotCallbackService(serverDB);
-    await service.handleCallback(body);
-
-    return c.json({ success: true });
+    const db = await getServerDB();
+    const receipt = await new BotDeliveryService(db).accept(body);
+    if (receipt.status === 'skipped') return c.json({ status: 'skipped', success: true });
+    if (receipt.status === 'pending' || receipt.status === 'running') wakeBotDelivery(db);
+    return c.json(
+      { deliveryStatus: receipt.status, receiptId: receipt.id, status: 'accepted', success: true },
+      202,
+    );
   } catch (error) {
-    console.error('bot-callback error:', error);
-    return c.json({ error: error instanceof Error ? error.message : 'Internal error' }, 500);
+    if (error instanceof BotDeliveryConflict)
+      return c.json({ status: 'payload_conflict', success: false }, 409);
+    c.header('Retry-After', '10');
+    return c.json({ status: 'receipt_unavailable', success: false }, 503);
   }
 }

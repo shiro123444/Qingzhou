@@ -100,6 +100,7 @@ robots.txt
 
 # Documents and media
 *.pdf
+!packages/file-loaders/src/loaders/pdf/fixtures/chinese-cid.pdf
 
 # Cloud service keys
 vertex-ai-key.json
@@ -154,7 +155,9 @@ docs/superpowers/
 
 # Local Scratch & Agent Cli artifacts
 scratch/
-.data/presentation/
+# Local runtime data (presentation storage, replays, export smoke artifacts) — never commit
+.data/
+.commandcode/
 .antigravity/
 .antigravitycli/
 image-*.png

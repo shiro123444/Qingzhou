@@ -35,7 +35,7 @@ export interface InterventionResult {
  *   move to `status='interrupted'` with `interruption.reason='human_rejected'`.
  *
  * Each branch is a self-contained method so the routing in `process()` reads
- * top-to-bottom: detect approval, then rejection, then unsupported humanInput.
+ * top-to-bottom: detect approval, rejection, then a pending question response.
  */
 export class HumanInterventionHandler {
   constructor(
@@ -55,14 +55,87 @@ export class HumanInterventionHandler {
       return this.reject(state, { rejectAndContinue, rejectionReason, toolMessageId });
     }
 
-    // human_prompt / human_select (submitToolInteraction) — out of scope for
-    // this codepath; the call site treats unrecognized intervention inputs as
-    // a no-op and lets the regular step loop run.
-    if (humanInput) {
-      return { newState: state, nextContext: undefined };
+    if (humanInput && state.status === 'waiting_for_human') {
+      return this.answer(state, humanInput, toolMessageId);
     }
 
     return { newState: state, nextContext: undefined };
+  }
+
+  private async answer(
+    state: any,
+    input: any,
+    toolMessageId?: string,
+  ): Promise<InterventionResult> {
+    const tool = state.pendingToolsCalling?.find((item: any) => item.id === input.toolCallId);
+    const question =
+      tool &&
+      ((tool.identifier === 'qingzhou-system-capabilities' && tool.apiName === 'ask') ||
+        (tool.identifier === 'lobe-user-interaction' && tool.apiName === 'askUserQuestion'));
+    if (
+      !question ||
+      !toolMessageId ||
+      !input.response ||
+      typeof input.response !== 'object' ||
+      Array.isArray(input.response)
+    )
+      throw new Error('Human input does not match a pending question');
+    const plugin = await this.serverDB.query.messagePlugins.findFirst({
+      where: (mp: any, { and, eq }: any) =>
+        and(eq(mp.id, toolMessageId), eq(mp.userId, state.metadata.userId)),
+    });
+    if (
+      !plugin ||
+      plugin.toolCallId !== tool.id ||
+      plugin.identifier !== tool.identifier ||
+      plugin.apiName !== tool.apiName
+    )
+      throw new Error('Human input tool message does not match');
+    const content = `User submitted: ${JSON.stringify(input.response)}`;
+    const pluginState = {
+      ...(plugin.state && typeof plugin.state === 'object' ? plugin.state : {}),
+      response: input.response,
+      status: 'submitted',
+    };
+    await this.messageModel.updateToolMessage(toolMessageId, { content });
+    await this.messageModel.updateMessagePlugin(toolMessageId, {
+      intervention: { status: 'approved' },
+      state: pluginState,
+    });
+    const newState = structuredClone(state);
+    newState.lastModified = new Date().toISOString();
+    const previous = newState.messages.find(
+      (message: any) => message.id === toolMessageId || message.tool_call_id === tool.id,
+    );
+    // The approval executor persists an empty DB row without adding it to state.messages.
+    // Append the real result when absent, otherwise the next LLM call sees a missing tool result.
+    newState.messages = newState.messages.filter(
+      (message: any) => message.id !== toolMessageId && message.tool_call_id !== tool.id,
+    );
+    newState.messages.push({
+      ...previous,
+      id: toolMessageId,
+      role: 'tool',
+      content,
+      tool_call_id: tool.id,
+      plugin: tool,
+      pluginState,
+      pluginError: undefined,
+      pluginIntervention: { status: 'approved' },
+    });
+    newState.pendingToolsCalling = newState.pendingToolsCalling.filter(
+      (item: any) => item.id !== tool.id,
+    );
+    newState.status = newState.pendingToolsCalling.length ? 'waiting_for_human' : 'running';
+    return {
+      newState,
+      nextContext: newState.pendingToolsCalling.length
+        ? undefined
+        : {
+            phase: 'tool_result',
+            payload: { parentMessageId: toolMessageId },
+          },
+    };
   }
 
   private async approve(

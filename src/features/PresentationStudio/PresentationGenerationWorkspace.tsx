@@ -7,6 +7,7 @@ import type {
   ArtifactSnapshot,
   PresentationJob,
 } from '../../../packages/runtime-contracts/src/index';
+import ActivityHistory from './ActivityHistory';
 import {
   type PresentationStreamStatus,
   usePresentationStudioStore,
@@ -14,6 +15,7 @@ import {
 import { styles } from './style';
 
 interface PresentationGenerationWorkspaceProps {
+  activityHistory?: { id: string; text: string }[];
   artifacts?: Record<string, ArtifactSnapshot>;
   busyState?: 'cancel' | 'retry' | null;
   job: PresentationJob;
@@ -40,27 +42,31 @@ const PLACEHOLDER_CARDS: SlideCard[] = [0, 1, 2].map((index) => ({
   slideIndex: index + 1,
 }));
 
-const SlowTypewriterTitle = memo(() => {
-  const [displayedText, setDisplayedText] = useState(SLOW_TITLE);
-  const [charIndex, setCharIndex] = useState(SLOW_TITLE.length);
+const SlowTypewriterTitle = memo(({ text }: { text: string }) => {
+  const [displayedText, setDisplayedText] = useState(text);
+  const [charIndex, setCharIndex] = useState(text.length);
 
   useEffect(() => {
-    if (window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches) return;
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches) {
+      setDisplayedText(text);
+      setCharIndex(text.length);
+      return;
+    }
     setDisplayedText('');
     setCharIndex(0);
-  }, []);
+  }, [text]);
 
   useEffect(() => {
-    if (charIndex >= SLOW_TITLE.length) return;
+    if (charIndex >= text.length) return;
     const timer = setTimeout(() => {
-      setDisplayedText(SLOW_TITLE.slice(0, charIndex + 1));
+      setDisplayedText(text.slice(0, charIndex + 1));
       setCharIndex((value) => value + 1);
     }, 150);
     return () => clearTimeout(timer);
-  }, [charIndex]);
+  }, [charIndex, text]);
 
   return (
-    <h2 aria-label={SLOW_TITLE} data-testid="presentation-generation-title">
+    <h2 aria-label={text} data-testid="presentation-generation-title">
       {displayedText}
     </h2>
   );
@@ -72,7 +78,7 @@ const conciseActivityFor = (job: PresentationJob): string => {
   // `message` often contains the original user prompt; never echo that into
   // the generation stage. Only backend-authored action fields are eligible.
   const activity = record.activity ?? record.lastAction ?? record.action;
-  if (typeof activity === 'string' && activity.trim()) return activity.trim().slice(0, 36);
+  if (typeof activity === 'string' && activity.trim()) return activity.trim().slice(0, 80);
 
   const phase = typeof record.phase === 'string' ? record.phase.toLowerCase() : '';
   if (phase.includes('planner')) return '正在梳理内容与页面结构';
@@ -90,9 +96,19 @@ const circularOffset = (index: number, activeIndex: number, length: number): num
 };
 
 const PresentationGenerationWorkspace = memo<PresentationGenerationWorkspaceProps>(
-  ({ artifacts: propsArtifacts, busyState = null, job, onCancel, streamStatus = null }) => {
+  ({
+    activityHistory,
+    artifacts: propsArtifacts,
+    busyState = null,
+    job,
+    onCancel,
+    streamStatus = null,
+  }) => {
     const storeArtifacts = usePresentationStudioStore((state) => state.artifacts);
-    const allArtifacts = propsArtifacts ?? storeArtifacts ?? {};
+    const allArtifacts = useMemo(
+      () => propsArtifacts ?? storeArtifacts,
+      [propsArtifacts, storeArtifacts],
+    );
     const [activeIndex, setActiveIndex] = useState(0);
     const userNavigationUntil = useRef(0);
 
@@ -163,6 +179,17 @@ const PresentationGenerationWorkspace = memo<PresentationGenerationWorkspaceProp
       setActiveIndex(Math.max(0, Math.min(cards.length - 1, currentSlideIndex - 1)));
     }, [cards.length, currentSlideIndex]);
 
+    useEffect(() => {
+      if (currentSlideIndex !== undefined || cards.length < 2) return;
+
+      const timer = window.setInterval(() => {
+        if (Date.now() < userNavigationUntil.current) return;
+        setActiveIndex((index) => (index + 1) % cards.length);
+      }, 2400);
+
+      return () => window.clearInterval(timer);
+    }, [cards.length, currentSlideIndex]);
+
     const move = useCallback(
       (direction: number) => {
         userNavigationUntil.current = Date.now() + 8000;
@@ -189,6 +216,8 @@ const PresentationGenerationWorkspace = memo<PresentationGenerationWorkspaceProp
     );
 
     const actionText = streamStatus === 'reconnecting' ? '正在恢复连接' : conciseActivityFor(job);
+    const headline =
+      actionText === '正在生成页面' || actionText === '正在准备创作环境' ? SLOW_TITLE : actionText;
 
     return (
       <section
@@ -324,14 +353,18 @@ const PresentationGenerationWorkspace = memo<PresentationGenerationWorkspaceProp
         </div>
 
         <div className={styles.generationCenter}>
-          <SlowTypewriterTitle />
-          <div
-            aria-live="polite"
-            className={styles.generationAction}
-            data-testid="presentation-generation-action"
-          >
-            {actionText}
-          </div>
+          <SlowTypewriterTitle text={headline} />
+          <ActivityHistory history={activityHistory}>
+            <button
+              aria-live="polite"
+              className={styles.generationAction}
+              data-testid="presentation-generation-action"
+              style={{ border: 0, background: 'transparent', cursor: 'pointer' }}
+              type="button"
+            >
+              {actionText}
+            </button>
+          </ActivityHistory>
           {onCancel && (
             <Button
               aria-label="Cancel presentation job"

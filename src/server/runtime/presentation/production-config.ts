@@ -17,6 +17,7 @@ export const PRODUCTION_PRESENTATION_ENV_KEYS = {
   allowedRunnerIds: 'LOBE_PRESENTATION_ALLOWED_RUNNER_IDS_JSON',
   command: 'LOBE_PRESENTATION_COMMAND_JSON',
   commandArgs: 'LOBE_PRESENTATION_COMMAND_ARGS_JSON',
+  imageBudget: 'LOBE_PRESENTATION_IMAGE_BUDGET',
   provider: 'LOBE_PRESENTATION_PROVIDER',
   runnerId: 'LOBE_PRESENTATION_RUNNER_ID',
 } as const;
@@ -50,6 +51,15 @@ const readOptionalIdentifier = (
     throw invalid(`${key} must be a non-empty string`, key);
   }
   return value.trim();
+};
+
+const parseOptionalCount = (env: unknown, key: string): number | undefined => {
+  const raw = readEnv(env, key);
+  if (raw === undefined || raw.trim() === '') return;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0)
+    throw invalid(`${key} must be a non-negative integer`, key);
+  return value;
 };
 
 const parseStringArray = (env: unknown, key: string): readonly string[] | undefined => {
@@ -101,6 +111,7 @@ export const loadProductionPresentationProviderOptions = (
   const commandArgs = parseStringArray(env, PRODUCTION_PRESENTATION_ENV_KEYS.commandArgs);
   const runnerId = readOptionalIdentifier(env, PRODUCTION_PRESENTATION_ENV_KEYS.runnerId);
   const allowedRunnerIds = parseStringArray(env, PRODUCTION_PRESENTATION_ENV_KEYS.allowedRunnerIds);
+  const imageBudget = parseOptionalCount(env, PRODUCTION_PRESENTATION_ENV_KEYS.imageBudget);
 
   const options = {
     ...(provider ? { provider } : {}),
@@ -108,6 +119,7 @@ export const loadProductionPresentationProviderOptions = (
     ...(commandArgs ? { commandArgs } : {}),
     ...(runnerId ? { runnerId } : {}),
     ...(allowedRunnerIds ? { allowedRunnerIds } : {}),
+    ...(imageBudget === undefined ? {} : { imageBudget }),
   } satisfies ProductionPresentationProviderOptions;
 
   // Reuse C-40 validation whenever the required provider/command pair exists;

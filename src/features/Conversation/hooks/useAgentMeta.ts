@@ -1,12 +1,11 @@
 import { type MetaData } from '@lobechat/types';
 import { useMemo } from 'react';
 
+import { JUMI_AVATAR, JUMI_NAME } from '@/const/jumi';
 import { useAgentStore } from '@/store/agent';
 import { agentSelectors } from '@/store/agent/selectors';
 
 import { contextSelectors, useConversationStore } from '../store';
-
-const LOBE_AI_TITLE = 'jumi AI';
 
 /**
  * Hook to get agent meta data for a specific agent or the current conversation.
@@ -29,9 +28,17 @@ export const useAgentMeta = (messageAgentId?: string | null): MetaData => {
     const builtinAgentIds = Object.values(builtinAgentIdMap);
     const isBuiltinAgent = builtinAgentIds.includes(agentId);
 
+    if (agentId === 'ppt-agent') {
+      return { ...agentMeta, avatar: JUMI_AVATAR, title: JUMI_NAME };
+    }
+
     if (isBuiltinAgent) {
-      // Use DB-stored title if customized (e.g. via onboarding), otherwise fallback to Lobe AI
-      return { ...agentMeta, title: agentMeta.title || LOBE_AI_TITLE };
+      // Keep an explicitly customized identity; otherwise use Qingzhou's main assistant.
+      return {
+        ...agentMeta,
+        avatar: agentMeta.avatar || JUMI_AVATAR,
+        title: agentMeta.title || JUMI_NAME,
+      };
     }
 
     return agentMeta;

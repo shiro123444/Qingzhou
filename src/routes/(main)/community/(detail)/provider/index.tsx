@@ -4,6 +4,7 @@ import { Flexbox } from '@lobehub/ui';
 import { memo } from 'react';
 import { useParams } from 'react-router-dom';
 
+import CommunityDetailFetchError from '@/features/CommunityDetail/FetchError';
 import { useDiscoverStore } from '@/store/discover';
 
 import NotFound from '../components/NotFound';
@@ -21,9 +22,11 @@ const ProviderDetailPage = memo<ProviderDetailPageProps>(({ mobile }) => {
   const identifier = decodeURIComponent(params.slug ?? '');
 
   const useProviderDetail = useDiscoverStore((s) => s.useProviderDetail);
-  const { data, isLoading } = useProviderDetail({ identifier, withReadme: true });
+  const { data, error, isLoading, mutate } = useProviderDetail({ identifier, withReadme: true });
 
   if (isLoading) return <Loading />;
+  if (error && !data)
+    return <CommunityDetailFetchError error={error} onRetry={() => void mutate()} />;
   if (!data) return <NotFound />;
 
   return (

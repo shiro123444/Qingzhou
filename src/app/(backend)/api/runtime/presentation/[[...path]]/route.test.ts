@@ -100,6 +100,81 @@ const portFor = (overrides: Partial<PresentationPort> = {}): PresentationPort =>
   ...overrides,
 });
 
+describe('durable planning route transport', () => {
+  it('returns the completed turn shape for JSON observers and scopes all collaboration operations', async () => {
+    const result = {
+      phase: 'outline',
+      brief: { topic: 'Saved report' },
+      message: 'Continue from the saved outline',
+      slides: [],
+    };
+    const sessions = {
+      read: vi.fn(async () => ({ threadId: 'thread-1', state: 'waiting_input' })),
+      start: vi.fn(async () => ({ state: 'running' })),
+      wait: vi.fn(async () => result),
+      presenceUpdate: vi.fn(async () => undefined),
+      answer: vi.fn(async () => ({ state: 'queued' })),
+    };
+    const base = createPresentationRuntimeComposition({
+      portFactory: async () => portFor(),
+      journalLoader: async () => new PresentationJobEventJournal(),
+    });
+    const handler = createPresentationRouteHandler({
+      authenticate: authenticated('planning-owner', 'db'),
+      generationScopeFactory: async () => ({
+        userId: 'planning-owner',
+        sessionId: 'planning-session',
+      }),
+      composition: {
+        ...base,
+        conversationCapability: { id: 'presentation.conversation', execute: vi.fn() },
+        planningSessions: sessions as never,
+      },
+    });
+    const post = (body: object) =>
+      handler(
+        request('/conversation', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ threadId: 'thread-1', ...body }),
+        }),
+      );
+    try {
+      const response = await post({
+        operation: 'turn',
+        requestId: 'turn-1',
+        messages: [{ role: 'user', content: 'Continue' }],
+        presence: { tabId: 'tab', visible: true, focused: true },
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual(result);
+      expect(sessions.start).toHaveBeenCalledWith(
+        { userId: 'planning-owner', sessionId: 'planning-session' },
+        expect.objectContaining({ operation: 'turn', threadId: 'thread-1' }),
+        'turn-1',
+      );
+      expect(sessions.wait).toHaveBeenCalledOnce();
+      expect(sessions.presenceUpdate).toHaveBeenCalledOnce();
+      await post({ operation: 'session' });
+      expect(sessions.read).toHaveBeenCalledWith(
+        { userId: 'planning-owner', sessionId: 'planning-session' },
+        'thread-1',
+      );
+      await post({
+        operation: 'decision',
+        answer: { decisionId: 'q', requestId: 'answer-1', action: 'retry' },
+      });
+      expect(sessions.answer).toHaveBeenCalledWith(
+        { userId: 'planning-owner', sessionId: 'planning-session' },
+        'thread-1',
+        { decisionId: 'q', requestId: 'answer-1', action: 'retry' },
+      );
+    } finally {
+      await base.dispose();
+    }
+  });
+});
+
 const createHandler = (
   port: PresentationPort,
   options: { authenticate?: PresentationAuthBoundary; factory?: PresentationPortFactory } = {},
@@ -2066,17 +2141,15 @@ describe('Presentation Route: R2-A-C generation composition wiring on /jobs', ()
         }
       },
       dispose: vi.fn(),
-      publish: vi.fn(
-        (input): ImageGenerationEvent => ({
-          data: input.data as Record<string, unknown>,
-          idempotencyKey: input.idempotencyKey ?? `event-${++seq}`,
-          jobId: input.jobId,
-          protocol_version: 'runtime.v1',
-          scope: input.scope ?? scope,
-          seq: ++seq,
-          type: input.type,
-        }),
-      ),
+      publish: vi.fn((input): ImageGenerationEvent => ({
+        data: input.data as Record<string, unknown>,
+        idempotencyKey: input.idempotencyKey ?? `event-${++seq}`,
+        jobId: input.jobId,
+        protocol_version: 'runtime.v1',
+        scope: input.scope ?? scope,
+        seq: ++seq,
+        type: input.type,
+      })),
     });
 
     const imageCapability = createImageGenerationCapability({
@@ -2335,17 +2408,15 @@ describe('Presentation Route: R2-A-C generation composition wiring on /jobs', ()
     const publisherFactory = (pubScope: RuntimeScope): ImageGenerationEventPublisherPort => ({
       assertScope: () => undefined,
       dispose: vi.fn(),
-      publish: vi.fn(
-        (input): ImageGenerationEvent => ({
-          data: input.data as Record<string, unknown>,
-          idempotencyKey: input.idempotencyKey ?? `event-${++imgSeq}`,
-          jobId: input.jobId,
-          protocol_version: 'runtime.v1',
-          scope: input.scope ?? pubScope,
-          seq: ++imgSeq,
-          type: input.type,
-        }),
-      ),
+      publish: vi.fn((input): ImageGenerationEvent => ({
+        data: input.data as Record<string, unknown>,
+        idempotencyKey: input.idempotencyKey ?? `event-${++imgSeq}`,
+        jobId: input.jobId,
+        protocol_version: 'runtime.v1',
+        scope: input.scope ?? pubScope,
+        seq: ++imgSeq,
+        type: input.type,
+      })),
     });
 
     const imageCapability = createImageGenerationCapability({

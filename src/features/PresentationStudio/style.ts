@@ -6,6 +6,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     display: flex;
     flex: 1;
+    flex-direction: column;
 
     min-width: 0;
     min-height: 0;
@@ -16,8 +17,15 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     flex-direction: column;
 
     min-width: 0;
+    min-height: 0;
+  `,
+  conversationMainCompact: css`
     height: min(760px, calc(100dvh - 120px));
     min-height: 420px;
+  `,
+  conversationMainFill: css`
+    height: 100%;
+    min-height: 0;
   `,
   banner: css`
     display: flex;
@@ -624,24 +632,23 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     display: flex;
     flex: 1;
     flex-direction: column;
-    align-items: center;
-    justify-content: center;
+    align-items: stretch;
 
     box-sizing: border-box;
     width: 100%;
-    max-width: 860px;
     height: 100%;
     min-height: 0;
-    margin-inline: auto;
     padding: 0;
+  `,
+  emptyHeader: css`
+    display: flex;
+    flex-shrink: 0;
+    gap: 8px;
+    align-items: center;
+    justify-content: space-between;
 
-    &:has([data-stage='outline']) {
-      max-width: 100%;
-    }
-
-    @media (width <= 768px) {
-      max-width: 100%;
-    }
+    width: 100%;
+    padding-block: 4px 8px;
   `,
   emptyShell: css`
     position: relative;
@@ -649,13 +656,27 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     display: flex;
     flex: 1;
     flex-direction: column;
-    align-items: center;
-    justify-content: center;
+    align-items: stretch;
 
     box-sizing: border-box;
     width: 100%;
     height: 100%;
     min-height: 0;
+  `,
+  emptyWorks: css`
+    flex-shrink: 0;
+  `,
+  worksPanel: css`
+    overflow: auto;
+
+    width: min(420px, 86vw);
+    max-height: min(60vh, 480px);
+    padding: 4px;
+    border: 1px solid ${cssVar.colorBorderSecondary};
+    border-radius: 12px;
+
+    background: ${cssVar.colorBgElevated};
+    box-shadow: ${cssVar.boxShadowSecondary};
   `,
   emptyDescription: css`
     display: flex;
@@ -675,7 +696,96 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     margin-block-end: 12px;
   `,
   exportNotice: css`
-    margin-block-end: 12px;
+    margin-block-end: 0;
+  `,
+  noticeHost: css`
+    pointer-events: none;
+
+    position: absolute;
+    z-index: 30;
+    inset-block-start: 12px;
+    inset-inline-start: 12px;
+
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+
+    width: min(360px, calc(100% - 24px));
+  `,
+  notice: css`
+    pointer-events: auto;
+
+    position: relative;
+
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+
+    padding-block: 10px 12px;
+    padding-inline: 14px 36px;
+    border: 1px solid ${cssVar.colorBorderSecondary};
+    border-radius: 14px;
+
+    background: ${cssVar.colorBgElevated};
+    box-shadow: 0 8px 24px rgb(0 0 0 / 12%);
+  `,
+  noticeSuccess: css`
+    border-color: ${cssVar.colorSuccessBorder};
+  `,
+  noticeWarning: css`
+    border-color: ${cssVar.colorWarningBorder};
+  `,
+  noticeError: css`
+    border-color: ${cssVar.colorErrorBorder};
+  `,
+  noticeTitle: css`
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.4;
+    color: ${cssVar.colorText};
+  `,
+  noticeDescription: css`
+    font-size: 12px;
+    line-height: 1.5;
+    color: ${cssVar.colorTextSecondary};
+  `,
+  noticeAction: css`
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-block-start: 4px;
+  `,
+  noticeTimer: css`
+    position: absolute;
+    inset-block-end: 0;
+    inset-inline-start: 0;
+    transform-origin: left center;
+
+    width: 100%;
+    height: 2px;
+
+    background: ${cssVar.colorTextDescription};
+
+    transition: transform linear;
+  `,
+  noticeClose: css`
+    cursor: pointer;
+
+    position: absolute;
+    inset-block-start: 4px;
+    inset-inline-end: 6px;
+
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: none;
+
+    font-size: 16px;
+    line-height: 20px;
+    color: ${cssVar.colorTextDescription};
+
+    background: transparent;
   `,
   grid: css`
     scrollbar-gutter: stable;

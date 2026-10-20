@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockCreateWechatAdapter = vi.hoisted(() => vi.fn());
@@ -153,6 +154,144 @@ describe('WechatGatewayClient', () => {
     await client.stop();
     resolveLoop?.({ get_updates_buf: 'cursor-1', msgs: [], ret: 0 });
     await Promise.all(backgroundTasks);
+  });
+
+  it('does not advance the cursor when authenticated forwarding fails', async () => {
+    const client = new WechatClientFactory().createClient(
+      {
+        applicationId: 'wechat-app',
+        credentials: { botId: 'bot-id', botToken: 'bot-token' },
+        platform: 'wechat',
+        settings: {},
+      },
+      { appUrl: 'https://example.com', redisClient: runtimeRedis as any },
+    );
+    const raw = {
+      context_token: 'ctx',
+      from_user_id: 'alice',
+      item_list: [],
+      message_id: 1,
+      message_state: 2,
+      message_type: 1,
+    };
+    mockGetUpdates.mockReset();
+    mockGetUpdates
+      .mockResolvedValueOnce({ get_updates_buf: 'cursor-1', msgs: [raw] })
+      .mockResolvedValueOnce({ get_updates_buf: 'cursor-1', msgs: [raw] })
+      .mockImplementationOnce(async () => {
+        await client.stop();
+        return { get_updates_buf: 'cursor-1', msgs: [] };
+      });
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+      .mockResolvedValueOnce(new Response(null, { status: 200 }));
+    vi.spyOn(client as any, 'sleep').mockResolvedValue(undefined);
+    await (client as any).pollLoop(
+      10_000,
+      'https://example.com/api/agent/webhooks/wechat/wechat-app',
+    );
+    expect(mockGetUpdates.mock.calls.map(([cursor]) => cursor)).toEqual([
+      undefined,
+      undefined,
+      'cursor-1',
+    ]);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const first = new Headers(vi.mocked(fetch).mock.calls[0][1]?.headers);
+    const second = new Headers(vi.mocked(fetch).mock.calls[1][1]?.headers);
+    expect(first.get('x-qingzhou-gateway-signature')).toMatch(/^[\da-f]{64}$/);
+    expect(second.get('x-qingzhou-gateway-nonce')).not.toBe(first.get('x-qingzhou-gateway-nonce'));
+  });
+
+  it('backs off repeated forwarding failures and resets only after a successful batch', async () => {
+    const client = new WechatClientFactory().createClient(
+      {
+        applicationId: 'wechat-app',
+        credentials: { botId: 'bot-id', botToken: 'bot-token' },
+        platform: 'wechat',
+        settings: {},
+      },
+      { appUrl: 'https://example.com', redisClient: runtimeRedis as any },
+    );
+    const raw = { from_user_id: 'alice', item_list: [], message_id: 1, message_type: 1 };
+    mockGetUpdates.mockReset();
+    for (let i = 0; i < 4; i++)
+      mockGetUpdates.mockResolvedValueOnce({ get_updates_buf: 'cursor-1', msgs: [raw] });
+    mockGetUpdates.mockImplementationOnce(async () => {
+      await client.stop();
+      return { msgs: [] };
+    });
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+      .mockResolvedValueOnce(new Response(null, { status: 200 }))
+      .mockResolvedValueOnce(new Response(null, { status: 503 }));
+    const sleep = vi.spyOn(client as any, 'sleep').mockResolvedValue(undefined);
+    await (client as any).pollLoop(
+      10_000,
+      'https://example.com/api/agent/webhooks/wechat/wechat-app',
+    );
+    expect(sleep.mock.calls.map(([delay]) => delay)).toEqual([1000, 2000, 1000]);
+    expect(mockGetUpdates.mock.calls.map(([cursor]) => cursor)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      'cursor-1',
+      'cursor-1',
+    ]);
+  });
+
+  it('restores the cursor on startup and advances it only after durable forwarding', async () => {
+    const store = {
+      load: vi.fn().mockResolvedValue('saved-cursor'),
+      save: vi.fn().mockResolvedValue(undefined),
+    };
+    const client = new WechatClientFactory().createClient(
+      {
+        applicationId: 'wechat-app',
+        credentials: { botId: 'bot-id', botToken: 'bot-token' },
+        platform: 'wechat',
+        settings: {},
+      },
+      {
+        appUrl: 'https://example.com',
+        redisClient: runtimeRedis as any,
+        pollingCursorStore: store,
+      },
+    );
+    const raw = { from_user_id: 'alice', item_list: [], message_id: 1, message_type: 1 };
+    mockGetUpdates.mockResolvedValueOnce({ msgs: [raw], get_updates_buf: 'next-cursor' });
+    expect(await (client as any).primePolling('https://example.com/webhook')).toBe('next-cursor');
+    expect(mockGetUpdates).toHaveBeenCalledWith('saved-cursor', expect.any(AbortSignal));
+    expect(store.save).toHaveBeenCalledWith('next-cursor');
+    expect(vi.mocked(fetch).mock.invocationCallOrder[0]).toBeLessThan(
+      store.save.mock.invocationCallOrder[0],
+    );
+    await client.stop();
+  });
+
+  it('does not persist a new cursor when the application rejects the batch', async () => {
+    const store = { load: vi.fn().mockResolvedValue('saved-cursor'), save: vi.fn() };
+    const client = new WechatClientFactory().createClient(
+      {
+        applicationId: 'wechat-app',
+        credentials: { botId: 'bot-id', botToken: 'bot-token' },
+        platform: 'wechat',
+        settings: {},
+      },
+      {
+        appUrl: 'https://example.com',
+        redisClient: runtimeRedis as any,
+        pollingCursorStore: store,
+      },
+    );
+    mockGetUpdates.mockResolvedValueOnce({
+      msgs: [{ from_user_id: 'alice', item_list: [], message_id: 1, message_type: 1 }],
+      get_updates_buf: 'next-cursor',
+    });
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 503 }));
+    await expect((client as any).primePolling('https://example.com/webhook')).rejects.toThrow();
+    expect(store.save).not.toHaveBeenCalled();
+    await client.stop();
   });
 
   it('throws a readable error when bot token is missing', () => {

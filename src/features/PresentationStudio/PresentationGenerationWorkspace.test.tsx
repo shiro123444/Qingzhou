@@ -45,7 +45,9 @@ describe('PresentationGenerationWorkspace', () => {
 
     render(<PresentationGenerationWorkspace job={customJob} />);
 
-    expect(screen.getByRole('heading', { name: '正在制作 PPT' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: '正在整理第 2 页的 Transformer 架构图' }),
+    ).toBeInTheDocument();
     expect(screen.getByTestId('presentation-generation-action')).toHaveTextContent(
       '正在整理第 2 页的 Transformer 架构图',
     );

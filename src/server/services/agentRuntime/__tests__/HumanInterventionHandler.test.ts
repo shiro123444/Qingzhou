@@ -16,7 +16,7 @@ describe('HumanInterventionHandler.process', () => {
   let mockDBPluginQuery: ReturnType<typeof vi.fn>;
   let handler: HumanInterventionHandler;
 
-  const makeState = (overrides: Record<string, any> = {}) => ({
+  const makeState = (overrides: Record<string, any> = {}): any => ({
     lastModified: new Date().toISOString(),
     pendingToolsCalling: [
       { apiName: 'search', arguments: '{}', id: 'tool-call-1', identifier: 'web-search' },
@@ -271,16 +271,94 @@ describe('HumanInterventionHandler.process', () => {
       expect(result.nextContext).toBeUndefined();
     });
 
-    it('handles humanInput as out-of-scope (no state transition)', async () => {
+    it('rejects input that does not correspond to a pending question', async () => {
       const state = makeState();
 
-      const result = await handler.process(state, {
-        humanInput: { response: 'hi' },
-        toolMessageId: 'tool-msg-1',
-      });
+      await expect(
+        handler.process(state, {
+          humanInput: { response: 'hi' },
+          toolMessageId: 'tool-msg-1',
+        }),
+      ).rejects.toThrow('pending question');
+      expect(mockMessageModel.updateToolMessage).not.toHaveBeenCalled();
+    });
+  });
 
-      expect(result.newState).toBe(state);
+  describe('question response', () => {
+    const question = {
+      id: 'question-1',
+      identifier: 'qingzhou-system-capabilities',
+      apiName: 'ask',
+    };
+    function prepare(extra: any[] = []) {
+      mockDBPluginQuery.mockResolvedValue({
+        ...question,
+        toolCallId: question.id,
+        state: { botDecision: { token: 't' } },
+      });
+      return makeState({
+        metadata: { userId: 'user-1' },
+        pendingToolsCalling: [question, ...extra],
+        messages: [{ id: 'tool-msg-1', role: 'tool', pluginIntervention: { status: 'pending' } }],
+      });
+    }
+    it('persists a real answer and resumes from the tool result without re-executing ask', async () => {
+      const state = prepare();
+      const result = await handler.process(state, {
+        toolMessageId: 'tool-msg-1',
+        humanInput: { toolCallId: question.id, response: { text: 'A' } },
+      });
+      expect(result.newState.status).toBe('running');
+      expect(result.newState.pendingToolsCalling).toEqual([]);
+      expect(result.newState.messages[0]).toMatchObject({
+        content: 'User submitted: {"text":"A"}',
+        pluginIntervention: { status: 'approved' },
+      });
+      expect(result.nextContext).toEqual({
+        phase: 'tool_result',
+        payload: { parentMessageId: 'tool-msg-1' },
+      });
+      expect(mockMessageModel.updateMessagePlugin).toHaveBeenCalledWith(
+        'tool-msg-1',
+        expect.objectContaining({
+          state: expect.objectContaining({ botDecision: { token: 't' }, response: { text: 'A' } }),
+        }),
+      );
+      expect(state.messages[0].pluginIntervention.status).toBe('pending');
+    });
+    it('keeps waiting while another tool is undecided', async () => {
+      const result = await handler.process(prepare([{ id: 'other' }]), {
+        toolMessageId: 'tool-msg-1',
+        humanInput: { toolCallId: question.id, response: { text: 'A' } },
+      });
+      expect(result.newState.status).toBe('waiting_for_human');
       expect(result.nextContext).toBeUndefined();
+    });
+    it('appends the answer when approval only created a database row and no in-memory placeholder', async () => {
+      const state = prepare();
+      state.messages = [{ id: 'assistant', role: 'assistant', tools: [question] }];
+      const result = await handler.process(state, {
+        toolMessageId: 'tool-msg-1',
+        humanInput: { toolCallId: question.id, response: { text: 'A' } },
+      });
+      expect(result.newState.messages).toHaveLength(2);
+      expect(result.newState.messages[1]).toMatchObject({
+        role: 'tool',
+        tool_call_id: question.id,
+        content: 'User submitted: {"text":"A"}',
+      });
+      expect(result.nextContext?.phase).toBe('tool_result');
+    });
+    it('rejects a mismatched persisted tool call before writing a response', async () => {
+      const state = prepare();
+      mockDBPluginQuery.mockResolvedValue({ toolCallId: 'other' });
+      await expect(
+        handler.process(state, {
+          toolMessageId: 'tool-msg-1',
+          humanInput: { toolCallId: question.id, response: { text: 'A' } },
+        }),
+      ).rejects.toThrow('does not match');
+      expect(mockMessageModel.updateToolMessage).not.toHaveBeenCalled();
     });
   });
 });

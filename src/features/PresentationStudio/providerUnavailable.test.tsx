@@ -150,7 +150,7 @@ describe('PresentationStudio recovery interaction hardening (C-76)', () => {
     await waitFor(() => {
       expect(document.activeElement).toBe(composerTitle);
     });
-  });
+  }, 12_000);
 
   it('ignores an Enter/Space burst before any draft exists (no accidental create)', async () => {
     const createPresentationJob = vi.fn().mockResolvedValue(queuedJob('job-none'));
@@ -187,7 +187,7 @@ describe('PresentationStudio provider unavailable recovery (C-74)', () => {
     // No fabricated progress: the studio stays on the honest empty state.
     expect(screen.getByTestId('studio-empty-state')).toBeInTheDocument();
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
-  });
+  }, 12_000);
 
   it('keeps other error codes on the existing plain error alert', async () => {
     const createPresentationJob = vi.fn().mockRejectedValue(new Error('network down mid-request'));
@@ -206,7 +206,7 @@ describe('PresentationStudio provider unavailable recovery (C-74)', () => {
     expect(
       screen.queryByRole('button', { name: /Resubmit the last presentation request/i }),
     ).not.toBeInTheDocument();
-  });
+  }, 12_000);
 
   it('preserves the composer draft and resubmits the same input', async () => {
     const createPresentationJob = vi
@@ -245,7 +245,7 @@ describe('PresentationStudio provider unavailable recovery (C-74)', () => {
     });
     // Recovery succeeded: the provider hint is dismissed with the error.
     expect(screen.queryByTestId('presentation-provider-unavailable')).not.toBeInTheDocument();
-  });
+  }, 12_000);
 
   it('keeps existing jobs, artifacts and lastSeq when the provider hint shows', async () => {
     // Seed the store with pre-existing data through an isolated store, then

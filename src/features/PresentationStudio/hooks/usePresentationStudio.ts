@@ -24,19 +24,20 @@ export const usePresentationStudio = (
   store: PresentationStudioStoreHook,
   { initialJobIds, pollIntervalMs = 2500, ...streamOptions }: UsePresentationStudioOptions = {},
 ) => {
-  // C-112-04: Resolve jobIds from props, URL search param, or sessionStorage (for leave-and-return recovery)
+  const initialJobIdsKey = initialJobIds === undefined ? undefined : JSON.stringify(initialJobIds);
+  // Explicit deep links resume one work. A bare /presentation restores the
+  // history list without selecting the previous work, so creation always opens
+  // on a clean canvas.
   const effectiveJobIds = useMemo(() => {
-    if (initialJobIds !== undefined) return initialJobIds;
+    if (initialJobIdsKey !== undefined) return JSON.parse(initialJobIdsKey) as string[];
     if (typeof window !== 'undefined') {
       try {
         const paramId = new URLSearchParams(window.location.search).get('jobId');
         if (paramId) return [paramId];
-        const storedId = window.sessionStorage?.getItem('presentation_studio_active_job_id');
-        if (storedId) return [storedId];
       } catch {}
     }
-    return undefined;
-  }, [initialJobIds]);
+    return [];
+  }, [initialJobIdsKey]);
 
   const initialLoading = store((s) => s.initialLoading);
 
@@ -44,43 +45,48 @@ export const usePresentationStudio = (
     let disposed = false;
     store.getState().setInitialLoading(true);
     const restore = async () => {
-      const recovered = await store.getState().restoreJobList();
-      const targets = effectiveJobIds?.length ? effectiveJobIds : recovered.slice(0, 1);
-      for (const jobId of targets) {
-        if (disposed) return;
+      try {
+        await store.getState().restoreJobList();
+        const targets = effectiveJobIds;
+        for (const jobId of targets) {
+          if (disposed) return;
 
-        // C-112-04: Restore highest seq before streaming if available
-        if (typeof window !== 'undefined' && window.sessionStorage) {
-          try {
-            const storedSeq = window.sessionStorage.getItem(
-              `presentation_studio_last_seq_${jobId}`,
-            );
-            if (storedSeq && !store.getState().lastSeqByJob[jobId]) {
-              store.setState((s) => ({
-                lastSeqByJob: {
-                  ...s.lastSeqByJob,
-                  [jobId]: Math.max(Number(storedSeq), s.lastSeqByJob[jobId] ?? 0),
-                },
-              }));
-            }
-          } catch {}
-        }
+          // C-112-04: Restore highest seq before streaming if available
+          if (typeof window !== 'undefined' && window.sessionStorage) {
+            try {
+              const storedSeq = window.sessionStorage.getItem(
+                `presentation_studio_last_seq_${jobId}`,
+              );
+              if (storedSeq && !store.getState().lastSeqByJob[jobId]) {
+                store.setState((s) => ({
+                  lastSeqByJob: {
+                    ...s.lastSeqByJob,
+                    [jobId]: Math.max(Number(storedSeq), s.lastSeqByJob[jobId] ?? 0),
+                  },
+                }));
+              }
+            } catch {}
+          }
 
-        await store.getState().refreshJob(jobId);
-        // Select the first restored job when nothing is selected yet (C-80):
-        // the artifact panel only renders for a selected job, so a restored
-        // session must land with a usable selection without fabricating one.
-        const state = store.getState();
-        if (!state.selectedJobId && state.jobs[jobId]) {
-          state.selectJob(jobId);
+          await store.getState().refreshJob(jobId);
+          // Select the first restored job when nothing is selected yet (C-80):
+          // the artifact panel only renders for a selected job, so a restored
+          // session must land with a usable selection without fabricating one.
+          const state = store.getState();
+          if (!state.selectedJobId && state.jobs[jobId]) {
+            state.selectJob(jobId);
+          }
+          // Hydrate the restored job's artifacts immediately (C-80): completed
+          // jobs expose artifactIds, and waiting for the first poll tick left the
+          // artifact panel empty after a synchronous restore. Each snapshot is
+          // fetched individually — a single failure never fabricates an artifact.
+          await store.getState().refreshArtifacts(jobId);
         }
-        // Hydrate the restored job's artifacts immediately (C-80): completed
-        // jobs expose artifactIds, and waiting for the first poll tick left the
-        // artifact panel empty after a synchronous restore. Each snapshot is
-        // fetched individually — a single failure never fabricates an artifact.
-        await store.getState().refreshArtifacts(jobId);
+      } finally {
+        // A rejected restore must not strand the restoring spinner: whatever went wrong,
+        // the studio either shows restored works or the honest empty state.
+        if (!disposed) store.getState().setInitialLoading(false);
       }
-      if (!disposed) store.getState().setInitialLoading(false);
     };
     void restore();
 

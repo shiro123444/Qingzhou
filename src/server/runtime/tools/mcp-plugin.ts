@@ -1,5 +1,5 @@
-import type { ToolRegistry } from '../../../../packages/cordis-kernel/src/tool';
 import type { RuntimePluginManifest } from '../../../../packages/cordis-kernel/src/types';
+import { isDuplicateToolError, resolveToolRegistry } from './registry-helper';
 import type { McpClientLike, McpPluginOptions } from './types';
 
 export const disconnectMcpClient = async (client: McpClientLike): Promise<void> => {
@@ -16,31 +16,48 @@ export const createMcpPluginManifest = (options: McpPluginOptions): RuntimePlugi
 
   return {
     apply: async (ctx) => {
-      const toolRegistry = (ctx as any).get?.('cordis.tools') as ToolRegistry | undefined;
-      if (!toolRegistry) {
-        throw new Error('cordis.tools service is required to mount MCP plugin');
-      }
+      const toolRegistry = resolveToolRegistry(ctx, 'MCP plugin');
 
-      let client: McpClientLike;
-      if (options.clientFactory) {
-        client = await options.clientFactory(options.clientParams);
-        ctx.effect(() => async () => {
-          await disconnectMcpClient(client);
-        });
-      } else {
+      let disconnected = false;
+      const disconnectOnce = async (clientInstance: McpClientLike) => {
+        if (disconnected) return;
+        disconnected = true;
+        await disconnectMcpClient(clientInstance);
+      };
+
+      // 1. Kick off client factory promise
+      const clientPromise = Promise.resolve().then(async () => {
+        if (options.clientFactory) {
+          return await options.clientFactory(options.clientParams);
+        }
         const { MCPClient } = await import('@/libs/mcp');
         const mcpClient = new MCPClient(options.clientParams);
-        client = mcpClient as unknown as McpClientLike;
-        ctx.effect(() => async () => {
-          await disconnectMcpClient(client);
-        });
-        await mcpClient.initialize();
+        return mcpClient as unknown as McpClientLike;
+      });
+
+      // 2. Register cleanup ownership in ctx.effect BEFORE awaiting the promise
+      ctx.effect(async () => {
+        const client = await clientPromise;
+        return () => disconnectOnce(client);
+      });
+
+      // 3. Await the client promise
+      const client = await clientPromise;
+
+      // 4. Verify fiber state: must be loading or active
+      const fiberState = ctx.fiber.state;
+      if (fiberState !== 'loading' && fiberState !== 'active') {
+        throw new Error(`MCP plugin mount aborted: fiber is ${fiberState}`);
       }
 
-      // Provide the connected client to the context so other plugins or services can access it
+      if (!options.clientFactory && typeof client.initialize === 'function') {
+        await client.initialize();
+      }
+
+      // 5. Unconditionally provide client (staging will reject as expected)
       ctx.provide(`mcp.client.${options.id}`, client);
 
-      // Discover and register all tools from the MCP server
+      // 6. Discover and register all tools from the MCP server
       const tools = await client.listTools();
       if ((!tools || tools.length === 0) && !options.allowEmptyTools) {
         throw new Error(
@@ -70,7 +87,10 @@ export const createMcpPluginManifest = (options: McpPluginOptions): RuntimePlugi
             inputSchema: tool.inputSchema ?? {},
             name: tool.name,
           });
-        } catch {
+        } catch (error) {
+          if (!isDuplicateToolError(error)) {
+            throw error;
+          }
           // If collision occurs, canonicalName remains available
         }
       }

@@ -1,31 +1,82 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import path from 'node:path';
 
 import type {
   ArtifactSnapshot,
   PresentationJob,
   PresentationJobInput,
   PresentationPlan,
+  PresentationPlanningSession,
   RuntimeScope,
 } from '../../../../packages/runtime-contracts/src';
 import type { ArtifactInput, PresentationArtifactStore, StoredArtifact } from './artifact-store';
+import { PRESENTATION_PRESENCE_TTL_MS } from './collaboration-plugin';
+import {
+  acquirePresentationExecutionLease,
+  type PresentationExecutionLease,
+} from './execution-lease';
 import { type PresentationJobEvent, PresentationJobEventJournal } from './job-event-journal';
 import type { PresentationRevisionAssetResult } from './revision-assets';
 
 export interface StoredPresentationJob {
+  draftCheckpoint?: { fingerprint: string; slides: PresentationPlan['slides'] };
   initialAssetsComplete?: boolean;
   input: PresentationJobInput;
   job: PresentationJob;
   plan?: PresentationPlan;
   preparedAssets?: Record<string, PresentationRevisionAssetResult>;
+  revisionCheckpoint?: { requestId: string; completedSlideIds: string[] };
+  scope?: RuntimeScope;
+}
+
+export interface PresentationPresenceTab {
+  active: boolean;
+  seenAt: number;
+  tabId: string;
 }
 
 export interface PresentationJobRepository {
+  acquireLease?: (
+    scope: RuntimeScope,
+    jobId: string,
+    signal?: AbortSignal,
+  ) => Promise<PresentationExecutionLease | null>;
   getJob: (scope: RuntimeScope, jobId: string) => Promise<StoredPresentationJob | null>;
   listJobs?: (scope: RuntimeScope) => Promise<PresentationJob[]>;
+  listRecoveryCandidates?: () => Promise<{ scope: RuntimeScope; jobId: string }[]>;
+  /**
+   * Presence is a short-lived cross-executor signal. A shared store lets the executor
+   * that owns the lease observe the foreground state reported to a passive port.
+   */
+  readPresence?: (scope: RuntimeScope, jobId: string) => Promise<PresentationPresenceTab[]>;
+  removeJob?: (scope: RuntimeScope, jobId: string) => Promise<void>;
   saveJob: (scope: RuntimeScope, record: StoredPresentationJob) => Promise<void>;
+  /** Upsert the supplied tabs only; omitted tabs belong to other writers. */
+  savePresence?: (
+    scope: RuntimeScope,
+    jobId: string,
+    tabs: PresentationPresenceTab[],
+  ) => Promise<void>;
+}
+
+export interface PresentationPlanningRepository {
+  acquireLease: NonNullable<PresentationJobRepository['acquireLease']>;
+  getPlanningSession: (
+    scope: RuntimeScope,
+    threadId: string,
+  ) => Promise<PresentationPlanningSession | null>;
+  listPlanningRecoveryCandidates: () => Promise<{ scope: RuntimeScope; threadId: string }[]>;
+  /** Shared presence so the actor holding the lease sees a peer port's foreground tab. */
+  readPresence?: (scope: RuntimeScope, threadId: string) => Promise<PresentationPresenceTab[]>;
+  savePlanningSession: (scope: RuntimeScope, session: PresentationPlanningSession) => Promise<void>;
+  /** Upsert the supplied tabs only; omitted tabs belong to other writers. */
+  savePresence?: (
+    scope: RuntimeScope,
+    threadId: string,
+    tabs: PresentationPresenceTab[],
+  ) => Promise<void>;
 }
 
 const hash = (value: string): string => createHash('sha256').update(value).digest('hex');
@@ -37,19 +88,100 @@ export class FilePresentationStorage
 {
   constructor(private readonly root: string) {}
 
+  acquireLease(scope: RuntimeScope, jobId: string, signal?: AbortSignal) {
+    return acquirePresentationExecutionLease(this.path(scope, 'leases', jobId), signal);
+  }
+
+  async getPlanningSession(
+    scope: RuntimeScope,
+    threadId: string,
+  ): Promise<PresentationPlanningSession | null> {
+    const record = await this.read<PresentationPlanningSession & { scope?: RuntimeScope }>(
+      this.path(scope, 'conversations', threadId),
+    );
+    if (!record) return null;
+    const { scope: _scope, ...session } = record;
+    return session;
+  }
+
+  savePlanningSession(scope: RuntimeScope, session: PresentationPlanningSession): Promise<void> {
+    return this.write(scope, 'conversations', session.threadId, {
+      ...session,
+      scope: { userId: scope.userId, sessionId: scope.sessionId },
+    });
+  }
+
+  async listPlanningRecoveryCandidates(): Promise<{ scope: RuntimeScope; threadId: string }[]> {
+    const directories = await readdir(this.root, { withFileTypes: true }).catch((error) => {
+      if (missing(error)) return [];
+      throw error;
+    });
+    const candidates: { scope: RuntimeScope; threadId: string }[] = [];
+    for (const directory of directories) {
+      if (!directory.isDirectory() || !/^[a-f0-9]{64}$/.test(directory.name)) continue;
+      const folder = path.join(this.root, directory.name, 'conversations');
+      const files = await readdir(folder).catch((error) => {
+        if (missing(error)) return [];
+        throw error;
+      });
+      for (const file of files.filter((name) => /^[a-f0-9]{64}\.json$/.test(name))) {
+        const session = await this.read<PresentationPlanningSession & { scope: RuntimeScope }>(
+          path.join(folder, file),
+        );
+        if (
+          session?.scope?.userId &&
+          session.scope.sessionId &&
+          hash(JSON.stringify([session.scope.userId, session.scope.sessionId])) ===
+            directory.name &&
+          (session.state === 'running' || session.state === 'queued')
+        )
+          candidates.push({ scope: session.scope, threadId: session.threadId });
+      }
+    }
+    return candidates;
+  }
+
+  async listRecoveryCandidates(): Promise<{ scope: RuntimeScope; jobId: string }[]> {
+    const directories = await readdir(this.root, { withFileTypes: true }).catch((error) => {
+      if (missing(error)) return [];
+      throw error;
+    });
+    const candidates: { scope: RuntimeScope; jobId: string }[] = [];
+    for (const directory of directories) {
+      if (!directory.isDirectory() || !/^[a-f0-9]{64}$/.test(directory.name)) continue;
+      const jobs = path.join(this.root, directory.name, 'jobs');
+      const files = await readdir(jobs).catch((error) => {
+        if (missing(error)) return [];
+        throw error;
+      });
+      for (const file of files.filter((name) => /^[a-f0-9]{64}\.json$/.test(name))) {
+        const record = await this.read<StoredPresentationJob>(path.join(jobs, file));
+        if (
+          !record?.scope?.userId ||
+          !record.scope.sessionId ||
+          hash(JSON.stringify([record.scope.userId, record.scope.sessionId])) !== directory.name
+        )
+          continue;
+        if (record.job.state === 'queued' || record.job.state === 'running')
+          candidates.push({ scope: record.scope, jobId: record.job.jobId });
+      }
+    }
+    return candidates;
+  }
+
   private directory(scope: RuntimeScope, kind: string): string {
     if (!scope.userId?.trim() || !scope.sessionId?.trim()) {
       throw Object.assign(new Error('Authenticated presentation scope is required'), {
         code: 'ARTIFACT_SCOPE_MISMATCH',
       });
     }
-    return join(this.root, hash(JSON.stringify([scope.userId, scope.sessionId])), kind);
+    return path.join(this.root, hash(JSON.stringify([scope.userId, scope.sessionId])), kind);
   }
 
   private path(scope: RuntimeScope, kind: string, id: string): string {
     if (!id?.trim())
       throw Object.assign(new Error('A resource id is required'), { code: 'ARTIFACT_INVALID' });
-    return join(this.directory(scope, kind), `${hash(id)}.json`);
+    return path.join(this.directory(scope, kind), `${hash(id)}.json`);
   }
 
   private async read<T>(path: string): Promise<T | null> {
@@ -67,7 +199,21 @@ export class FilePresentationStorage
     const temporary = `${path}.${randomUUID()}.tmp`;
     try {
       await writeFile(temporary, JSON.stringify(data), { mode: 0o600 });
-      await rename(temporary, path);
+      // Windows readers and virus scanners can briefly hold the destination.
+      // Keep the old complete snapshot until an atomic replacement succeeds.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await rename(temporary, path);
+          break;
+        } catch (error) {
+          if (
+            attempt >= 5 ||
+            !['EPERM', 'EACCES', 'EBUSY'].includes((error as NodeJS.ErrnoException).code ?? '')
+          )
+            throw error;
+          await new Promise((resolve) => setTimeout(resolve, 20 * 2 ** attempt));
+        }
+      }
     } finally {
       await unlink(temporary).catch((error) => {
         if (!missing(error)) throw error;
@@ -84,19 +230,88 @@ export class FilePresentationStorage
     const jobs = await Promise.all(
       files
         .filter((f) => /^[a-f0-9]{64}\.json$/.test(f))
-        .map(async (file) => (await this.read<StoredPresentationJob>(join(directory, file)))?.job),
+        .map(
+          async (file) => (await this.read<StoredPresentationJob>(path.join(directory, file)))?.job,
+        ),
     );
     return jobs
       .filter((job): job is PresentationJob => !!job)
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
-  getJob(scope: RuntimeScope, jobId: string): Promise<StoredPresentationJob | null> {
-    return this.read(this.path(scope, 'jobs', jobId));
+  async getJob(scope: RuntimeScope, jobId: string): Promise<StoredPresentationJob | null> {
+    const record = await this.read<StoredPresentationJob>(this.path(scope, 'jobs', jobId));
+    if (!record) return null;
+    const { scope: _scope, ...stored } = record;
+    return stored;
+  }
+
+  async readPresence(scope: RuntimeScope, jobId: string): Promise<PresentationPresenceTab[]> {
+    const directory = this.path(scope, 'presence', jobId).slice(0, -5);
+    const files = await readdir(directory).catch((error) => {
+      if (missing(error)) return [];
+      throw error;
+    });
+    const now = Date.now();
+    const tabs: PresentationPresenceTab[] = [];
+    for (const file of files.filter((name) => /^[a-f0-9]{64}\.json$/u.test(name))) {
+      let tab: PresentationPresenceTab | null;
+      try {
+        tab = await this.read<PresentationPresenceTab>(path.join(directory, file));
+      } catch (error) {
+        if (error instanceof SyntaxError) continue;
+        throw error;
+      }
+      if (
+        tab &&
+        typeof tab.tabId === 'string' &&
+        `${hash(tab.tabId)}.json` === file &&
+        typeof tab.active === 'boolean' &&
+        Number.isFinite(tab.seenAt) &&
+        now >= tab.seenAt &&
+        now - tab.seenAt < PRESENTATION_PRESENCE_TTL_MS
+      )
+        tabs.push(tab);
+    }
+    return tabs;
+  }
+
+  async savePresence(
+    scope: RuntimeScope,
+    jobId: string,
+    tabs: PresentationPresenceTab[],
+  ): Promise<void> {
+    // Each tab owns one atomic file. Never read/merge/rewrite a whole-task snapshot:
+    // independent executors would otherwise lose each other's heartbeats.
+    this.path(scope, 'presence', jobId);
+    for (const tab of tabs) {
+      if (
+        !tab.tabId?.trim() ||
+        tab.tabId.length > 128 ||
+        typeof tab.active !== 'boolean' ||
+        !Number.isFinite(tab.seenAt)
+      )
+        throw Object.assign(new Error('Invalid presence tab'), { code: 'ARTIFACT_INVALID' });
+      await this.write(scope, path.join('presence', hash(jobId)), tab.tabId, tab);
+    }
   }
 
   saveJob(scope: RuntimeScope, record: StoredPresentationJob): Promise<void> {
-    return this.write(scope, 'jobs', record.job.jobId, record);
+    return this.write(scope, 'jobs', record.job.jobId, {
+      ...record,
+      scope: { userId: scope.userId, sessionId: scope.sessionId },
+    });
+  }
+
+  async removeJob(scope: RuntimeScope, jobId: string): Promise<void> {
+    await Promise.all([
+      unlink(this.path(scope, 'jobs', jobId)).catch((error) => {
+        if (!missing(error)) throw error;
+      }),
+      unlink(path.join(this.directory(scope, 'events'), `${hash(jobId)}.jsonl`)).catch((error) => {
+        if (!missing(error)) throw error;
+      }),
+    ]);
   }
 
   async get(scope: RuntimeScope, artifactId: string): Promise<StoredArtifact | null> {
@@ -149,7 +364,9 @@ export class FilePresentationStorage
     });
     const artifacts: ArtifactSnapshot[] = [];
     for (const file of files.filter((name) => /^[a-f0-9]{64}\.json$/.test(name))) {
-      const stored = await this.read<StoredArtifact & { base64?: string }>(join(directory, file));
+      const stored = await this.read<StoredArtifact & { base64?: string }>(
+        path.join(directory, file),
+      );
       if (stored) {
         const { base64: _bytes, ...snapshot } = stored;
         artifacts.push(snapshot);
@@ -169,7 +386,7 @@ export class FilePresentationStorage
     }
     const output: StoredArtifact[] = [];
     for (const file of files.filter((file) => file.endsWith('.json'))) {
-      const stored = await this.read<StoredArtifact>(join(directory, file));
+      const stored = await this.read<StoredArtifact>(path.join(directory, file));
       if (stored?.metadata?.jobId === jobId) {
         const artifact = await this.get(scope, stored.artifactId);
         if (artifact) output.push(artifact);
@@ -204,7 +421,9 @@ class DurablePresentationJournal extends PresentationJobEventJournal {
   private load(jobId: string): void {
     if (this.loaded.has(jobId)) return;
     try {
-      const lines = readFileSync(join(this.directory, `${hash(jobId)}.jsonl`), 'utf8').split('\n');
+      const lines = readFileSync(path.join(this.directory, `${hash(jobId)}.jsonl`), 'utf8').split(
+        '\n',
+      );
       for (const [index, line] of lines.entries()) {
         if (!line.trim()) continue;
         try {
@@ -232,7 +451,7 @@ class DurablePresentationJournal extends PresentationJobEventJournal {
     const appended = super.append(jobId, event);
     if (appended)
       appendFileSync(
-        join(this.directory, `${hash(jobId)}.jsonl`),
+        path.join(this.directory, `${hash(jobId)}.jsonl`),
         `${JSON.stringify(appended)}\n`,
         { mode: 0o600 },
       );

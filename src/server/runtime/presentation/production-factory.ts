@@ -39,12 +39,23 @@ import {
   InMemoryPresentationArtifactStore,
   type PresentationArtifactStore,
 } from './artifact-store';
+import {
+  type CutoutTransparency,
+  requestsCutout,
+  verifyCutoutTransparency,
+} from './artwork-pipeline';
 import { atomicPlanner, atomicWorker, createPresentationAtomicRuntime } from './atomic-plugin';
+import { type CapabilityMemory, capabilityMemoryOperations } from './capability-memory';
+import { createPresentationCapabilitySelector } from './capability-selection';
 import {
   createPresentationRuntimeComposition,
   type PresentationGenerationContextFactory,
   type PresentationRuntimeComposition,
 } from './composition';
+import {
+  createPresentationContentCompiler,
+  type PresentationContentCompiler,
+} from './content-intent';
 import type {
   PresentationJobEventJournalLoader,
   ScopedPresentationJobEventJournalCache,
@@ -56,6 +67,7 @@ import { PresentationJobEventJournal } from './job-event-journal';
 import type { MultimodalChatPort } from './multimodal-chat-provider';
 import { createMultimodalPresentationPlanner } from './multimodal-planner';
 import { createPresentationGenerationPipeline } from './pipeline';
+import type { PlanningContextFactory } from './planning-session';
 import type {
   ProductionPresentationProvider,
   ProductionPresentationProviderOptions,
@@ -67,10 +79,17 @@ import {
 } from './production-command';
 import type { ProductionPresentationEnv } from './production-config';
 import { loadProductionPresentationProviderOptions } from './production-config';
+import { createPresentationReferenceValidator } from './reference-validation';
 import { createRevisionAssetPlanner } from './revision-assets';
 import { createProcessPresentationRunner, type ProcessPresentationRunnerOptions } from './runner';
+import type { FileTeachingMemory } from './teaching-memory';
+import { TeachingLearning } from './teaching-memory';
 import type { FilePresentationTemplateLibrary } from './templates';
+import type { PresentationAudioTranscriber } from './templates/audio-transcription';
+import { prepareFrameAperture } from './templates/frame-aperture';
 import { TemplateVisualLearning } from './templates/visual-learning';
+import { createPresentationVisualCritic } from './visual-critic';
+import { createPresentationVisualStoryboardPlanner } from './visual-storyboard';
 import { InMemoryPresentationPlanWorker, type PresentationWorkerWorkspace } from './worker';
 
 /** The authenticated scope every port resolution must carry. */
@@ -393,9 +412,14 @@ export const createPptMasterProductionComposition =
 
 export interface ProductionPresentationGenerationCompositionOptions {
   readonly artifactStore?: PresentationArtifactStore;
+  readonly audioTranscriber?: PresentationAudioTranscriber;
+  readonly capabilityMemory?: CapabilityMemory;
+  readonly contentCompiler?: PresentationContentCompiler;
   readonly contextFactory?: PresentationGenerationContextFactory;
   readonly defaultSlideCount?: number;
   readonly env?: ProductionPresentationEnv;
+  /** Generated-image budget for one job; defaults to the asset planner's own bound. */
+  readonly imageBudget?: number;
   readonly imageGenerationCapability?: ImageGenerationCapability;
   readonly jobRepository?: PresentationJobRepository;
   readonly journalCache?: ScopedPresentationJobEventJournalCache;
@@ -403,8 +427,13 @@ export interface ProductionPresentationGenerationCompositionOptions {
   readonly multimodalChatPort?: MultimodalChatPort;
   readonly now?: () => string;
   readonly planner?: PresentationPlanner;
+  readonly planningContextFactory?: PlanningContextFactory;
+  readonly prepareCapabilityLibrary?: (scope: RuntimeScope) => Promise<void>;
   readonly runnerFactory?: (provider: ProductionPresentationProvider) => PresentationRunner;
+  readonly teachingMemory?: FileTeachingMemory;
   readonly templateLibrary?: FilePresentationTemplateLibrary;
+  /** Optional dedicated pixel observer; the content planner retains the user's primary model. */
+  readonly visionChatPort?: MultimodalChatPort;
   readonly worker?: Pick<InMemoryPresentationPlanWorker, 'run'>;
   readonly workspaceFactory?: (jobId: string) => PresentationWorkerWorkspace;
 }
@@ -430,16 +459,34 @@ export const createProductionPresentationGenerationComposition = (
     throw invalid('Production presentation generation composition options are required', 'options');
   }
 
+  const visionChatPort = options.visionChatPort ?? options.multimodalChatPort;
   const planner =
     options.planner ??
     (options.multimodalChatPort
       ? createMultimodalPresentationPlanner({
-          chatPort: options.multimodalChatPort,
+          // Layout must inspect real template pages and artwork. Keep the user's
+          // text model for content compilation and as the layout fallback.
+          chatPort: visionChatPort ?? options.multimodalChatPort,
+          fallbackChatPort: options.multimodalChatPort,
           defaultSlideCount: options.defaultSlideCount,
         })
       : undefined);
 
   const worker = options.worker ?? new InMemoryPresentationPlanWorker();
+  // One budget for the whole deck: the compiler plans within it and the asset planner enforces it.
+  const imageBudget =
+    options.imageBudget ?? loadProductionPresentationProviderOptions(options.env ?? {}).imageBudget;
+  const contentCompiler =
+    options.contentCompiler ??
+    (!options.planner && options.multimodalChatPort
+      ? createPresentationContentCompiler(options.multimodalChatPort, options.defaultSlideCount, {
+          ...(visionChatPort && visionChatPort !== options.multimodalChatPort
+            ? { fallbackChat: visionChatPort }
+            : {}),
+          ...(imageBudget === undefined ? {} : { maxRasterVisuals: imageBudget }),
+          imageGenerationAvailable: Boolean(options.imageGenerationCapability),
+        })
+      : undefined);
   const artifactStore =
     options.artifactStore ??
     new InMemoryPresentationArtifactStore(options.now ? () => options.now!() : undefined);
@@ -463,14 +510,27 @@ export const createProductionPresentationGenerationComposition = (
   const templateVisualLearning =
     options.templateLibrary && options.multimodalChatPort
       ? new TemplateVisualLearning({
+          memory: options.capabilityMemory,
+          audioTranscriber: options.audioTranscriber,
           library: options.templateLibrary,
           store: artifactStore,
-          chat: options.multimodalChatPort,
+          chat: visionChatPort!,
         })
       : undefined;
+  const visualStoryboardPlanner = options.multimodalChatPort
+    ? createPresentationVisualStoryboardPlanner({ chat: visionChatPort! })
+    : undefined;
+  const visualCritic = options.multimodalChatPort
+    ? createPresentationVisualCritic({ chat: visionChatPort!, store: artifactStore })
+    : undefined;
   const revisionAssetPlanner = options.multimodalChatPort
     ? createRevisionAssetPlanner({
-        chatPort: options.multimodalChatPort,
+        chatPort: visionChatPort!,
+        validateReferenceAssets: createPresentationReferenceValidator({
+          store: artifactStore,
+          chat: visionChatPort!,
+        }),
+        ...(imageBudget === undefined ? {} : { maxGeneratedSlots: imageBudget }),
         readReusableAssets: async (refs, input) => {
           const assets = await Promise.all(
             refs.map(async (ref) => {
@@ -483,19 +543,61 @@ export const createProductionPresentationGenerationComposition = (
           );
           return assets.filter((asset): asset is NonNullable<typeof asset> => !!asset);
         },
+        readVisualReferences: async (refs, input) => {
+          const images = await Promise.all(
+            refs.map(async (ref) => {
+              const artifact = await artifactStore.get(input.scope, ref);
+              if (
+                !artifact?.bytes ||
+                artifact.bytes.length > 8 * 1024 * 1024 ||
+                !['image/png', 'image/jpeg', 'image/webp'].includes(artifact.mimeType ?? '')
+              ) {
+                return null;
+              }
+              return {
+                base64: Buffer.from(artifact.bytes).toString('base64'),
+                mimeType: artifact.mimeType as 'image/jpeg' | 'image/png' | 'image/webp',
+                ref,
+              };
+            }),
+          );
+          return images.filter((image): image is NonNullable<typeof image> => Boolean(image));
+        },
         extractTemplateComponent: templateVisualLearning
           ? async (componentId, input) => {
               if (!input.jobInput.template || !atomicRuntime)
                 throw new Error('Template runtime unavailable');
-              return atomicRuntime.invoke(
+              const extracted = (await atomicRuntime.invoke(
                 'presentation.template.extractComponent',
                 {
-                  templateId: input.jobInput.template,
-                  versionId: input.jobInput.options?.templateVersionId,
-                  componentId,
+                  ...((
+                    input.jobInput.options?.templateComponentSources as
+                      | Record<
+                          string,
+                          { templateId: string; versionId: string; componentId: string }
+                        >
+                      | undefined
+                  )?.[componentId] ?? {
+                    templateId: input.jobInput.template,
+                    versionId: input.jobInput.options?.templateVersionId,
+                    componentId,
+                  }),
                 },
-                { scope: input.scope, jobId: input.jobId, signal: input.signal },
-              );
+                {
+                  scope: input.scope,
+                  jobId: input.jobId,
+                  signal: input.signal,
+                  onEvent: input.onEvent,
+                },
+              )) as { ref: string; needsTransparency: boolean; component: { role: string } };
+              return extracted.component.role === 'frame'
+                ? prepareFrameAperture({
+                    ...input,
+                    ref: extracted.ref,
+                    store: artifactStore,
+                    chat: visionChatPort!,
+                  })
+                : extracted;
             }
           : undefined,
         imageGenerationCapability,
@@ -504,9 +606,15 @@ export const createProductionPresentationGenerationComposition = (
           const output = await runSkillSteps(
             atomicRuntime,
             steps,
-            { scope: input.scope, jobId: input.jobId, signal: input.signal },
+            {
+              scope: input.scope,
+              jobId: input.jobId,
+              signal: input.signal,
+              onEvent: input.onEvent,
+            },
             (name) =>
               [
+                'assets.generate',
                 'assets.removeBackground',
                 'assets.keyColor',
                 'assets.transform',
@@ -516,19 +624,46 @@ export const createProductionPresentationGenerationComposition = (
           );
           const result = output.last as { ref?: string };
           if (!result?.ref) throw new Error('Asset workflow did not return an image');
-          return { ref: result.ref };
+          // A cutout workflow can succeed while returning an opaque bitmap. Measure the produced
+          // pixels here, where the server owns the bytes, so every caller gets a fact instead of
+          // an assumption about the workflow name.
+          let transparency: CutoutTransparency | undefined;
+          if (requestsCutout(steps)) {
+            const stored = await artifactStore.get(input.scope, result.ref);
+            if (stored?.bytes) transparency = await verifyCutoutTransparency(stored.bytes);
+          }
+          return { ref: result.ref, ...(transparency ? { transparency } : {}) };
         },
       })
     : undefined;
+  const teachingLearning =
+    options.teachingMemory && options.templateLibrary && options.multimodalChatPort
+      ? new TeachingLearning(
+          options.teachingMemory,
+          options.templateLibrary,
+          options.multimodalChatPort,
+          { store: artifactStore },
+        )
+      : undefined;
   const atomicRuntime: AtomicRuntime | undefined = planner
     ? createPresentationAtomicRuntime({
         planner,
-        operations: templateVisualLearning?.operations(),
+        contentCompiler,
+        teachingMemory: options.teachingMemory,
+        teachingLearning,
+        operations: [
+          ...(templateVisualLearning?.operations() ?? []),
+          ...(options.capabilityMemory
+            ? capabilityMemoryOperations(options.capabilityMemory, options.jobRepository)
+            : []),
+        ],
         chatPort: options.multimodalChatPort,
         worker,
         artifactStore,
         templateLibrary: options.templateLibrary,
         revisionAssetPlanner,
+        visualStoryboardPlanner,
+        visualCritic,
         imageGenerationCapability: options.imageGenerationCapability,
       })
     : undefined;
@@ -571,9 +706,24 @@ export const createProductionPresentationGenerationComposition = (
       : options.journalLoader;
 
   const composition = createPresentationRuntimeComposition({
+    planningContextFactory: options.planningContextFactory,
     atomicRuntime,
+    collaborationHook: atomicRuntime
+      ? (input, context) =>
+          atomicRuntime.invoke('presentation-collaboration.decide', input, context)
+      : undefined,
+    contentCompiler,
+    capabilityMemory: options.capabilityMemory,
+    capabilitySelector: options.multimodalChatPort
+      ? createPresentationCapabilitySelector(options.multimodalChatPort)
+      : undefined,
+    prepareCapabilityLibrary: options.prepareCapabilityLibrary,
+    teachingMemory: options.teachingMemory,
+    teachingLearning,
     templateLibrary: options.templateLibrary,
     revisionAssetPlanner,
+    visualStoryboardPlanner,
+    visualCritic,
     ...(capability ? { capability } : {}),
     contextFactory,
     generationArtifactStore: artifactStore,

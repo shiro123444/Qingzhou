@@ -196,3 +196,103 @@ describe('FeishuWebhookClient.extractFiles', () => {
     ]);
   });
 });
+
+describe('Feishu/Lark inbound authentication mode', () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    mockGetTenantAccessToken.mockResolvedValue('tok');
+    const { LarkApiClient } = await import('@lobechat/chat-adapter-feishu');
+    vi.mocked(LarkApiClient).mockImplementation(
+      () =>
+        ({
+          getTenantAccessToken: mockGetTenantAccessToken,
+        }) as any,
+    );
+  });
+
+  it.each(['feishu', 'lark'])(
+    'injects shared replay claims only for external %s webhooks',
+    (platform) => {
+      const client = new FeishuClientFactory().createClient(
+        {
+          applicationId: 'cli_test_app',
+          credentials: { appSecret: 'secret', encryptKey: 'enc' },
+          platform,
+          settings: { connectionMode: 'webhook' },
+        },
+        { appUrl: 'https://example.com' },
+      );
+      client.createAdapter();
+      expect(mockCreateLarkAdapter).toHaveBeenCalledWith(
+        expect.objectContaining({
+          claimWebhookReplay: expect.any(Function),
+          encryptKey: 'enc',
+          platform,
+        }),
+      );
+      expect(mockCreateLarkAdapter.mock.calls[0][0].authenticateWebhook).toBeUndefined();
+    },
+  );
+
+  it.each(['feishu', 'lark'])(
+    'requires internal signed envelopes in %s WS mode',
+    async (platform) => {
+      const client = new FeishuClientFactory().createClient(
+        {
+          applicationId: 'cli_test_app',
+          credentials: { appSecret: 'secret' },
+          platform,
+          settings: { connectionMode: 'websocket' },
+        },
+        { appUrl: 'https://example.com' },
+      );
+      client.createAdapter();
+      const config = mockCreateLarkAdapter.mock.calls[0][0];
+      expect(config.encryptKey).toBeUndefined();
+      expect(config.verificationToken).toBeUndefined();
+      expect(config.claimWebhookReplay).toBeUndefined();
+      expect(config.authenticateWebhook).toEqual(expect.any(Function));
+      const response = await config.authenticateWebhook(
+        new Request('http://localhost/webhook', {
+          body: '{}',
+          method: 'POST',
+        }),
+      );
+      expect(response.status).toBe(401);
+    },
+  );
+
+  it('requires Encrypt Key only in webhook/legacy mode with a useful field error', async () => {
+    const factory = new FeishuClientFactory();
+    for (const settings of [undefined, { connectionMode: 'webhook' }]) {
+      const result = await factory.validateCredentials(
+        { appSecret: 'secret' },
+        settings,
+        'app',
+        'feishu',
+      );
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContainEqual(expect.objectContaining({ field: 'encryptKey' }));
+    }
+    expect(
+      (
+        await factory.validateCredentials(
+          { appSecret: 'secret' },
+          { connectionMode: 'websocket' },
+          'app',
+          'lark',
+        )
+      ).valid,
+    ).toBe(true);
+    expect(
+      (
+        await factory.validateCredentials(
+          { appSecret: 'secret', encryptKey: 'enc' },
+          { connectionMode: 'webhook' },
+          'app',
+          'feishu',
+        )
+      ).valid,
+    ).toBe(true);
+  });
+});

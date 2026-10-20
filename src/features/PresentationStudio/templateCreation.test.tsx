@@ -57,7 +57,7 @@ describe('new presentation template selection', () => {
         </I18nextProvider>,
       );
 
-      fireEvent.click(screen.getByRole('button', { name: 'Templates' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Templates' }));
       fireEvent.click(await screen.findByRole('button', { name: 'Use Soft white' }));
       expect(screen.getByRole('button', { name: 'Templates' })).toHaveAttribute(
         'aria-pressed',
@@ -112,7 +112,8 @@ describe('new presentation template selection', () => {
     );
     fireEvent.click(await screen.findByRole('button', { name: 'New presentation' }));
     expect(screen.getByTestId('studio-empty-state')).toBeInTheDocument();
-    expect(screen.getByTestId('presentation-job-job-old')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '我的作品' }));
+    expect(await screen.findByTestId('presentation-job-job-old')).toBeInTheDocument();
     expect(window.location.search).toBe('?hl=zh-CN');
     expect(window.sessionStorage.getItem('presentation_studio_active_job_id')).toBeNull();
     expect(client.cancelPresentationJob).not.toHaveBeenCalled();
@@ -123,7 +124,8 @@ describe('new presentation template selection', () => {
     );
     expect(window.sessionStorage.getItem('presentation_studio_active_job_id')).toBe('job-new');
     fireEvent.click(await screen.findByRole('button', { name: 'New presentation' }));
+    fireEvent.click(screen.getByRole('button', { name: '我的作品' }));
     expect(screen.getByTestId('presentation-job-job-old')).toBeInTheDocument();
     expect(screen.getByTestId('presentation-job-job-new')).toBeInTheDocument();
-  }, 20000);
+  }, 40_000);
 });

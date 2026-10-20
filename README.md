@@ -6,7 +6,7 @@
 
 我们从演示文稿开始，也在为更多创作能力建设共同的运行基础。
 
-[开始开发](#本地开发) · [PPT 与插件开发](./docs/development/cordis-atomic-presentation.md) · [Cordis 迁移进展](./docs/cordis/foundation-migration.md) · [反馈问题](https://github.com/shiro123444/Qingzhou/issues)
+[开始开发](#本地开发) · [原生能力装配](./docs/development/cordis-native-composition.md) · [资源基线](./docs/development/qingzhou-resource-baseline.md) · [PPT 与插件开发](./docs/development/cordis-atomic-presentation.md) · [Cordis 迁移进展](./docs/cordis/foundation-migration.md) · [反馈问题](https://github.com/shiro123444/Qingzhou/issues)
 
 ## 与作品一起工作
 
@@ -44,7 +44,11 @@ packages/runtime-contracts/      任务、页面、事件和资产协议
 
 清舟正在持续开发。当前已打通真实 PPT 生成、生图、模板视觉分析、页级修改、恢复与导出；Cordis 的原子工具宿主迁移已完成首阶段验证。
 
-接下来继续推进通用 Agent 循环的插件化、服务迁移、配置装配和 Loader/HMR。复杂模板的精细还原、跨环境恢复与视觉质量也仍在完善。安装一个插件不会自动获得业务授权、持久化或任意代码沙箱，这些边界需要由宿主和业务共同定义。
+当前以 Operation、Plugin、Recipe、Profile 组织原生能力：教学已拆为独立插件，PPT 与博客共用组合执行机制，站点可按场景装配可信能力。通用 Agent 执行和工具入口已接入 Cordis；接下来继续推进文档身份与贡献流程、前端插件插槽、统一运维和跨环境恢复。安装一个插件不会自动获得业务授权、持久化或任意代码沙箱，这些边界需要由宿主和业务共同定义。
+
+个人服务器部署以外部模型 API、预构建产物和有界重任务为起点，提供 `start:compact` 的 4c4g / 8c8g 配置。当前测试与资源测量的具体范围见[原生改造说明](./docs/development/cordis-native-composition.md)；公开 Web 入口通过受限运行测试不等于整套数据库、跨站业务和真实 PPT 任务已完成容量验收。
+
+构建机可运行 `bun run build:compact`，使用经过完整构建验证的 Webpack 内存优化预设；随后在 4GB 服务器部署产物并运行 `bun run start:compact 4c4g`。构建预设默认 4 GiB JavaScript 堆，需要额外原生内存和缓存空间；不承诺在 4GB 机器上本地编译。内存与耗时的实测取舍见[资源基线](./docs/development/qingzhou-resource-baseline.md)。
 
 2026-09-13 的一次验收包括 **269 项定向测试**，以及真实 3 页 PPT 的生成、图片嵌入、讲者备注、LibreOffice 打开验证和单页对话修改。具体范围见[验收记录](./docs/cordis/foundation-migration.md#本轮实测记录2026-09-13)。
 

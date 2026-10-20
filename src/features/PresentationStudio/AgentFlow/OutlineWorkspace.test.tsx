@@ -1,6 +1,8 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
+import type { LessonPlan, TeacherBrief } from '@/types/presentationLesson';
+
 import OutlineWorkspace, { type OutlineSlide } from './OutlineWorkspace';
 
 const providerSlides = (): OutlineSlide[] =>
@@ -28,6 +30,58 @@ const setup = (onAiRewrite = vi.fn(async () => undefined) as any) => {
 };
 
 describe('Outline storyboard', () => {
+  it('retains the accepted teaching draft across mode switches', async () => {
+    const onConfirm = vi.fn();
+    const onPlanLesson = vi.fn(
+      async (brief: TeacherBrief): Promise<LessonPlan> => ({
+        schemaVersion: 1,
+        brief,
+        beats: [
+          {
+            id: 'opening',
+            title: '课程引入',
+            objective: '引入主题',
+            teacherCue: '',
+            studentAction: '',
+            checkForUnderstanding: '',
+            durationMinutes: 1,
+            locked: false,
+            frames: [
+              {
+                id: 'cover',
+                title: '智能新零售',
+                kind: 'cover',
+                visibleContent: [],
+                visualCue: '课程封面',
+                withheldContent: [],
+                boardSpace: 'none',
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    render(
+      <OutlineWorkspace
+        initialSlides={providerSlides()}
+        onAiRewrite={vi.fn(async () => undefined)}
+        onBack={vi.fn()}
+        onConfirm={onConfirm}
+        onPlanLesson={onPlanLesson}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /教学模式|presentationLesson.mode/ }));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '先用封面引入' } });
+    fireEvent.click(screen.getByTestId('lesson-plan-propose'));
+    fireEvent.click(await screen.findByTestId('lesson-accept'));
+    fireEvent.click(screen.getByRole('button', { name: /教学模式|presentationLesson.mode/ }));
+    expect(screen.getByTestId('outline-overview')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: /教学模式|presentationLesson.mode/ }));
+    expect(screen.getByRole('button', { name: '1. 课程引入' })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: '确认大纲，继续生成' }));
+    expect(onConfirm.mock.calls[0][0].lessonPlan.beats[0].id).toBe('opening');
+    expect(onPlanLesson).toHaveBeenCalledOnce();
+  });
   it('shows only titles and conclusions until a page is opened, without an automatic rewrite', () => {
     const { onAiRewrite } = setup();
     const overview = within(screen.getByTestId('outline-overview'));

@@ -83,6 +83,7 @@ export async function runStep(c: Context): Promise<Response> {
       completed: result.state.status === 'done',
       error: result.state.status === 'error' ? result.state.error : undefined,
       executionTime,
+      hookDeliveryFailures: result.hookDeliveryFailures,
       nextStepIndex: result.nextStepScheduled ? stepIndex + 1 : undefined,
       nextStepScheduled: result.nextStepScheduled,
       operationId,

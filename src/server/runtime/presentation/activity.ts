@@ -3,6 +3,28 @@ import type { PresentationActivity } from '@/types/presentationActivity';
 import type { AtomicOperationEvent } from '../atomic-runtime';
 
 const labels: Record<string, string> = {
+  'context.document.fromText': '保存文字资料',
+  'context.document.inspect': '查看资料的页段目录',
+  'context.document.read': '读取分镜所需的原文',
+  'context.document.convert': '转换资料为文字版',
+  'context.document.splitPdf': '按页拆分 PDF 资料',
+  'presentation.teaching.analyze': '读取连续页并提出待审阅的教学模式',
+  'presentation.teaching.search': '检索教师确认的教学模式',
+  'presentation.teaching.compose': '组合有条件的教学模式',
+  'presentation.lesson.plan': '规划教师主导的教学环节',
+  'presentation.lesson.compile': '编排分阶段讲解',
+  'presentation.lesson.revise': '校验教学计划修改与教师锁定',
+  'presentation.lesson.validate': '检查教学呈现约束',
+  'presentation.content.compile': '识别公式与科研图需求',
+  'presentation.formula.render': '渲染数学公式',
+  'presentation.formula.measure': '测量公式排版尺寸',
+  'presentation.diagram.render': '绘制结构化科研图',
+  'presentation.diagram.measure': '测量科研图所需空间',
+  'presentation.memory.promote': '确认创作经验',
+  'presentation.memory.search': '查找已学习的创作能力',
+  'presentation.memory.load': '读取学习依据',
+  'presentation.memory.compose': '组合已验证的创作能力',
+  'presentation.memory.recordOutcome': '记录学习反馈',
   'context.readFile': '读取参考材料',
   'context.readSkill': '读取创作技能',
   'context.search': '搜索相关资料',
@@ -11,15 +33,26 @@ const labels: Record<string, string> = {
   'presentation.template.list': '查找参考模板',
   'presentation.template.resolve': '读取模板规范',
   'presentation.template.render': '查看模板页面',
+  'presentation.template.observe': '观察模板的画风与构图',
   'presentation.template.analyzeVisual': '分析模板的视觉与组件',
+  'presentation.template.observeMedia': '观察模板中的视频与音频',
+  'presentation.template.transcribeMedia': '理解模板媒体中的声音',
+  'presentation.template.compileDesign': '整理模板的设计语言',
+  'presentation.template.mapDeck': '编排整稿的视觉节奏',
+  'presentation.template.reviewDeck': '对照原稿复核成品视觉',
   'presentation.template.extractComponent': '提取模板组件',
   'presentation.template.inspectNative': '识别模板中的可编辑内容',
   'presentation.template.extractAssets': '提取模板素材',
+  'presentation.template.extractMedia': '提取模板中的音视频',
+  'presentation.assets.prepare': '规划各页素材',
   'assets.generate': '生成视觉素材',
   'assets.removeBackground': '处理素材的透明背景',
   'assets.transform': '调整素材尺寸与裁切',
   'assets.compose': '组合视觉素材',
   'assets.applyMask': '处理素材区域',
+  'assets.keyColor': '移除素材底色',
+  'presentation.assets.generate': '绘画素材',
+  'presentation.assets.reuse': '复用素材',
 };
 
 export const presentationActivity = (event: AtomicOperationEvent): PresentationActivity => ({
@@ -27,8 +60,8 @@ export const presentationActivity = (event: AtomicOperationEvent): PresentationA
   state: event.state,
   text:
     event.state === 'failed'
-      ? `${labels[event.name] ?? '当前操作'}未完成，正在调整`
+      ? `${event.detail ? `${event.detail} · ` : ''}${labels[event.name] ?? '当前操作'}未完成`
       : event.state === 'completed'
-        ? `${labels[event.name] ?? '当前操作'}已完成`
-        : `正在${labels[event.name] ?? '处理创作任务'}`,
+        ? `${event.detail ? `${event.detail} · ` : ''}${labels[event.name] ?? '当前操作'}已完成`
+        : `${event.detail ? `${event.detail} · ` : ''}正在${labels[event.name] ?? '处理创作任务'}`,
 });

@@ -18,9 +18,9 @@ import type { PresentationClient } from '../store/presentationStore';
  */
 
 export interface PresentationDemoOptions {
-  now?: () => number;
   /** If true, the job always ends `failed` with a stable error. Default false. */
   fail?: boolean;
+  now?: () => number;
   /** Milliseconds the job stays `queued` after creation. Default 1200. */
   queuedMs?: number;
   /** Milliseconds the job stays `running` before completing. Default 2400. */
@@ -152,6 +152,11 @@ export const createPresentationDemoClient = (
     getPresentationJob: async (jobId: string): Promise<PresentationJob | null> => {
       if (!records.has(jobId)) return null;
       return buildJob(jobId);
+    },
+
+    deletePresentationJob: async (jobId: string): Promise<void> => {
+      if (!records.delete(jobId)) throw new Error(`Demo job ${jobId} not found`);
+      artifactsByJob.delete(jobId);
     },
 
     cancelPresentationJob: async (jobId: string): Promise<PresentationJob> => {

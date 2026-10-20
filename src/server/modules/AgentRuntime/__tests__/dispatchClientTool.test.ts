@@ -69,6 +69,78 @@ describe('dispatchClientTool', () => {
     vi.clearAllMocks();
   });
 
+  it('does not dispatch when already aborted or the local lease fence fails', async () => {
+    const controller = new AbortController();
+    const lost = new Error('lease lost');
+    controller.abort(lost);
+    const sendToolExecute = vi.fn();
+    const streamManager = makeStreamManager(sendToolExecute);
+    await expect(
+      dispatchClientTool(makePayload(), {
+        operationId: 'op-1',
+        signal: controller.signal,
+        streamManager,
+      }),
+    ).rejects.toBe(lost);
+    await expect(
+      dispatchClientTool(makePayload(), {
+        assertStepLease: () => {
+          throw lost;
+        },
+        operationId: 'op-1',
+        streamManager,
+      }),
+    ).rejects.toBe(lost);
+    expect(sendToolExecute).not.toHaveBeenCalled();
+    expect(mockDuplicate).not.toHaveBeenCalled();
+  });
+
+  it('aborts pending Redis waits, removes its listener and disconnects without returning a tool error', async () => {
+    const controller = new AbortController();
+    const lost = new Error('lease lost while waiting');
+    const removeListener = vi.spyOn(controller.signal, 'removeEventListener');
+    const sendToolExecute = vi.fn().mockResolvedValue(undefined);
+    let started!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    mockBlpop.mockImplementation(() => {
+      started();
+      return new Promise(() => {});
+    });
+    const result = dispatchClientTool(makePayload(), {
+      operationId: 'op-1',
+      signal: controller.signal,
+      streamManager: makeStreamManager(sendToolExecute),
+    });
+    const rejected = expect(result).rejects.toBe(lost);
+    await waiting;
+    controller.abort(lost);
+    await rejected;
+    expect(sendToolExecute).toHaveBeenCalledTimes(1);
+    expect(mockDisconnect).toHaveBeenCalledTimes(1);
+    expect(removeListener).toHaveBeenCalledWith('abort', expect.any(Function));
+  });
+
+  it('does not begin waiting if lease loss happens during dispatch', async () => {
+    const lost = new Error('lease lost during dispatch');
+    let leaseLost = false;
+    const sendToolExecute = vi.fn(async () => {
+      leaseLost = true;
+    });
+    await expect(
+      dispatchClientTool(makePayload(), {
+        assertStepLease: () => {
+          if (leaseLost) throw lost;
+        },
+        operationId: 'op-1',
+        streamManager: makeStreamManager(sendToolExecute),
+      }),
+    ).rejects.toBe(lost);
+    expect(mockBlpop).not.toHaveBeenCalled();
+    expect(mockDisconnect).toHaveBeenCalledTimes(1);
+  });
+
   it('returns gateway_unsupported when streamManager.sendToolExecute is missing', async () => {
     const streamManager = makeStreamManager(undefined);
 

@@ -1,16 +1,11 @@
-import { useEffect } from 'react';
-
-import { JUMI_CHAT_MODEL, JUMI_CHAT_PROVIDER } from '@/const/jumi';
 import { useAgentStore } from '@/store/agent';
+import { agentByIdSelectors, builtinAgentSelectors } from '@/store/agent/selectors';
 
-/** Persist the supported model for real agents; PPT intake uses its server-pinned provider. */
+/** Read saved selections without overwriting them; PPT shares the real inbox agent. */
 export function useJumiChatModel(agentId: string) {
-  const config = useAgentStore((s) => s.agentMap[agentId]);
-  const update = useAgentStore((s) => s.updateAgentConfigById);
-  useEffect(() => {
-    if (!config || agentId === 'ppt-agent') return;
-    if (config.model === JUMI_CHAT_MODEL && config.provider === JUMI_CHAT_PROVIDER) return;
-    void update(agentId, { model: JUMI_CHAT_MODEL, provider: JUMI_CHAT_PROVIDER });
-  }, [agentId, config?.model, config?.provider, update]);
-  return { model: JUMI_CHAT_MODEL, provider: JUMI_CHAT_PROVIDER };
+  const inboxId = useAgentStore(builtinAgentSelectors.inboxAgentId);
+  const selectionAgentId = agentId === 'ppt-agent' ? (inboxId ?? '') : agentId;
+  const model = useAgentStore(agentByIdSelectors.getAgentModelById(selectionAgentId));
+  const provider = useAgentStore(agentByIdSelectors.getAgentModelProviderById(selectionAgentId));
+  return { model, provider, selectionAgentId };
 }

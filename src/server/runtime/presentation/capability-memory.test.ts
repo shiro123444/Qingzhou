@@ -1,0 +1,678 @@
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import type { PresentationPlan } from '../../../../packages/runtime-contracts/src';
+import { AtomicRuntime } from '../atomic-runtime';
+import { runSkillSteps } from '../skill-composition';
+import { InMemoryPresentationArtifactStore } from './artifact-store';
+import { appliedLearnedCapabilityIds, normalizeCapabilityUses } from './capability-composition';
+import {
+  appliedTemplateCapsuleIds,
+  type CapabilityCapsule,
+  capabilityMemoryOperations,
+  FileCapabilityCapsuleStore,
+} from './capability-memory';
+import { contentInputFingerprint, type PresentationContentCompiler } from './content-intent';
+import type { PresentationGenerationCapability } from './generation-capability';
+import { PresentationGenerationPort } from './generation-port';
+import type { RepresentativeTrial } from './representative-trial';
+import { compileTemplateDesignProgram } from './templates/design-program';
+import type { TemplateVisualProfile } from './templates/visual-types';
+
+const scope = { userId: 'alice', sessionId: 'first' };
+const analysis = {
+  summary: '蓝红学术',
+  families: [
+    {
+      id: 'academic',
+      name: '蓝红学术课程',
+      pages: [1],
+      palette: ['#2563eb'],
+      typography: '简洁标题',
+      composition: '左图右文',
+      artwork: '克制留白',
+      preserve: ['蓝色标题'],
+    },
+  ],
+  components: [],
+  guidance: '保持留白',
+  questions: [],
+};
+const visual: TemplateVisualProfile = {
+  ...analysis,
+  schemaVersion: 3,
+  designProgram: compileTemplateDesignProgram(analysis),
+  templateId: 'template',
+  versionId: 'v1',
+  analyzedAt: '2026-09-22',
+  model: 'test',
+  learning: { guidanceHistory: [], iteration: 1, questions: [], status: 'ready' },
+  media: [],
+  pages: [],
+};
+const plan: PresentationPlan = {
+  planId: 'p1',
+  title: '课程',
+  aspectRatio: '16:9',
+  sourceVersionIds: [],
+  designSpec: {
+    contentPolicyVersion: 1,
+    templateVisualReview: { final: { passed: true, issues: [] } },
+  },
+  slides: [
+    {
+      slideId: 'slide-1',
+      order: 1,
+      svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><text font-size="32" x="40" y="60">课程核心结论</text></svg>',
+    },
+  ],
+};
+let root: string;
+function trialEvidence(capsuleIds: string[] = []): RepresentativeTrial {
+  const gate = {
+    status: 'passed' as const,
+    evidence: 'Trusted runner checked original sources and preview',
+  };
+  const quality = (score: number) => ({
+    readability: { score, evidence: 'Rendered text size checked' },
+    hierarchy: { score, evidence: 'Title and body hierarchy checked' },
+    composition: { score, evidence: 'Rendered geometry checked' },
+    styleConsistency: { score, evidence: 'Compared with frozen master' },
+  });
+  const evaluation = {
+    conditionFingerprint: 'a'.repeat(64),
+    evaluatorVersion: 'trusted-review-v1',
+    artifact: { ref: 'owned-preview', sha256: 'b'.repeat(64) },
+    gates: { facts: gate, editability: gate, assets: gate, render: gate, visual: gate },
+    quality: quality(2),
+  };
+  return {
+    schemaVersion: 1,
+    trialId: 'trial-1',
+    source: { jobId: 'source-job', versionId: 'v1', slideId: 'slide-1' },
+    conditionFingerprint: 'a'.repeat(64),
+    baseline: { id: 'baseline', status: 'completed', appliedCapsuleIds: [], evaluation },
+    candidates: [
+      {
+        id: 'candidate',
+        status: 'completed',
+        appliedCapsuleIds: capsuleIds,
+        evaluation: {
+          ...evaluation,
+          artifact: { ref: 'candidate-preview', sha256: 'c'.repeat(64) },
+          quality: quality(3),
+        },
+      },
+    ],
+    rejectedCandidateIds: [],
+  };
+}
+beforeEach(async () => {
+  root = await mkdtemp(path.join(os.tmpdir(), 'qingzhou-memory-test-'));
+});
+
+describe('representative trial evidence in capability memory', () => {
+  it('persists an automatic winner without promoting the capabilities it used', async () => {
+    const store = new FileCapabilityCapsuleStore(root);
+    const capsules = await store.learn(scope, visual);
+    const input = trialEvidence(capsules.map(({ id }) => id));
+    const record = await store.recordTrial(scope, input);
+    expect(record.selection).toMatchObject({
+      selectedId: 'candidate',
+      reason: 'strict-improvement',
+    });
+    expect(await store.search(scope, '学术课程')).toEqual([]);
+    await expect(store.compose(scope, [capsules[0].id])).rejects.toThrow('verified');
+    expect(await new FileCapabilityCapsuleStore(root).readTrial(scope, record.id)).toEqual(record);
+  });
+
+  it('preserves account isolation while allowing a new session of the same account', async () => {
+    const store = new FileCapabilityCapsuleStore(root);
+    const record = await store.recordTrial(scope, trialEvidence());
+    expect(await store.readTrial({ ...scope, userId: 'bob' }, record.id)).toBeNull();
+    expect(await store.readTrial({ ...scope, sessionId: 'next' }, record.id)).toEqual(record);
+    await expect(store.recordTrial({ ...scope, userId: '' }, trialEvidence())).rejects.toThrow(
+      'scope',
+    );
+  });
+
+  it('refuses applied capabilities from another account', async () => {
+    const store = new FileCapabilityCapsuleStore(root);
+    const [capsule] = await store.learn(scope, visual);
+    await expect(
+      store.recordTrial({ ...scope, userId: 'bob' }, trialEvidence([capsule.id])),
+    ).rejects.toThrow('unavailable');
+  });
+
+  it('publishes one immutable record even when independent writers race', async () => {
+    let clock = 0;
+    const first = new FileCapabilityCapsuleStore(root, () => new Date(++clock).toISOString());
+    const second = new FileCapabilityCapsuleStore(root, () => new Date(++clock).toISOString());
+    const input = trialEvidence();
+    const records = await Promise.all([
+      first.recordTrial(scope, input),
+      second.recordTrial(scope, input),
+    ]);
+    expect(records[0]).toEqual(records[1]);
+    expect(await second.recordTrial(scope, input)).toEqual(records[0]);
+  });
+
+  it('keeps earlier evidence when conditions, outputs or user choices change', async () => {
+    const store = new FileCapabilityCapsuleStore(root);
+    const input = trialEvidence();
+    const original = await store.recordTrial(scope, input);
+    const choice = await store.recordTrial(scope, { ...input, userChoice: 'baseline' });
+    expect(choice.id).not.toBe(original.id);
+    expect(choice.selection.selectedId).toBe('baseline');
+    const changed = structuredClone(input);
+    changed.candidates[0].evaluation!.artifact.sha256 = 'd'.repeat(64);
+    expect((await store.recordTrial(scope, changed)).id).not.toBe(original.id);
+    changed.conditionFingerprint = 'e'.repeat(64);
+    expect((await store.recordTrial(scope, changed)).id).not.toBe(original.id);
+    expect(await store.readTrial(scope, original.id)).toEqual(original);
+  });
+
+  it.each(['trial', 'selection'] as const)(
+    'detects altered persisted %s evidence',
+    async (part) => {
+      const store = new FileCapabilityCapsuleStore(root);
+      const record = await store.recordTrial(scope, trialEvidence());
+      const [account] = await readdir(root);
+      const directory = path.join(root, account, 'trials');
+      const [file] = await readdir(directory);
+      const filename = path.join(directory, file);
+      const saved = JSON.parse(await readFile(filename, 'utf8'));
+      if (part === 'trial') saved.trial.source.versionId = 'changed-version';
+      else saved.selection.selectedId = 'baseline';
+      await writeFile(filename, JSON.stringify(saved));
+      await expect(store.readTrial(scope, record.id)).rejects.toThrow('identity mismatch');
+    },
+  );
+
+  it('exposes only account-scoped reading through Cordis, never score submission or promotion', async () => {
+    const store = new FileCapabilityCapsuleStore(root);
+    const record = await store.recordTrial(scope, trialEvidence());
+    const operations = capabilityMemoryOperations(store);
+    const reads = operations.filter(({ name }) => name.includes('.trial.'));
+    expect(reads.map(({ name }) => name)).toEqual(['presentation.memory.trial.read']);
+    expect(reads[0].agent).toBeUndefined();
+    const runtime = new AtomicRuntime([{ id: 'presentation', version: '1', operations }]);
+    try {
+      expect(
+        await runtime.invoke('presentation.memory.trial.read', { id: record.id }, { scope }),
+      ).toEqual(record);
+      expect(
+        await runtime.invoke(
+          'presentation.memory.trial.read',
+          { id: record.id },
+          { scope: { ...scope, userId: 'bob' } },
+        ),
+      ).toBeNull();
+      await expect(
+        runtime.invoke('presentation.memory.trial.read', { id: record.id, score: 4 }, { scope }),
+      ).rejects.toThrow();
+    } finally {
+      await runtime.dispose();
+    }
+  });
+});
+afterEach(async () => {
+  await rm(root, { recursive: true, force: true });
+});
+
+describe('durable presentation capability memory', () => {
+  it('retires superseded observations from selection while retaining their historical evidence', async () => {
+    const store = new FileCapabilityCapsuleStore(root);
+    const original = await store.learn(scope, visual);
+    const revised = {
+      ...visual,
+      families: visual.families.map((family) => ({ ...family, composition: '更正后上下分栏' })),
+    };
+    await store.learn(scope, revised);
+    const oldStyle = original.find(({ kind }) => kind === 'style')!;
+    expect(await store.load(scope, oldStyle.id)).toEqual(oldStyle);
+    expect((await store.search(scope, '学术课程', 6, true)).map(({ id }) => id)).not.toContain(
+      oldStyle.id,
+    );
+    await expect(store.compose(scope, [oldStyle.id], true)).rejects.toThrow('verified');
+    expect(await store.load({ ...scope, userId: 'bob' }, oldStyle.id)).toBeNull();
+  });
+  it('offers observed template atoms for first use without treating observation as verified success or overriding rejection', async () => {
+    const store = new FileCapabilityCapsuleStore(root);
+    const learned = await store.learn(scope, visual);
+    expect(await store.search(scope, '学术课程')).toEqual([]);
+    const candidates = await store.search(scope, '学术课程', 6, true);
+    expect(candidates.length).toBeGreaterThan(0);
+    const composed = await store.compose(
+      scope,
+      candidates.map(({ id }) => id),
+      true,
+    );
+    expect(composed.observedCapabilityIds).toEqual(candidates.map(({ id }) => id));
+    await store.recordOutcome(scope, {
+      jobId: 'reject',
+      plan,
+      capsuleIds: learned.map(({ id }) => id),
+      result: 'rejected',
+    });
+    expect(await store.search(scope, '学术课程', 6, true)).toEqual([]);
+    await expect(store.compose(scope, [learned[0].id], true)).rejects.toThrow('verified');
+  });
+  it('retrieves complementary atoms across templates by page task and composes one visual anchor', async () => {
+    const store = new FileCapabilityCapsuleStore(root);
+    const anchor = await store.learn(scope, visual);
+    const comparisonAnalysis = {
+      ...analysis,
+      families: [
+        {
+          ...analysis.families[0],
+          name: '另一模板',
+          composition: '双栏比较',
+          palette: ['#ff6600'],
+        },
+      ],
+    };
+    const layouts = await store.learn(scope, {
+      ...visual,
+      ...comparisonAnalysis,
+      templateId: 'other-template',
+      designProgram: compileTemplateDesignProgram(comparisonAnalysis),
+    });
+    await store.recordOutcome(scope, {
+      jobId: 'prior',
+      plan,
+      capsuleIds: [...anchor, ...layouts].map(({ id }) => id),
+      result: 'passed',
+    });
+    const selected = await store.search(scope, '学术课程 对比');
+    expect(selected.filter(({ kind }) => kind === 'style')).toHaveLength(1);
+    expect(
+      selected.some(
+        (capsule) => capsule.kind === 'layout' && capsule.source.templateId === 'other-template',
+      ),
+    ).toBe(true);
+    const composed = await store.compose(
+      scope,
+      selected.map(({ id }) => id),
+    );
+    expect(composed.composition.styleCapsuleId).toBe(
+      anchor.find(({ kind }) => kind === 'style')!.id,
+    );
+    expect(composed.composition.layoutCapsuleIds).toContain(
+      layouts.find(({ kind }) => kind === 'layout')!.id,
+    );
+    expect(composed.capsules.some(({ source }) => source.templateId === 'template')).toBe(true);
+  });
+
+  it('uses feedback to rank equally relevant styles without erasing failure evidence', async () => {
+    let clock = 0;
+    const store = new FileCapabilityCapsuleStore(root, () =>
+      new Date(1000 * ++clock).toISOString(),
+    );
+    const first = (await store.learn(scope, visual)).find(({ kind }) => kind === 'style')!;
+    const second = (await store.learn(scope, { ...visual, templateId: 'alternative' })).find(
+      ({ kind }) => kind === 'style',
+    )!;
+    await store.recordOutcome(scope, {
+      jobId: 'first',
+      plan,
+      capsuleIds: [first.id, second.id],
+      result: 'passed',
+    });
+    const previous = (await store.search(scope, '学术课程', 1))[0];
+    const preferred = previous.id === first.id ? second : first;
+    await store.recordOutcome(scope, {
+      jobId: 'failed-use',
+      plan,
+      capsuleIds: [previous.id],
+      result: 'failed',
+    });
+    await store.recordOutcome(scope, {
+      jobId: 'accepted-use',
+      plan,
+      capsuleIds: [preferred.id],
+      result: 'accepted',
+    });
+    expect((await store.search(scope, '学术课程', 1))[0].id).toBe(preferred.id);
+  });
+
+  it('attributes only offered capabilities actually declared on a page and excludes recovered layouts', async () => {
+    const store = new FileCapabilityCapsuleStore(root);
+    const capsules = await store.learn(scope, visual);
+    const style = capsules.find(({ kind }) => kind === 'style')!;
+    const layout = capsules.find(({ kind }) => kind === 'layout')!;
+    const uses = [
+      { capsuleId: style.id, reason: '标题和页脚采用此能力的蓝色与字形规则' },
+      { capsuleId: style.id, reason: '重复声明同一能力不应重复计数' },
+      { capsuleId: 'not-offered', reason: '此能力从未提供给本次制作任务' },
+      { capsuleId: layout.id, reason: '采用左右图文结构并按字号测量调整留白' },
+    ];
+    expect(normalizeCapabilityUses(uses, capsules)).toHaveLength(2);
+    expect(appliedLearnedCapabilityIds(capsules, plan)).toEqual([]);
+    const usedPlan: PresentationPlan = {
+      ...plan,
+      slides: [{ ...plan.slides[0], metadata: { capabilityUses: uses } }],
+    };
+    expect(appliedLearnedCapabilityIds(capsules, usedPlan)).toEqual([style.id, layout.id]);
+    usedPlan.slides[0].metadata = {
+      ...usedPlan.slides[0].metadata,
+      layoutRecovered: true,
+    };
+    expect(appliedLearnedCapabilityIds(capsules, usedPlan)).toEqual([]);
+  });
+
+  it('persists verified mixed-scientific recipes without requiring a template and retrieves them across sessions', async () => {
+    const store = new FileCapabilityCapsuleStore(root);
+    const mixed = {
+      ...plan,
+      slides: [
+        {
+          ...plan.slides[0],
+          metadata: {
+            contentBlocks: [{ kind: 'formula', id: 'core', latex: 'x^2' }],
+            visualAssets: [
+              {
+                visualId: 'brain',
+                kind: 'scientific-illustration',
+                origin: 'generated',
+                ref: '/api/runtime/presentation/artifacts/brain',
+              },
+              {
+                visualId: 'spark',
+                kind: 'sticker',
+                origin: 'generated',
+                ref: '/api/runtime/presentation/artifacts/spark',
+              },
+            ],
+          },
+        },
+      ],
+    };
+    const recipes = await store.learnRecipes(scope, mixed);
+    expect(recipes.map((r) => r.recipe)).toEqual(
+      expect.arrayContaining([
+        'formula-with-explanation',
+        'scientific-illustration',
+        'mixed-scientific',
+        'decoration-sticker',
+      ]),
+    );
+    expect(
+      recipes.every((r) => r.source.templateId === undefined && r.source.planId === plan.planId),
+    ).toBe(true);
+    expect(await store.search(scope, '科研插图')).toEqual([]);
+    await store.recordOutcome(scope, {
+      jobId: 'mixed',
+      plan: mixed,
+      capsuleIds: recipes.map((r) => r.id),
+      result: 'passed',
+    });
+    const restarted = new FileCapabilityCapsuleStore(root);
+    expect(
+      (await restarted.search({ ...scope, sessionId: 'later' }, '科研插图')).map((r) => r.recipe),
+    ).toContain('mixed-scientific');
+    expect(JSON.stringify(recipes)).not.toContain('/api/');
+  });
+  it('retrieves prior learning for template-free creation and recompiles only the targeted revision content', async () => {
+    const store = new FileCapabilityCapsuleStore(root);
+    const learned = await store.learn(scope, visual);
+    await store.recordOutcome(scope, {
+      jobId: 'prior',
+      plan,
+      capsuleIds: learned.map((c) => c.id),
+      result: 'passed',
+    });
+    const compile = vi.fn<PresentationContentCompiler['compile']>(async (input) => ({
+      inputFingerprint: contentInputFingerprint(input),
+      slides: [1, 2].map((page) => ({
+        slideId: `slide-${page}`,
+        claim: '课程结论',
+        formulas: [{ id: 'eq', latex: input.options?.contentRevision ? 'x^2' : 'x' }],
+        visualKind: 'none',
+        visualReason: '公式解释',
+      })),
+    }));
+    const basePlan: PresentationPlan = {
+      ...plan,
+      slides: [1, 2].map((page) => ({ ...plan.slides[0], order: page, slideId: `slide-${page}` })),
+    };
+    const execute = vi.fn(async (_scope, input, context) => {
+      const generated = structuredClone(basePlan);
+      const selectedStyle = input.options.learnedCapabilities.capsules.find(
+        (capsule: CapabilityCapsule) => capsule.kind === 'style',
+      );
+      generated.slides[0].metadata = {
+        capabilityUses: [
+          { capsuleId: selectedStyle.id, reason: '课程标题和页脚使用学习所得的蓝色风格规则' },
+        ],
+      };
+      return { artifacts: [], plan: await context.preparePlan(context.initialPlan ?? generated) };
+    });
+    const revise = vi.fn(async () => structuredClone(basePlan));
+    const review = vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      passed: true,
+      issues: [],
+      summary: '逐页通过',
+    }));
+    const port = new PresentationGenerationPort(
+      {
+        artifactStore: new InMemoryPresentationArtifactStore(),
+        capability: { execute, plan: revise } as unknown as PresentationGenerationCapability,
+        capabilityMemory: new FileCapabilityCapsuleStore(root),
+        contentCompiler: { compile },
+        contextFactory: () => ({
+          plannerContext: {},
+          workerContext: {
+            convert: vi.fn(),
+            jobId: 'ignored',
+            qualityCheck: vi.fn(),
+            workspace: { path: '/tmp', write: vi.fn() },
+          },
+        }),
+        idFactory: () => 'new-session-job',
+        visualCritic: { review },
+      },
+      { ...scope, sessionId: 'second', request: new Request('https://example.test') },
+    );
+    await port.createJob({
+      notebookId: 'n1',
+      title: '学术课程',
+      sourceVersionIds: [],
+      slideCount: 2,
+    });
+    await vi.waitFor(async () =>
+      expect((await port.getJob('new-session-job'))?.state).toBe('completed'),
+    );
+    expect(execute.mock.calls[0][1].options.learnedCapabilities.capsules.length).toBeGreaterThan(0);
+    expect(execute.mock.calls[0][1].template).toBeUndefined();
+    const completedPlan = (await port.readPlan('new-session-job')).plan;
+    expect(completedPlan.designSpec?.retrievedCapabilityIds).not.toHaveLength(0);
+    expect(completedPlan.designSpec?.learnedCapabilityIds).toContain(
+      learned.find(({ kind }) => kind === 'style')!.id,
+    );
+    expect(completedPlan.designSpec?.learnedCapabilityIds).toEqual(
+      expect.not.arrayContaining(learned.map(({ id }) => id)),
+    );
+    expect(review).toHaveBeenCalled();
+    await port.sendMessage('new-session-job', {
+      content: '第2页公式改为x平方',
+      requestId: 'revision-1',
+      target: { type: 'slide', slideNumber: 2 },
+    });
+    await vi.waitFor(async () =>
+      expect((await port.getJob('new-session-job'))?.messages?.[0]?.status).toBe('applied'),
+    );
+    const revisedInput = (
+      revise.mock.calls.at(-1) as unknown as [
+        { options: { contentIntents: { slides: Array<{ formulas: Array<{ latex: string }> }> } } },
+      ]
+    )[0];
+    expect(
+      revisedInput.options.contentIntents.slides.map((slide) => slide.formulas[0].latex),
+    ).toEqual(['x', 'x^2']);
+    expect(compile).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not promote unused template styles or layouts merely because another page passed', async () => {
+    const store = new FileCapabilityCapsuleStore(root);
+    const learned = await store.learn(scope, visual);
+    expect(appliedTemplateCapsuleIds(learned, plan)).toEqual([]);
+    const archetype = visual.designProgram.archetypes[0];
+    const used = appliedTemplateCapsuleIds(learned, {
+      ...plan,
+      slides: plan.slides.map((slide) => ({
+        ...slide,
+        metadata: { visualDirection: { familyId: 'academic', archetypeId: archetype.id } },
+      })),
+    });
+    expect(used).toContain(learned.find((capsule) => capsule.kind === 'style')!.id);
+    expect(used).toContain(
+      learned.find((capsule) => capsule.source.archetypeId === archetype.id)!.id,
+    );
+    expect(used).toHaveLength(2);
+    expect(
+      learned.find((capsule) => capsule.source.archetypeId === archetype.id)?.layout,
+    ).toMatchObject({ id: archetype.id });
+  });
+
+  it('keeps candidates out of retrieval until verified, survives restart and session changes, and isolates users', async () => {
+    const store = new FileCapabilityCapsuleStore(root);
+    const learned = await store.learn(scope, visual);
+    expect(learned.length).toBeGreaterThan(0);
+    expect(await store.search(scope, '学术课程')).toEqual([]);
+    await expect(store.compose(scope, [learned[0].id])).rejects.toThrow('verified');
+    await store.recordOutcome(scope, {
+      jobId: 'job',
+      plan,
+      capsuleIds: learned.map((c) => c.id),
+      result: 'passed',
+    });
+    const restarted = new FileCapabilityCapsuleStore(root);
+    expect(await restarted.search({ ...scope, sessionId: 'second' }, '学术课程')).toContainEqual(
+      learned[0],
+    );
+    expect(await restarted.search({ userId: 'bob', sessionId: 'second' }, '学术课程')).toEqual([]);
+    expect(await restarted.load({ userId: 'bob', sessionId: 'second' }, learned[0].id)).toBeNull();
+    expect((await restarted.learn(scope, visual)).map((c) => c.id)).toEqual(
+      learned.map((c) => c.id),
+    );
+  });
+
+  it('requires successful quality evidence, isolates failures, and honors explicit rejection across automatic passes', async () => {
+    let clock = 0;
+    const store = new FileCapabilityCapsuleStore(root, () =>
+      new Date(1000 * ++clock).toISOString(),
+    );
+    const ids = (await store.learn(scope, visual)).map((c) => c.id);
+    const failed = {
+      ...plan,
+      designSpec: { templateVisualReview: { final: { passed: false, issues: [] } } },
+    };
+    await expect(
+      store.recordOutcome(scope, { jobId: 'bad', plan: failed, capsuleIds: ids, result: 'passed' }),
+    ).rejects.toThrow();
+    await store.recordOutcome(scope, {
+      jobId: 'bad',
+      plan: failed,
+      capsuleIds: ids,
+      result: 'failed',
+    });
+    expect(await store.search(scope, '学术')).toEqual([]);
+    await store.recordOutcome(scope, { jobId: 'good', plan, capsuleIds: ids, result: 'passed' });
+    await store.recordOutcome(scope, { jobId: 'good', plan, capsuleIds: ids, result: 'rejected' });
+    await store.recordOutcome(scope, { jobId: 'other', plan, capsuleIds: ids, result: 'passed' });
+    expect(await store.search(scope, '学术')).toEqual([]);
+    await store.recordOutcome(scope, { jobId: 'good', plan, capsuleIds: ids, result: 'accepted' });
+    expect((await store.search(scope, '学术')).length).toBeGreaterThan(0);
+  });
+
+  it('resolves a changed mind to the newest verdict instead of resurrecting the stale one', async () => {
+    let clock = 0;
+    const store = new FileCapabilityCapsuleStore(root, () =>
+      new Date(1000 * ++clock).toISOString(),
+    );
+    const ids = (await store.learn(scope, visual)).map((c) => c.id);
+
+    const accepted = await store.recordOutcome(scope, {
+      jobId: 'mind',
+      plan,
+      capsuleIds: ids,
+      result: 'accepted',
+    });
+    // Repeating the current verdict is idempotent, not a new event.
+    expect(
+      await store.recordOutcome(scope, {
+        jobId: 'mind',
+        plan,
+        capsuleIds: ids,
+        result: 'accepted',
+      }),
+    ).toEqual(accepted);
+
+    const rejected = await store.recordOutcome(scope, {
+      jobId: 'mind',
+      plan,
+      capsuleIds: ids,
+      result: 'rejected',
+    });
+    expect(await store.search(scope, '学术课程')).toEqual([]);
+
+    // Changing back must win over the intervening rejection.
+    const reaccepted = await store.recordOutcome(scope, {
+      jobId: 'mind',
+      plan,
+      capsuleIds: ids,
+      result: 'accepted',
+    });
+    // Behavioral guarantee first: the newest verdict decides the outcome.
+    expect((await store.search(scope, '学术课程')).length).toBeGreaterThan(0);
+    expect((await store.compose(scope, [ids[0]])).capsules).toHaveLength(1);
+    expect(reaccepted.id).not.toBe(accepted.id);
+    expect(rejected.supersedes).toBe(accepted.id);
+    expect(reaccepted.supersedes).toBe(rejected.id);
+    expect(reaccepted.revision).toBeGreaterThan(1);
+  });
+
+  it('exposes scoped retrieval and composition as ordinary Cordis operations with references', async () => {
+    const store = new FileCapabilityCapsuleStore(root);
+    const learned = await store.learn(scope, visual);
+    await store.recordOutcome(scope, {
+      jobId: 'good',
+      plan,
+      capsuleIds: learned.map((c) => c.id),
+      result: 'passed',
+    });
+    const runtime = new AtomicRuntime([
+      { id: 'presentation', version: '1', operations: capabilityMemoryOperations(store) },
+    ]);
+    try {
+      const found = await store.search(scope, '学术课程');
+      const result = await runSkillSteps(
+        runtime,
+        [
+          { id: 'find', operation: 'presentation.memory.search', input: { query: '学术课程' } },
+          {
+            id: 'compose',
+            operation: 'presentation.memory.compose',
+            input: { ids: [{ $ref: 'find.0.id' }] },
+          },
+        ],
+        { scope },
+        (operation) => operation.startsWith('presentation.memory.'),
+      );
+      expect(result.last).toMatchObject({
+        contentBudget: { minBodyFontSize: 24 },
+        capsules: [{ id: found[0].id }],
+      });
+      expect((await runtime.catalog()).map((tool) => tool.name)).toContain(
+        'presentation.memory.search',
+      );
+    } finally {
+      await runtime.dispose();
+    }
+  });
+});

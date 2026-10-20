@@ -4,6 +4,7 @@ import { Flexbox } from '@lobehub/ui';
 import { memo } from 'react';
 import { useParams } from 'react-router-dom';
 
+import CommunityDetailFetchError from '@/features/CommunityDetail/FetchError';
 import { useQuery } from '@/hooks/useQuery';
 import { useDiscoverStore } from '@/store/discover';
 
@@ -24,9 +25,11 @@ const SkillDetailPage = memo<SkillDetailPageProps>(({ mobile }) => {
 
   const { version } = useQuery() as { version?: string };
   const useSkillDetail = useDiscoverStore((s) => s.useFetchSkillDetail);
-  const { data, isLoading } = useSkillDetail({ identifier, version });
+  const { data, error, isLoading, mutate } = useSkillDetail({ identifier, version });
 
   if (isLoading) return <Loading />;
+  if (error && !data)
+    return <CommunityDetailFetchError error={error} onRetry={() => void mutate()} />;
   if (!data) return <NotFound />;
 
   return (

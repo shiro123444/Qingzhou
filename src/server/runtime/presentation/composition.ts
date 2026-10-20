@@ -1,7 +1,13 @@
 import type { ImageGenerationPort, RuntimeScope } from '../../../../packages/runtime-contracts/src';
 import type { AtomicRuntime } from '../atomic-runtime';
+import { ExecutionLimiter } from '../execution-limiter';
+import { getResourceBudget } from '../resource-budget';
 import type { PresentationArtifactStore } from './artifact-store';
 import type { PresentationAssetStore } from './asset-store';
+import type { CapabilityMemory } from './capability-memory';
+import type { PresentationCapabilitySelector } from './capability-selection';
+import type { PresentationCollaborationHook } from './collaboration-plugin';
+import type { PresentationContentCompiler } from './content-intent';
 import {
   createPresentationConversationCapability,
   type PresentationConversationCapability,
@@ -15,7 +21,7 @@ import {
   ScopedPresentationJobEventJournalCache,
 } from './event-journal-cache';
 import type { PresentationPortFactory } from './factory';
-import type { PresentationJobRepository } from './file-storage';
+import type { PresentationJobRepository, PresentationPlanningRepository } from './file-storage';
 import type { PresentationGenerationCapability } from './generation-capability';
 import {
   handlePresentationGenerationRequest,
@@ -36,8 +42,12 @@ import {
   type PresentationOutlineCapability,
 } from './outline-capability';
 import type { PresentationPipelineContext } from './pipeline';
+import { type PlanningContextFactory, PresentationPlanningSessions } from './planning-session';
 import type { PresentationRevisionAssetPlanner } from './revision-assets';
+import type { FileTeachingMemory, TeachingLearning } from './teaching-memory';
 import type { FilePresentationTemplateLibrary } from './templates';
+import type { PresentationVisualCritic } from './visual-critic';
+import type { PresentationVisualStoryboardPlanner } from './visual-storyboard';
 
 export type PresentationGenerationContextFactory = (jobId: string) => PresentationPipelineContext;
 
@@ -49,6 +59,10 @@ export type PresentationRuntimeGenerationHandler = (
 export interface PresentationRuntimeCompositionOptions {
   readonly atomicRuntime?: AtomicRuntime;
   readonly capability?: PresentationGenerationCapability;
+  readonly capabilityMemory?: CapabilityMemory;
+  readonly capabilitySelector?: PresentationCapabilitySelector;
+  readonly collaborationHook?: PresentationCollaborationHook;
+  readonly contentCompiler?: PresentationContentCompiler;
   readonly contextFactory?: PresentationGenerationContextFactory;
   /** Artifact store used by the asynchronous `/jobs` generation bridge. */
   readonly generationArtifactStore?: PresentationArtifactStore;
@@ -63,14 +77,19 @@ export interface PresentationRuntimeCompositionOptions {
   readonly journalLoader?: PresentationJobEventJournalLoader;
   readonly multimodalChatPort?: MultimodalChatPort;
   readonly now?: () => string;
+  readonly planningContextFactory?: PlanningContextFactory;
   readonly portFactory?: PresentationPortFactory;
+  readonly prepareCapabilityLibrary?: (scope: RuntimeScope) => Promise<void>;
   readonly revisionAssetPlanner?: PresentationRevisionAssetPlanner;
+  readonly teachingLearning?: TeachingLearning;
+  readonly teachingMemory?: FileTeachingMemory;
   readonly templateLibrary?: FilePresentationTemplateLibrary;
+  readonly visualCritic?: PresentationVisualCritic;
+  readonly visualStoryboardPlanner?: PresentationVisualStoryboardPlanner;
 }
 
 export type PresentationRuntimeCompositionErrorCode =
-  | 'PRESENTATION_COMPOSITION_DEPENDENCY_MISSING'
-  | 'PRESENTATION_COMPOSITION_OPTIONS_INVALID';
+  'PRESENTATION_COMPOSITION_DEPENDENCY_MISSING' | 'PRESENTATION_COMPOSITION_OPTIONS_INVALID';
 
 export class PresentationRuntimeCompositionError extends Error {
   constructor(
@@ -97,9 +116,12 @@ export interface PresentationRuntimeComposition {
   readonly jobEventJournalFactory: PresentationJobEventJournalFactory;
   readonly multimodalChatPort?: MultimodalChatPort;
   readonly outlineCapability?: PresentationOutlineCapability;
+  readonly planningSessions?: PresentationPlanningSessions;
   readonly portFactory?: PresentationPortFactory;
+  readonly recoveryReady: Promise<number>;
   reset: (scope?: PresentationEventJournalScope) => number;
   readonly revisionAssetPlanner?: PresentationRevisionAssetPlanner;
+  readonly teachingLearning?: TeachingLearning;
   readonly templateLibrary?: FilePresentationTemplateLibrary;
 }
 
@@ -289,6 +311,11 @@ export const createPresentationRuntimeComposition = (
   const resolvedCapability = capability ?? createUnavailableCapability();
   const resolvedContextFactory = contextFactory ?? createUnavailableContextFactory();
   const generationPorts = new Map<string, PresentationGenerationPort>();
+  const budget = getResourceBudget();
+  const executionLimiter = new ExecutionLimiter(
+    budget.generationConcurrency,
+    budget.generationQueue,
+  );
   const generationPortFactory =
     capability && contextFactory && compositionOptions.generationArtifactStore
       ? (scope: RuntimeScope & { readonly request: Request }) => {
@@ -298,8 +325,16 @@ export const createPresentationRuntimeComposition = (
           const port = createPresentationGenerationPort(
             {
               atomicRuntime: compositionOptions.atomicRuntime,
+              collaborationHook: compositionOptions.collaborationHook,
+              executionLimiter,
+              contentCompiler: compositionOptions.contentCompiler,
+              capabilityMemory: compositionOptions.capabilityMemory,
+              capabilitySelector: compositionOptions.capabilitySelector,
+              prepareCapabilityLibrary: compositionOptions.prepareCapabilityLibrary,
               templateLibrary: compositionOptions.templateLibrary,
               revisionAssetPlanner: compositionOptions.revisionAssetPlanner,
+              visualStoryboardPlanner: compositionOptions.visualStoryboardPlanner,
+              visualCritic: compositionOptions.visualCritic,
               artifactStore: compositionOptions.generationArtifactStore!,
               repository: compositionOptions.jobRepository,
               capability,
@@ -323,7 +358,10 @@ export const createPresentationRuntimeComposition = (
       resolvedCapability,
       resolvedContextFactory,
       capability && contextFactory
-        ? { generationEventPublisherFactory: bindings.generationEventPublisherFactory }
+        ? {
+            executionLimiter,
+            generationEventPublisherFactory: bindings.generationEventPublisherFactory,
+          }
         : undefined,
     );
 
@@ -331,9 +369,10 @@ export const createPresentationRuntimeComposition = (
   const dispose = (): Promise<void> => {
     if (disposePromise) return disposePromise;
     const disposableImageCapability = resolvedImageGenerationCapability as
-      | (ImageGenerationCapability & { readonly dispose?: () => void | Promise<void> })
-      | undefined;
+      (ImageGenerationCapability & { readonly dispose?: () => void | Promise<void> }) | undefined;
     disposePromise = firstFailure([
+      () => clearInterval(recoveryTimer),
+      () => planningSessions?.dispose(),
       () => cache.dispose(),
       ...[...generationPorts.values()].map((port) => () => port.dispose()),
       ...(capability && typeof capability.dispose === 'function'
@@ -358,10 +397,88 @@ export const createPresentationRuntimeComposition = (
     ? createPresentationConversationCapability({ chat: compositionOptions.multimodalChatPort })
     : undefined;
   const outlineCapability = compositionOptions.multimodalChatPort
-    ? createPresentationOutlineCapability({ chat: compositionOptions.multimodalChatPort })
+    ? createPresentationOutlineCapability({
+        atomicRuntime: compositionOptions.atomicRuntime ?? null,
+        chat: compositionOptions.multimodalChatPort,
+        teachingMemory: compositionOptions.teachingMemory,
+      })
     : undefined;
 
+  const planningRepository = compositionOptions.jobRepository as
+    (PresentationJobRepository & Partial<PresentationPlanningRepository>) | undefined;
+  const planningSessions =
+    conversationCapability &&
+    compositionOptions.planningContextFactory &&
+    planningRepository?.getPlanningSession &&
+    planningRepository.savePlanningSession &&
+    planningRepository.acquireLease &&
+    planningRepository.listPlanningRecoveryCandidates
+      ? new PresentationPlanningSessions(
+          planningRepository as PresentationPlanningRepository,
+          conversationCapability,
+          async (scope) => {
+            const binding = await compositionOptions.planningContextFactory!(scope);
+            return {
+              ...binding,
+              context: { capabilities: compositionOptions.atomicRuntime, ...binding.context },
+            };
+          },
+          compositionOptions.collaborationHook,
+        )
+      : undefined;
+  let scanning = false;
+  const recover = async () => {
+    if (scanning || disposePromise) return 0;
+    scanning = true;
+    let resumed = 0;
+    try {
+      const candidates = (await compositionOptions.jobRepository?.listRecoveryCandidates?.()) ?? [];
+      for (const candidate of candidates) {
+        if (disposePromise) break;
+        try {
+          await generationPortFactory?.({
+            ...candidate.scope,
+            request: new Request('http://localhost/api/runtime/presentation/recovery'),
+          }).getJob(candidate.jobId);
+          resumed++;
+        } catch (error) {
+          console.error('[presentation.recovery] takeover failed', {
+            jobId: candidate.jobId,
+            code: (error as { code?: string }).code ?? 'PRESENTATION_RECOVERY_FAILED',
+          });
+        }
+      }
+      if (planningSessions)
+        for (const candidate of await planningRepository!.listPlanningRecoveryCandidates!()) {
+          if (disposePromise) break;
+          try {
+            await planningSessions.recover(candidate.scope, candidate.threadId);
+            resumed++;
+          } catch (error) {
+            console.error('[presentation.planning] takeover failed', {
+              code: (error as { code?: string }).code ?? 'PRESENTATION_RECOVERY_FAILED',
+            });
+          }
+        }
+    } finally {
+      scanning = false;
+    }
+    return resumed;
+  };
+  const recoveryReady = recover();
+  const recoveryTimer = setInterval(() => {
+    void recover().catch((error) =>
+      console.error('[presentation.recovery] scan failed', {
+        code: error?.code ?? 'PRESENTATION_RECOVERY_FAILED',
+      }),
+    );
+  }, 30_000);
+  recoveryTimer.unref?.();
+
   return {
+    recoveryReady,
+    planningSessions,
+    teachingLearning: compositionOptions.teachingLearning,
     atomicRuntime: compositionOptions.atomicRuntime,
     ...(conversationCapability ? { conversationCapability } : {}),
     generationEventPublisherFactory: bindings.generationEventPublisherFactory,

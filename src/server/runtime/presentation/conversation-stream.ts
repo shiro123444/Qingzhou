@@ -2,13 +2,33 @@ import type { PresentationActivity } from '@/types/presentationActivity';
 
 import type { PresentationConversationResult } from './conversation-capability';
 
+const streamMessage = async (
+  message: string,
+  send: (value: unknown) => void,
+  signal: AbortSignal,
+): Promise<void> => {
+  const characters = Array.from(message);
+  if (characters.length === 0) return;
+  const chunkSize = Math.max(1, Math.ceil(characters.length / 24));
+  let content = '';
+  for (let index = 0; index < characters.length && !signal.aborted; index += chunkSize) {
+    const delta = characters.slice(index, index + chunkSize).join('');
+    content += delta;
+    send({ type: 'message_delta', content, delta });
+    if (index + chunkSize < characters.length)
+      await new Promise<void>((resolve) => setTimeout(resolve, 12));
+  }
+};
+
 export const conversationStream = (
   execute: (
     onActivity: (activity: PresentationActivity) => void,
     signal: AbortSignal,
+    onCheckpoint: (checkpoint: Pick<PresentationConversationResult, 'brief' | 'slides'>) => void,
   ) => Promise<PresentationConversationResult>,
   dispose: () => Promise<void>,
   requestSignal: AbortSignal,
+  timing: { heartbeatMs?: number; totalTimeoutMs?: number } = {},
 ): Response => {
   const abort = new AbortController();
   const signal = AbortSignal.any([requestSignal, abort.signal]);
@@ -21,12 +41,34 @@ export const conversationStream = (
           if (!closed && !signal.aborted)
             controller.enqueue(encoder.encode(`${JSON.stringify(value)}\n`));
         };
+        const heartbeat = setInterval(
+          () => send({ type: 'heartbeat' }),
+          timing.heartbeatMs ?? 15_000,
+        );
+        const deadline = setTimeout(
+          () => {
+            send({ type: 'error', message: '本轮处理超时，已保存的学习进度可以重试恢复' });
+            abort.abort(new Error('Presentation conversation timed out'));
+            if (!closed) {
+              closed = true;
+              controller.close();
+            }
+          },
+          timing.totalTimeoutMs ?? 15 * 60_000,
+        );
         try {
-          const result = await execute((activity) => send({ type: 'activity', activity }), signal);
+          const result = await execute(
+            (activity) => send({ type: 'activity', activity }),
+            signal,
+            (checkpoint) => send({ type: 'checkpoint', checkpoint }),
+          );
+          await streamMessage(result.message, send, signal);
           send({ type: 'result', result });
         } catch (error) {
           send({ type: 'error', message: error instanceof Error ? error.message : '创作暂时中断' });
         } finally {
+          clearInterval(heartbeat);
+          clearTimeout(deadline);
           try {
             await dispose();
           } finally {
@@ -47,6 +89,7 @@ export const conversationStream = (
         'Content-Type': 'application/x-ndjson; charset=utf-8',
         'Cache-Control': 'no-cache, no-transform',
         'X-Accel-Buffering': 'no',
+        'X-Presentation-Conversation-Version': 'checkpoint-v1',
       },
     },
   );

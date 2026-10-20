@@ -2,6 +2,7 @@ import { Button, Flexbox, Icon } from '@lobehub/ui';
 import { Alert, Progress, Spin, Steps } from 'antd';
 import { RefreshCw, Square } from 'lucide-react';
 import { memo, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type { PresentationJob } from '../../../../packages/runtime-contracts/src/index';
 import JobStateTag from '../JobStateTag';
@@ -36,6 +37,7 @@ JobError.displayName = 'JobError';
 
 export const PresentationProgress = memo<PresentationProgressProps>(
   ({ busyState = null, className, job, onCancel, onRetry, streamStatus = null, title }) => {
+    const { t } = useTranslation('common');
     const handleCancel = useCallback(() => {
       if (job?.jobId && onCancel) onCancel(job.jobId);
     }, [job?.jobId, onCancel]);
@@ -52,7 +54,8 @@ export const PresentationProgress = memo<PresentationProgressProps>(
     const cancelled = job.state === 'cancelled';
     const completed = job.state === 'completed';
 
-    const showCancel = queued || running;
+    const waiting = job.state === 'waiting_input';
+    const showCancel = queued || running || waiting;
     const showRetry = failed || cancelled;
     const canCancel = showCancel && busyState !== 'cancel';
     const canRetry = showRetry && busyState !== 'retry';
@@ -127,6 +130,7 @@ export const PresentationProgress = memo<PresentationProgressProps>(
               <span style={{ display: 'none' }}>Failed</span>
             </span>
           )}
+          {waiting && <span>{t('presentationCollaboration.waiting')}</span>}
         </div>
 
         {(queued || running || completed) && (

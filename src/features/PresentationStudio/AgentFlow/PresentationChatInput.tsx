@@ -38,6 +38,7 @@ export interface PresentationChatInputProps {
   disabled?: boolean;
   onEditorReady?: (editor: ChatInputEditor) => void;
   onSend: (payload: PresentationSendPayload) => void;
+  onStop?: () => void;
   onToolsChange?: (value: PresentationToolSelection) => void;
   placeholder?: string;
   tools?: PresentationToolSelection;
@@ -53,6 +54,7 @@ const PresentationChatInputInner = memo<PresentationChatInputProps>(
     disabled = false,
     onEditorReady,
     onSend,
+    onStop,
     placeholder,
   }) => {
     const editorRef = useRef<ChatInputEditor | null>(null);
@@ -145,7 +147,6 @@ const PresentationChatInputInner = memo<PresentationChatInputProps>(
           >
             <ConversationChatInput
               allowExpand
-              skipScrollMarginWithList
               isConfigLoading={false}
               leftActions={CONVERSATION_LEFT_ACTIONS}
               placeholder={placeholder}
@@ -163,9 +164,9 @@ const PresentationChatInputInner = memo<PresentationChatInputProps>(
                   : [uploadAction]
               }
               sendButtonProps={{
-                disabled: disabled || creating || isUploadingFiles,
+                disabled: (disabled && !creating) || isUploadingFiles,
                 generating: creating,
-                onStop: () => undefined,
+                onStop,
                 shape: 'round',
               }}
               onEditorReady={onEditorReady}
@@ -205,9 +206,9 @@ const PresentationChatInputInner = memo<PresentationChatInputProps>(
               if (instance) onEditorReady?.(instance);
             }}
             sendButtonProps={{
-              disabled: disabled || creating || isUploadingFiles,
+              disabled: (disabled && !creating) || isUploadingFiles,
               generating: creating,
-              onStop: () => undefined,
+              onStop: onStop ?? (() => {}),
               shape: 'round',
             }}
             onSend={handleSend}

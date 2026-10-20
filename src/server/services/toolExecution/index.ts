@@ -1,3 +1,4 @@
+import { canonicalToolName, invokeNativeTool } from '@lobechat/cordis-runtime';
 import { type ChatToolPayload } from '@lobechat/types';
 import { safeParseJSON } from '@lobechat/utils';
 import debug from 'debug';
@@ -23,8 +24,8 @@ import {
 const log = debug('lobe-server:tool-execution-service');
 
 interface ToolExecutionServiceDeps {
-  builtinToolsExecutor: BuiltinToolsExecutor;
-  mcpService: MCPService;
+  builtinToolsExecutor: Pick<BuiltinToolsExecutor, 'execute'>;
+  mcpService: Pick<MCPService, 'callTool'>;
 }
 
 const normalizeExecutionError = (error: unknown, fallbackMessage: string) => {
@@ -58,9 +59,14 @@ const normalizeExecutionError = (error: unknown, fallbackMessage: string) => {
   return { code: normalized.code, kind: normalized.kind, message };
 };
 
+const assertExecutionAllowed = (context: ToolExecutionContext): void => {
+  context.assertStepLease?.();
+  context.signal?.throwIfAborted();
+};
+
 export class ToolExecutionService {
-  private builtinToolsExecutor: BuiltinToolsExecutor;
-  private mcpService: MCPService;
+  private builtinToolsExecutor: Pick<BuiltinToolsExecutor, 'execute'>;
+  private mcpService: Pick<MCPService, 'callTool'>;
 
   constructor({ mcpService, builtinToolsExecutor }: ToolExecutionServiceDeps) {
     this.builtinToolsExecutor = builtinToolsExecutor;
@@ -71,27 +77,32 @@ export class ToolExecutionService {
     payload: ChatToolPayload,
     context: ToolExecutionContext,
   ): Promise<ToolExecutionResultResponse> {
+    assertExecutionAllowed(context);
     const { identifier, apiName, type } = payload;
 
     log('Executing tool: %s:%s (type: %s)', identifier, apiName, type);
 
     const startTime = Date.now();
     try {
-      const typeStr = type as string;
-      let data: ToolExecutionResult;
-      switch (typeStr) {
-        case 'mcp': {
-          data = await this.executeMCPTool(payload, context);
-          break;
-        }
+      const data = await invokeNativeTool<ToolExecutionResult>(
+        {
+          name: canonicalToolName(identifier, apiName),
+          execute: async (input) => {
+            assertExecutionAllowed(context);
+            const resolvedPayload = {
+              ...payload,
+              arguments: typeof input === 'string' ? input : JSON.stringify(input ?? {}),
+            };
+            // The authenticated server context stays in this closure. Cloud MCP,
+            // proxy/file handling and builtin authorization remain in their adapters.
+            if ((type as string) === 'mcp') return this.executeMCPTool(resolvedPayload, context);
+            return this.builtinToolsExecutor.execute(resolvedPayload, context);
+          },
+        },
+        payload.arguments,
+      );
 
-        case 'builtin':
-        default: {
-          data = await this.builtinToolsExecutor.execute(payload, context);
-          break;
-        }
-      }
-
+      assertExecutionAllowed(context);
       const executionTime = Date.now() - startTime;
 
       // Truncate result content to prevent context overflow
@@ -128,6 +139,7 @@ export class ToolExecutionService {
 
       // Handle MCP and other types (default, standalone, markdown, mcp)
     } catch (error) {
+      assertExecutionAllowed(context);
       const executionTime = Date.now() - startTime;
       log('Error executing tool %s:%s: %O', identifier, apiName, error);
       const errorMessage = (error as Error).message;
@@ -296,9 +308,10 @@ export class ToolExecutionService {
       // Process content blocks (upload images, etc.)
       const { processContentBlocks } = await import('@/server/services/mcp/contentProcessor');
       const { FileService } = await import('@/server/services/file');
-      const fileService = context.userId && context.serverDB
-        ? new FileService(context.serverDB, context.userId)
-        : undefined;
+      const fileService =
+        context.userId && context.serverDB
+          ? new FileService(context.serverDB, context.userId)
+          : undefined;
 
       const newContent = result.isError
         ? result.content

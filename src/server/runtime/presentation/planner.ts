@@ -20,7 +20,9 @@ export class PresentationPlanError extends Error {
 }
 
 export interface PresentationPlanValidationOptions {
+  readonly maxEmbeddedImageBytes?: number;
   readonly maxSlides?: number;
+  /** SVG markup budget, excluding separately bounded raster payloads. */
   readonly maxSvgBytes?: number;
 }
 
@@ -44,6 +46,23 @@ const cloneWireValue = <T>(value: T): T => {
 };
 
 const svgBytes = (svg: string): number => new TextEncoder().encode(svg).byteLength;
+
+const measureSvgBytes = (svg: string) => {
+  let imageBytes = 0;
+  const markup = svg.replaceAll(
+    /(\b(?:xlink:)?href\s*=\s*)(["'])(data:image\/(?:png|jpeg|webp);base64,)([A-Za-z0-9+/]*={0,2})\2/gu,
+    (attribute, prefix: string, quote: string, header: string, payload: string) => {
+      if (!payload.length || payload.length % 4 !== 0) return attribute;
+      const decodedBytes =
+        (payload.length / 4) * 3 - (payload.endsWith('==') ? 2 : payload.endsWith('=') ? 1 : 0);
+      if (decodedBytes > 8 * 1024 * 1024)
+        throw new PresentationPlanError('Embedded image byte budget exceeded');
+      imageBytes += decodedBytes;
+      return `${prefix}${quote}${header}${quote}`;
+    },
+  );
+  return { imageBytes, markupBytes: svgBytes(markup) };
+};
 
 const validSvg = (svg: unknown): svg is string => {
   if (
@@ -92,11 +111,15 @@ export const validatePresentationPlan = (
   if (!Number.isInteger(maxSvgBytes) || maxSvgBytes <= 0) {
     throw new PresentationPlanError('maxSvgBytes must be a positive integer');
   }
+  const maxEmbeddedImageBytes = options.maxEmbeddedImageBytes ?? 64 * 1024 * 1024;
+  if (!Number.isInteger(maxEmbeddedImageBytes) || maxEmbeddedImageBytes <= 0)
+    throw new PresentationPlanError('maxEmbeddedImageBytes must be a positive integer');
   const ids = new Set<string>();
   const orders = new Set<number>();
   const slides: PresentationSlidePlan[] = [];
   let orderStart: number | undefined;
   let totalBytes = 0;
+  let totalImageBytes = 0;
   for (const [index, slide] of candidate.slides.entries()) {
     if (!isRecord(slide) || !nonEmpty(slide.slideId))
       throw new PresentationPlanError('slideId must be non-empty');
@@ -116,8 +139,12 @@ export const validatePresentationPlan = (
     orders.add(slideCandidate.order);
     if (!validSvg(slideCandidate.svg))
       throw new PresentationPlanError(`invalid SVG for slide: ${slideCandidate.slideId}`);
-    totalBytes += svgBytes(slideCandidate.svg);
+    const measured = measureSvgBytes(slideCandidate.svg);
+    totalBytes += measured.markupBytes;
+    totalImageBytes += measured.imageBytes;
     if (totalBytes > maxSvgBytes) throw new PresentationPlanError('SVG byte budget exceeded');
+    if (totalImageBytes > maxEmbeddedImageBytes)
+      throw new PresentationPlanError('Embedded image byte budget exceeded');
     slides.push({
       metadata: slideCandidate.metadata ? cloneWireValue(slideCandidate.metadata) : undefined,
       notes: slideCandidate.notes,

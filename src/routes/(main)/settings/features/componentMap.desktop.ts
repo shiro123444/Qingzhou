@@ -10,6 +10,7 @@ import About from '../about';
 import Advanced from '../advanced';
 import APIKey from '../apikey';
 import Appearance from '../appearance';
+import BotDelivery from '../bot-delivery';
 import Creds from '../creds';
 import Hotkey from '../hotkey';
 import Memory from '../memory';
@@ -25,6 +26,7 @@ import Storage from '../storage';
 import SystemTools from '../system-tools';
 
 export const componentMap = {
+  [SettingsTabs.BotDelivery]: BotDelivery,
   [SettingsTabs.Advanced]: Advanced,
   [SettingsTabs.Appearance]: Appearance,
   [SettingsTabs.Provider]: Provider,

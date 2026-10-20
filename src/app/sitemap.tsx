@@ -12,27 +12,7 @@ export const generateSitemapLink = (url: string) =>
   );
 
 export async function generateSitemaps() {
-  const sitemapModule = new Sitemap();
-  // Generate dynamic sitemap list, including paginated sitemaps
-  const staticSitemaps = sitemapModule.sitemapIndexs;
-
-  // Get page counts for types that need pagination
-  const [pluginPages, assistantPages, modelPages] = await Promise.all([
-    sitemapModule.getPluginPageCount(),
-    sitemapModule.getAssistantPageCount(),
-    sitemapModule.getModelPageCount(),
-  ]);
-
-  // Generate paginated sitemap ID list
-  const paginatedSitemaps = [
-    ...Array.from({ length: pluginPages }, (_, i) => ({ id: `plugins-${i + 1}` as SitemapType })),
-    ...Array.from({ length: assistantPages }, (_, i) => ({
-      id: `assistants-${i + 1}` as SitemapType,
-    })),
-    ...Array.from({ length: modelPages }, (_, i) => ({ id: `models-${i + 1}` as SitemapType })),
-  ];
-
-  return [...staticSitemaps, ...paginatedSitemaps];
+  return new Sitemap().getSitemapIds();
 }
 
 // Parse paginated ID
@@ -50,7 +30,7 @@ export function parsePaginatedId(id: string): { page?: number; type: SitemapType
 export default async function sitemap({
   id: idPromise,
 }: {
-  id: string;
+  id: Promise<string>;
 }): Promise<MetadataRoute.Sitemap> {
   const id = await idPromise;
 

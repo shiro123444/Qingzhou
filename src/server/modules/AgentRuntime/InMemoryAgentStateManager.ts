@@ -2,7 +2,13 @@ import { type AgentState } from '@lobechat/agent-runtime';
 import debug from 'debug';
 
 import { type AgentOperationMetadata, type StepResult } from './AgentStateManager';
-import { type IAgentStateManager } from './types';
+import {
+  assertStepLeaseOperation,
+  createStepLease,
+  DEFAULT_STEP_LEASE_TTL_SECONDS,
+  stepLeaseTtlMs,
+} from './stepLease';
+import { type IAgentStateManager, type StepLease } from './types';
 
 const log = debug('lobe-server:agent-runtime:in-memory-state-manager');
 
@@ -11,6 +17,7 @@ const log = debug('lobe-server:agent-runtime:in-memory-state-manager');
  * In-memory implementation for testing and local development environments
  */
 export class InMemoryAgentStateManager implements IAgentStateManager {
+  private leases = new Map<string, { expiresAt: number; ownerToken: string }>();
   private states: Map<string, AgentState> = new Map();
   private steps: Map<string, any[]> = new Map();
   private metadata: Map<string, AgentOperationMetadata> = new Map();
@@ -215,16 +222,94 @@ export class InMemoryAgentStateManager implements IAgentStateManager {
     return stats;
   }
 
-  async tryClaimStep(
-    _operationId: string,
-    _stepIndex: number,
-    _ttlSeconds?: number,
+  private leaseKey(operationId: string, stepIndex: number): string {
+    return JSON.stringify([operationId, stepIndex]);
+  }
+
+  private ownsLease(lease: StepLease): boolean {
+    const key = this.leaseKey(lease.operationId, lease.stepIndex);
+    const current = this.leases.get(key);
+    if (current && current.expiresAt <= Date.now()) {
+      this.leases.delete(key);
+      return false;
+    }
+    return current?.ownerToken === lease.ownerToken;
+  }
+
+  async acquireStepLease(
+    operationId: string,
+    stepIndex: number,
+    ttlSeconds: number = DEFAULT_STEP_LEASE_TTL_SECONDS,
+  ): Promise<StepLease | null> {
+    const ttlMs = stepLeaseTtlMs(ttlSeconds);
+    const key = this.leaseKey(operationId, stepIndex);
+    const current = this.leases.get(key);
+    if (current && current.expiresAt > Date.now()) return null;
+    const lease = createStepLease(operationId, stepIndex);
+    this.leases.set(key, { expiresAt: Date.now() + ttlMs, ownerToken: lease.ownerToken });
+    return lease;
+  }
+
+  async renewStepLease(
+    lease: StepLease,
+    ttlSeconds: number = DEFAULT_STEP_LEASE_TTL_SECONDS,
   ): Promise<boolean> {
+    const ttlMs = stepLeaseTtlMs(ttlSeconds);
+    if (!this.ownsLease(lease)) return false;
+    this.leases.set(this.leaseKey(lease.operationId, lease.stepIndex), {
+      expiresAt: Date.now() + ttlMs,
+      ownerToken: lease.ownerToken,
+    });
     return true;
   }
 
-  async releaseStepLock(_operationId: string, _stepIndex: number): Promise<void> {
-    // noop
+  async releaseStepLease(lease: StepLease): Promise<boolean> {
+    if (!this.ownsLease(lease)) return false;
+    this.leases.delete(this.leaseKey(lease.operationId, lease.stepIndex));
+    return true;
+  }
+
+  private canCommitWithLease(
+    operationId: string,
+    state: AgentState,
+    lease: StepLease,
+    isStepResult: boolean,
+  ): boolean {
+    if (!this.ownsLease(lease)) return false;
+    const previous = this.states.get(operationId);
+    if (!previous) return true;
+    return (
+      Number.isFinite(previous.stepCount) &&
+      Number.isFinite(state.stepCount) &&
+      state.stepCount >= previous.stepCount &&
+      previous.stepCount <= lease.stepIndex + 1 &&
+      (!isStepResult || previous.stepCount === lease.stepIndex)
+    );
+  }
+
+  async saveAgentStateWithLease(
+    operationId: string,
+    state: AgentState,
+    lease: StepLease,
+  ): Promise<boolean> {
+    assertStepLeaseOperation(operationId, lease);
+    if (!this.canCommitWithLease(operationId, state, lease, false)) return false;
+    // saveAgentState performs every mutation synchronously before returning its promise.
+    await this.saveAgentState(operationId, state);
+    return true;
+  }
+
+  async saveStepResultWithLease(
+    operationId: string,
+    stepResult: StepResult,
+    lease: StepLease,
+  ): Promise<boolean> {
+    assertStepLeaseOperation(operationId, lease);
+    if (stepResult.stepIndex !== lease.stepIndex) throw new TypeError('Step lease index mismatch');
+    if (!this.canCommitWithLease(operationId, stepResult.newState, lease, true)) return false;
+    // No await between ownership validation and state/metadata/history mutations.
+    await this.saveStepResult(operationId, stepResult);
+    return true;
   }
 
   async disconnect(): Promise<void> {
@@ -236,6 +321,7 @@ export class InMemoryAgentStateManager implements IAgentStateManager {
    * Clear all data (for testing)
    */
   clear(): void {
+    this.leases.clear();
     this.states.clear();
     this.steps.clear();
     this.metadata.clear();

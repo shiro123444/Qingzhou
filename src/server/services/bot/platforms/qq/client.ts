@@ -5,6 +5,11 @@ import debug from 'debug';
 
 import type { AttachmentSource } from '@/server/services/aiAgent/ingestAttachment';
 import {
+  claimWebhookReplay,
+  createGatewayAuthenticator,
+  signGatewayRequest,
+} from '@/server/services/bot/security/gatewayAuth';
+import {
   BOT_RUNTIME_STATUSES,
   getRuntimeStatusErrorMessage,
   updateBotRuntimeStatus,
@@ -45,28 +50,63 @@ async function sendQQMessage(
   threadType: string,
   targetId: string,
   content: string,
+  options?: { msgId: string; msgSeq: number },
 ): Promise<void> {
   switch (threadType) {
     case 'group': {
-      await api.sendGroupMessage(targetId, content);
+      await api.sendGroupMessage(targetId, content, options);
       return;
     }
     case 'guild': {
-      await api.sendGuildMessage(targetId, content);
+      await api.sendGuildMessage(targetId, content, options);
       return;
     }
     case 'c2c': {
-      await api.sendC2CMessage(targetId, content);
+      await api.sendC2CMessage(targetId, content, options);
       return;
     }
     case 'dms': {
-      await api.sendDmsMessage(targetId, content);
+      await api.sendDmsMessage(targetId, content, options);
       return;
     }
     default: {
-      await api.sendGroupMessage(targetId, content);
+      await api.sendGroupMessage(targetId, content, options);
     }
   }
+}
+
+function replyOptions(
+  config: BotProviderConfig,
+  context: BotPlatformRuntimeContext,
+  threadId: string,
+) {
+  let sequence = 0;
+  return async () => {
+    const msgId = context.replyToMessageId;
+    if (!msgId) return undefined;
+    const key = `qq:reply-seq:${config.applicationId}:${threadId}:${msgId}`;
+    const redis = context.redisClient;
+    const msgSeq = redis?.incr ? await redis.incr(key) : ++sequence;
+    if (redis?.expire) await redis.expire(key, 86_400);
+    return { msgId, msgSeq };
+  };
+}
+
+function qqFileTransport(
+  api: QQApiClient,
+  threadType: string,
+  targetId: string,
+  nextOptions: () => Promise<{ msgId: string; msgSeq: number } | undefined>,
+): Pick<PlatformMessenger, 'prepareFile'> {
+  if (threadType !== 'group' && threadType !== 'c2c') return {};
+  return {
+    prepareFile: async (file) => {
+      const info = await api.uploadFile(threadType, targetId, file);
+      return async () => {
+        await api.sendFile(threadType, targetId, info, await nextOptions());
+      };
+    },
+  };
 }
 
 /**
@@ -153,6 +193,12 @@ class QQGatewayClient implements PlatformClient {
 
       const adapter = createQQAdapter({
         appId: this.config.applicationId,
+        authenticateWebhook: createGatewayAuthenticator({
+          durableReceipt: !!this.context.persistVerifiedWebhook,
+          applicationId: this.applicationId,
+          platform: this.id,
+          secret: this.config.credentials.appSecret,
+        }),
         clientSecret: this.config.credentials.appSecret,
       });
 
@@ -185,6 +231,18 @@ class QQGatewayClient implements PlatformClient {
         durationMs,
         this.abort.signal,
         webhookUrl,
+        async (url, body) =>
+          fetch(url, {
+            ...signGatewayRequest({
+              applicationId: this.applicationId,
+              body,
+              platform: this.id,
+              secret: this.config.credentials.appSecret,
+              url,
+            }),
+            redirect: 'error',
+            signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(30_000)]),
+          }),
       );
 
       if (!options) {
@@ -254,7 +312,14 @@ class QQGatewayClient implements PlatformClient {
   createAdapter(): Record<string, any> {
     return {
       qq: createQQAdapter({
+        persistVerifiedWebhook: this.context.persistVerifiedWebhook,
         appId: this.config.applicationId,
+        authenticateWebhook: createGatewayAuthenticator({
+          durableReceipt: !!this.context.persistVerifiedWebhook,
+          applicationId: this.applicationId,
+          platform: this.id,
+          secret: this.config.credentials.appSecret,
+        }),
         clientSecret: this.config.credentials.appSecret,
       }),
     };
@@ -264,11 +329,14 @@ class QQGatewayClient implements PlatformClient {
     const api = new QQApiClient(this.config.applicationId, this.config.credentials.appSecret);
     const targetId = extractChatId(platformThreadId);
     const threadType = extractThreadType(platformThreadId);
+    const nextOptions = replyOptions(this.config, this.context, platformThreadId);
     return {
-      createMessage: (content) => sendQQMessage(api, threadType, targetId, content),
-      editMessage: (_messageId, content) =>
+      ...qqFileTransport(api, threadType, targetId, nextOptions),
+      createMessage: async (content) =>
+        sendQQMessage(api, threadType, targetId, content, await nextOptions()),
+      editMessage: async (_messageId, content) =>
         // QQ does not support editing — send a new message as fallback
-        sendQQMessage(api, threadType, targetId, content),
+        sendQQMessage(api, threadType, targetId, content, await nextOptions()),
       // QQ Bot API doesn't support reactions or typing
       removeReaction: () => Promise.resolve(),
     };
@@ -302,7 +370,10 @@ class QQWebhookClient implements PlatformClient {
 
   private config: BotProviderConfig;
 
-  constructor(config: BotProviderConfig, _context: BotPlatformRuntimeContext) {
+  constructor(
+    config: BotProviderConfig,
+    private readonly context: BotPlatformRuntimeContext,
+  ) {
     this.config = config;
     this.applicationId = config.applicationId;
   }
@@ -354,7 +425,9 @@ class QQWebhookClient implements PlatformClient {
   createAdapter(): Record<string, any> {
     return {
       qq: createQQAdapter({
+        persistVerifiedWebhook: this.context.persistVerifiedWebhook,
         appId: this.config.applicationId,
+        claimWebhookReplay,
         clientSecret: this.config.credentials.appSecret,
       }),
     };
@@ -364,9 +437,13 @@ class QQWebhookClient implements PlatformClient {
     const api = new QQApiClient(this.config.applicationId, this.config.credentials.appSecret);
     const targetId = extractChatId(platformThreadId);
     const threadType = extractThreadType(platformThreadId);
+    const nextOptions = replyOptions(this.config, this.context, platformThreadId);
     return {
-      createMessage: (content) => sendQQMessage(api, threadType, targetId, content),
-      editMessage: (_messageId, content) => sendQQMessage(api, threadType, targetId, content),
+      ...qqFileTransport(api, threadType, targetId, nextOptions),
+      createMessage: async (content) =>
+        sendQQMessage(api, threadType, targetId, content, await nextOptions()),
+      editMessage: async (_messageId, content) =>
+        sendQQMessage(api, threadType, targetId, content, await nextOptions()),
       removeReaction: () => Promise.resolve(),
     };
   }

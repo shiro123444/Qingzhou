@@ -20,10 +20,12 @@ import {
 import type { PresentationAssetSnapshot, PresentationAssetStore } from './asset-store';
 
 export interface ImageGenerationSlot {
+  readonly background?: ImageGenerationRequest['background'];
   readonly count?: number;
   readonly idempotencyKey?: string;
   readonly prompt: string;
   readonly quality?: string;
+  readonly referenceAssetRefs?: readonly string[];
   readonly size?: string;
   readonly slideId: string;
   readonly slotId: string;
@@ -132,6 +134,8 @@ const fingerprint = (scope: RuntimeScope, slot: ImageGenerationSlot): string =>
     slot.quality ?? null,
     slot.count ?? 1,
     slot.idempotencyKey ?? null,
+    slot.referenceAssetRefs ?? [],
+    slot.background ?? null,
   ]);
 
 const compareSlots = (
@@ -218,12 +222,30 @@ const normalizeSlot = (value: unknown): ImageGenerationSlot => {
   const quality = optionalString('quality', value.quality);
   const size = optionalString('size', value.size);
   const countValue = value.count;
+  if (
+    value.referenceAssetRefs !== undefined &&
+    (!Array.isArray(value.referenceAssetRefs) ||
+      value.referenceAssetRefs.length > 4 ||
+      value.referenceAssetRefs.some((ref) => !nonEmpty(ref) || ref.length > 256))
+  )
+    throw new ImageGenerationPlannerError('IMAGE_PLAN_INVALID', 'Invalid visual references');
+  if (
+    value.background !== undefined &&
+    !['transparent', 'opaque', 'auto'].includes(String(value.background))
+  )
+    throw new ImageGenerationPlannerError('IMAGE_PLAN_INVALID', 'Invalid background mode');
   const count = countValue === undefined ? 1 : countValue;
   if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 1) {
     throw new ImageGenerationPlannerError('IMAGE_PLAN_INVALID', 'count must be a positive integer');
   }
   return {
     count,
+    ...(value.referenceAssetRefs === undefined
+      ? {}
+      : { referenceAssetRefs: [...(value.referenceAssetRefs as string[])] }),
+    ...(value.background === undefined
+      ? {}
+      : { background: value.background as ImageGenerationRequest['background'] }),
     ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
     prompt: value.prompt,
     ...(quality === undefined ? {} : { quality }),
@@ -456,6 +478,8 @@ export class ImageGenerationPlanner {
 
     const request: ImageGenerationRequest = {
       count: slot.count,
+      ...(slot.referenceAssetRefs?.length ? { referenceAssetRefs: slot.referenceAssetRefs } : {}),
+      ...(slot.background ? { background: slot.background } : {}),
       ...(slot.idempotencyKey === undefined ? {} : { idempotencyKey: slot.idempotencyKey }),
       prompt: slot.prompt,
       ...(slot.quality === undefined ? {} : { quality: slot.quality }),

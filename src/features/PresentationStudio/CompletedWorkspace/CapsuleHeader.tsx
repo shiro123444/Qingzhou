@@ -1,7 +1,6 @@
 import { Button, Flexbox, Icon } from '@lobehub/ui';
-import { Dropdown, Input, type MenuProps, Popover, Tooltip } from 'antd';
+import { Dropdown, type MenuProps, Tooltip } from 'antd';
 import {
-  ArrowUp,
   Check,
   ChevronDown,
   Download,
@@ -16,24 +15,29 @@ import {
   Plus,
   RefreshCw,
   Sparkles,
-  X,
 } from 'lucide-react';
-import { memo, useState } from 'react';
+import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
+
+import ToggleLeftPanelButton from '@/features/NavPanel/ToggleLeftPanelButton';
 
 import type {
   PresentationExportFormat,
   PresentationJob,
 } from '../../../../packages/runtime-contracts/src/index';
+import ActivityHistory from '../ActivityHistory';
+import PresentationJobList from '../PresentationJobList';
 import { styles } from './style';
 import TemplateLibraryButton from './TemplateLibraryButton';
 import type { CompletedViewMode } from './types';
 
 export interface CapsuleHeaderProps {
+  activity?: string;
+  activityHistory?: { id: string; text: string }[];
   availableFormats?: string[];
   canExport: boolean;
   canQuickExport?: boolean;
-  creating?: boolean;
+  conversationOpen?: boolean;
   currentIndex: number;
   drawerOpen: boolean;
   exported: { artifactId: string; format: PresentationExportFormat; uri?: string } | null;
@@ -41,16 +45,18 @@ export interface CapsuleHeaderProps {
   job: PresentationJob;
   jobs?: PresentationJob[];
   jobTitle?: string;
-  onAiModify: (prompt: string) => Promise<void>;
+  onDeleteJob?: (jobId: string) => Promise<void> | void;
   onExport: (format: PresentationExportFormat) => void;
   onJobChanged?: () => Promise<void>;
   onNewPresentation?: () => void;
+  onOpenConversation: () => void;
   onQuickExport: () => void;
   onRetryJob: () => void;
   onSelectJob?: (jobId: string) => void;
   onToggleDrawer: () => void;
   onToggleViewMode: () => void;
   presentationStyle?: string;
+  showSidebarReopen?: boolean;
   slideCount: number;
   viewMode: CompletedViewMode;
 }
@@ -68,40 +74,52 @@ const MORE_EXPORT_FORMATS: {
 
 export const CapsuleHeader = memo<CapsuleHeaderProps>(
   ({
+    activity,
+    activityHistory,
     availableFormats,
     canExport,
     canQuickExport = canExport,
-    creating = false,
+    conversationOpen = false,
     drawerOpen,
     exporting,
     job,
     jobTitle,
     jobs,
     onSelectJob,
-    onAiModify,
+    onDeleteJob,
     onExport,
     onJobChanged,
     onNewPresentation,
+    onOpenConversation,
     onQuickExport,
     onRetryJob,
     onToggleDrawer,
     onToggleViewMode,
+    showSidebarReopen = false,
     viewMode,
   }) => {
     const { t } = useTranslation('common');
-    const [aiPopoverOpen, setAiPopoverOpen] = useState(false);
-    const [aiPrompt, setAiPrompt] = useState('');
 
     const working = job.state === 'running' || job.state === 'queued';
-    const statusText = working ? '正在修改' : job.state === 'completed' ? '已完成' : '已暂停';
+    const statusText = working
+      ? activity?.trim() || '正在修改'
+      : job.state === 'completed'
+        ? '已完成'
+        : job.state === 'cancelled'
+          ? '已取消'
+          : job.error?.code === 'CHAT_UNAVAILABLE'
+            ? '模型繁忙，请稍后重试'
+            : job.error?.code === 'IMAGE_PLAN_INVALID'
+              ? '素材规划未完成，请再试一次'
+              : job.error?.code === 'IMAGE_UNAVAILABLE'
+                ? '素材生成未完成，请再试一次'
+                : job.error?.code === 'CHAT_PAYLOAD_INVALID' ||
+                    /empty response|parse multimodal|invalid JSON/iu.test(job.error?.message ?? '')
+                  ? '排版未完成，请再试一次'
+                  : job.error?.message?.trim()
+                    ? job.error.message.trim().slice(0, 40)
+                    : '未完成';
     const viewLabel = viewMode === 'lightbox' ? '单页精研' : '全景网格';
-
-    const handleAiSubmit = async () => {
-      if (!aiPrompt.trim() || creating) return;
-      await onAiModify(aiPrompt.trim());
-      setAiPrompt('');
-      setAiPopoverOpen(false);
-    };
 
     const moreExportMenu: MenuProps['items'] = MORE_EXPORT_FORMATS.filter(
       ({ format }) => !availableFormats || availableFormats.includes(format),
@@ -124,23 +142,33 @@ export const CapsuleHeader = memo<CapsuleHeaderProps>(
         data-testid="presentation-editor-toolbar"
       >
         <div className={styles.capsuleGroupLeft}>
+          {showSidebarReopen && (
+            <div data-testid="presentation-sidebar-reopen">
+              <ToggleLeftPanelButton />
+            </div>
+          )}
           <span className={styles.capsuleTitle} title={jobTitle ?? '演示文稿'}>
             {jobTitle ?? '演示文稿'}
           </span>
 
-          <span
-            className={styles.capsuleStatus}
-            data-testid="presentation-completed-tag"
-            role="status"
-          >
-            <Icon
-              aria-hidden
-              icon={working ? RefreshCw : job.state === 'completed' ? Check : Pause}
-              size={14}
-              spin={working}
-            />
-            {statusText}
-          </span>
+          <ActivityHistory history={activityHistory}>
+            <button
+              aria-label={t('presentationTemplates.activityHistory')}
+              aria-live="polite"
+              className={styles.capsuleStatus}
+              data-testid="presentation-completed-tag"
+              title={job.error?.message}
+              type="button"
+            >
+              <Icon
+                aria-hidden
+                icon={working ? RefreshCw : job.state === 'completed' ? Check : Pause}
+                size={14}
+                spin={working}
+              />
+              <span key={statusText}>{statusText}</span>
+            </button>
+          </ActivityHistory>
         </div>
 
         <div className={styles.capsuleGroupRight}>
@@ -186,14 +214,19 @@ export const CapsuleHeader = memo<CapsuleHeaderProps>(
           {jobs && onSelectJob && (
             <Dropdown
               trigger={['click']}
-              menu={{
-                selectedKeys: [job.jobId],
-                items: jobs.map((item) => ({
-                  key: item.jobId,
-                  label: item.title ?? '未命名演示文稿',
-                })),
-                onClick: ({ key }) => onSelectJob(key),
-              }}
+              popupRender={() => (
+                <div className={styles.historyPanel}>
+                  <PresentationJobList
+                    jobs={jobs}
+                    selectedJobId={job.jobId}
+                    titles={Object.fromEntries(
+                      jobs.map((item) => [item.jobId, item.title ?? '未命名演示文稿']),
+                    )}
+                    onDelete={onDeleteJob}
+                    onSelect={onSelectJob}
+                  />
+                </div>
+              )}
             >
               <Button
                 aria-label={t('presentationTemplates.history')}
@@ -210,55 +243,16 @@ export const CapsuleHeader = memo<CapsuleHeaderProps>(
             onJobChanged={onJobChanged}
           />
 
-          <Popover
-            open={aiPopoverOpen}
-            placement="bottomRight"
-            trigger="click"
-            content={
-              <Flexbox gap={10} style={{ padding: 4, width: 280 }}>
-                <Input.TextArea
-                  aria-label="修改要求"
-                  autoSize={{ maxRows: 6, minRows: 3 }}
-                  placeholder="想改些什么？"
-                  value={aiPrompt}
-                  onChange={(e) => setAiPrompt(e.target.value)}
-                />
-                <Flexbox horizontal gap={8} justify="flex-end">
-                  <Tooltip title="取消">
-                    <Button
-                      aria-label="取消修改"
-                      className={styles.iconButton}
-                      icon={<Icon aria-hidden icon={X} size={22} />}
-                      type="text"
-                      onClick={() => setAiPopoverOpen(false)}
-                    />
-                  </Tooltip>
-                  <Tooltip title="提交修改">
-                    <Button
-                      aria-label="提交修改"
-                      className={styles.iconButton}
-                      disabled={!aiPrompt.trim() || creating}
-                      icon={<Icon aria-hidden icon={ArrowUp} size={22} />}
-                      loading={creating}
-                      type="primary"
-                      onClick={() => void handleAiSubmit()}
-                    />
-                  </Tooltip>
-                </Flexbox>
-              </Flexbox>
-            }
-            onOpenChange={setAiPopoverOpen}
-          >
-            <Tooltip title={aiPopoverOpen ? undefined : 'AI 修改'}>
-              <Button
-                aria-expanded={aiPopoverOpen}
-                aria-label="Continue prompting AI"
-                className={styles.iconButton}
-                icon={<Icon aria-hidden icon={Sparkles} size={24} />}
-                type="text"
-              />
-            </Tooltip>
-          </Popover>
+          <Tooltip title={conversationOpen ? undefined : 'AI 修改'}>
+            <Button
+              aria-expanded={conversationOpen}
+              aria-label="Continue prompting AI"
+              className={styles.iconButton}
+              icon={<Icon aria-hidden icon={Sparkles} size={24} />}
+              type="text"
+              onClick={onOpenConversation}
+            />
+          </Tooltip>
 
           <Tooltip title="重新生成">
             <Button

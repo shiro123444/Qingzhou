@@ -99,7 +99,13 @@ export const normalizeGLMChatEndpoint = (value: unknown): string => {
   }
 
   const pathname = parsed.pathname.replace(/\/+$/u, '');
-  const allowedPath = pathname === '' || pathname === '/v1' || pathname === '/v1/chat/completions';
+  // `/anthropic` is accepted as a gateway alias and rewritten to the OpenAI
+  // chat-completions path this adapter actually calls.
+  const allowedPath =
+    pathname === '' ||
+    pathname === '/v1' ||
+    pathname === '/v1/chat/completions' ||
+    pathname === '/anthropic';
   if (
     parsed.protocol !== 'https:' ||
     !parsed.hostname ||
@@ -138,13 +144,13 @@ export const loadProductionGLMChatProviderConfig = (
 
   const endpoint = normalizeGLMChatEndpoint(rawBaseUrl);
 
-  // The active provider is deliberately pinned. Legacy GLM callers retain
-  // their historical model override until that compatibility path is removed.
+  // Active provider uses ANTHROPIC_MODEL when set; otherwise the default
+  // Gemini model. Request/dependency overrides stay locked in this mode.
   const modelValue = legacyMode
     ? (readEnv(env, PRODUCTION_GLM_CHAT_ENV_KEYS.model) ??
       readEnv(env, 'GLM_CHAT_MODEL') ??
       readEnv(env, 'LOBE_PRESENTATION_CHAT_MODEL'))
-    : undefined;
+    : readEnv(env, PRODUCTION_CHAT_ENV_KEYS.model);
 
   if (modelValue !== undefined && !nonEmptyString(modelValue)) {
     throw invalid('BAI_CHAT_MODEL must be non-empty when provided', 'BAI_CHAT_MODEL');

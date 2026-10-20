@@ -6,6 +6,7 @@ import { createStaticStyles, cssVar, cx } from 'antd-style';
 import { memo } from 'react';
 
 import { useChatInputStore } from '@/features/ChatInput/store';
+import { QingzhouComposerOrnaments, qingzhouStyles } from '@/features/QingzhouBrand';
 import dynamic from '@/libs/next/dynamic';
 
 import ActionBar from '../ActionBar';
@@ -16,6 +17,14 @@ const FilePreview = dynamic(() => import('./FilePreview'), { ssr: false });
 
 const styles = createStaticStyles(({ css }) => ({
   container: css``,
+  expandedFrame: css`
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+
+    width: 100%;
+    min-height: 0;
+  `,
   fullscreen: css`
     position: absolute;
     z-index: 100;
@@ -43,23 +52,26 @@ const DesktopChatInput = memo(() => {
         paddingBlock={'0 12px'}
         paddingInline={12}
       >
-        <ChatInput
-          fullscreen={expand}
-          header={<ChatInputActionBar left={<ActionBar />} />}
-          slashMenuRef={slashMenuRef}
-          footer={
-            <ChatInputActionBar
-              left={<div />}
-              right={<SendArea />}
-              style={{
-                paddingRight: 8,
-              }}
-            />
-          }
-        >
-          {expand && fileNode}
-          <InputEditor defaultRows={1} />
-        </ChatInput>
+        <div className={cx(qingzhouStyles.composer, expand && styles.expandedFrame)}>
+          {!expand && <QingzhouComposerOrnaments />}
+          <ChatInput
+            fullscreen={expand}
+            header={<ChatInputActionBar left={<ActionBar />} />}
+            slashMenuRef={slashMenuRef}
+            footer={
+              <ChatInputActionBar
+                left={<div />}
+                right={<SendArea />}
+                style={{
+                  paddingRight: 8,
+                }}
+              />
+            }
+          >
+            {expand && fileNode}
+            <InputEditor defaultRows={1} />
+          </ChatInput>
+        </div>
       </Flexbox>
     </>
   );

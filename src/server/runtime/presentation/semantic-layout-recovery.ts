@@ -1,0 +1,345 @@
+import { isNativeVisual, type SlideContentIntent, visualRequirements } from './content-intent';
+import { contentLayout } from './content-layout';
+import { fitFormula } from './formula-renderer';
+import { PresentationPlanError } from './planner';
+import { layoutReportTable, type ReportTable } from './report-table';
+import { layoutScientificGraph } from './scientific-graph-layout';
+import {
+  escapeSvgText,
+  minimumScientificDiagramSize,
+  renderSemanticBlocks,
+  type SemanticBlock,
+  semanticBlockSchema,
+} from './semantic-blocks';
+import { measureSlideText } from './text-measurement';
+
+/** A restrained layout for valid sources when a model gives measured formulas undersized boxes. */
+export async function recoverSemanticSlideLayout(input: {
+  aspectRatio: string;
+  boardSpace?: string;
+  intent: SlideContentIntent;
+  rawBlocks: unknown;
+  title: string;
+  /** Already-owned image references; recovery may arrange them but never invent them. */
+  imageRefs?: string[];
+  visibleContent?: string[];
+  /** A deck contract owns the title/chrome and the content rectangle across every recovery path. */
+  deckBody?: { x: number; y: number; width: number; height: number };
+}) {
+  const blocks = Array.isArray(input.rawBlocks)
+    ? input.rawBlocks
+        .map((block) => semanticBlockSchema.safeParse(block))
+        .flatMap((result) => (result.success ? [result.data] : []))
+    : [];
+  const diagramIds = visualRequirements(input.intent)
+    .filter((visual) => visual.required && isNativeVisual(visual))
+    .map((visual) => visual.id);
+  if (diagramIds.length > 1)
+    throw new Error('This stage needs separate pages for multiple diagrams');
+  let diagram = blocks.find(
+    (block) => block.kind === 'scientific-diagram' && diagramIds.includes(block.id),
+  );
+  const required = visualRequirements(input.intent).find((visual) => visual.id === diagramIds[0]);
+  if (
+    required?.fidelity === 'computed' &&
+    (!diagram ||
+      (diagram.kind === 'scientific-diagram' &&
+        !['quadratic', 'taylor'].includes(diagram.spec.type) &&
+        diagram.provenance.kind !== 'source'))
+  ) {
+    const subject = `${input.title} ${required.brief}`;
+    const spec =
+      /凸|convex/iu.test(subject) && /切线|泰勒|tangent/iu.test(subject)
+        ? {
+            type: 'taylor' as const,
+            coefficients: [0, 0, 0.5],
+            at: 1,
+            xRange: [-2, 3] as [number, number],
+          }
+        : /病态|峡谷|动量|Nesterov|NAG|梯度下降/iu.test(subject) &&
+            /等高线|轨迹|迭代/u.test(subject)
+          ? {
+              type: 'quadratic' as const,
+              a: 1,
+              b: 20,
+              levels: [4, 12, 24],
+              start: [-3, 1.2] as [number, number],
+              learningRate: /Nesterov|NAG|动量/iu.test(subject) ? 0.035 : 0.08,
+              steps: 16,
+              methods: /Nesterov|NAG|动量/iu.test(subject)
+                ? (['gradient', 'nesterov'] as const)
+                : (['gradient'] as const),
+            }
+          : undefined;
+    if (spec)
+      diagram = semanticBlockSchema.parse({
+        id: required.id,
+        kind: 'scientific-diagram',
+        title: input.intent.claim.slice(0, 100),
+        provenance: { kind: 'illustrative' },
+        rect: { x: 48, y: 100, width: 400, height: 300 },
+        spec,
+      });
+  }
+  if (diagramIds.length && !diagram)
+    throw new Error('A required scientific diagram has no valid source');
+  const bounds = input.deckBody ?? contentLayout(input.boardSpace, input.aspectRatio);
+  const [ratioWidth, ratioHeight] = input.aspectRatio.split(':').map(Number);
+  const canvasHeight = (960 * ratioHeight) / ratioWidth;
+  const formulas = input.intent.formulas.filter((formula) => formula.placement !== 'notes');
+  const imageRefs = [...new Set(input.imageRefs ?? [])];
+  if (
+    input.deckBody &&
+    !formulas.length &&
+    imageRefs.length === 1 &&
+    diagram?.kind === 'scientific-diagram' &&
+    diagram.spec.type === 'graph' &&
+    required?.fidelity !== 'computed' &&
+    (input.visibleContent?.length ?? 0) >= 3
+  ) {
+    const table: ReportTable = {
+      type: 'table',
+      columns: ['要点', '资料内容'],
+      columnWeights: [1, 4],
+      fontSize: 18,
+      headerFill: '#1D3E6B',
+      rows: input.visibleContent!.map((fact, index) => {
+        const split = fact.indexOf('：');
+        return split > 0 && split <= 12
+          ? [fact.slice(0, split), fact.slice(split + 1)]
+          : [String(index + 1), fact];
+      }),
+    };
+    try {
+      for (const ratio of [0.65, 0.7, 0.75]) {
+        const width = Math.floor((bounds.width - 24) * ratio);
+        if (layoutReportTable(table, width, bounds.height).height <= bounds.height) {
+          const block: SemanticBlock = {
+            ...diagram,
+            rect: { x: bounds.x, y: bounds.y, width, height: bounds.height },
+            spec: table,
+          };
+          const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 ${canvasHeight}"><g data-deck-body="true"><g data-content-id="${block.id}"/><image href="${escapeSvgText(imageRefs[0])}" x="${bounds.x + width + 24}" y="${bounds.y}" width="${bounds.width - width - 24}" height="${bounds.height}" preserveAspectRatio="xMidYMid meet"/></g></svg>`;
+          return await renderSemanticBlocks(svg, [block], input.intent);
+        }
+      }
+    } catch {
+      // Keep the exact structured diagram when the full source table cannot fit.
+    }
+  }
+  const layout = async (width: number) => {
+    const fitted: SemanticBlock[] = [];
+    for (const formula of formulas) {
+      const fontSize = formula.fontSize ?? 28;
+      const fit = await fitFormula(
+        { latex: formula.latex, display: formula.display ?? true, fontSize },
+        { width, height: bounds.height },
+      );
+      fitted.push({
+        id: formula.id,
+        kind: 'formula',
+        latex: fit.latex,
+        display: formula.display ?? true,
+        color: '#172554',
+        fontSize,
+        rect: { x: bounds.x, y: 0, width, height: fit.measurement.minRectHeight },
+      });
+    }
+    return fitted;
+  };
+  const diagramFits = (diagramWidth: number, diagramHeight: number) => {
+    try {
+      if (diagram?.kind === 'scientific-diagram') {
+        const minimum = minimumScientificDiagramSize(diagram, diagramWidth);
+        if (minimum.width > diagramWidth || minimum.height > diagramHeight) return false;
+      }
+      if (diagram?.kind !== 'scientific-diagram' || diagram.spec.type !== 'graph') return true;
+      layoutScientificGraph(diagram.spec, diagramWidth, diagramHeight);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const sideColumn = (bounds.width - 24) / 2;
+  // A diagram can need more than half of the body. Preserve its exact source
+  // in an asymmetric column before stacking it above an unusably short image.
+  if (
+    input.deckBody &&
+    !formulas.length &&
+    imageRefs.length === 1 &&
+    diagram?.kind === 'scientific-diagram'
+  ) {
+    for (const ratio of [0.65, 0.7, 0.75]) {
+      const width = Math.floor((bounds.width - 24) * ratio);
+      if (!diagramFits(width, bounds.height)) continue;
+      const block = {
+        ...diagram,
+        rect: { x: bounds.x, y: bounds.y, width, height: bounds.height },
+      };
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 ${canvasHeight}"><g data-deck-body="true"><g data-content-id="${block.id}"/><image href="${escapeSvgText(imageRefs[0])}" x="${bounds.x + width + 24}" y="${bounds.y}" width="${bounds.width - width - 24}" height="${bounds.height}" preserveAspectRatio="xMidYMid meet"/></g></svg>`;
+      try {
+        return {
+          ...(await renderSemanticBlocks(svg, [block], input.intent)),
+          overflowNotes: (input.visibleContent ?? []).join('\n'),
+        };
+      } catch {
+        // Try the next measured width without changing source values or labels.
+      }
+    }
+  }
+  // A comparison graph keeps its full label width. Half a slide is not used when
+  // that would force the labels to shrink or the page to fail.
+  const twoColumns = Boolean(
+    diagram &&
+    bounds.width >= 800 &&
+    (formulas.length || imageRefs.length || input.visibleContent?.length) &&
+    diagramFits(sideColumn, bounds.height),
+  );
+  let formulaWidth = twoColumns ? (bounds.width - 24) / 2 : bounds.width;
+  let fitted: SemanticBlock[];
+  try {
+    fitted = await layout(formulaWidth);
+  } catch (error) {
+    if (!twoColumns) throw error;
+    formulaWidth = bounds.width;
+    fitted = await layout(formulaWidth);
+  }
+  let imageColumn = false;
+  if (!diagram && imageRefs.length === 1 && bounds.width >= 800 && formulaWidth === bounds.width) {
+    const stacked =
+      bounds.height -
+      fitted.reduce((sum, formula) => sum + formula.rect.height, 0) -
+      12 * Math.max(0, fitted.length - 1);
+    if (stacked < 180) {
+      try {
+        const half = (bounds.width - 24) / 2;
+        fitted = await layout(half);
+        formulaWidth = half;
+        imageColumn = true;
+      } catch {
+        // The formulas cannot wrap into a column. Keep them full width.
+      }
+    }
+  }
+  const sideBySide = formulaWidth < bounds.width;
+  const imageCount = imageRefs.length;
+  const reservedImage =
+    imageCount && (!sideBySide || diagram) ? 96 * imageCount + 12 * Math.max(0, imageCount - 1) : 0;
+  const formulaHeight = fitted.reduce((sum, formula) => sum + formula.rect.height, 0);
+  const formulaGaps = Math.max(0, fitted.length - 1);
+  const freeForGaps = bounds.height - formulaHeight - reservedImage;
+  const formulaGap = formulaGaps
+    ? Math.min(12, Math.max(4, Math.floor(freeForGaps / formulaGaps)))
+    : 0;
+  if (formulaHeight + formulaGap * formulaGaps + reservedImage > bounds.height + 1)
+    throw new Error('This stage needs separate pages for its formulas');
+  const blocksOut: SemanticBlock[] = [];
+  let y = bounds.y;
+  for (const [index, formula] of fitted.entries()) {
+    blocksOut.push({ ...formula, rect: { ...formula.rect, y } });
+    y += formula.rect.height;
+    if (index < fitted.length - 1) y += formulaGap;
+  }
+  const columnWidth = sideBySide ? (bounds.width - 24) / 2 : bounds.width;
+  const textMarkup: string[] = [];
+  const fontSize = 24;
+  const fontFamily = input.deckBody ? 'Microsoft YaHei, Arial' : 'Arial, Microsoft YaHei';
+  const measure = (text: string) => measureSlideText(text, fontSize, fontFamily);
+  const lineHeight = 29;
+  const wrap = (value: string, maxWidth: number): string[] => {
+    const tokens = value.match(/[A-Za-z0-9]+(?:[./+-][A-Za-z0-9]+)*|./gu) ?? [];
+    const lines: string[] = [];
+    let current = '';
+    for (const token of tokens) {
+      if (current && measure(current + token) > maxWidth) {
+        lines.push(current.trimEnd());
+        current = '';
+      }
+      if (measure(token) > maxWidth) {
+        for (const character of token) {
+          if (current && measure(current + character) > maxWidth) {
+            lines.push(current.trimEnd());
+            current = '';
+          }
+          current += character;
+        }
+      } else current += token;
+    }
+    if (current.trim()) lines.push(current.trimEnd());
+    return lines;
+  };
+  // An outline is content, not a request for a bullet list. Preserve an authored
+  // marker when present, but never introduce one during layout recovery.
+  // A report table is already the main body. Do not paste its complete outline
+  // above it again; retain those source details in notes and show one conclusion.
+  const tableOwnsBody = diagram?.kind === 'scientific-diagram' && diagram.spec.type === 'table';
+  const contentLines = (
+    tableOwnsBody ? [input.intent.claim] : (input.visibleContent ?? [])
+  ).flatMap((item) => wrap(item, columnWidth - 32));
+  const overflowLines: string[] = tableOwnsBody ? [...(input.visibleContent ?? [])] : [];
+  // Reserve the actual diagram before flowing supplementary prose. Otherwise
+  // a valid full-width table loses its space to the outline that it already visualizes.
+  const reservedDiagram =
+    !sideBySide && diagram?.kind === 'scientific-diagram'
+      ? minimumScientificDiagramSize(diagram, bounds.width).height + 12
+      : 0;
+  const textBottom = bounds.y + bounds.height - reservedImage - reservedDiagram;
+  if (contentLines.length && y + 4 < textBottom) {
+    y += 4;
+    for (const line of contentLines) {
+      if (y + lineHeight > textBottom) {
+        overflowLines.push(line);
+        continue;
+      }
+      y += lineHeight;
+      textMarkup.push(
+        `<text x="${bounds.x + 4}" y="${y}" font-size="${fontSize}" font-family="${fontFamily}" fill="#26374d">${escapeSvgText(line)}</text>`,
+      );
+    }
+    y += 8;
+  } else overflowLines.push(...contentLines);
+  const imageMarkup: string[] = [];
+  if (diagram?.kind === 'scientific-diagram') {
+    const diagramRect = sideBySide
+      ? {
+          x: bounds.x + (bounds.width - 24) / 2 + 24,
+          y: bounds.y,
+          width: (bounds.width - 24) / 2,
+          height: bounds.height,
+        }
+      : {
+          x: bounds.x,
+          y,
+          width: bounds.width,
+          height: bounds.y + bounds.height - y - (imageRefs.length ? reservedImage + 12 : 0),
+        };
+    const requiredSize = minimumScientificDiagramSize(diagram, diagramRect.width);
+    if (diagramRect.width < requiredSize.width || diagramRect.height < requiredSize.height)
+      throw new Error('This stage needs separate pages for formulas and the scientific diagram');
+    blocksOut.push({ ...diagram, rect: diagramRect });
+    if (!sideBySide) y += diagramRect.height + 12;
+  }
+  const remainingHeight = bounds.y + bounds.height - y;
+  if (imageColumn) {
+    const imageWidth = (bounds.width - 24) / 2;
+    imageMarkup.push(
+      `<image href="${escapeSvgText(imageRefs[0])}" x="${bounds.x + imageWidth + 24}" y="${bounds.y}" width="${imageWidth}" height="${bounds.height}" preserveAspectRatio="xMidYMid meet"/>`,
+    );
+  } else if (imageRefs.length) {
+    const imageWidth = diagram && sideBySide ? (bounds.width - 24) / 2 : bounds.width;
+    const gap = 12;
+    const imageHeight = (remainingHeight - gap * (imageRefs.length - 1)) / imageRefs.length;
+    if (imageHeight + 0.1 < 96)
+      throw new PresentationPlanError(
+        'This stage needs more space for its images; revise the diagram and image composition without dropping source facts',
+      );
+    for (const [index, href] of imageRefs.entries())
+      imageMarkup.push(
+        `<image href="${escapeSvgText(href)}" x="${bounds.x}" y="${y + index * (imageHeight + gap)}" width="${imageWidth}" height="${imageHeight}" preserveAspectRatio="xMidYMid meet"/>`,
+      );
+  }
+  const title = escapeSvgText(input.title);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 ${canvasHeight}">${input.deckBody ? '<g data-deck-body="true">' : `<rect x="0" y="0" width="960" height="${canvasHeight}" fill="#ffffff"/><text x="72" y="44" font-family="Microsoft YaHei, Arial" font-size="28" font-weight="bold" fill="#172554">${title}</text>`}${imageMarkup.join('')}${textMarkup.join('')}${blocksOut.map((block) => `<g data-content-id="${block.id}"/>`).join('')}${input.deckBody ? '</g>' : ''}</svg>`;
+  const rendered = await renderSemanticBlocks(svg, blocksOut, input.intent);
+  return overflowLines.length ? { ...rendered, overflowNotes: overflowLines.join('\n') } : rendered;
+}

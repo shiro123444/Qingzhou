@@ -17,6 +17,7 @@ describe('RuntimeStore', () => {
     cancelRun: vi.fn().mockResolvedValue(undefined),
     createImageGeneration: vi.fn().mockResolvedValue({ jobId: 'job-1', slots: [] }),
     createPresentationJob: vi.fn().mockResolvedValue({} as any),
+    deletePresentationJob: vi.fn().mockResolvedValue(undefined),
     downloadArtifact: vi.fn().mockResolvedValue(new Blob()),
     exportArtifact: vi.fn().mockResolvedValue({} as any),
     getArtifact: vi.fn().mockResolvedValue(null),

@@ -30,6 +30,9 @@ export function defineConfig(config: CustomNextConfig) {
       '*': [
         'public/**/*',
         '.next/static/**/*',
+        // MathJax loads font ranges dynamically; keep them in standalone deployments.
+        'node_modules/@mathjax/src/mjs/**/*',
+        'node_modules/.pnpm/@mathjax+mathjax-newcm-font@*/node_modules/@mathjax/mathjax-newcm-font/mjs/**/*',
 
         // Only needed for Docker standalone builds.
         // On Vercel (serverless), including native bindings can easily exceed function size limits.
@@ -66,7 +69,18 @@ export function defineConfig(config: CustomNextConfig) {
       emotion: true,
     },
     compress: isProd,
+    webpack: (webpackConfig) => {
+      if (process.env.QINGZHOU_BUILD_PROFILE) {
+        // Prefer bounded cold builds over retaining a second copy of module data in cache.
+        webpackConfig.cache = false;
+        webpackConfig.parallelism = process.env.QINGZHOU_BUILD_PROFILE === '4c4g' ? 4 : 8;
+      }
+      // Both development and compact builds need the same Markdown support as Turbopack.
+      webpackConfig.module.rules.push({ test: /\.md$/, type: 'asset/source' });
+      return webpackConfig;
+    },
     experimental: {
+      ...(process.env.NODE_ENV === 'development' && { webpackMemoryOptimizations: true }),
       optimizePackageImports: [
         'emoji-mart',
         '@emoji-mart/react',
@@ -265,7 +279,10 @@ export function defineConfig(config: CustomNextConfig) {
       outputFileTracingExcludes: config.outputFileTracingExcludes,
     }),
     ...(config.outputFileTracingIncludes && {
-      outputFileTracingIncludes: config.outputFileTracingIncludes,
+      outputFileTracingIncludes: {
+        ...(isStandaloneMode ? standaloneConfig.outputFileTracingIncludes : {}),
+        ...config.outputFileTracingIncludes,
+      },
     }),
     reactStrictMode: true,
     redirects: async () => [
@@ -353,10 +370,13 @@ export function defineConfig(config: CustomNextConfig) {
     // @napi-rs/canvas is a native module that can't be bundled by Turbopack
     // pdfjs-dist uses @napi-rs/canvas for DOMMatrix polyfill in Node.js environment
     serverExternalPackages: config.serverExternalPackages ?? [
+      '@mathjax/src',
       'pdfkit',
       '@napi-rs/canvas',
       '@lobehub/editor',
       'discord.js',
+      // Keep the adapter's optional native compression dependency out of Webpack's graph.
+      '@chat-adapter/discord',
       'ffmpeg-static',
       'pdfjs-dist',
       'ajv',
@@ -366,7 +386,7 @@ export function defineConfig(config: CustomNextConfig) {
     transpilePackages: ['mermaid', 'better-auth-harmony'],
     turbopack: {
       rules: {
-        ...(isTest
+        ...(isTest || isProd
           ? void 0
           : codeInspectorPlugin({
               bundler: 'turbopack',

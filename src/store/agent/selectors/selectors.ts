@@ -19,6 +19,7 @@ import {
 import { KnowledgeType } from '@lobechat/types';
 import { VoiceList } from '@lobehub/tts';
 
+import { JUMI_AVATAR, JUMI_NAME } from '@/const/jumi';
 import { DEFAULT_OPENING_QUESTIONS } from '@/features/AgentSetting/store/selectors';
 import { globalAgentContextManager } from '@/helpers/GlobalAgentContextManager';
 import { filterToolIds } from '@/helpers/toolFilters';
@@ -32,7 +33,14 @@ import { builtinAgentSelectors } from './builtinAgentSelectors';
 const currentAgentData = (s: AgentStoreState) =>
   s.activeAgentId ? s.agentMap[s.activeAgentId] : undefined;
 
-const currentAgentTitle = (s: AgentStoreState) => currentAgentData(s)?.title;
+const isLegacyInboxIdentity = (s: AgentStoreState, agentId?: string): boolean => {
+  if (!agentId || builtinAgentSelectors.inboxAgentId(s) !== agentId) return false;
+  const title = s.agentMap[agentId]?.title?.trim();
+  return !title || title === 'Lobe AI' || title === 'jumi AI' || title === '未命名助手';
+};
+
+const currentAgentTitle = (s: AgentStoreState) =>
+  isLegacyInboxIdentity(s, s.activeAgentId) ? JUMI_NAME : currentAgentData(s)?.title;
 
 const getDefaultAvatarByAgentId = (s: AgentStoreState, agentId?: string) => {
   const inboxAgentId = builtinAgentSelectors.inboxAgentId(s);
@@ -41,7 +49,9 @@ const getDefaultAvatarByAgentId = (s: AgentStoreState, agentId?: string) => {
 };
 
 const currentAgentAvatar = (s: AgentStoreState) =>
-  currentAgentData(s)?.avatar || getDefaultAvatarByAgentId(s, s.activeAgentId);
+  isLegacyInboxIdentity(s, s.activeAgentId)
+    ? JUMI_AVATAR
+    : currentAgentData(s)?.avatar || getDefaultAvatarByAgentId(s, s.activeAgentId);
 
 const currentAgentDescription = (s: AgentStoreState) => currentAgentData(s)?.description;
 
@@ -56,13 +66,16 @@ const currentAgentTags = (s: AgentStoreState) => currentAgentData(s)?.tags || []
  */
 const currentAgentMeta = (s: AgentStoreState): MetaData => {
   const data = currentAgentData(s);
+  const usesJumiIdentity = isLegacyInboxIdentity(s, s.activeAgentId);
   return {
-    avatar: data?.avatar || getDefaultAvatarByAgentId(s, s.activeAgentId),
+    avatar: usesJumiIdentity
+      ? JUMI_AVATAR
+      : data?.avatar || getDefaultAvatarByAgentId(s, s.activeAgentId),
     backgroundColor: data?.backgroundColor || DEFAULT_BACKGROUND_COLOR,
     description: data?.description || undefined,
     marketIdentifier: data?.marketIdentifier || undefined,
     tags: data?.tags,
-    title: data?.title === 'Lobe AI' ? 'jumi AI' : data?.title || undefined,
+    title: usesJumiIdentity ? JUMI_NAME : data?.title || undefined,
   };
 };
 
@@ -75,14 +88,15 @@ const getAgentMetaById =
   (s: AgentStoreState): MetaData => {
     const data = s.agentMap[agentId];
     if (!data) return {};
+    const usesJumiIdentity = isLegacyInboxIdentity(s, agentId);
 
     return {
-      avatar: data.avatar || getDefaultAvatarByAgentId(s, agentId),
+      avatar: usesJumiIdentity ? JUMI_AVATAR : data.avatar || getDefaultAvatarByAgentId(s, agentId),
       backgroundColor: data.backgroundColor || DEFAULT_BACKGROUND_COLOR,
       description: data.description || undefined,
       marketIdentifier: data.marketIdentifier || undefined,
       tags: data.tags,
-      title: data.title === 'Lobe AI' ? 'jumi AI' : data.title || undefined,
+      title: usesJumiIdentity ? JUMI_NAME : data.title || undefined,
     };
   };
 

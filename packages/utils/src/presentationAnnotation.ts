@@ -82,15 +82,26 @@ export function mergeAnnotationElements(
   for (const patch of patches) {
     if (!allowed.has(patch.index) || typeof patch.svg !== 'string' || patch.svg.length > 100_000)
       throw new Error('Annotation changed an unselected element');
-    // Local patches cannot introduce global styles, external resources or executable SVG.
+    // Local patches may define their own clip paths, but cannot reference definitions or
+    // resources outside the replacement fragment.
     if (
-      /<\s*(?:\/\s*)?(?:svg|defs|style|script|foreignObject|filter|animate\w*|set|a)\b|<!|\bon\w+\s*=|(?:javascript|data|https?):|url\s*\(/i.test(
+      /<\s*(?:\/\s*)?(?:svg|style|script|foreignObject|filter|mask|animate\w*|set|a)\b|<!|\bon\w+\s*=|(?:javascript|data|https?):/i.test(
         patch.svg,
       )
     )
       throw new Error('Unsafe annotation patch');
+    const localIds = new Set(
+      [...patch.svg.matchAll(/\bid\s*=\s*(["'])([^"']+)\1/gi)].map((match) => match[2]),
+    );
+    for (const reference of patch.svg.matchAll(/url\s*\(\s*(["']?)([^)'"\s]+)\1\s*\)/gi)) {
+      const value = reference[2];
+      if (!value.startsWith('#') || !localIds.has(value.slice(1)))
+        throw new Error('Unsafe annotation patch');
+    }
     const allowedTags = new Set([
       'g',
+      'defs',
+      'clipPath',
       'text',
       'tspan',
       'image',

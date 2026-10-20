@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -14,20 +14,30 @@ export type TemplatePageRenderer = (
 
 /** Render the native document; an XML approximation cannot reveal raster-only template design. */
 export const renderNativeTemplatePages: TemplatePageRenderer = async (bytes, pages, signal) => {
-  if (pages.length > 4 || pages.some((page) => !Number.isInteger(page) || page < 1))
-    throw new Error('Select one to four template pages');
-  const directory = await mkdtemp(join(tmpdir(), 'jumi-template-vision-'));
+  if (pages.length > 24 || pages.some((page) => !Number.isInteger(page) || page < 1))
+    throw new Error('Select one to twenty-four template pages');
+  const directory = await mkdtemp(path.join(tmpdir(), 'jumi-template-vision-'));
   const options = { signal, timeout: 120_000, maxBuffer: 1024 * 1024 };
   try {
-    const file = join(directory, 'source.pptx');
+    if (process.platform === 'win32') {
+      try {
+        const { renderPowerPointTemplatePages } = await import('./powerpoint-renderer');
+        return await renderPowerPointTemplatePages(bytes, pages, signal);
+      } catch (error) {
+        if (signal?.aborted) throw error;
+      }
+    }
+    const file = path.join(directory, 'source.pptx');
     await writeFile(file, bytes, { mode: 0o600 });
     await run(
-      'libreoffice',
+      process.platform === 'win32'
+        ? 'C:/Program Files/LibreOffice/program/soffice.com'
+        : 'libreoffice',
       [
-        `-env:UserInstallation=${pathToFileURL(join(directory, 'profile')).href}`,
+        `-env:UserInstallation=${pathToFileURL(path.join(directory, 'profile')).href}`,
         '--headless',
         '--convert-to',
-        'pdf',
+        'pdf:impress_pdf_Export:{"ExportHiddenSlides":{"type":"boolean","value":"true"}}',
         '--outdir',
         directory,
         file,
@@ -36,7 +46,7 @@ export const renderNativeTemplatePages: TemplatePageRenderer = async (bytes, pag
     );
     const rendered = [];
     for (const page of pages) {
-      const target = join(directory, `page-${page}`);
+      const target = path.join(directory, `page-${page}`);
       await run(
         'pdftoppm',
         [
@@ -50,7 +60,7 @@ export const renderNativeTemplatePages: TemplatePageRenderer = async (bytes, pag
           '-jpeg',
           '-jpegopt',
           'quality=86',
-          join(directory, 'source.pdf'),
+          path.join(directory, 'source.pdf'),
           target,
         ],
         options,

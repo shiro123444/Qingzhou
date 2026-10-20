@@ -2,6 +2,8 @@ import debug from 'debug';
 
 import type { MessengerPlatform } from '@/config/messenger';
 import { AgentBotProviderModel } from '@/database/models/agentBotProvider';
+import { BotInboundModel } from '@/database/models/botInbound';
+import { MessengerAccountLinkModel } from '@/database/models/messengerAccountLink';
 import { TopicModel } from '@/database/models/topic';
 import { type LobeChatDatabase } from '@/database/type';
 import { getAgentRuntimeRedisClient } from '@/server/modules/AgentRuntime/redis';
@@ -12,9 +14,15 @@ import {
   messengerConnectionIdForUser,
 } from '@/server/services/messenger/installations';
 import { messengerPlatformRegistry } from '@/server/services/messenger/platforms';
+import { isQueueAgentRuntimeEnabled } from '@/server/services/queue/impls';
 import { SystemAgentService } from '@/server/services/systemAgent';
 
 import { AgentBridgeService } from './AgentBridgeService';
+import { BotArtifactService } from './BotArtifactService';
+import { BotInteractionService } from './BotInteractionService';
+import type { LedgerBackend } from './callbackLedger';
+import { CallbackDeliveryError, CallbackDeliverySession, callbackHash } from './callbackLedger';
+import { normalizeBotPausePayload } from './deliveryEnvelope';
 import type { BotReplyLocale, PlatformClient, PlatformMessenger, UsageStats } from './platforms';
 import {
   getBotReplyLocale,
@@ -22,6 +30,7 @@ import {
   platformRegistry,
   resolveBotProviderConfig,
 } from './platforms';
+import { PostgresCallbackLedger } from './postgresCallbackLedger';
 import { clearReactionState, getReactionState, saveReactionState } from './reactionState';
 import {
   renderAgentError,
@@ -30,6 +39,7 @@ import {
   renderStopped,
   splitMessage,
 } from './replyTemplate';
+import { botSessionKey } from './sessionScope';
 
 const log = debug('lobe-server:bot:callback');
 
@@ -59,12 +69,15 @@ export interface BotCallbackBody {
    * `ChatTopicBotContext.messengerInstallationKey`.
    */
   messengerInstallationKey?: string;
+  messengerPlatformUserId?: string;
   operationId?: string;
   platformThreadId: string;
   progressMessageId?: string;
   reason?: string;
   reasoning?: string;
   shouldContinue?: boolean;
+  stepIndex?: number;
+  steps?: number;
   stepType?: 'call_llm' | 'call_tool';
   thinking?: boolean;
   /** Thread name from the platform (e.g. Discord thread title) */
@@ -90,17 +103,56 @@ export interface BotCallbackBody {
 export class BotCallbackService {
   private readonly db: LobeChatDatabase;
 
-  constructor(db: LobeChatDatabase) {
+  constructor(
+    db: LobeChatDatabase,
+    private readonly deliveryLedger?: LedgerBackend,
+  ) {
     this.db = db;
   }
 
-  async handleCallback(body: BotCallbackBody): Promise<void> {
+  async handleCallback(body: BotCallbackBody): Promise<{ status: 'delivered' | 'skipped' }> {
+    body = normalizeBotPausePayload(
+      body as unknown as Record<string, unknown>,
+    ) as unknown as BotCallbackBody;
+    // onComplete also signals a non-terminal human-approval pause. This bot
+    // receiver has no approval-card flow: afterStep owns progress, and the same
+    // operation must remain open for resumed steps and its eventual final reply.
+    if (body.type === 'completion' && body.reason === 'waiting_for_human') {
+      return { status: 'skipped' };
+    }
+
+    // Delivery timing and hook transport identity can change on terminal
+    // redispatch; neither changes the stable message intent.
+    const { duration: _duration, hookId: _hookId, hookType: _hookType, ...intent } = body;
+    if (isQueueAgentRuntimeEnabled() && !body.userId)
+      throw new CallbackDeliveryError('invalid_callback');
+    const backend =
+      this.deliveryLedger ??
+      (isQueueAgentRuntimeEnabled()
+        ? new PostgresCallbackLedger(this.db, body.userId!)
+        : undefined);
+    const delivery = await CallbackDeliverySession.begin(body, callbackHash(intent), backend);
+    if (!delivery) return { status: 'skipped' };
+    try {
+      await this.deliverCallback(body, delivery);
+      await delivery.complete();
+      return { status: 'delivered' };
+    } finally {
+      await delivery.release();
+    }
+  }
+
+  private async deliverCallback(
+    body: BotCallbackBody,
+    delivery: CallbackDeliverySession,
+  ): Promise<void> {
     const {
       type,
       applicationId,
       platformThreadId,
       progressMessageId,
       messengerInstallationKey,
+      messengerPlatformUserId,
       userId,
     } = body;
     const platform = platformThreadId.split(':')[0];
@@ -108,9 +160,11 @@ export class BotCallbackService {
     const { client, connectionId, messenger, charLimit, settings } = await this.createMessenger({
       applicationId,
       messengerInstallationKey,
+      messengerPlatformUserId,
       platform,
       platformThreadId,
       userId,
+      replyToMessageId: body.userMessageId,
     });
 
     const entry = platformRegistry.getPlatform(platform);
@@ -118,22 +172,48 @@ export class BotCallbackService {
     const replyLocale = getBotReplyLocale(platform);
 
     if (type === 'step') {
+      if (body.reason === 'waiting_for_human' && body.userId && body.operationId) {
+        const notice = await new BotInteractionService(this.db, body.userId).describe(
+          body.operationId,
+        );
+        if (notice) {
+          const plan = await delivery.plan({ notice });
+          await delivery.effect('interaction-notice', () => messenger.createMessage(plan.notice));
+        }
+        return;
+      }
       if (canEdit && progressMessageId && settings.displayToolCalls === true) {
-        await this.handleStep(body, messenger, progressMessageId, client, replyLocale);
+        await this.handleStep(body, messenger, progressMessageId, client, replyLocale, delivery);
       }
       // Swap the user-message reaction to match the current step type (tool
       // call vs. LLM reasoning). Runs regardless of `displayToolCalls` because
       // the progress-message edit and the reaction are separate UX channels.
-      await this.swapStepReaction(body, client, platform);
+      await this.swapStepReaction(body, client, platform, delivery);
       // Only renew typing when more steps are expected. The final step
       // (shouldContinue=false) may arrive after the completion callback
       // via async delivery (QStash), which would restart typing after stop.
       if (body.shouldContinue) {
-        this.renewGatewayTyping(connectionId, platformThreadId);
+        await delivery.bestEffort('gateway-typing', () =>
+          this.renewGatewayTyping(connectionId, platformThreadId),
+        );
       }
     } else if (type === 'completion') {
+      if (body.userId && body.operationId) {
+        const key = botSessionKey(body.userId, {
+          platform,
+          applicationId,
+          platformThreadId,
+          messengerInstallationKey,
+        });
+        await new BotInboundModel(this.db).releaseSession(body.userId, key, {
+          operationId: body.operationId,
+        });
+        AgentBridgeService.clearActiveThread(key);
+      }
       // Stop typing on the gateway
-      this.stopGatewayTyping(connectionId, platformThreadId);
+      await delivery.bestEffort('gateway-stop', () =>
+        this.stopGatewayTyping(connectionId, platformThreadId),
+      );
 
       await this.handleCompletion(
         body,
@@ -141,24 +221,29 @@ export class BotCallbackService {
         progressMessageId ?? '',
         client,
         replyLocale,
+        delivery,
         charLimit,
-        canEdit,
+        // A late in-flight progress edit must never overwrite the final reply.
+        // Keep its unknown tombstone and deliver the final reply independently.
+        canEdit && !delivery.hasUncertainProgress(),
       );
-      await this.clearStepReaction(body, client, platform);
+      await this.clearStepReaction(body, client, platform, delivery);
       // Clear the active thread tracker so the thread can accept new messages.
       // In queue mode, the bridge handler's finally block skips this cleanup
       // to keep the thread marked active while the agent runs on the job queue.
-      AgentBridgeService.clearActiveThread(platformThreadId);
-      this.summarizeTopicTitle(body, messenger);
+      if (!body.userId) AgentBridgeService.clearActiveThread(platformThreadId);
+      await this.summarizeTopicTitle(body, messenger, delivery);
     }
   }
 
   private async createMessenger(params: {
     applicationId: string;
     messengerInstallationKey?: string;
+    messengerPlatformUserId?: string;
     platform: string;
     platformThreadId: string;
     userId?: string;
+    replyToMessageId?: string;
   }): Promise<{
     charLimit?: number;
     connectionId: string;
@@ -166,7 +251,14 @@ export class BotCallbackService {
     messenger: PlatformMessenger;
     settings: Record<string, unknown>;
   }> {
-    const { applicationId, messengerInstallationKey, platform, platformThreadId, userId } = params;
+    const {
+      applicationId,
+      messengerInstallationKey,
+      messengerPlatformUserId,
+      platform,
+      platformThreadId,
+      userId,
+    } = params;
 
     // Deterministic discriminator: any run originated from the shared
     // Messenger bot is tagged by `MessengerRouter` with the install key. We
@@ -178,6 +270,7 @@ export class BotCallbackService {
         messengerInstallationKey,
         platformThreadId,
         userId,
+        messengerPlatformUserId,
       );
     }
 
@@ -187,7 +280,7 @@ export class BotCallbackService {
       applicationId,
     );
 
-    if (!row?.credentials) {
+    if (!row?.credentials || row.enabled === false || (userId && row.userId !== userId)) {
       throw new Error(`Bot provider not found for ${platform} appId=${applicationId}`);
     }
 
@@ -212,6 +305,7 @@ export class BotCallbackService {
     const charLimit = (settings.charLimit as number) || undefined;
 
     const client = entry.clientFactory.createClient(config, {
+      replyToMessageId: params.replyToMessageId,
       redisClient: getAgentRuntimeRedisClient() as any,
     });
     const messenger = client.getMessenger(platformThreadId);
@@ -237,6 +331,7 @@ export class BotCallbackService {
     installationKey: string,
     platformThreadId: string,
     userId?: string,
+    platformUserId?: string,
   ): Promise<{
     charLimit?: number;
     connectionId: string;
@@ -252,6 +347,16 @@ export class BotCallbackService {
     const creds = await store.resolveByKey(installationKey);
     if (!creds) {
       throw new Error(`Messenger install not found for ${platform} (key=${installationKey})`);
+    }
+
+    if (userId) {
+      const link = await new MessengerAccountLinkModel(this.db, userId).findByPlatform(
+        platform,
+        creds.tenantId,
+      );
+      if (!link || (platformUserId && link.platformUserId !== platformUserId)) {
+        throw new Error('Messenger binding no longer authorizes this callback');
+      }
     }
 
     const binder = messengerPlatformRegistry.createBinder(creds);
@@ -290,6 +395,7 @@ export class BotCallbackService {
     progressMessageId: string,
     client: PlatformClient,
     replyLocale: BotReplyLocale,
+    delivery: CallbackDeliverySession,
   ): Promise<void> {
     if (!body.shouldContinue) return;
 
@@ -327,13 +433,12 @@ export class BotCallbackService {
     const isLlmFinalResponse =
       body.stepType === 'call_llm' && !body.toolsCalling?.length && body.content;
 
-    try {
-      await messenger.editMessage(progressMessageId, progressText);
-      if (!isLlmFinalResponse) {
-        await messenger.triggerTyping?.();
-      }
-    } catch (error) {
-      log('handleStep: failed to edit progress message: %O', error);
+    const plan = await delivery.plan({ progressMessageId, progressText });
+    await delivery.effect('progress-edit', () =>
+      messenger.editMessage(plan.progressMessageId, plan.progressText),
+    );
+    if (!isLlmFinalResponse && messenger.triggerTyping) {
+      await delivery.bestEffort('platform-typing', () => messenger.triggerTyping!());
     }
   }
 
@@ -343,6 +448,7 @@ export class BotCallbackService {
     progressMessageId: string,
     client: PlatformClient,
     replyLocale: BotReplyLocale,
+    delivery: CallbackDeliverySession,
     charLimit?: number,
     canEdit = true,
   ): Promise<void> {
@@ -357,29 +463,37 @@ export class BotCallbackService {
       );
       const errorBody = renderAgentError(errorType, errorMessage, operationId, replyLocale);
       const errorText = client.formatMarkdown?.(errorBody) ?? errorBody;
-      await this.deliverFirstChunk(messenger, progressMessageId, errorText, canEdit);
+      const plan = await delivery.plan({ canEdit, chunks: [errorText], progressMessageId });
+      await this.deliverFirstChunk(
+        messenger,
+        plan.progressMessageId,
+        plan.chunks[0],
+        plan.canEdit,
+        delivery,
+      );
       return;
     }
 
     if (reason === 'interrupted') {
       const stoppedText = renderStopped(errorMessage, replyLocale);
-      try {
-        await messenger.createMessage(stoppedText);
-      } catch (error) {
-        log('handleCompletion: failed to send interrupted message: %O', error);
-      }
+      const plan = await delivery.plan({ chunks: [stoppedText], mode: 'create' });
+      await delivery.effect('chunk:0', () => messenger.createMessage(plan.chunks[0]));
       return;
     }
 
     // `!lastAssistantContent` lets whitespace-only strings ("\n", "  ") through;
     // those collapse to empty text downstream and get rejected by Telegram as
     // "message text is empty", silently losing the reply. Trim before testing.
-    if (!lastAssistantContent?.trim()) {
+    const artifacts =
+      messenger.prepareFile && body.userId && body.operationId
+        ? await new BotArtifactService(this.db, body.userId).list(body.operationId)
+        : [];
+    if (!lastAssistantContent?.trim() && !artifacts.length) {
       log('handleCompletion: no lastAssistantContent, skipping');
       return;
     }
 
-    const msgBody = renderFinalReply(lastAssistantContent);
+    const msgBody = renderFinalReply(lastAssistantContent ?? '');
 
     const stats: UsageStats = {
       elapsedMs: body.duration,
@@ -393,48 +507,50 @@ export class BotCallbackService {
     const finalText = client.formatReply?.(formattedBody, stats) ?? formattedBody;
     const chunks = splitMessage(finalText, charLimit);
 
-    if (chunks.length === 0) {
+    const plan = await delivery.plan({ canEdit, chunks, progressMessageId, artifacts });
+    if (plan.chunks.length === 0 && !plan.artifacts?.length) {
       log('handleCompletion: all chunks empty after formatting, skipping send');
       return;
     }
 
-    await this.deliverFirstChunk(messenger, progressMessageId, chunks[0], canEdit);
-    // Each remaining chunk gets its own try/catch so a single transient failure
-    // (rate-limit, network blip) doesn't drop everything that follows.
-    for (let i = 1; i < chunks.length; i++) {
-      try {
-        await messenger.createMessage(chunks[i]);
-      } catch (error) {
-        log('handleCompletion: failed to send chunk %d: %O', i, error);
-      }
+    if (plan.chunks.length)
+      await this.deliverFirstChunk(
+        messenger,
+        plan.progressMessageId,
+        plan.chunks[0],
+        plan.canEdit,
+        delivery,
+      );
+    for (let i = 1; i < plan.chunks.length; i++) {
+      await delivery.effect(`chunk:${i}`, () => messenger.createMessage(plan.chunks[i]));
+    }
+    for (const fileId of plan.artifacts ?? []) {
+      if (delivery.hasDeliveredEffect(`file:${fileId}`)) continue;
+      if (!messenger.prepareFile || !body.userId)
+        throw new Error('File reply transport unavailable');
+      const file = await new BotArtifactService(this.db, body.userId).read(fileId);
+      // CDN upload is not a user-visible send. Failures here remain safely retryable.
+      const send = await messenger.prepareFile({
+        ...file,
+        deliveryId: callbackHash([body.operationId, fileId]),
+      });
+      await delivery.effect(`file:${fileId}`, send);
     }
   }
 
-  /**
-   * Deliver the first chunk via edit when possible, else send a new message.
-   * If editing fails for any reason, fall back to createMessage so the agent's
-   * actual reply still reaches the user — silent edit failures were causing
-   * "agent ran but no reply appeared" reports on Telegram.
-   */
+  /** An edit error may mean success at the platform. Never blindly append a fallback. */
   private async deliverFirstChunk(
     messenger: PlatformMessenger,
     progressMessageId: string,
     text: string,
     canEdit: boolean,
+    delivery: CallbackDeliverySession,
   ): Promise<void> {
-    if (canEdit && progressMessageId) {
-      try {
-        await messenger.editMessage(progressMessageId, text);
-        return;
-      } catch (error) {
-        log('handleCompletion: editMessage failed, falling back to createMessage: %O', error);
-      }
-    }
-    try {
-      await messenger.createMessage(text);
-    } catch (error) {
-      log('handleCompletion: createMessage fallback failed: %O', error);
-    }
+    await delivery.effect('chunk:0', () =>
+      canEdit && progressMessageId
+        ? messenger.editMessage(progressMessageId, text)
+        : messenger.createMessage(text),
+    );
   }
 
   /**
@@ -448,6 +564,7 @@ export class BotCallbackService {
     body: BotCallbackBody,
     client: PlatformClient,
     platform: string,
+    delivery: CallbackDeliverySession,
   ): Promise<void> {
     const { userMessageId, applicationId, platformThreadId } = body;
     if (!userMessageId) return;
@@ -460,11 +577,9 @@ export class BotCallbackService {
     const previous = await getReactionState(platform, applicationId, userMessageId);
     if (previous?.emoji === desiredEmoji) return;
 
-    try {
-      await messenger.replaceReaction?.(userMessageId, previous?.emoji ?? null, desiredEmoji);
-    } catch (error) {
-      log('swapStepReaction: failed: %O', error);
-    }
+    await delivery.bestEffort('step-reaction', async () =>
+      messenger.replaceReaction?.(userMessageId, previous?.emoji ?? null, desiredEmoji),
+    );
 
     await saveReactionState(platform, applicationId, userMessageId, {
       emoji: desiredEmoji,
@@ -481,6 +596,7 @@ export class BotCallbackService {
     body: BotCallbackBody,
     client: PlatformClient,
     platform: string,
+    delivery: CallbackDeliverySession,
   ): Promise<void> {
     const { userMessageId, applicationId, platformThreadId } = body;
     if (!userMessageId) return;
@@ -496,43 +612,41 @@ export class BotCallbackService {
       platformThreadId;
     const messenger = client.getMessenger(reactionThreadId);
 
-    try {
-      await messenger.replaceReaction?.(userMessageId, emoji, null);
-    } catch (error) {
-      log('clearStepReaction: failed: %O', error);
-    }
+    await delivery.bestEffort('clear-reaction', async () =>
+      messenger.replaceReaction?.(userMessageId, emoji, null),
+    );
 
     await clearReactionState(platform, applicationId, userMessageId);
   }
 
   /**
    * Renew typing on the message-gateway. Each POST resets the 30s auto-stop timeout.
-   * Fire-and-forget — typing is best-effort.
+   * Awaited under the callback lease to avoid renewing typing after completion.
    *
    * Skipped when `connectionId` is empty (messenger-originated runs have no
    * `agent_bot_providers.id` to register against the gateway).
    */
-  private renewGatewayTyping(connectionId: string, platformThreadId: string): void {
+  private async renewGatewayTyping(connectionId: string, platformThreadId: string): Promise<void> {
     if (!connectionId) return;
     const client = getMessageGatewayClient();
     if (!client.isEnabled) return;
 
-    client.startTyping(connectionId, platformThreadId).catch((err) => {
-      log('renewGatewayTyping failed: %O', err);
-    });
+    await client.startTyping(connectionId, platformThreadId);
   }
 
-  private stopGatewayTyping(connectionId: string, platformThreadId: string): void {
+  private async stopGatewayTyping(connectionId: string, platformThreadId: string): Promise<void> {
     if (!connectionId) return;
     const client = getMessageGatewayClient();
     if (!client.isEnabled) return;
 
-    client.stopTyping(connectionId, platformThreadId).catch((err) => {
-      log('stopGatewayTyping failed: %O', err);
-    });
+    await client.stopTyping(connectionId, platformThreadId);
   }
 
-  private summarizeTopicTitle(body: BotCallbackBody, messenger: PlatformMessenger): void {
+  private async summarizeTopicTitle(
+    body: BotCallbackBody,
+    messenger: PlatformMessenger,
+    delivery: CallbackDeliverySession,
+  ): Promise<void> {
     const { reason, topicId, userId, userPrompt, lastAssistantContent, threadName } = body;
     if (
       reason === 'error' ||
@@ -545,44 +659,28 @@ export class BotCallbackService {
       return;
     }
 
-    // Thread already has a user-set name — use it as topic title, skip LLM generation
-    if (threadName) {
+    try {
       const topicModel = new TopicModel(this.db, userId);
-      topicModel
-        .findById(topicId)
-        .then(async (topic) => {
-          if (topic?.title) return;
-          await topicModel.update(topicId, { title: threadName });
-        })
-        .catch((error) => {
-          log('summarizeTopicTitle: failed to set thread name as topic title: %O', error);
-        });
-      return;
+      const topic = await topicModel.findById(topicId);
+      if (topic?.title) return;
+
+      // A user-set thread name does not need LLM generation or a platform rename.
+      if (threadName) {
+        await topicModel.update(topicId, { title: threadName });
+        return;
+      }
+      const systemAgent = new SystemAgentService(this.db, userId);
+      const title = await systemAgent.generateTopicTitle({ lastAssistantContent, userPrompt });
+      if (!title) return;
+      await topicModel.update(topicId, { title });
+      if (messenger.updateThreadName) {
+        await delivery.bestEffort('thread-name', () => messenger.updateThreadName!(title));
+      }
+    } catch (error) {
+      // UX failures remain ancillary. Ownership/backend failures still fail
+      // closed; they must not permit a stale worker to continue sending.
+      if (error instanceof CallbackDeliveryError) throw error;
+      log('summarizeTopicTitle failed (%s)', error instanceof Error ? error.name : 'unknown');
     }
-
-    const topicModel = new TopicModel(this.db, userId);
-    topicModel
-      .findById(topicId)
-      .then(async (topic) => {
-        if (topic?.title) return;
-
-        const systemAgent = new SystemAgentService(this.db, userId);
-        const title = await systemAgent.generateTopicTitle({
-          lastAssistantContent,
-          userPrompt,
-        });
-        if (!title) return;
-
-        await topicModel.update(topicId, { title });
-
-        if (messenger.updateThreadName) {
-          messenger.updateThreadName(title).catch((error) => {
-            log('summarizeTopicTitle: failed to update thread name: %O', error);
-          });
-        }
-      })
-      .catch((error) => {
-        log('summarizeTopicTitle: failed: %O', error);
-      });
   }
 }

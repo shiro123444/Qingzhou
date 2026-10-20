@@ -1,6 +1,8 @@
-import { JUMI_CHAT_MODELS } from '@/const/jumi';
+import { useAiInfraStore } from '@/store/aiInfra';
 import { type EnabledProviderWithModels } from '@/types/aiProvider';
 
-export const useEnabledChatModels = (): EnabledProviderWithModels[] => {
-  return JUMI_CHAT_MODELS;
-};
+const EMPTY_MODELS: EnabledProviderWithModels[] = [];
+
+/** Use the authenticated user's enabled provider/model catalogue. */
+export const useEnabledChatModels = (): EnabledProviderWithModels[] =>
+  useAiInfraStore((s) => s.enabledChatModelList ?? EMPTY_MODELS);

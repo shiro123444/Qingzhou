@@ -8,7 +8,7 @@ import { DEFAULT_LANG } from '@/const/locale';
 import { SITEMAP_BASE_URL } from '@/const/url';
 import { type Locales } from '@/locales/resources';
 import { locales as allLocales } from '@/locales/resources';
-import { DiscoverService } from '@/server/services/discover';
+import type { DiscoverService } from '@/server/services/discover';
 import { getCanonicalUrl } from '@/server/utils/url';
 import { isDev } from '@/utils/env';
 
@@ -37,25 +37,68 @@ export const LAST_MODIFIED = new Date().toISOString();
 const ITEMS_PER_PAGE = 100;
 
 export class Sitemap {
-  sitemapIndexs = [{ id: SitemapType.Pages }, { id: SitemapType.Providers }];
+  private readonly includeMarketplace: boolean;
+  private discovery?: Promise<DiscoverService>;
 
-  private discoverService = new DiscoverService();
+  constructor(options: { includeMarketplace?: boolean } = {}) {
+    this.includeMarketplace =
+      options.includeMarketplace ?? process.env.QINGZHOU_MARKET_SITEMAPS === '1';
+  }
+
+  get sitemapIndexs() {
+    return [
+      { id: SitemapType.Pages },
+      ...(this.includeMarketplace ? [{ id: SitemapType.Providers }] : []),
+    ];
+  }
+
+  private discoverService(): Promise<DiscoverService> {
+    this.discovery ??= import('@/server/services/discover').then(
+      ({ DiscoverService }) => new DiscoverService(),
+    );
+    return this.discovery;
+  }
+
+  /** One source of truth for the index and Next's static route enumeration. */
+  async getSitemapIds() {
+    if (!this.includeMarketplace) return this.sitemapIndexs;
+    const [plugins, assistants, models] = await Promise.all([
+      this.getPluginPageCount(),
+      this.getAssistantPageCount(),
+      this.getModelPageCount(),
+    ]);
+    return [
+      ...this.sitemapIndexs,
+      ...Array.from({ length: plugins }, (_, index) => ({
+        id: `plugins-${index + 1}` as SitemapType,
+      })),
+      ...Array.from({ length: assistants }, (_, index) => ({
+        id: `assistants-${index + 1}` as SitemapType,
+      })),
+      ...Array.from({ length: models }, (_, index) => ({
+        id: `models-${index + 1}` as SitemapType,
+      })),
+    ];
+  }
 
   // Get total number of plugin pages
   async getPluginPageCount(): Promise<number> {
-    const list = await this.discoverService.getPluginIdentifiers();
+    if (!this.includeMarketplace) return 0;
+    const list = await (await this.discoverService()).getPluginIdentifiers();
     return Math.ceil(list.length / ITEMS_PER_PAGE);
   }
 
   // Get total number of assistant pages
   async getAssistantPageCount(): Promise<number> {
-    const list = await this.discoverService.getAssistantIdentifiers();
+    if (!this.includeMarketplace) return 0;
+    const list = await (await this.discoverService()).getAssistantIdentifiers();
     return Math.ceil(list.length / ITEMS_PER_PAGE);
   }
 
   // Get total number of model pages
   async getModelPageCount(): Promise<number> {
-    const list = await this.discoverService.getModelIdentifiers();
+    if (!this.includeMarketplace) return 0;
+    const list = await (await this.discoverService()).getModelIdentifiers();
     return Math.ceil(list.length / ITEMS_PER_PAGE);
   }
 
@@ -159,52 +202,23 @@ export class Sitemap {
   }
 
   async getIndex(): Promise<string> {
-    const staticSitemaps = this.sitemapIndexs.map((item) =>
+    const staticSitemaps = (await this.getSitemapIds()).map((item) =>
       this._generateSitemapLink(
         getCanonicalUrl(SITEMAP_BASE_URL, isDev ? item.id : `${item.id}.xml`),
       ),
     );
 
-    // Get page counts for types that need pagination
-    const [pluginPages, assistantPages, modelPages] = await Promise.all([
-      this.getPluginPageCount(),
-      this.getAssistantPageCount(),
-      this.getModelPageCount(),
-    ]);
-
-    // Generate paginated sitemap links
-    const paginatedSitemaps = [
-      ...Array.from({ length: pluginPages }, (_, i) =>
-        this._generateSitemapLink(
-          getCanonicalUrl(SITEMAP_BASE_URL, isDev ? `plugins-${i + 1}` : `plugins-${i + 1}.xml`),
-        ),
-      ),
-      ...Array.from({ length: assistantPages }, (_, i) =>
-        this._generateSitemapLink(
-          getCanonicalUrl(
-            SITEMAP_BASE_URL,
-            isDev ? `assistants-${i + 1}` : `assistants-${i + 1}.xml`,
-          ),
-        ),
-      ),
-      ...Array.from({ length: modelPages }, (_, i) =>
-        this._generateSitemapLink(
-          getCanonicalUrl(SITEMAP_BASE_URL, isDev ? `models-${i + 1}` : `models-${i + 1}.xml`),
-        ),
-      ),
-    ];
-
     return [
       '<?xml version="1.0" encoding="UTF-8"?>',
       '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
       ...staticSitemaps,
-      ...paginatedSitemaps,
       '</sitemapindex>',
     ].join('\n');
   }
 
   async getAssistants(page?: number): Promise<MetadataRoute.Sitemap> {
-    const list = await this.discoverService.getAssistantIdentifiers();
+    if (!this.includeMarketplace) return [];
+    const list = await (await this.discoverService()).getAssistantIdentifiers();
 
     if (page !== undefined) {
       const startIndex = (page - 1) * ITEMS_PER_PAGE;
@@ -233,7 +247,8 @@ export class Sitemap {
   }
 
   async getPlugins(page?: number): Promise<MetadataRoute.Sitemap> {
-    const list = await this.discoverService.getPluginIdentifiers();
+    if (!this.includeMarketplace) return [];
+    const list = await (await this.discoverService()).getPluginIdentifiers();
 
     if (page !== undefined) {
       const startIndex = (page - 1) * ITEMS_PER_PAGE;
@@ -262,7 +277,8 @@ export class Sitemap {
   }
 
   async getModels(page?: number): Promise<MetadataRoute.Sitemap> {
-    const list = await this.discoverService.getModelIdentifiers();
+    if (!this.includeMarketplace) return [];
+    const list = await (await this.discoverService()).getModelIdentifiers();
 
     if (page !== undefined) {
       const startIndex = (page - 1) * ITEMS_PER_PAGE;
@@ -291,7 +307,8 @@ export class Sitemap {
   }
 
   async getProviders(): Promise<MetadataRoute.Sitemap> {
-    const list = await this.discoverService.getProviderIdentifiers();
+    if (!this.includeMarketplace) return [];
+    const list = await (await this.discoverService()).getProviderIdentifiers();
     const sitmap = list
       .filter((item) => item.identifier) // Filter out items with empty identifiers
       .map((item) =>
