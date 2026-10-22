@@ -1,6 +1,11 @@
+import {
+  appendAccountJournal,
+  ownedLearningDirectory,
+  withAccountData,
+} from '../learning-lifecycle/files';
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
-import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import type {
@@ -175,7 +180,14 @@ export class FilePresentationStorage
         code: 'ARTIFACT_SCOPE_MISMATCH',
       });
     }
-    return path.join(this.root, hash(JSON.stringify([scope.userId, scope.sessionId])), kind);
+    return path.join(
+      ownedLearningDirectory(
+        scope.userId,
+        this.root,
+        hash(JSON.stringify([scope.userId, scope.sessionId])),
+      ),
+      kind,
+    );
   }
 
   private path(scope: RuntimeScope, kind: string, id: string): string {
@@ -194,31 +206,33 @@ export class FilePresentationStorage
   }
 
   private async write(scope: RuntimeScope, kind: string, id: string, data: unknown): Promise<void> {
-    await mkdir(this.directory(scope, kind), { recursive: true, mode: 0o700 });
-    const path = this.path(scope, kind, id);
-    const temporary = `${path}.${randomUUID()}.tmp`;
-    try {
-      await writeFile(temporary, JSON.stringify(data), { mode: 0o600 });
-      // Windows readers and virus scanners can briefly hold the destination.
-      // Keep the old complete snapshot until an atomic replacement succeeds.
-      for (let attempt = 0; ; attempt++) {
-        try {
-          await rename(temporary, path);
-          break;
-        } catch (error) {
-          if (
-            attempt >= 5 ||
-            !['EPERM', 'EACCES', 'EBUSY'].includes((error as NodeJS.ErrnoException).code ?? '')
-          )
-            throw error;
-          await new Promise((resolve) => setTimeout(resolve, 20 * 2 ** attempt));
+    return withAccountData(this.directory(scope, kind), async () => {
+      await mkdir(this.directory(scope, kind), { recursive: true, mode: 0o700 });
+      const path = this.path(scope, kind, id);
+      const temporary = `${path}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(temporary, JSON.stringify(data), { mode: 0o600 });
+        // Windows readers and virus scanners can briefly hold the destination.
+        // Keep the old complete snapshot until an atomic replacement succeeds.
+        for (let attempt = 0; ; attempt++) {
+          try {
+            await rename(temporary, path);
+            break;
+          } catch (error) {
+            if (
+              attempt >= 5 ||
+              !['EPERM', 'EACCES', 'EBUSY'].includes((error as NodeJS.ErrnoException).code ?? '')
+            )
+              throw error;
+            await new Promise((resolve) => setTimeout(resolve, 20 * 2 ** attempt));
+          }
         }
+      } finally {
+        await unlink(temporary).catch((error) => {
+          if (!missing(error)) throw error;
+        });
       }
-    } finally {
-      await unlink(temporary).catch((error) => {
-        if (!missing(error)) throw error;
-      });
-    }
+    });
   }
 
   async listJobs(scope: RuntimeScope): Promise<PresentationJob[]> {
@@ -293,6 +307,37 @@ export class FilePresentationStorage
       )
         throw Object.assign(new Error('Invalid presence tab'), { code: 'ARTIFACT_INVALID' });
       await this.write(scope, path.join('presence', hash(jobId)), tab.tabId, tab);
+    }
+  }
+
+  /** Publish a new version identity once; never replaces an existing job. */
+  async createJobImmutable(
+    scope: RuntimeScope,
+    record: StoredPresentationJob,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    signal?.throwIfAborted();
+    const file = this.path(scope, 'jobs', record.job.jobId);
+    await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+    const temporary = `${file}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(
+        temporary,
+        JSON.stringify({ ...record, scope: { userId: scope.userId, sessionId: scope.sessionId } }),
+        { mode: 0o600, flag: 'wx' },
+      );
+      signal?.throwIfAborted();
+      try {
+        await link(temporary, file);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST')
+          throw Object.assign(new Error('Version identity already exists'), {
+            code: 'PRESENTATION_CONFLICT',
+          });
+        throw error;
+      }
+    } finally {
+      await unlink(temporary).catch(() => undefined);
     }
   }
 
@@ -449,7 +494,13 @@ class DurablePresentationJournal extends PresentationJobEventJournal {
   override append(jobId: string, event: PresentationJobEvent): PresentationJobEvent | undefined {
     this.load(jobId);
     const appended = super.append(jobId, event);
-    if (appended)
+    if (
+      appended &&
+      !appendAccountJournal(
+        path.join(this.directory, `${hash(jobId)}.jsonl`),
+        `${JSON.stringify(appended)}\n`,
+      )
+    )
       appendFileSync(
         path.join(this.directory, `${hash(jobId)}.jsonl`),
         `${JSON.stringify(appended)}\n`,

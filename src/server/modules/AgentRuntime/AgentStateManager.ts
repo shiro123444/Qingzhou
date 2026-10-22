@@ -1,7 +1,8 @@
-import {
-  type AgentEvent,
-  type AgentRuntimeContext,
-  type AgentState,
+import type {
+  AgentEvent,
+  AgentRuntimeContext,
+  AgentState,
+  HarnessRunBinding,
 } from '@lobechat/agent-runtime';
 import debug from 'debug';
 import { type Redis } from 'ioredis';
@@ -33,6 +34,7 @@ export interface StepResult {
 export interface AgentOperationMetadata {
   agentConfig?: any;
   createdAt: string;
+  harnessBinding?: HarnessRunBinding;
   lastActiveAt: string;
   modelRuntimeConfig?: any;
   status: AgentState['status'];
@@ -196,6 +198,7 @@ export class AgentStateManager implements IAgentStateManager {
       }
 
       return {
+        harnessBinding: metadata.harnessBinding ? JSON.parse(metadata.harnessBinding) : undefined,
         agentConfig: metadata.agentConfig ? JSON.parse(metadata.agentConfig) : undefined,
         createdAt: metadata.createdAt,
         lastActiveAt: metadata.lastActiveAt,
@@ -219,6 +222,7 @@ export class AgentStateManager implements IAgentStateManager {
   async createOperationMetadata(
     operationId: string,
     data: {
+      harnessBinding?: HarnessRunBinding;
       agentConfig?: any;
       modelRuntimeConfig?: any;
       userId?: string;
@@ -228,6 +232,7 @@ export class AgentStateManager implements IAgentStateManager {
 
     try {
       const metadata: AgentOperationMetadata = {
+        harnessBinding: data.harnessBinding,
         agentConfig: data.agentConfig,
         createdAt: new Date().toISOString(),
         lastActiveAt: new Date().toISOString(),
@@ -248,6 +253,8 @@ export class AgentStateManager implements IAgentStateManager {
       };
 
       if (metadata.userId) redisData.userId = metadata.userId;
+      if (metadata.harnessBinding)
+        redisData.harnessBinding = JSON.stringify(metadata.harnessBinding);
       if (metadata.modelRuntimeConfig)
         redisData.modelRuntimeConfig = JSON.stringify(metadata.modelRuntimeConfig);
       if (metadata.agentConfig) redisData.agentConfig = JSON.stringify(metadata.agentConfig);

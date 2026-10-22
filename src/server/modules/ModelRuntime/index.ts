@@ -400,6 +400,7 @@ export const initModelRuntimeFromDB = async (
   db: LobeChatDatabase,
   userId: string,
   provider: string,
+  requirements?: { singleDispatch?: boolean },
 ): Promise<ModelRuntime> => {
   // 1. Get user's provider configuration from database
   const aiProviderModel = new AiProviderModel(db, userId);
@@ -424,5 +425,21 @@ export const initModelRuntimeFromDB = async (
   const hooks = getBusinessModelRuntimeHooks(userId, provider);
 
   // 5. Initialize ModelRuntime with the payload and hooks
-  return initModelRuntimeWithUserPayload(provider, payload, { userId }, hooks);
+  return initModelRuntimeWithUserPayload(
+    provider,
+    payload,
+    { userId, ...(requirements?.singleDispatch ? singleDispatchOptions(runtimeProvider) : {}) },
+    hooks,
+  );
+};
+
+/** Explicit capability declaration for bounded experiments. Other transports must be audited first. */
+export const singleDispatchOptions = (runtimeProvider: string) => {
+  if (
+    !new Set<string>([ModelProvider.OpenAI, ModelProvider.DeepSeek, ModelProvider.Azure]).has(
+      runtimeProvider,
+    )
+  )
+    throw new Error('HARNESS_PROVIDER_SINGLE_DISPATCH_UNSUPPORTED');
+  return { maxRetries: 0 };
 };

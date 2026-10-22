@@ -31,6 +31,7 @@ export interface CompletedWorkspaceProps {
   onSelectArtifact: (artifactId: string) => void;
   onSelectJob?: (jobId: string) => void;
   onSendMessage?: (jobId: string, input: PresentationMessageInput) => Promise<boolean>;
+  onTrialVersionCreated?: (jobId: string) => Promise<void> | void;
   resolveArtifactUri?: (artifactId: string) => string | undefined;
   retryPendingKeys: Record<string, boolean>;
   retrySlot: (jobId: string, slideId: string, slotId: string) => Promise<void>;

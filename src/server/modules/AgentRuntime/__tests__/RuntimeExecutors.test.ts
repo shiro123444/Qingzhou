@@ -5,6 +5,8 @@ import * as ContextEngineering from '@/server/modules/Mecha/ContextEngineering';
 import { initModelRuntimeFromDB } from '@/server/modules/ModelRuntime';
 import { HookDispatcher } from '@/server/services/agentRuntime/hooks/HookDispatcher';
 import * as QueueImpls from '@/server/services/queue/impls';
+import * as managedSkills from '@/server/services/agentRuntime/managedSkills';
+import { createSkillMaterialRegistry } from '@/server/runtime/improvement/skill-material';
 
 import { createRuntimeExecutors, type RuntimeExecutorContext } from '../RuntimeExecutors';
 
@@ -489,6 +491,61 @@ describe('RuntimeExecutors', () => {
       ...overrides,
     });
 
+    it('uses the selected material provider in ordinary context compilation and records its local receipt', async () => {
+      const registry = createSkillMaterialRegistry();
+      const lease = registry.acquire(registry.binding('skills.sections@1.0.0'));
+      const access = vi
+        .spyOn(managedSkills, 'assertManagedSkillAccess')
+        .mockResolvedValue(undefined);
+      ctx.transformSkills = lease.apply;
+      ctx.agentConfig = { systemRole: 'Author', chatConfig: { enableAgentMode: true } } as any;
+      const state = createMockState({
+        metadata: {
+          agentId: 'agent-123',
+          operationSkillSet: {
+            enabledPluginIds: [],
+            skills: [
+              {
+                identifier: 'managed-skill:one',
+                name: 'procedure',
+                description: 'Evidence',
+                content: '# Procedure\nKeep the source.',
+                revision: { bindingId: 'one' },
+              },
+            ],
+          },
+        },
+        activatedStepSkills: [{ identifier: 'managed-skill:one', activatedAtStep: 1 }],
+      } as any);
+      const compile = vi.spyOn(ContextEngineering, 'serverMessagesEngine');
+      try {
+        await createRuntimeExecutors(ctx).call_llm!(
+          {
+            type: 'call_llm',
+            payload: {
+              model: 'gpt-4',
+              provider: 'openai',
+              messages: [{ role: 'user', content: 'A real task' }],
+            },
+          } as any,
+          state,
+        );
+        expect(access).toHaveBeenCalledTimes(1);
+        const input = compile.mock.calls[0][0];
+        expect(input.skillsConfig?.enabledSkills?.[0].content).toContain(
+          'qingzhou.skill-sections.v1',
+        );
+        expect(state.metadata?.skillMaterialReceipt).toMatchObject({
+          modelCalls: 0,
+          binding: { manifest: { id: 'skills.sections', implementationVersion: '1.0.0' } },
+        });
+        expect(JSON.stringify(input.skillsConfig)).toContain('Keep the source.');
+      } finally {
+        lease.release();
+        access.mockRestore();
+        compile.mockRestore();
+      }
+    });
     it('should pass parentId from payload.parentId to messageModel.create', async () => {
       const executors = createRuntimeExecutors(ctx);
       const state = createMockState();

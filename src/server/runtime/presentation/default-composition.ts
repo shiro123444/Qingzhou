@@ -37,6 +37,9 @@ import { FileTeachingMemory } from './teaching-memory';
 import { FilePresentationTemplateLibrary } from './templates';
 import { createOpenAICompatibleAudioTranscriber } from './templates/audio-transcription';
 import { PptMasterToolchain } from './toolchain';
+import { FileTrialLearningStore } from './trial-learning';
+import { FileTrialEvidenceStore, PresentationTrialReview } from './trial-review';
+import { createProductionTrialWorkspace } from './trial-workspace-production';
 import { createUserChatProvider } from './user-chat-provider';
 
 let readiness: ProductionProviderReadiness | undefined;
@@ -246,7 +249,37 @@ const assemble = (): PresentationRuntimeComposition | undefined => {
     const templateLibrary = new FilePresentationTemplateLibrary({
       root: nodePath.join(dataRoot, 'templates'),
     });
+    const trialEvidence = new FileTrialEvidenceStore(nodePath.join(dataRoot, 'trial-evidence'));
+    const trialLearning = new FileTrialLearningStore({
+      root: nodePath.join(dataRoot, 'trial-learning'),
+      evidence: trialEvidence,
+      storage: artifactStore,
+    });
     const result = createProductionPresentationGenerationComposition({
+      trialLearning,
+      trialWorkspace: createProductionTrialWorkspace({
+        budgets: async () => {
+          const [{ getServerDB }, { withLearningBudget }] = await Promise.all([
+            import('@/database/core/db-adaptor'),
+            import('../improvement/production'),
+          ]);
+          return withLearningBudget(await getServerDB(), async (budget) => budget);
+        },
+        dataRoot,
+        learning: trialLearning,
+        storage: artifactStore,
+        memory: capabilityMemory,
+        // Raw transport: trials own their retries and reservation ledger.
+        fetcher: globalThis.fetch,
+        resolve: resolveChatConnection,
+        visionModel,
+      }),
+      trialReview: new PresentationTrialReview(
+        trialEvidence,
+        artifactStore,
+        artifactStore,
+        trialLearning,
+      ),
       teachingMemory: new FileTeachingMemory(nodePath.join(dataRoot, 'teaching-memory')),
       capabilityMemory,
       prepareCapabilityLibrary: process.env.CORDIS_PRESENTATION_LOCAL_CORPUS_USER_ID

@@ -59,6 +59,33 @@ const post = (path: string, body: unknown): Request =>
   request(path, { method: 'POST', body: JSON.stringify(body) });
 
 describe('presentation HTTP seam', () => {
+  it('forwards the HTTP cancellation signal to explicit trial confirmation', async () => {
+    const { port } = createPort();
+    const executeOperation = vi.fn(
+      async (_name: string, _body: unknown, _signal?: AbortSignal) => ({ status: 'kept' }),
+    );
+    const controller = new AbortController();
+    const req = request('/tools/presentation.trial.choose', {
+      method: 'POST',
+      body: JSON.stringify({ confirmed: true }),
+      signal: controller.signal,
+    });
+    const result = await handlePresentationRequest(
+      req,
+      scope,
+      matchPresentationRoute(req),
+      async () => Object.assign(port, { executeOperation, listTemplates: async () => [] }),
+    );
+    expect(result.status).toBe(200);
+    expect(executeOperation).toHaveBeenCalledWith(
+      'presentation.trial.choose',
+      { confirmed: true },
+      req.signal,
+    );
+    controller.abort();
+    expect(executeOperation.mock.calls[0][2]?.aborted).toBe(true);
+  });
+
   it('routes presence and answers through the authenticated scoped port', async () => {
     const { port } = createPort();
     const extended = Object.assign(port, {

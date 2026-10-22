@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { userMutationAuthority } from '@/server/runtime/improvement/mutation-authority';
 import type { LobeChatDatabase, Transaction } from '@lobechat/database';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -37,6 +38,20 @@ const expectedEditorData = (content: string) => ({
 });
 
 class InMemoryAgentDocumentModel implements SkillManagementAgentDocumentModel {
+  async lockAgent(_agentId: string) {}
+  async assertVersions(
+    versions: Array<{ id: string; generation: number; documentGeneration: number }>,
+  ) {
+    for (const version of versions) {
+      const doc = this.documents.find((item) => item.id === version.id);
+      if (
+        !doc ||
+        (doc.generation ?? 0) !== version.generation ||
+        (doc.documentGeneration ?? 0) !== version.documentGeneration
+      )
+        throw new Error('RESOURCE_CAS_CONFLICT');
+    }
+  }
   documents: SkillAgentDocument[] = [];
   createCalls: Array<{
     agentId: string;
@@ -277,6 +292,7 @@ const createService = () => {
       createMarkdownEditorSnapshot: createSnapshot,
       documentService,
     },
+    userMutationAuthority('user-1'),
   );
 
   return { agentDocumentModel, documentService, service };

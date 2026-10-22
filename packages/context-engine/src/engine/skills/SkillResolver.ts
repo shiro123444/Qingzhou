@@ -47,7 +47,8 @@ export class SkillResolver {
 
     // Resolve each skill
     const enabledSkills: SkillMeta[] = operationSkillSet.skills.map((skill) => {
-      const isOperationActivated = enabledPluginIds.has(skill.identifier);
+      // Managed text skills retain progressive loading, independent of plugin auto-activation.
+      const isOperationActivated = !skill.revision && enabledPluginIds.has(skill.identifier);
       const stepActivation = stepActivatedMap.get(skill.identifier);
       const isStepActivated = !!stepActivation;
 
@@ -56,7 +57,7 @@ export class SkillResolver {
           ...skill,
           activated: true,
           // Step delta content overrides original content if provided
-          content: stepActivation?.content || skill.content,
+          content: skill.revision ? skill.content : stepActivation?.content || skill.content,
         };
       }
 

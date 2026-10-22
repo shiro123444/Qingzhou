@@ -1,6 +1,11 @@
 import { SpanStatusCode } from '@lobechat/observability-otel/api';
 import { tracer } from '@lobechat/observability-otel/modules/agent-signal';
 
+import {
+  type HarnessProposalPort,
+  LearningWritePendingError,
+} from '@/server/runtime/improvement/contracts';
+
 import type { SelfReviewProposalBaseSnapshot } from '../review/proposal';
 import type { EvidenceRef } from '../types';
 
@@ -523,6 +528,8 @@ export interface ToolSetAdapters {
   getEvidenceDigest?: (input: GetEvidenceDigestInput) => Promise<unknown | undefined>;
   /** Reads one managed skill in the requested agent scope. */
   getManagedSkill?: (input: GetManagedSkillInput) => Promise<unknown | undefined>;
+  /** Optional source-bound proposal-only port; never supplies adoption authority. */
+  harness?: HarnessProposalPort;
   /** Lists managed skills in the requested agent scope. */
   listManagedSkills?: (input: ListManagedSkillsInput) => Promise<unknown[]>;
   /** Lists self-review proposals in the requested agent scope. */
@@ -780,6 +787,13 @@ const runWriteTool = async <TInput extends ToolWriteInput>({
           summary: mutationResult.summary ?? input.summary,
         };
       } catch (error) {
+        if (error instanceof LearningWritePendingError)
+          return {
+            resourceId: error.intentId,
+            status: 'proposed',
+            summary:
+              'Recorded the full skill proposal; independent validation is required before changing shared behavior.',
+          };
         recordConvertedException(error);
 
         return {
@@ -836,6 +850,7 @@ const runWriteTool = async <TInput extends ToolWriteInput>({
  * - Tool functions that dedupe, preflight, mutate, receipt, and trace consistently
  */
 export const createToolSet = (adapters: ToolSetAdapters) => ({
+  harness: adapters.harness,
   closeSelfReviewProposal: async (input: CloseSelfReviewProposalInput) =>
     runWriteTool({
       adapters,
@@ -989,7 +1004,9 @@ export const createToolSet = (adapters: ToolSetAdapters) => ({
 });
 
 /** Callable safe resource tools exposed to bounded agent runners. */
-export type ToolSet = ReturnType<typeof createToolSet>;
+export type ToolSet = Omit<ReturnType<typeof createToolSet>, 'harness'> & {
+  harness?: ToolSetAdapters['harness'];
+};
 
 /**
  * Class-backed boundary for self-iteration resource tools.

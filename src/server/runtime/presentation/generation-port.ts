@@ -1374,10 +1374,12 @@ export class PresentationGenerationPort implements PresentationPort {
   ): Promise<PresentationJobInput> {
     if (!this.options.contentCompiler) return input;
     const previous = input.options?.contentIntents as
-      Awaited<ReturnType<PresentationContentCompiler['compile']>> | undefined;
+      | Awaited<ReturnType<PresentationContentCompiler['compile']>>
+      | undefined;
     if (previous?.inputFingerprint === contentInputFingerprint(input)) return input;
     const revision = input.options?.contentRevision as
-      { target?: PresentationMessageInput['target'] } | undefined;
+      | { target?: PresentationMessageInput['target'] }
+      | undefined;
     const target = revision?.target;
     const outline = input.options?.outline;
     const scoped =
@@ -1464,7 +1466,8 @@ export class PresentationGenerationPort implements PresentationPort {
     if (!template.visual?.designProgram || !this.options.visualStoryboardPlanner) return input;
     if (!confirmedDeckLength(input)) return input;
     const existing = input.options?.visualStoryboard as
-      Partial<PresentationVisualStoryboard> | undefined;
+      | Partial<PresentationVisualStoryboard>
+      | undefined;
     if (
       existing?.templateId === template.templateId &&
       existing.versionId === template.versionId &&
@@ -1990,6 +1993,19 @@ export class PresentationGenerationPort implements PresentationPort {
     'presentation.template.listNativeOutputs',
     'presentation.template.fillNative',
     'presentation.template.restoreNative',
+    'presentation.learning.list',
+    'presentation.learning.read',
+    'presentation.validation.options',
+    'presentation.validation.create',
+    'presentation.validation.start',
+    'presentation.validation.status',
+    'presentation.validation.cancel',
+    'presentation.trial.start',
+    'presentation.trial.status',
+    'presentation.trial.cancel',
+    'presentation.trial.list',
+    'presentation.trial.read',
+    'presentation.trial.choose',
     'presentation.page.read',
     'presentation.page.replace',
     'presentation.job.message',
@@ -2264,7 +2280,8 @@ export class PresentationGenerationPort implements PresentationPort {
             code: 'PROVIDER_UNAVAILABLE',
           });
         const pinnedMemory = generationInput.options?.learnedCapabilities as
-          { capsules?: CapabilityCapsule[] } | undefined;
+          | { capsules?: CapabilityCapsule[] }
+          | undefined;
         let learnedCapsules = pinnedMemory?.capsules ?? [];
         let templateCapsules: CapabilityCapsule[] = [];
         if (this.options.capabilityMemory && !entry.plan && !entry.draftCheckpoint) {

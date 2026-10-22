@@ -290,12 +290,14 @@ describe('AgentStateManager', () => {
       expect(await stateManager.saveAgentStateWithLease('op', state, lease)).toBe(true);
       expect(redis().eval).toHaveBeenCalledWith(
         COMMIT_STEP_LEASE_SCRIPT,
-        5,
+        7,
         'agent_runtime_step_lock:op:2',
         'agent_runtime_state:op',
         'agent_runtime_meta:op',
         'agent_runtime_steps:op',
         'agent_runtime_events:op',
+        'agent_runtime_callback_intent:op:2',
+        'agent_runtime_callback_intent_ready',
         'owner',
         7200,
         JSON.stringify(state),
@@ -307,6 +309,7 @@ describe('AgentStateManager', () => {
         '',
         2,
         0,
+        '',
       );
       expect(COMMIT_STEP_LEASE_SCRIPT).toContain("redis.call('HSET', KEYS[3]");
       expect(COMMIT_STEP_LEASE_SCRIPT).toContain(
@@ -329,8 +332,8 @@ describe('AgentStateManager', () => {
       } as any;
       expect(await stateManager.saveStepResultWithLease('op', result, lease)).toBe(true);
       const args = redis().eval.mock.calls[0];
-      expect(JSON.parse(args.at(-4))).toMatchObject({ cost: 3, executionTime: 50, stepIndex: 2 });
-      expect(JSON.parse(args.at(-3))).toEqual(result.events);
+      expect(JSON.parse(args.at(-5))).toMatchObject({ cost: 3, executionTime: 50, stepIndex: 2 });
+      expect(JSON.parse(args.at(-4))).toEqual(result.events);
       expect(redis().multi).not.toHaveBeenCalled();
       redis().eval.mockResolvedValue(0);
       expect(await stateManager.saveStepResultWithLease('op', result, lease)).toBe(false);

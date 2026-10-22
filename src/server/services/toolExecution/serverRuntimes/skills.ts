@@ -3,7 +3,6 @@ import { type CommandResult, SkillsIdentifier } from '@lobechat/builtin-tool-ski
 import {
   type ExportFileResult,
   type SkillRuntimeService,
-  SkillsExecutionRuntime,
 } from '@lobechat/builtin-tool-skills/executionRuntime';
 import type { SkillItem, SkillListItem, SkillResourceContent } from '@lobechat/types';
 import type { CodeInterpreterToolName } from '@lobehub/market-sdk';
@@ -20,24 +19,25 @@ import { MarketService } from '@/server/services/market';
 import { SkillResourceService } from '@/server/services/skill/resource';
 import { preprocessLhCommand } from '@/server/services/toolExecution/preprocessLhCommand';
 
+import { PinnedSkillsExecutionRuntime } from '../pinnedSkills';
 import { type ServerRuntimeRegistration } from './types';
 
 const log = debug('lobe-server:skills-runtime');
 
 class SkillServerRuntimeService implements SkillRuntimeService {
-  private resourceService: SkillResourceService;
+  private resourceService: () => SkillResourceService;
   private skillModel: AgentSkillModel;
   private marketService: MarketService;
-  private fileService: FileService;
+  private fileService: () => FileService;
   private fileModel: FileModel;
   private topicId?: string;
   private userId: string;
 
   constructor(options: {
     fileModel: FileModel;
-    fileService: FileService;
+    fileService: () => FileService;
     marketService: MarketService;
-    resourceService: SkillResourceService;
+    resourceService: () => SkillResourceService;
     skillModel: AgentSkillModel;
     topicId?: string;
     userId: string;
@@ -67,7 +67,7 @@ class SkillServerRuntimeService implements SkillRuntimeService {
     const skill = await this.skillModel.findById(id);
     if (!skill) throw new Error(`Skill not found: ${id}`);
     if (!skill.resources) throw new Error(`Skill has no resources: ${id}`);
-    return this.resourceService.readResource(skill.resources, path);
+    return this.resourceService().readResource(skill.resources, path);
   };
 
   runCommand = async (options: { command: string }): Promise<CommandResult> => {
@@ -169,7 +169,7 @@ class SkillServerRuntimeService implements SkillRuntimeService {
 
           if (fileInfo.isExist && fileInfo.url) {
             // Convert S3 key to full URL
-            const fullUrl = await this.fileService.getFullFileUrl(fileInfo.url);
+            const fullUrl = await this.fileService().getFullFileUrl(fileInfo.url);
             if (fullUrl) {
               enhancedParams.zipUrl = fullUrl;
               log('Added zipUrl to execScript params for skill %s: %s', skill.name, fullUrl);
@@ -267,7 +267,7 @@ class SkillServerRuntimeService implements SkillRuntimeService {
       // Step 4: Create persistent file record
       const fileHash = sha256(key + Date.now().toString());
 
-      const { fileId, url } = await this.fileService.createFileRecord({
+      const { fileId, url } = await this.fileService().createFileRecord({
         fileHash,
         fileType: mimeType,
         name: filename,
@@ -324,12 +324,16 @@ export const skillsRuntime: ServerRuntimeRegistration = {
     }
 
     const skillModel = new AgentSkillModel(context.serverDB, context.userId);
-    const resourceService = new SkillResourceService(context.serverDB, context.userId);
+    // Text activation needs only pinned/DB text. Resource storage is initialized on first use.
+    let resources: SkillResourceService | undefined;
+    const resourceService = () =>
+      (resources ??= new SkillResourceService(context.serverDB!, context.userId!));
     const marketService = new MarketService({
       accessToken: marketAccessToken,
       userInfo: { userId: context.userId },
     });
-    const fileService = new FileService(context.serverDB, context.userId);
+    let files: FileService | undefined;
+    const fileService = () => (files ??= new FileService(context.serverDB!, context.userId!));
     const fileModel = new FileModel(context.serverDB, context.userId);
 
     const service = new SkillServerRuntimeService({
@@ -342,10 +346,13 @@ export const skillsRuntime: ServerRuntimeRegistration = {
       userId: context.userId,
     });
 
-    return new SkillsExecutionRuntime({
-      builtinSkills: filterBuiltinSkills(builtinSkills),
-      service,
-    });
+    return new PinnedSkillsExecutionRuntime(
+      {
+        builtinSkills: filterBuiltinSkills(builtinSkills),
+        service,
+      },
+      context,
+    );
   },
   identifier: SkillsIdentifier,
 };

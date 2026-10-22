@@ -1,4 +1,4 @@
-import { type AgentState } from '@lobechat/agent-runtime';
+import type { AgentState, HarnessRunBinding } from '@lobechat/agent-runtime';
 import debug from 'debug';
 
 import { type AgentOperationMetadata, type StepResult } from './AgentStateManager';
@@ -126,12 +126,14 @@ export class InMemoryAgentStateManager implements IAgentStateManager {
   async createOperationMetadata(
     operationId: string,
     data: {
+      harnessBinding?: HarnessRunBinding;
       agentConfig?: any;
       modelRuntimeConfig?: any;
       userId?: string;
     },
   ): Promise<void> {
     const metadata: AgentOperationMetadata = {
+      harnessBinding: data.harnessBinding,
       agentConfig: data.agentConfig,
       createdAt: new Date().toISOString(),
       lastActiveAt: new Date().toISOString(),

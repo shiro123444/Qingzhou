@@ -4,13 +4,15 @@ import { DEFAULT_MINI_SYSTEM_AGENT_ITEM } from '@lobechat/const';
 import { AgentSignalReviewContextModel } from '@/database/models/agentSignal/reviewContext';
 import type { LobeChatDatabase } from '@/database/type';
 import { initModelRuntimeFromDB } from '@/server/modules/ModelRuntime';
+import { learningMutationAuthority } from '@/server/runtime/improvement/mutation-authority';
+import { executeBudgetedSignal } from '@/server/runtime/improvement/signal-budget';
 import { AGENT_SIGNAL_DEFAULTS } from '@/server/services/agentSignal/constants';
 import { runMemoryActionAgent } from '@/server/services/agentSignal/policies/analyzeIntent/actions/userMemory';
 import { redisSourceEventStore } from '@/server/services/agentSignal/store/adapters/redis/sourceEventStore';
 import { SkillManagementDocumentService } from '@/server/services/skillManagement';
 
 import { persistAgentSignalReceipts } from '../../receiptService';
-import { executeSelfIteration } from '../execute';
+import type { executeSelfIteration } from '../execute';
 import { createSelfReviewProposalPreflightService } from '../review/proposalPreflight';
 import { createSelfReviewProposalSnapshotService } from '../review/proposalSnapshot';
 import type { CreateServerSelfIterationPolicyOptions } from '../server';
@@ -417,10 +419,12 @@ export class SelfFeedbackIntentServerRuntimeFactory implements SelfFeedbackInten
       this.input.db,
       this.input.userId,
       DEFAULT_MINI_SYSTEM_AGENT_ITEM.provider,
+      process.env.QINGZHOU_HARNESS_LEARNING_ENABLED === '1' ? { singleDispatch: true } : undefined,
     );
 
     return {
-      executeSelfIteration,
+      executeSelfIteration: (input: Parameters<typeof executeSelfIteration>[0]) =>
+        executeBudgetedSignal(this.input.db, input),
       model: DEFAULT_MINI_SYSTEM_AGENT_ITEM.model,
       modelRuntime,
       tools: createIntentRuntimeTools({
@@ -464,7 +468,12 @@ export const createServerSelfFeedbackIntentPolicyOptions = ({
   userId,
 }: CreateServerSelfIterationPolicyOptions): CreateSelfFeedbackIntentSourceHandlerDependencies => {
   const reviewContextModel = new AgentSignalReviewContextModel(db, userId);
-  const skillDocumentService = new SkillManagementDocumentService(db, userId);
+  const skillDocumentService = new SkillManagementDocumentService(
+    db,
+    userId,
+    undefined,
+    learningMutationAuthority(userId),
+  );
 
   return {
     acquireReviewGuard: (input) =>

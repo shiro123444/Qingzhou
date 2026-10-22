@@ -15,6 +15,7 @@ import { agentDocumentRouter } from './agentDocument';
 import { agentEvalRouter } from './agentEval';
 import { agentEvalExternalRouter } from './agentEvalExternal';
 import { agentGroupRouter } from './agentGroup';
+import { agentHarnessRouter } from './agentHarness';
 import { agentNotifyRouter } from './agentNotify';
 import { agentSignalRouter } from './agentSignal';
 import { agentSkillsRouter } from './agentSkills';
@@ -80,6 +81,7 @@ export const lambdaRouter = router({
   agentEvalExternal: agentEvalExternalRouter,
   agentSkills: agentSkillsRouter,
   agentSignal: agentSignalRouter,
+  agentHarness: agentHarnessRouter,
   task: taskRouter,
   changelog: changelogRouter,
   brief: briefRouter,

@@ -198,6 +198,14 @@ describe('OperationTraceRecorder', () => {
     });
 
     it('writes the canonical snapshot and removes the partial on success', async () => {
+      const binding = {
+        schemaVersion: 2,
+        operationId: 'op-done',
+        revisionId: 'behavior-revision',
+        snapshotId: 'run-snapshot',
+        scope: { agentId: 'agt-1', userId: 'u-1' },
+        source: 'server',
+      };
       store.loadPartial.mockResolvedValue({
         model: 'claude-sonnet-4-6',
         provider: 'lobehub',
@@ -219,7 +227,12 @@ describe('OperationTraceRecorder', () => {
         completionReason: 'done',
         state: {
           cost: { total: 0.5 },
-          metadata: { agentId: 'agt-1', topicId: 'tpc-1', userId: 'u-1' },
+          metadata: {
+            agentId: 'agt-1',
+            harness: { binding, snapshot: { material: 'private-run-input' } },
+            topicId: 'tpc-1',
+            userId: 'u-1',
+          },
           stepCount: 1,
           usage: { llm: { tokens: { total: 200 } } },
         },
@@ -230,6 +243,7 @@ describe('OperationTraceRecorder', () => {
       expect(saved).toMatchObject({
         agentId: 'agt-1',
         completionReason: 'done',
+        harnessBinding: binding,
         operationId: 'op-done',
         topicId: 'tpc-1',
         totalCost: 0.5,
@@ -237,6 +251,7 @@ describe('OperationTraceRecorder', () => {
         totalTokens: 200,
         userId: 'u-1',
       });
+      expect(JSON.stringify(saved)).not.toContain('private-run-input');
       expect(store.removePartial).toHaveBeenCalledWith('op-done');
     });
 

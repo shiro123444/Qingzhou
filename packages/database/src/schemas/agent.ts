@@ -7,6 +7,7 @@ import { AgentChatConfigSchema } from '@lobechat/types';
 import {
   boolean,
   index,
+  integer,
   jsonb,
   pgTable,
   primaryKey,
@@ -34,6 +35,7 @@ export const agents = pgTable(
       .primaryKey()
       .$defaultFn(() => idGenerator('agents'))
       .notNull(),
+    generation: integer('generation').notNull().default(0),
     slug: varchar('slug', { length: 100 }).$defaultFn(() => randomSlug(3)),
     title: varchar('title', { length: 255 }),
     description: varchar('description', { length: 1000 }),

@@ -5,8 +5,12 @@ import {
   InMemoryAgentStateManager,
   InMemoryStreamEventManager,
 } from '@/server/modules/AgentRuntime';
+import { applyHarnessPatch } from '@/server/runtime/improvement/coordinator';
+import * as harnessProduction from '@/server/runtime/improvement/production';
 
 import { AgentRuntimeService } from '../AgentRuntimeService';
+import { captureOperationHarness } from '../harness';
+import type { OperationCreationParams } from '../types';
 
 // Mock database models
 vi.mock('@/database/models/message', () => ({
@@ -83,6 +87,79 @@ describe('AgentRuntimeService.executeSync', () => {
   });
 
   describe('createOperation with queueService disabled', () => {
+    it('persists v2 operation bindings and restores adopted instructions with host/task constraints', async () => {
+      const params: OperationCreationParams = {
+        agentConfig: { model: 'model', provider: 'provider', systemRole: 'Author\n\nHost\n\nTask' },
+        agentDocuments: [],
+        appContext: { agentId: 'agent', scope: 'page' },
+        autoStart: false,
+        harnessSource: {
+          agentConfig: { model: 'model', provider: 'provider', systemRole: 'Author' },
+          promptSegments: [
+            { kind: 'author', content: 'Author' },
+            { kind: 'host', content: 'Host' },
+            { kind: 'task', content: 'Task' },
+          ],
+        },
+        initialContext: { phase: 'user_input' } as AgentRuntimeContext,
+        modelRuntimeConfig: { model: 'model', provider: 'provider' },
+        operationId: 'v2-operation',
+        operationSkillSet: { skills: [], enabledPluginIds: [] },
+        toolSet: { manifestMap: {}, tools: [] },
+        userId,
+      };
+      const baseline = await captureOperationHarness(params);
+      const candidate = await applyHarnessPatch(baseline.revision, {
+        baseRevisionId: baseline.revision.id,
+        surface: 'chat.systemRole',
+        value: 'Adopted author instructions',
+      });
+      const resolve = vi.spyOn(harnessProduction, 'selectActiveHarness').mockResolvedValue({
+        revision: candidate,
+        publicationRef: { generation: 1, decisionId: 'confirmation' },
+      });
+      try {
+        await service.createOperation(params);
+        const state = await stateManager.loadAgentState(params.operationId);
+        expect(state?.metadata?.agentConfig.systemRole).toBe(
+          'Adopted author instructions\n\nHost\n\nTask',
+        );
+        expect(state?.metadata?.harnessRevisionId).toBe(candidate.id);
+        expect(state?.metadata?.harnessSnapshotId).toBe(state?.metadata?.harness.snapshot.id);
+        expect(state?.metadata?.harness.snapshot.material.publicationRef).toEqual({
+          generation: 1,
+          decisionId: 'confirmation',
+        });
+        expect(state?.metadata?.harness.snapshot.material.sourceRevisionId).toBe(
+          baseline.revision.id,
+        );
+        expect(
+          (await stateManager.getOperationMetadata(params.operationId))?.harnessBinding,
+        ).toMatchObject({
+          schemaVersion: 2,
+          revisionId: candidate.id,
+          snapshotId: state?.metadata?.harnessSnapshotId,
+        });
+      } finally {
+        resolve.mockRestore();
+      }
+    });
+
+    it('rejects non-serializable configuration before recording a running operation', async () => {
+      const recordStart = vi.spyOn((service as any).completionLifecycle, 'recordStart');
+      await expect(
+        service.createOperation({
+          agentConfig: { model: 'model', unsupported: new Map() },
+          appContext: { agentId: 'agent' },
+          initialContext: { phase: 'user_input' } as AgentRuntimeContext,
+          operationId: 'invalid-config',
+          toolSet: { manifestMap: {} },
+          userId,
+        }),
+      ).rejects.toThrow('HARNESS_NON_SERIALIZABLE');
+      expect(recordStart).not.toHaveBeenCalled();
+      expect(await stateManager.loadAgentState('invalid-config')).toBeNull();
+    });
     it('should create operation without scheduling queue message', async () => {
       const operationId = 'test-op-1';
       const initialContext: AgentRuntimeContext = {
@@ -118,6 +195,13 @@ describe('AgentRuntimeService.executeSync', () => {
       const state = await stateManager.loadAgentState(operationId);
       expect(state).not.toBeNull();
       expect(state?.operationId).toBe(operationId);
+      expect(state?.metadata?.harness?.binding).toMatchObject({
+        operationId,
+        source: 'server',
+        scope: { userId, agentId: 'test-agent' },
+      });
+      const metadata = await stateManager.getOperationMetadata(operationId);
+      expect(metadata?.harnessBinding).toEqual(state?.metadata?.harness?.binding);
     });
 
     it('should save initial state correctly', async () => {

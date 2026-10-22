@@ -9,13 +9,13 @@ export const getMessageError = async (response: Response): Promise<ChatMessageEr
     const data = (await response.json()) as ErrorResponse;
     chatMessageError = {
       body: data.body,
-      message: t(`response.${data.errorType}`, { ns: 'error' }),
+      message: t(`response.${data.errorType}`, { ns: 'error', defaultValue: String(data.errorType) }),
       type: data.errorType,
     };
   } catch {
     // if not return, then it's a common error
     chatMessageError = {
-      message: t(`response.${response.status}`, { ns: 'error' }),
+      message: t(`response.${response.status}`, { ns: 'error', defaultValue: String(response.status) }),
       type: response.status as ErrorType,
     };
   }

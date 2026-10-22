@@ -200,4 +200,26 @@ describe('AiAgentService.execAgent - model/provider override', () => {
     expect(callArgs.agentConfig.model).toBe('claude-sonnet-4-6');
     expect(callArgs.agentConfig.provider).toBe('anthropic');
   });
+
+  it('captures authoring configuration before per-call overrides and additional instructions', async () => {
+    mockGetAgentConfig.mockResolvedValue(structuredClone(defaultAgentConfig));
+    await service.execAgent({
+      agentId: 'agent-1',
+      instructions: 'Only for this request',
+      model: 'claude-sonnet-4-6',
+      provider: 'anthropic',
+      prompt: 'Hello',
+    });
+    const args = mockCreateOperation.mock.calls[0][0];
+    expect(args.harnessSource.agentConfig).toEqual(defaultAgentConfig);
+    expect(args.harnessSource.promptSegments).toEqual([
+      { kind: 'author', content: defaultAgentConfig.systemRole },
+      { kind: 'task', content: 'Only for this request' },
+    ]);
+    expect(args.agentConfig).toMatchObject({
+      model: 'claude-sonnet-4-6',
+      provider: 'anthropic',
+      systemRole: `${defaultAgentConfig.systemRole}\n\nOnly for this request`,
+    });
+  });
 });

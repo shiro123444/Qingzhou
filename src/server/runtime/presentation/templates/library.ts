@@ -1,3 +1,4 @@
+import { ownedLearningDirectory, withAccountData } from '../../learning-lifecycle/files';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   copyFile,
@@ -44,8 +45,11 @@ export class FilePresentationTemplateLibrary {
     if (!scope.userId?.trim() || !scope.sessionId?.trim())
       throw new PresentationTemplateError('Authenticated template scope is required');
     return nodePath.join(
-      this.root,
-      hash(JSON.stringify([scope.userId, scope.sessionId])),
+      ownedLearningDirectory(
+        scope.userId,
+        this.root,
+        hash(JSON.stringify([scope.userId, scope.sessionId])),
+      ),
       'templates',
     );
   }
@@ -56,15 +60,17 @@ export class FilePresentationTemplateLibrary {
   }
 
   private async write(path: string, value: string | Uint8Array): Promise<void> {
-    const temporary = `${path}.${randomUUID()}.tmp`;
-    try {
-      await writeFile(temporary, value, { mode: 0o600 });
-      await rename(temporary, path);
-    } finally {
-      await unlink(temporary).catch((error) => {
-        if (!missing(error)) throw error;
-      });
-    }
+    return withAccountData(path, async () => {
+      const temporary = `${path}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(temporary, value, { mode: 0o600 });
+        await rename(temporary, path);
+      } finally {
+        await unlink(temporary).catch((error) => {
+          if (!missing(error)) throw error;
+        });
+      }
+    });
   }
 
   private async save(

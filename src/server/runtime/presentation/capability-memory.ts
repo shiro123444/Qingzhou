@@ -1,3 +1,4 @@
+import { ownedLearningDirectory, withAccountData } from '../learning-lifecycle/files';
 import { createHash, randomUUID } from 'node:crypto';
 import { link, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -192,7 +193,7 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
   private directory(scope: RuntimeScope, kind: MemoryKind) {
     if (!scope.userId?.trim() || !scope.sessionId?.trim())
       throw new Error('Authenticated memory scope is required');
-    return path.join(this.root, hash(scope.userId), kind);
+    return path.join(ownedLearningDirectory(scope.userId, this.root, hash(scope.userId)), kind);
   }
 
   private async read<T>(
@@ -208,26 +209,28 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
   }
 
   private async save(scope: RuntimeScope, kind: MemoryKind, id: string, value: unknown) {
-    const directory = this.directory(scope, kind);
-    await mkdir(directory, { recursive: true, mode: 0o700 });
-    const filename = path.join(directory, `${hash(id)}.json`);
-    // Content-addressed keys make retries idempotent. Atomic rename never exposes partial JSON.
-    const temporary = `${filename}.${randomUUID()}.tmp`;
-    try {
-      await writeFile(temporary, JSON.stringify(value), { mode: 0o600 });
-      if (kind === 'trials') {
-        // Publish the complete immutable record once, including across independent writers.
-        await link(temporary, filename).catch((error) => {
-          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    return withAccountData(this.directory(scope, kind), async () => {
+      const directory = this.directory(scope, kind);
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      const filename = path.join(directory, `${hash(id)}.json`);
+      // Content-addressed keys make retries idempotent. Atomic rename never exposes partial JSON.
+      const temporary = `${filename}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(temporary, JSON.stringify(value), { mode: 0o600 });
+        if (kind === 'trials') {
+          // Publish the complete immutable record once, including across independent writers.
+          await link(temporary, filename).catch((error) => {
+            if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+          });
+        } else {
+          await rename(temporary, filename);
+        }
+      } finally {
+        await unlink(temporary).catch((error) => {
+          if (!missing(error)) throw error;
         });
-      } else {
-        await rename(temporary, filename);
       }
-    } finally {
-      await unlink(temporary).catch((error) => {
-        if (!missing(error)) throw error;
-      });
-    }
+    });
   }
 
   private async list<T>(scope: RuntimeScope, kind: MemoryKind, schema: z.ZodType<T>): Promise<T[]> {

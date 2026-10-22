@@ -1,3 +1,5 @@
+import type { HarnessRunBinding } from '@lobechat/agent-runtime';
+
 export interface ExecutionSnapshot {
   agentId?: string;
   completedAt?: number;
@@ -10,6 +12,8 @@ export interface ExecutionSnapshot {
     | 'waiting_for_human';
   error?: { type: string; message: string };
   externalRetryCount?: number;
+  /** Behavior/run identity only; private input material stays in operation storage. */
+  harnessBinding?: HarnessRunBinding;
   model?: string;
   operationId: string;
   provider?: string;

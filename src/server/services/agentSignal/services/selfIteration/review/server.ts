@@ -9,6 +9,9 @@ import { UserModel } from '@/database/models/user';
 import type { BriefItem } from '@/database/schemas';
 import type { LobeChatDatabase } from '@/database/type';
 import { initModelRuntimeFromDB } from '@/server/modules/ModelRuntime';
+import { learningMutationAuthority } from '@/server/runtime/improvement/mutation-authority';
+import { executeBudgetedSignal } from '@/server/runtime/improvement/signal-budget';
+import { createSignalHarnessProposals } from '@/server/runtime/improvement/signal-proposal';
 import { AGENT_SIGNAL_DEFAULTS } from '@/server/services/agentSignal/constants';
 import { isAgentSignalEnabledForUser } from '@/server/services/agentSignal/featureGate';
 import { runMemoryActionAgent } from '@/server/services/agentSignal/policies/analyzeIntent/actions/userMemory';
@@ -17,7 +20,7 @@ import { SkillManagementDocumentService } from '@/server/services/skillManagemen
 import { translation } from '@/server/translation';
 
 import { persistAgentSignalReceipts } from '../../receiptService';
-import { createAgentRunner, executeSelfIteration } from '../execute';
+import { createAgentRunner } from '../execute';
 import { projectRun } from '../projection';
 import type { CreateServerSelfIterationPolicyOptions } from '../server';
 import { listServerSelfReviewProposalActivity } from '../server';
@@ -594,6 +597,22 @@ export const createServerToolSet = ({
   });
 
   return createToolSet({
+    harness: createSignalHarnessProposals({
+      scope: { userId, agentId },
+      sourceId,
+      evidence: async (evidenceIds) => {
+        const topics = context.topics.filter(
+          (topic) =>
+            topic.evidenceRefs?.some((ref) => evidenceIds.includes(ref.id)) ||
+            topic.failedMessages?.some((message) => evidenceIds.includes(message.messageId)),
+        );
+        const signals = context.selfReviewSignals.filter((signal) =>
+          signal.evidenceRefs?.some((ref) => evidenceIds.includes(ref.id)),
+        );
+        if (!topics.length && !signals.length) throw new Error('HARNESS_INVALID_EVIDENCE');
+        return { topics, signals };
+      },
+    }),
     closeProposal: async (input: CloseSelfReviewProposalInput) =>
       updateSelfReviewProposalBrief({
         agentId,
@@ -859,7 +878,12 @@ export const createServerSelfReviewPolicyOptions = ({
   const nightlyReviewModel = new AgentSignalNightlyReviewModel(db);
   const reviewContextModel = new AgentSignalReviewContextModel(db, userId);
   const briefModel = new BriefModel(db, userId);
-  const skillDocumentService = new SkillManagementDocumentService(db, userId);
+  const skillDocumentService = new SkillManagementDocumentService(
+    db,
+    userId,
+    undefined,
+    learningMutationAuthority(userId),
+  );
   const collector = createSelfReviewContextService({
     listDocumentActivity: async ({ agentId: targetAgentId, reviewWindowEnd, reviewWindowStart }) =>
       tracer.startActiveSpan(
@@ -1100,6 +1124,9 @@ export const createServerSelfReviewPolicyOptions = ({
         db,
         runnerUserId,
         DEFAULT_MINI_SYSTEM_AGENT_ITEM.provider,
+        process.env.QINGZHOU_HARNESS_LEARNING_ENABLED === '1'
+          ? { singleDispatch: true }
+          : undefined,
       );
       const toolSet = createServerToolSet({
         agentId: context.agentId,
@@ -1116,7 +1143,7 @@ export const createServerSelfReviewPolicyOptions = ({
       const selfReviewAgentRunner = createAgentRunner({
         maxSteps: 10,
         run: async ({ context, localDate, maxSteps, reviewScope, sourceId, tools, userId }) => {
-          const runtimeResult = await executeSelfIteration({
+          const runtimeResult = await executeBudgetedSignal(db, {
             agentId: context.agentId,
             context,
             maxSteps,

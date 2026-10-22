@@ -1,4 +1,8 @@
-import { type AgentRuntimeContext, type AgentState } from '@lobechat/agent-runtime';
+import {
+  type AgentRuntimeContext,
+  type AgentState,
+  type HarnessPromptSegment,
+} from '@lobechat/agent-runtime';
 import type {
   BotPlatformContext,
   LobeToolManifest,
@@ -152,6 +156,8 @@ export interface AgentExecutionResult {
 export interface OperationCreationParams {
   activeDeviceId?: string;
   agentConfig?: any;
+  /** Resolved document material captured once, before the operation starts. */
+  agentDocuments?: unknown[];
   appContext: {
     agentId?: string;
     defaultTaskAssigneeAgentId?: string;
@@ -186,6 +192,12 @@ export interface OperationCreationParams {
   /** Discord context for injecting channel/guild info into agent system message */
   discordContext?: any;
   evalContext?: any;
+  /** Captured by the trusted entry point before page/task and per-call composition. */
+  harnessSource?: {
+    agentConfig: Record<string, unknown>;
+    promptSegments: HarnessPromptSegment[];
+    skillVersions?: { generation: number; id: string }[];
+  };
   /**
    * External lifecycle hooks
    * Registered once, auto-adapt to local (in-memory) or production (webhook) mode
@@ -211,6 +223,7 @@ export interface OperationCreationParams {
   queueRetryDelay?: string;
   /** Abort startup before the first step is scheduled */
   signal?: AbortSignal;
+  sourceSystemRole?: string;
   /**
    * Whether the LLM call should use streaming.
    * Defaults to true. Set to false for non-streaming scenarios (e.g., bot integrations).

@@ -9,6 +9,7 @@ import {
   type SkillMaintainerRuntimeService,
 } from '@lobechat/builtin-tool-skill-maintainer';
 
+import { learningMutationAuthority } from '@/server/runtime/improvement/mutation-authority';
 import { SkillManagementDocumentService } from '@/server/services/skillManagement';
 
 import { type ServerRuntimeRegistration } from './types';
@@ -33,7 +34,12 @@ export const skillManagementRuntime: ServerRuntimeRegistration = {
       throw new Error('userId and serverDB are required for Skill Management execution');
     }
 
-    const service = new SkillManagementDocumentService(context.serverDB, context.userId);
+    const service = new SkillManagementDocumentService(
+      context.serverDB,
+      context.userId,
+      undefined,
+      learningMutationAuthority(context.userId),
+    );
 
     const runtimeService: SkillMaintainerRuntimeService = {
       createSkill: (params: CreateSkillArgs & { agentId: string }) => service.createSkill(params),

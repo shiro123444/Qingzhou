@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
 import { capabilityCapsuleSchema } from './capability-memory';
+import { trialPolicySchema } from './trial-policy';
 
 const id = z.string().trim().min(1).max(200);
 const capsuleId = z.string().regex(/^capsule-[a-f\d]{40}$/u);
@@ -25,7 +26,10 @@ export const trialRequestSchema = z
         z
           .object({
             id: z.string().regex(/^(?!baseline$)[\w-]{1,64}$/u),
-            patch: z.object({ layoutCapsuleIds: distinctIds.optional() }).strict(),
+            patch: z.union([
+              z.object({ layoutCapsuleIds: distinctIds.optional() }).strict(),
+              trialPolicySchema,
+            ]),
           })
           .strict(),
       )
@@ -42,6 +46,7 @@ export const trialBudgetSchema = z
     maxProbes: z.number().int().min(0).max(2),
     maxRenders: z.number().int().min(1).max(3),
     maxEvaluations: z.number().int().min(0).max(1).optional(),
+    maxProposals: z.number().int().min(0).max(1).optional(),
     maxTokens: z.number().int().nonnegative().safe(),
     maxCostMicros: z.number().int().nonnegative().safe(),
     maxDurationMs: z.number().int().positive().max(600_000),
@@ -89,6 +94,7 @@ export const trialSettingsSchema = z
     frozenInputs: z.record(json),
     baselineCapsuleIds: distinctIds,
     probeAllowance: trialUsageSchema,
+    proposal: z.object({ version: id, allowance: trialUsageSchema }).strict().optional(),
     evaluation: z
       .object({
         version: id,

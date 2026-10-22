@@ -5,7 +5,14 @@ import {
   type Cost,
   type Usage,
 } from '@lobechat/agent-runtime';
-import { AgentRuntime, computeStepContext, GeneralChatAgent } from '@lobechat/agent-runtime';
+import {
+  AgentRuntime,
+  bindHarness,
+  computeStepContext,
+  createHarnessRevision,
+  GeneralChatAgent,
+  verifyHarness,
+} from '@lobechat/agent-runtime';
 import { LobeAgentManifest } from '@lobechat/builtin-tool-lobe-agent';
 import { createPathScopeAudit } from '@lobechat/builtin-tool-local-system';
 import { PageAgentIdentifier } from '@lobechat/builtin-tool-page-agent';
@@ -23,6 +30,7 @@ import debug from 'debug';
 import { t } from 'i18next';
 
 import { createAgentToolsEngine } from '@/helpers/toolEngineering';
+import { agentHarnessService } from '@/services/agentHarness';
 import { isCanUseVideo, isCanUseVision } from '@/services/chat/helper';
 import { type ResolvedAgentConfig } from '@/services/chat/mecha';
 import { composeEnabledTools, resolveAgentConfig } from '@/services/chat/mecha';
@@ -560,7 +568,7 @@ export class StreamingExecutorActionImpl {
     const {
       state: initialAgentState,
       context: initialAgentContext,
-      agentConfig,
+      agentConfig: resolvedAgentConfig,
       toolsEngine,
     } = this.#get().internal_createAgentState({
       messages,
@@ -576,7 +584,60 @@ export class StreamingExecutorActionImpl {
       isSubAgent, // Pass isSubAgent to filter out lobe-agent tool in sub-agent context
     });
 
-    // Use model/provider from resolved agentConfig
+    let agentConfig = resolvedAgentConfig;
+    const harnessScope = {
+      userId: getUserStoreState().user?.id || 'local',
+      agentId: effectiveAgentId || 'default',
+    };
+    const previousHarness = params.initialState?.metadata?.harness;
+    let serverRevisionId: string | undefined;
+    if (!params.initialState && getUserStoreState().user?.id) {
+      const selected = agentConfig.agentConfig;
+      try {
+        const projection = await agentHarnessService.resolveClient({
+          agentId: effectiveAgentId || 'default',
+          systemRole: selected.systemRole || '',
+          model: selected.model,
+          provider: selected.provider!,
+        });
+        if (projection) {
+          serverRevisionId = projection.revisionId;
+          agentConfig = {
+            ...agentConfig,
+            agentConfig: { ...selected, systemRole: projection.systemRole },
+          };
+        }
+      } catch {
+        log('[harness] projection unavailable; starting with the source configuration');
+      }
+    }
+    if (previousHarness) {
+      await verifyHarness(previousHarness, harnessScope, previousHarness.binding.operationId);
+      agentConfig = structuredClone(
+        previousHarness.revision.material.resolvedConfig,
+      ) as unknown as ResolvedAgentConfig;
+    } else if (params.initialState?.metadata?.harnessRevisionId) {
+      throw new Error('HARNESS_REVISION_MISSING');
+    }
+    const revision =
+      previousHarness?.revision ??
+      (await createHarnessRevision(harnessScope, {
+        implementation: 'qingzhou-client-agent-v1',
+        serverRevisionId: serverRevisionId ?? null,
+        resolvedConfig: agentConfig,
+        toolCatalog: initialAgentState.operationToolSet ?? {},
+      }));
+    agentConfig = structuredClone(
+      revision.material.resolvedConfig,
+    ) as unknown as ResolvedAgentConfig;
+    initialAgentState.metadata = {
+      ...initialAgentState.metadata,
+      harness: bindHarness(revision, operationId, 'client'),
+      harnessRevisionId: revision.id,
+      harnessTracking: params.initialState && !previousHarness ? 'legacy/unverified' : 'client',
+    };
+
+    // Use model/provider from the operation's fixed configuration
     const { agentConfig: agentConfigData } = agentConfig;
     const model = agentConfigData.model;
     const provider = agentConfigData.provider;

@@ -41,6 +41,7 @@ import type { AgentDocument } from '@/database/models/agentDocuments';
 import { AgentDocumentModel } from '@/database/models/agentDocuments';
 import type { LobeChatDatabase } from '@/database/type';
 import { initModelRuntimeFromDB } from '@/server/modules/ModelRuntime';
+import { learningMutationAuthority } from '@/server/runtime/improvement/mutation-authority';
 import { AgentDocumentsService } from '@/server/services/agentDocuments';
 import { getSkillBundle } from '@/server/services/agentDocumentVfs/mounts/skills/providers/providerSkillsAgentDocumentUtils';
 import { AgentSignalProcedureInspector } from '@/server/services/agentSignal/procedure';
@@ -1410,7 +1411,12 @@ const resolveSkillDecisionCandidates = async (
 const createDefaultSkillManagementService = (
   options: SkillManagementActionHandlerOptions,
 ): SkillManagementOperationService =>
-  new SkillManagementDocumentService(options.db, options.userId);
+  new SkillManagementDocumentService(
+    options.db,
+    options.userId,
+    undefined,
+    learningMutationAuthority(options.userId),
+  );
 
 const getSkillTargets = (decision: SkillManagementDecision) => decision.targetSkillRefs ?? [];
 

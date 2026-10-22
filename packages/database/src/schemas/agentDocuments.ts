@@ -52,6 +52,7 @@ export const agentDocuments = pgTable(
   'agent_documents',
   {
     id: uuid('id').primaryKey().defaultRandom(),
+    generation: integer('generation').notNull().default(0),
     userId: text('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),

@@ -1,5 +1,5 @@
 import type { ToolExecuteData } from '@lobechat/agent-gateway-client';
-import { type AgentState } from '@lobechat/agent-runtime';
+import type { AgentState, HarnessRunBinding } from '@lobechat/agent-runtime';
 
 import { type AgentOperationMetadata, type StepResult } from './AgentStateManager';
 import { type StreamChunkData, type StreamEvent } from './StreamEventManager';
@@ -34,6 +34,7 @@ export interface IAgentStateManager {
   createOperationMetadata: (
     operationId: string,
     data: {
+      harnessBinding?: HarnessRunBinding;
       agentConfig?: any;
       modelRuntimeConfig?: any;
       userId?: string;

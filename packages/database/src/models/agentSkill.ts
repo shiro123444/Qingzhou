@@ -2,7 +2,7 @@ import type { SkillItem, SkillListItem } from '@lobechat/types';
 import { merge } from '@lobechat/utils';
 import { and, desc, eq, ilike, inArray, or } from 'drizzle-orm';
 
-import type {NewAgentSkill } from '../schemas';
+import type { NewAgentSkill } from '../schemas';
 import { agentSkills } from '../schemas';
 import type { LobeChatDatabase } from '../type';
 
@@ -91,10 +91,10 @@ export class AgentSkillModel {
     return { data, total: data.length };
   };
 
-  findByIds = async (ids: string[]): Promise<SkillItem[]> => {
+  findByIds = async (ids: string[]): Promise<Array<SkillItem & { generation: number }>> => {
     if (ids.length === 0) return [];
     return this.db
-      .select(skillItemColumns)
+      .select({ ...skillItemColumns, generation: agentSkills.generation })
       .from(agentSkills)
       .where(and(inArray(agentSkills.id, ids), eq(agentSkills.userId, this.userId)));
   };

@@ -13,6 +13,7 @@
     "at": "./src/cli/index.ts"
   },
   "dependencies": {
+    "@lobechat/agent-runtime": "workspace:*",
     "commander": "^13.1.0",
     "gpt-tokenizer": "^3.4.0"
   }

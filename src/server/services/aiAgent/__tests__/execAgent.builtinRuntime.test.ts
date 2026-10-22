@@ -212,6 +212,11 @@ describe('AiAgentService.execAgent - builtin agent runtime config', () => {
     const callArgs = mockCreateOperation.mock.calls[0][0];
     expect(callArgs.agentConfig.systemRole).toContain('You are Lobe');
     expect(callArgs.agentConfig.systemRole).toContain('{{model}}');
+    expect(callArgs.harnessSource.agentConfig.systemRole).toBe('');
+    expect(callArgs.harnessSource.promptSegments).toEqual([
+      { kind: 'author', content: '' },
+      { kind: 'host', content: callArgs.agentConfig.systemRole },
+    ]);
   });
 
   it('should NOT override user-customized systemRole for inbox agent', async () => {
@@ -398,6 +403,15 @@ describe('AiAgentService.execAgent - builtin agent runtime config', () => {
     expect(callArgs.agentConfig.systemRole).toContain(
       'You are a helpful document (page) editing assistant',
     );
+    expect(callArgs.harnessSource.agentConfig).toMatchObject({
+      systemRole: 'Custom role.',
+      plugins: ['lobe-agent-documents'],
+      chatConfig: {},
+    });
+    expect(callArgs.harnessSource.promptSegments).toEqual([
+      { kind: 'author', content: 'Custom role.' },
+      { kind: 'host', content: expect.stringContaining('document (page) editing assistant') },
+    ]);
 
     expect(createServerAgentToolsEngine).toHaveBeenCalledWith(
       expect.anything(),
@@ -442,6 +456,11 @@ describe('AiAgentService.execAgent - builtin agent runtime config', () => {
     expect(callArgs.initialContext.initialContext.taskManager.contextPrompt).toContain(
       'Default Lobe AI agent id: agt_inbox',
     );
+    expect(callArgs.harnessSource.agentConfig).toMatchObject({ systemRole: '', plugins: [] });
+    expect(callArgs.harnessSource.promptSegments).toEqual([
+      { kind: 'author', content: '' },
+      { kind: 'host', content: callArgs.agentConfig.systemRole },
+    ]);
   });
 
   it('should inject lobe-agent when history has visual media and model lacks vision', async () => {

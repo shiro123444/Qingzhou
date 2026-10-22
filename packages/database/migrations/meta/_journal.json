@@ -770,6 +770,20 @@
       "when": 1779508800000,
       "tag": "0109_bot_inbound_sessions",
       "breakpoints": true
+    },
+    {
+      "idx": 110,
+      "version": "7",
+      "when": 1792627200000,
+      "tag": "0110_harness_publications",
+      "breakpoints": true
+    },
+    {
+      "idx": 111,
+      "version": "7",
+      "when": 1792627200001,
+      "tag": "0111_learning_budgets",
+      "breakpoints": true
     }
   ],
   "version": "6"

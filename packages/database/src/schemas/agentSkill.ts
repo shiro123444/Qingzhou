@@ -1,6 +1,6 @@
 import type { SkillManifest, SkillResourceMeta } from '@lobechat/types';
 import { relations } from 'drizzle-orm';
-import { index, jsonb, pgTable, text, uniqueIndex, varchar } from 'drizzle-orm/pg-core';
+import { index, integer, jsonb, pgTable, text, uniqueIndex, varchar } from 'drizzle-orm/pg-core';
 
 import { idGenerator } from '../utils/idGenerator';
 import { timestamps } from './_helpers';
@@ -13,6 +13,7 @@ export const agentSkills = pgTable(
     id: text('id')
       .$defaultFn(() => idGenerator('agentSkills'))
       .primaryKey(),
+    generation: integer('generation').notNull().default(0),
 
     // Core identifiers
     name: text('name').notNull(),

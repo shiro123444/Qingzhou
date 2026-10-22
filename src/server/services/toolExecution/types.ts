@@ -1,4 +1,4 @@
-import { type LobeToolManifest } from '@lobechat/context-engine';
+import { type LobeToolManifest, type OperationSkillSet } from '@lobechat/context-engine';
 import { type LobeChatDatabase } from '@lobechat/database';
 import { type ChatToolPayload, type ClientSecretPayload } from '@lobechat/types';
 
@@ -34,6 +34,8 @@ export interface ToolExecutionContext {
   messageId?: string;
   /** Agent runtime operation ID for structured tool outcome identity. */
   operationId?: string;
+  /** Trusted operation snapshot, never taken from model tool arguments. */
+  operationSkillSet?: OperationSkillSet;
   /** Conversation scope captured when the operation was created */
   scope?: string | null;
   /** Server database for LobeHub Skills execution */

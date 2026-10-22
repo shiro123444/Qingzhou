@@ -2,5 +2,8 @@ export * from './agents';
 export * from './audit';
 export * from './core';
 export * from './groupOrchestration';
+export * from './harness';
+export * from './learning';
+export * from './materialCapability';
 export * from './types';
 export * from './utils';

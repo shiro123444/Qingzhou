@@ -22,6 +22,13 @@ export async function register() {
     });
   }
 
+  if (process.env.NEXT_RUNTIME === 'nodejs' && process.env.QINGZHOU_LEARNING_WORKER === '1') {
+    const { serverDB } = await import('@lobechat/database');
+    const { withLearningMaintenance } = await import('./server/runtime/improvement/production');
+    // Mount the native worker at startup, including when no experiment page is visited.
+    await withLearningMaintenance(serverDB, async () => undefined);
+  }
+
   // Note: messenger system bot connections (Discord/Telegram) are managed
   // entirely from dc-center's System Bots admin — save / enable / forceReconnect
   // mutations call MessageGateway directly. The main app's only role here is

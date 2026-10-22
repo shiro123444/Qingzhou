@@ -1,6 +1,10 @@
-import type { AgentRuntimeContext, AgentState } from '@lobechat/agent-runtime';
+import {
+  type AgentRuntimeContext,
+  type AgentState,
+  composeHarnessPrompt,
+  type HarnessPromptSegment,
+} from '@lobechat/agent-runtime';
 import { BUILTIN_AGENT_SLUGS, getAgentRuntimeConfig } from '@lobechat/builtin-agents';
-import { builtinSkills } from '@lobechat/builtin-skills';
 import { LobeAgentManifest } from '@lobechat/builtin-tool-lobe-agent';
 import { LocalSystemManifest } from '@lobechat/builtin-tool-local-system';
 import { MessageToolIdentifier } from '@lobechat/builtin-tool-message';
@@ -21,7 +25,6 @@ import type {
   ToolExecutor,
   ToolSource,
 } from '@lobechat/context-engine';
-import { SkillEngine } from '@lobechat/context-engine';
 import type { LobeChatDatabase } from '@lobechat/database';
 import { buildTaskManagerDefaultsPrompt } from '@lobechat/prompts';
 import type {
@@ -42,8 +45,8 @@ import { nanoid } from '@lobechat/utils';
 import debug from 'debug';
 
 import { AgentModel } from '@/database/models/agent';
+import type { AgentDocumentWithRules } from '@/database/models/agentDocuments';
 import { AgentOperationModel } from '@/database/models/agentOperation';
-import { AgentSkillModel } from '@/database/models/agentSkill';
 import { AiModelModel } from '@/database/models/aiModel';
 import { FileModel } from '@/database/models/file';
 import { MessageModel } from '@/database/models/message';
@@ -54,7 +57,6 @@ import { TopicModel } from '@/database/models/topic';
 import { UserModel } from '@/database/models/user';
 import { UserPersonaModel } from '@/database/models/userMemory/persona';
 import { toolsEnv } from '@/envs/tools';
-import { shouldEnableBuiltinSkill } from '@/helpers/skillFilters';
 import { signOperationJwt, signUserJWT } from '@/libs/trpc/utils/internalJwt';
 import type { EvalContext, ServerAgentToolsContext } from '@/server/modules/Mecha';
 import { createServerAgentToolsEngine } from '@/server/modules/Mecha';
@@ -66,6 +68,7 @@ import { AgentRuntimeService } from '@/server/services/agentRuntime';
 import { getAbortError, isAbortError, throwIfAborted } from '@/server/services/agentRuntime/abort';
 import { hookDispatcher } from '@/server/services/agentRuntime/hooks';
 import type { AgentHook } from '@/server/services/agentRuntime/hooks/types';
+import { resolveOperationSkills } from '@/server/services/agentRuntime/skills';
 import type { StepLifecycleCallbacks } from '@/server/services/agentRuntime/types';
 import { enqueueAgentSignalSourceEvent } from '@/server/services/agentSignal';
 import {
@@ -388,6 +391,9 @@ export class AiAgentService {
     }
 
     // Use actual agent ID from config for subsequent operations
+    const sourceSystemRole = agentConfig.systemRole ?? '';
+    const sourceAgentConfig = structuredClone(agentConfig);
+    const promptSegments: HarnessPromptSegment[] = [{ kind: 'author', content: sourceSystemRole }];
     const resolvedAgentId = agentConfig.id;
 
     // Apply per-call model/provider overrides (e.g. from task.config)
@@ -414,7 +420,8 @@ export class AiAgentService {
       if (runtimeConfig) {
         // Runtime systemRole takes effect only if DB has no user-customized systemRole
         if (!agentConfig.systemRole && runtimeConfig.systemRole) {
-          agentConfig.systemRole = runtimeConfig.systemRole;
+          promptSegments.push({ kind: 'host', content: runtimeConfig.systemRole });
+          agentConfig.systemRole = composeHarnessPrompt(promptSegments);
           log('execAgent: merged builtin agent runtime systemRole for slug=%s', agentSlug);
         }
         // Runtime plugins merged (runtime plugins take priority if provided)
@@ -437,9 +444,8 @@ export class AiAgentService {
       const pageAgentSystemRole = pageAgentRuntime?.systemRole || '';
 
       if (pageAgentSystemRole) {
-        agentConfig.systemRole = agentConfig.systemRole
-          ? `${agentConfig.systemRole}\n\n${pageAgentSystemRole}`
-          : pageAgentSystemRole;
+        promptSegments.push({ kind: 'host', content: pageAgentSystemRole });
+        agentConfig.systemRole = composeHarnessPrompt(promptSegments);
       }
 
       agentConfig.plugins = agentConfig.plugins?.includes(PageAgentIdentifier)
@@ -460,9 +466,8 @@ export class AiAgentService {
       const taskAgentSystemRole = taskAgentRuntime?.systemRole || '';
 
       if (taskAgentSystemRole) {
-        agentConfig.systemRole = agentConfig.systemRole
-          ? `${agentConfig.systemRole}\n\n${taskAgentSystemRole}`
-          : taskAgentSystemRole;
+        promptSegments.push({ kind: 'host', content: taskAgentSystemRole });
+        agentConfig.systemRole = composeHarnessPrompt(promptSegments);
       }
 
       agentConfig.plugins = agentConfig.plugins?.includes(TaskIdentifier)
@@ -475,9 +480,8 @@ export class AiAgentService {
 
     // 2.5. Append additional instructions to agent's systemRole
     if (instructions) {
-      agentConfig.systemRole = agentConfig.systemRole
-        ? `${agentConfig.systemRole}\n\n${instructions}`
-        : instructions;
+      promptSegments.push({ kind: 'task', content: instructions });
+      agentConfig.systemRole = composeHarnessPrompt(promptSegments);
       log('execAgent: appended additional instructions to systemRole');
     }
 
@@ -846,6 +850,7 @@ export class AiAgentService {
     let onlineDevices: DeviceAttachment[] = [];
     let activeDeviceId: string | undefined;
     let hasAgentDocuments = false;
+    let pinnedAgentDocuments: AgentDocumentWithRules[] | undefined;
     let hasEnabledKnowledgeBases = false;
     const isBotConversation = !!(botContext || discordContext);
 
@@ -947,6 +952,7 @@ export class AiAgentService {
 
       try {
         const docs = await this.agentDocumentsService.getAgentDocuments(resolvedAgentId);
+        pinnedAgentDocuments = JSON.parse(JSON.stringify(docs));
         hasAgentDocuments = docs.length > 0;
       } catch {
         // Agent documents check is non-critical
@@ -1883,35 +1889,35 @@ export class AiAgentService {
       Object.keys(toolManifestMap).length,
     );
 
+    if (!pinnedAgentDocuments) {
+      try {
+        pinnedAgentDocuments = JSON.parse(
+          JSON.stringify(await this.agentDocumentsService.getAgentDocuments(resolvedAgentId)),
+        );
+      } catch {
+        /* Legacy unavailable documents remain explicitly uncaptured. */
+      }
+    }
+
     // 18. Build OperationSkillSet via SkillEngine
     // Combines builtin skills + user DB skills, filters by platform via enableChecker,
     // and pairs with agent's enabled plugin IDs for downstream SkillResolver consumption.
     let operationSkillSet;
+    let skillVersions: { generation: number; id: string }[] = [];
     try {
-      const builtinMetas = builtinSkills.map((s) => ({
-        content: s.content,
-        description: s.description,
-        identifier: s.identifier,
-        name: s.name,
-      }));
-      const skillModel = new AgentSkillModel(this.db, this.userId);
-      const { data: dbSkills } = await skillModel.findAll();
-      const dbMetas = dbSkills.map((s) => ({
-        description: s.description ?? '',
-        identifier: s.identifier,
-        name: s.name,
-      }));
-
-      const skillEngine = new SkillEngine({
-        enableChecker: (skill) => shouldEnableBuiltinSkill(skill.identifier),
-        skills: [...builtinMetas, ...dbMetas],
-      });
-      operationSkillSet = skillEngine.generate(agentPlugins ?? []);
+      ({ operationSkillSet, skillVersions } = await resolveOperationSkills(
+        this.db,
+        this.userId,
+        agentPlugins ?? [],
+        resolvedAgentId,
+        pinnedAgentDocuments,
+      ));
     } catch (error) {
       log('execAgent: failed to build operationSkillSet: %O', error);
     }
 
     // 19. Create operation using AgentRuntimeService
+
     log(
       'execAgent: creating operation %s — agentDocuments=%d, knowledgeBases=%s, tools=%d, skills=%d',
       operationId,
@@ -1925,6 +1931,9 @@ export class AiAgentService {
     // If createOperation fails, we still have valid messages that need error info
     try {
       const result = await this.agentRuntimeService.createOperation({
+        agentDocuments: pinnedAgentDocuments,
+        sourceSystemRole,
+        harnessSource: { agentConfig: { ...sourceAgentConfig }, promptSegments, skillVersions },
         activeDeviceId,
         agentConfig,
         deviceSystemInfo: Object.keys(deviceSystemInfo).length > 0 ? deviceSystemInfo : undefined,

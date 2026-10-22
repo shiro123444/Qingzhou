@@ -12,12 +12,14 @@ import { useAgentStore } from '@/store/agent';
 import { builtinAgentSelectors } from '@/store/agent/selectors';
 
 import { selectors, useStore } from '../store';
+import HarnessExperiments from './HarnessExperiments';
 
 const AgentSelfIteration = memo(() => {
   const { t } = useTranslation('setting');
   const [form] = Form.useForm();
   const updateConfig = useStore((s) => s.setChatConfig);
   const config = useStore(selectors.currentChatConfig, isEqual);
+  const agentId = useStore((s) => s.id);
   const isInbox = useAgentStore(builtinAgentSelectors.isInboxAgent);
 
   const selfIterationItem = isInbox
@@ -44,16 +46,19 @@ const AgentSelfIteration = memo(() => {
   };
 
   return (
-    <Form
-      footer={isInbox ? undefined : <Form.SubmitFooter />}
-      form={form}
-      initialValues={config}
-      items={[selfIteration]}
-      itemsType={'group'}
-      variant={'borderless'}
-      onFinish={updateConfig}
-      {...FORM_STYLE}
-    />
+    <>
+      <Form
+        footer={isInbox ? undefined : <Form.SubmitFooter />}
+        form={form}
+        initialValues={config}
+        items={[selfIteration]}
+        itemsType={'group'}
+        variant={'borderless'}
+        onFinish={updateConfig}
+        {...FORM_STYLE}
+      />
+      {agentId && <HarnessExperiments agentId={agentId} key={agentId} />}
+    </>
   );
 });
 
