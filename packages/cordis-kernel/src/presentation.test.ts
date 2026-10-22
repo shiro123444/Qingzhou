@@ -1,3 +1,6 @@
+import { tmpdir } from 'node:os';
+import nodePath from 'node:path';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import type {
@@ -119,7 +122,7 @@ const adapterFor = (bundle: MockRunnerBundle, timeoutMs = 100): PptMasterAdapter
     idFactory: () => `job-${++nextJob}`,
     workspaceFactory: async (jobId) => {
       const workspace: PresentationWorkspace = {
-        path: `/tmp/herdr-presentation/${jobId}`,
+        path: nodePath.join(tmpdir(), 'herdr-presentation', jobId),
         cleanup: vi.fn(),
       };
       bundle.workspaces.push(workspace);
@@ -141,7 +144,9 @@ describe('@lobechat/cordis-kernel PptMasterAdapter', () => {
 
     await adapter.createJob(reordered);
     const request = bundle.requests[0]!;
-    expect(request.inputArtifact?.path).toBe('/tmp/herdr-presentation/job-1/input.json');
+    expect(request.inputArtifact?.path).toBe(
+      nodePath.join(bundle.workspaces[0]!.path, 'input.json'),
+    );
     expect(new TextDecoder().decode(request.inputArtifact?.bytes)).toBe(
       '{"notebookId":"notebook-1","options":{"a":1,"z":2},"sourceVersionIds":["version-1"],"title":"Runtime presentation"}',
     );
@@ -173,7 +178,7 @@ describe('@lobechat/cordis-kernel PptMasterAdapter', () => {
       mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
     });
     expect(bundle.requests[0]).toMatchObject({
-      cwd: '/tmp/herdr-presentation/job-1',
+      cwd: bundle.workspaces[0]!.path,
       shell: false,
       timeoutMs: 100,
       maxOutputBytes: 1024,
