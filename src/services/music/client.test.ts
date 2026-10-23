@@ -26,6 +26,13 @@ function fixture() {
 }
 
 describe('audio upload transport', () => {
+  it('calls a native-style fetch without binding the MusicClient as its receiver', async () => {
+    const fetcher: typeof fetch = async function (this: unknown) {
+      expect(this).toBeUndefined();
+      return Response.json({ success: true, result: { tracks: [track] } });
+    };
+    expect(await new MusicClient(fetcher).search()).toEqual([track]);
+  });
   it('sniffs real audio, uploads it and registers a normal file without starting document processing', async () => {
     const f = fixture();
     expect(

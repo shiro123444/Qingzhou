@@ -68,6 +68,7 @@ import MemoryContextsPage from '@/routes/(main)/memory/contexts';
 import MemoryExperiencesPage from '@/routes/(main)/memory/experiences';
 import MemoryIdentitiesPage from '@/routes/(main)/memory/identities';
 import MemoryPreferencesPage from '@/routes/(main)/memory/preferences';
+import MusicPage from '@/routes/(main)/music';
 import PageIndexPage from '@/routes/(main)/page';
 import DesktopPageLayout from '@/routes/(main)/page/_layout';
 import PageDetailPage from '@/routes/(main)/page/[id]';
@@ -520,6 +521,7 @@ export const desktopRoutes: RouteObject[] = [
       },
 
       { element: <SitesPage />, path: 'sites' },
+      { element: <MusicPage />, path: 'music' },
       // Runtime routes
       {
         children: [

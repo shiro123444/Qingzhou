@@ -1,6 +1,6 @@
 # 清舟音乐最小闭环落地方案
 
-状态：M1 媒体通路已实现，M2 播放界面与 M3 Agent 尚待实施。初始方案基线为 `eb04cb1b1`，整理日期为 2026-10-19；M1 实现与验证记录见 [音乐媒体通路](../development/music-m1.md)。
+状态：M1 媒体通路与 M2 播放界面已实现，M3 Agent 尚待实施。初始方案基线为 `eb04cb1b1`，整理日期为 2026-10-19；实现与验证记录见 [M1 音乐媒体通路](../development/music-m1.md) 和 [M2 播放工作台](../development/music-m2.md)。M2 歌词采用按账号保存的浏览器本地 LRC，服务端歌词读取接口留待后续。
 
 一期采用“用户已有音频文件库 + 单个 music 原子插件 + 每标签页一个浏览器播放器”。交付目标是：导入音频、搜索、加入队列、播放、暂停、跳转、切歌、可选 LRC 同步，以及在音乐页、聊天页和 PPT 页之间切换时继续播放。自然语言入口可以准备播放队列，实际播放由当前客户端执行并反馈结果。
 
@@ -27,26 +27,27 @@
 
 ## 3. 模块和文件划分
 
-M1 已新增服务端 contracts、provider、runtime、原子插件、API 和客户端。下面保留完整的模块划分；歌词、composition 和界面文件仍是后续待接线位置。
+M1 已新增服务端 contracts、provider、runtime、原子插件、API 和客户端。M2 已在 MusicPlayer feature 中实现共享引擎、store、歌词解析和 Mini，MusicStudio 实现工作台。下面保留完整方案的模块划分；服务端歌词、composition 和 Agent 仍是后续位置。
 
 ```text
-src/types/music.ts                         DTO、播放器状态和队列提案
+src/types/music.ts                         曲目与播放 DTO、Zod 校验
 src/server/runtime/music/
-  contracts.ts                             Zod schema、端口和错误码
+  contracts.ts                             provider 端口和错误码
   atomic-plugin.ts                         music 操作及发现元数据
-  owned-file-provider.ts                   用户文件查询、歌词读取、播放解析
-  composition.ts                           音乐 skills policy 与模型配置解析
+  owned-file-provider.ts                   用户音频查询、播放解析和流式代理
+  composition.ts                           待实施：音乐 skills policy 与模型配置解析
   runtime.ts                               music/skills bundle 和 profile
 src/app/(backend)/api/runtime/music/
   route.ts                                 受鉴权的目录及操作入口
-  tracks/[id]/stream/route.ts               受鉴权的媒体地址解析与重定向
+  tracks/[id]/stream/route.ts               每请求鉴权的媒体流与 Range 代理
 src/services/music/client.ts               HTTP DTO 客户端
 src/features/MusicPlayer/
-  engine.ts                                单一 HTMLAudioElement 所有者
-  store.ts                                 队列、偏好和媒体事件投影
-  Host.tsx                                 长期挂载、账户切换、资源回收
+  engine.ts                                单一 HTMLAudioElement、store、队列与账号持久化
+  context.tsx                              共享引擎、账户切换、资源回收
+  PlayerShell.tsx                          路由内容容器与常驻播放栏
+  lyrics.ts                                有界 LRC 解析、时间索引
   MiniPlayer.tsx                            全局控制栏
-  index.ts                                 公共导出
+  index.tsx                                主布局 Host 与登录账号绑定
 src/features/MusicStudio/
   index.tsx                                搜索、导入、队列和歌词
 src/routes/(main)/music/index.tsx           薄路由，导入 MusicStudio

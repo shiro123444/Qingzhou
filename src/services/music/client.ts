@@ -37,7 +37,9 @@ export class MusicClient {
   ) {}
 
   private async invoke(operation: string, input: unknown, signal?: AbortSignal) {
-    const response = await this.fetcher('/api/runtime/music', {
+    // Native Window.fetch must not receive this MusicClient as its receiver.
+    const fetcher = this.fetcher;
+    const response = await fetcher('/api/runtime/music', {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },

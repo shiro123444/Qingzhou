@@ -20,6 +20,7 @@ import OverlayMessageDispatcher from '@/features/Electron/ScreenCapture/OverlayM
 import OverlaySnapshotPublisher from '@/features/Electron/ScreenCapture/OverlaySnapshotPublisher';
 import TitleBar from '@/features/Electron/titlebar/TitleBar';
 import HotkeyHelperPanel from '@/features/HotkeyHelperPanel';
+import { MusicPlayerHost } from '@/features/MusicPlayer';
 import NavPanel from '@/features/NavPanel';
 import { useFeedbackModal } from '@/hooks/useFeedbackModal';
 import { usePlatform } from '@/hooks/usePlatform';
@@ -78,14 +79,16 @@ const Layout: FC = () => {
         >
           <NavPanel />
           <DesktopLayoutContainer>
-            <MarketAuthProvider isDesktop={isDesktop}>
-              <DesktopHomeLayout>
-                <DesktopHome />
-              </DesktopHomeLayout>
-              <Suspense fallback={<Loading debugId="DesktopMainLayout > Outlet" />}>
-                <Outlet />
-              </Suspense>
-            </MarketAuthProvider>
+            <MusicPlayerHost>
+              <MarketAuthProvider isDesktop={isDesktop}>
+                <DesktopHomeLayout>
+                  <DesktopHome />
+                </DesktopHomeLayout>
+                <Suspense fallback={<Loading debugId="DesktopMainLayout > Outlet" />}>
+                  <Outlet />
+                </Suspense>
+              </MarketAuthProvider>
+            </MusicPlayerHost>
           </DesktopLayoutContainer>
         </Flexbox>
       </DndContextWrapper>
