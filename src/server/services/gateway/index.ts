@@ -287,9 +287,9 @@ export class GatewayService {
       }
 
       const manager = createGatewayManager({ definitions: platformRegistry.listPlatforms() });
-      await manager.startClient(platform, applicationId, userId);
+      const status = await manager.startClient(platform, applicationId, userId);
       log('Started client %s:%s (direct)', platform, applicationId);
-      return 'started';
+      return status;
     }
 
     let manager = getGatewayManager();
@@ -299,9 +299,9 @@ export class GatewayService {
       manager = getGatewayManager();
     }
 
-    await manager!.startClient(platform, applicationId, userId);
+    const status = await manager!.startClient(platform, applicationId, userId);
     log('Started client %s:%s', platform, applicationId);
-    return 'started';
+    return status;
   }
 
   /**
@@ -420,16 +420,10 @@ export class GatewayService {
     }
 
     const manager = getGatewayManager();
-    if (manager?.isRunning) {
+    if (manager) {
       await manager.stopClient(platform, applicationId);
       log('Stopped client %s:%s', platform, applicationId);
     }
-
-    await updateBotRuntimeStatus({
-      applicationId,
-      platform,
-      status: BOT_RUNTIME_STATUSES.disconnected,
-    });
   }
 
   /**

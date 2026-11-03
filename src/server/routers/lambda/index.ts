@@ -27,6 +27,8 @@ import { botDeliveryRouter } from './botDelivery';
 import { botMessageRouter } from './botMessage';
 import { briefRouter } from './brief';
 import { changelogRouter } from './changelog';
+import { channelRouter } from './channel';
+import { channelIdentityRouter } from './channelIdentity';
 import { chunkRouter } from './chunk';
 import { comfyuiRouter } from './comfyui';
 import { communityAnalyticsRouter } from './communityAnalytics';
@@ -82,6 +84,8 @@ export const lambdaRouter = router({
   agentSignal: agentSignalRouter,
   task: taskRouter,
   changelog: changelogRouter,
+  channel: channelRouter,
+  channelIdentity: channelIdentityRouter,
   brief: briefRouter,
   communityAnalytics: communityAnalyticsRouter,
   aiAgent: aiAgentRouter,

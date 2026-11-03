@@ -1,4 +1,5 @@
 export default {
+  'navigation.channels': 'Channels',
   'navigation.chat': 'Chat',
   'navigation.discover': 'Discover',
   'navigation.discoverAssistants': 'Discover Assistants',

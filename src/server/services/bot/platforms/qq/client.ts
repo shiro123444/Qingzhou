@@ -109,6 +109,64 @@ function qqFileTransport(
   };
 }
 
+/** The caller persists frames/receipts; this adapter keeps no process-local stream state. */
+function qqStreamTransport(
+  api: QQApiClient,
+  config: BotProviderConfig,
+  context: BotPlatformRuntimeContext,
+  threadType: string,
+  targetId: string,
+  nextOptions: () => Promise<{ msgId: string; msgSeq: number } | undefined>,
+): Pick<PlatformMessenger, 'prepareReplyStream' | 'sendReplyStreamFrame'> {
+  const receivedAt = context.replyToMessageReceivedAt;
+  const isFresh = () =>
+    typeof receivedAt === 'number' &&
+    Number.isFinite(receivedAt) &&
+    receivedAt <= Date.now() &&
+    Date.now() - receivedAt < 5 * 60_000;
+  if (
+    config.settings.c2cStreaming !== true ||
+    threadType !== 'c2c' ||
+    !context.replyToMessageId ||
+    !context.redisClient?.incr ||
+    !isFresh()
+  )
+    return {};
+  const assertFresh = () => {
+    if (!isFresh()) throw new Error('QQ C2C stream reply window expired');
+  };
+  return {
+    prepareReplyStream: async () => {
+      assertFresh();
+      const options = await nextOptions();
+      assertFresh();
+      if (!options) throw new Error('QQ C2C stream requires a passive reply reference');
+      return { msgSeq: options.msgSeq, replyMessageId: options.msgId };
+    },
+    sendReplyStreamFrame: async (frame) => {
+      assertFresh();
+      if (frame.replyMessageId !== context.replyToMessageId)
+        throw new Error('QQ C2C stream reply reference does not match this conversation');
+      const receipt = await api.sendC2CStreamMessage(targetId, {
+        content_raw: frame.content,
+        content_type: 'markdown',
+        index: frame.index,
+        input_mode: 'replace',
+        input_state: frame.final ? 10 : 1,
+        msg_id: frame.replyMessageId,
+        msg_seq: frame.msgSeq,
+        ...(frame.streamId ? { stream_msg_id: frame.streamId } : {}),
+      });
+      return {
+        streamId: frame.streamId ?? receipt.id,
+        ...(Number.isSafeInteger(receipt.remain_msg_len) && receipt.remain_msg_len! >= 0
+          ? { remainingCharacters: receipt.remain_msg_len }
+          : {}),
+      };
+    },
+  };
+}
+
 /**
  * Resolve attachments on an inbound QQ message into `AttachmentSource[]`.
  *
@@ -159,6 +217,7 @@ class QQGatewayClient implements PlatformClient {
   private config: BotProviderConfig;
   private context: BotPlatformRuntimeContext;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private refreshTask?: Promise<void>;
   private stopped = false;
 
   constructor(config: BotProviderConfig, context: BotPlatformRuntimeContext) {
@@ -176,7 +235,7 @@ class QQGatewayClient implements PlatformClient {
     this.abort = new AbortController();
     const durationMs = options?.durationMs ?? DEFAULT_DURATION_MS;
     const runtimeStatusTtlMs = durationMs + CONNECTED_STATUS_TTL_BUFFER_MS;
-    await updateBotRuntimeStatus(
+    await (this.context.updateRuntimeStatus ?? updateBotRuntimeStatus)(
       {
         applicationId: this.applicationId,
         platform: this.id,
@@ -220,6 +279,8 @@ class QQGatewayClient implements PlatformClient {
       const bot = new Chat(chatConfig);
       this.bot = bot;
       await bot.initialize();
+      this.context.assertConnectionHeld?.();
+      if (this.stopped || this.abort.signal.aborted) return;
 
       const qqAdapter = (bot as any).adapters.get('qq') as QQAdapter;
       const waitUntil = options?.waitUntil ?? ((task: Promise<any>) => task.catch(() => {}));
@@ -231,8 +292,9 @@ class QQGatewayClient implements PlatformClient {
         durationMs,
         this.abort.signal,
         webhookUrl,
-        async (url, body) =>
-          fetch(url, {
+        async (url, body) => {
+          this.context.assertConnectionHeld?.();
+          return fetch(url, {
             ...signGatewayRequest({
               applicationId: this.applicationId,
               body,
@@ -242,10 +304,13 @@ class QQGatewayClient implements PlatformClient {
             }),
             redirect: 'error',
             signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(30_000)]),
-          }),
+          });
+        },
       );
 
-      if (!options) {
+      this.context.assertConnectionHeld?.();
+      if (this.stopped || this.abort.signal.aborted) return;
+      if (!options && !this.stopped) {
         this.refreshTimer = setTimeout(() => {
           if (this.abort.signal.aborted || this.stopped) return;
 
@@ -255,13 +320,13 @@ class QQGatewayClient implements PlatformClient {
             durationMs / 3_600_000,
           );
           this.abort.abort();
-          this.start().catch((err) => {
+          this.refreshTask = this.start().catch((err) => {
             log('Failed to refresh QQBot appId=%s: %O', this.applicationId, err);
           });
         }, durationMs);
       }
 
-      await updateBotRuntimeStatus(
+      await (this.context.updateRuntimeStatus ?? updateBotRuntimeStatus)(
         {
           applicationId: this.applicationId,
           platform: this.id,
@@ -272,7 +337,7 @@ class QQGatewayClient implements PlatformClient {
 
       log('QQBot appId=%s started, webhookUrl=%s', this.applicationId, webhookUrl);
     } catch (error) {
-      await updateBotRuntimeStatus(
+      await (this.context.updateRuntimeStatus ?? updateBotRuntimeStatus)(
         {
           applicationId: this.applicationId,
           errorMessage: getRuntimeStatusErrorMessage(error),
@@ -293,11 +358,13 @@ class QQGatewayClient implements PlatformClient {
       this.refreshTimer = null;
     }
     this.abort.abort();
+    // A refresh may still be initializing its replacement bot.
+    await this.refreshTask;
     if (this.bot) {
       await this.bot.shutdown().catch(() => {});
       this.bot = null;
     }
-    await updateBotRuntimeStatus(
+    await (this.context.updateRuntimeStatus ?? updateBotRuntimeStatus)(
       {
         applicationId: this.applicationId,
         platform: this.id,
@@ -325,13 +392,18 @@ class QQGatewayClient implements PlatformClient {
     };
   }
 
-  getMessenger(platformThreadId: string): PlatformMessenger {
+  getMessenger(
+    platformThreadId: string,
+    replyContext?: Pick<BotPlatformRuntimeContext, 'replyToMessageId' | 'replyToMessageReceivedAt'>,
+  ): PlatformMessenger {
+    const context = { ...this.context, ...replyContext };
     const api = new QQApiClient(this.config.applicationId, this.config.credentials.appSecret);
     const targetId = extractChatId(platformThreadId);
     const threadType = extractThreadType(platformThreadId);
-    const nextOptions = replyOptions(this.config, this.context, platformThreadId);
+    const nextOptions = replyOptions(this.config, context, platformThreadId);
     return {
       ...qqFileTransport(api, threadType, targetId, nextOptions),
+      ...qqStreamTransport(api, this.config, context, threadType, targetId, nextOptions),
       createMessage: async (content) =>
         sendQQMessage(api, threadType, targetId, content, await nextOptions()),
       editMessage: async (_messageId, content) =>
@@ -433,13 +505,18 @@ class QQWebhookClient implements PlatformClient {
     };
   }
 
-  getMessenger(platformThreadId: string): PlatformMessenger {
+  getMessenger(
+    platformThreadId: string,
+    replyContext?: Pick<BotPlatformRuntimeContext, 'replyToMessageId' | 'replyToMessageReceivedAt'>,
+  ): PlatformMessenger {
+    const context = { ...this.context, ...replyContext };
     const api = new QQApiClient(this.config.applicationId, this.config.credentials.appSecret);
     const targetId = extractChatId(platformThreadId);
     const threadType = extractThreadType(platformThreadId);
-    const nextOptions = replyOptions(this.config, this.context, platformThreadId);
+    const nextOptions = replyOptions(this.config, context, platformThreadId);
     return {
       ...qqFileTransport(api, threadType, targetId, nextOptions),
+      ...qqStreamTransport(api, this.config, context, threadType, targetId, nextOptions),
       createMessage: async (content) =>
         sendQQMessage(api, threadType, targetId, content, await nextOptions()),
       editMessage: async (_messageId, content) =>

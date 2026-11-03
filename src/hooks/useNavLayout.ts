@@ -70,6 +70,12 @@ export const useNavLayout = (): NavLayout => {
           title: t('tab.presentation'),
           url: '/presentation',
         },
+        {
+          icon: getRouteById('channels')!.icon,
+          key: SidebarTabKey.Channels,
+          title: t('tab.channels'),
+          url: '/channels',
+        },
       ] as NavItem[],
     [t, toggleCommandMenu],
   );

@@ -1,6 +1,7 @@
 import type { Chat, Message } from 'chat';
 
 import type { AttachmentSource } from '@/server/services/aiAgent/ingestAttachment';
+import type { updateBotRuntimeStatus } from '@/server/services/gateway/runtimeStatus';
 
 // ============================================================================
 // Bot Platform Core Types
@@ -84,6 +85,27 @@ export interface FieldSchema {
 /**
  * LobeHub-specific outbound capabilities used by callback and bridge services.
  */
+export interface ReplyCard {
+  actions?: Array<{
+    action: 'confirm' | 'reject';
+    label: string;
+    platformThreadId: string;
+    token: string;
+  }>;
+  content: string;
+  deliveryId: string;
+  title: string;
+}
+
+export interface ReplyStreamFrame {
+  content: string;
+  final: boolean;
+  index: number;
+  msgSeq: number;
+  replyMessageId: string;
+  streamId?: string;
+}
+
 export interface PlatformMessenger {
   /**
    * Add a reaction to a message (optional — platforms without reaction APIs
@@ -91,6 +113,7 @@ export interface PlatformMessenger {
    */
   addReaction?: (messageId: string, emoji: string) => Promise<void>;
   createMessage: (content: string) => Promise<void>;
+  createReplyCard?: (card: ReplyCard) => Promise<void>;
   editMessage: (messageId: string, content: string) => Promise<void>;
   /** Upload privately, then return the separately ledgered user-visible send. */
   prepareFile?: (file: {
@@ -99,6 +122,7 @@ export interface PlatformMessenger {
     mimeType: string;
     deliveryId: string;
   }) => Promise<() => Promise<void>>;
+  prepareReplyStream?: () => Promise<{ msgSeq: number; replyMessageId: string }>;
   removeReaction: (messageId: string, emoji: string) => Promise<void>;
   /**
    * Transition the bot's reaction on a message from `prevEmoji` to
@@ -119,6 +143,9 @@ export interface PlatformMessenger {
     prevEmoji: string | null,
     nextEmoji: string | null,
   ) => Promise<void>;
+  sendReplyStreamFrame?: (
+    frame: ReplyStreamFrame,
+  ) => Promise<{ remainingCharacters?: number; streamId: string }>;
   triggerTyping?: () => Promise<void>;
   updateThreadName?: (name: string) => Promise<void>;
 }
@@ -224,7 +251,10 @@ export interface PlatformClient {
   // --- Runtime Operations ---
 
   /** Get a messenger for a specific thread (outbound messaging). */
-  getMessenger: (platformThreadId: string) => PlatformMessenger;
+  getMessenger: (
+    platformThreadId: string,
+    replyContext?: Pick<BotPlatformRuntimeContext, 'replyToMessageId' | 'replyToMessageReceivedAt'>,
+  ) => PlatformMessenger;
 
   readonly id: string;
 
@@ -326,6 +356,7 @@ export interface BotPlatformRedisClient {
 
 export interface BotPlatformRuntimeContext {
   appUrl?: string;
+  assertConnectionHeld?: () => void;
   persistVerifiedWebhook?: (payload: unknown, eventId: string, threadId: string) => Promise<void>;
   pollingCursorStore?: {
     load: () => Promise<string | undefined>;
@@ -335,6 +366,8 @@ export interface BotPlatformRuntimeContext {
   registerByToken?: (token: string) => void;
   /** Original inbound message ID for passive platform replies. */
   replyToMessageId?: string;
+  replyToMessageReceivedAt?: number;
+  updateRuntimeStatus?: typeof updateBotRuntimeStatus;
 }
 
 // --------------- Validation ---------------

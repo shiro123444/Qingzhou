@@ -27,6 +27,7 @@ import {
 import { type IStreamEventManager } from '@/server/modules/AgentRuntime/types';
 import { emitAgentSignalSourceEvent } from '@/server/services/agentSignal';
 import { toAgentSignalTraceEvents } from '@/server/services/agentSignal/observability/traceEvents';
+import { assertChannelIdentityAccess } from '@/server/services/bot/channelIdentityAccess';
 import { mcpService } from '@/server/services/mcp';
 import { QueueService } from '@/server/services/queue';
 import { LocalQueueServiceImpl } from '@/server/services/queue/impls';
@@ -623,6 +624,14 @@ export class AgentRuntimeService {
       if (agentState.stepCount < stepIndex) {
         return { locked: true, nextStepScheduled: false, state: agentState, success: false };
       }
+
+      // Committed continuations keep their idempotent recovery path above.
+      await assertChannelIdentityAccess(
+        this.serverDB,
+        this.userId,
+        agentState.metadata?.botContext,
+      );
+      assertHeld();
 
       // Dispatch beforeStep hooks
       try {

@@ -11,11 +11,23 @@ import { CallbackDeliverySession, RedisCallbackLedger } from '@/server/services/
 import { AgentStateManager } from '../AgentStateManager';
 import * as redisRuntime from '../redis';
 
-// Opt-in only: use a disposable LOCAL UNIX socket, never the application's REDIS_URL.
+// Opt-in only: use a disposable LOCAL server, never the application's REDIS_URL.
 const socket = process.env.AGENT_TEST_REDIS_SOCKET;
+const redisTestUrl = process.env.CHANNEL_TEST_REDIS_URL;
 if (socket && !socket.startsWith('/tmp/')) {
   throw new Error('Lease integration tests require an isolated /tmp/ Redis socket');
 }
+const parsedRedisUrl = redisTestUrl ? new URL(redisTestUrl) : undefined;
+if (
+  parsedRedisUrl &&
+  (parsedRedisUrl.protocol !== 'redis:' ||
+    !['localhost', '127.0.0.1', '[::1]'].includes(parsedRedisUrl.hostname) ||
+    !parsedRedisUrl.port ||
+    parsedRedisUrl.port === '6379' ||
+    parsedRedisUrl.pathname !== '/15')
+)
+  throw new Error('Use a disposable local Redis server on a dedicated port and database 15');
+if (socket && redisTestUrl) throw new Error('Select one isolated Redis test endpoint');
 
 const state = (
   operationId: string,
@@ -49,17 +61,19 @@ const state = (
   },
 });
 
-describe.skipIf(!socket)('lease Lua against an isolated real Redis server', () => {
+describe.skipIf(!socket && !redisTestUrl)('lease Lua against an isolated real Redis server', () => {
   let redis: Redis;
   let manager: AgentStateManager;
 
   beforeAll(async () => {
-    redis = new Redis({
+    const options = {
       enableOfflineQueue: false,
       lazyConnect: true,
       maxRetriesPerRequest: 0,
-      path: socket!,
-    });
+    };
+    redis = redisTestUrl
+      ? new Redis(redisTestUrl, options)
+      : new Redis({ ...options, path: socket! });
     await redis.connect();
     vi.spyOn(redisRuntime, 'getAgentRuntimeRedisClient').mockReturnValue(redis);
     manager = new AgentStateManager();

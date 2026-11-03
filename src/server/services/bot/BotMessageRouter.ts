@@ -19,6 +19,7 @@ import { AgentBridgeService } from './AgentBridgeService';
 import { BotInboundService, inboundExecution } from './BotInboundService';
 import { BotInteractionError, BotInteractionService } from './BotInteractionService';
 import { buildBotContext } from './buildBotContext';
+import { ChannelIdentityService, supportsChannelIdentity } from './channelIdentity';
 import { wakeBotDelivery } from './deliveryWake';
 import {
   createOrGetPairingRequest,
@@ -120,6 +121,7 @@ interface CommandContext {
   /** Display name of the invoking user. Optional because some platforms
    *  surface only the ID, not a friendly label. */
   authorUserName?: string;
+  isDM?: boolean;
   post: (text: string) => Promise<any>;
   /** Locale to use for any system-generated reply text. Plumbed in by the
    *  caller — text-based commands derive it per-message via the platform's
@@ -795,6 +797,7 @@ export class BotMessageRouter {
     const tryDispatch = async (
       thread: {
         id: string;
+        isDM?: boolean;
         post: (t: string) => Promise<any>;
         setState: (s: Record<string, any>, o?: { replace?: boolean }) => Promise<any>;
       },
@@ -806,6 +809,7 @@ export class BotMessageRouter {
       const result = BotMessageRouter.dispatchTextCommand(sanitized, commands);
       if (!result) return false;
       await result.command.handler({
+        isDM: thread.isDM,
         args: result.args,
         authorUserId: author?.userId,
         authorUserName: author?.userName,
@@ -841,9 +845,29 @@ export class BotMessageRouter {
     /** Returns true when the inbound passes the standard caller-test
      *  text. Used to short-circuit gate checks for non-command messages in
      *  subscribed group threads that aren't addressed to the bot. */
-    const looksLikeCommand = (text: string | undefined): boolean => {
+    const commandName = (text: string | undefined): string | undefined => {
       const sanitized = client.sanitizeUserInput?.(text ?? '') ?? text;
-      return BotMessageRouter.dispatchTextCommand(sanitized, commands) !== null;
+      return BotMessageRouter.dispatchTextCommand(sanitized, commands)?.command.name;
+    };
+    const looksLikeCommand = (text: string | undefined) => commandName(text) !== undefined;
+
+    const resolveBotContext = async (authorUserId: string | undefined, threadId: string) => {
+      const identity = await ChannelIdentityService.resolveAccess(
+        serverDB,
+        platform,
+        applicationId,
+        authorUserId,
+        { userId, agentId },
+      );
+      if (identity.enforced && !identity.allowed)
+        throw new Error('当前账号绑定已撤销，请重新绑定后继续。');
+      return buildBotContext({
+        applicationId,
+        authorUserId,
+        operatorUserId: identity.enforced ? identity.operatorUserId : operatorUserId,
+        platform,
+        platformThreadId: threadId,
+      });
     };
 
     /**
@@ -862,7 +886,25 @@ export class BotMessageRouter {
       author: { userId?: string; userName?: string },
       replyLocale: BotReplyLocale,
       caller: string,
+      command?: string,
     ): Promise<boolean> => {
+      if (command === 'bind') {
+        if (thread.isDM === true) return true;
+        await thread.post('请在与机器人的私聊中发送绑定命令。');
+        return false;
+      }
+      const identity = await ChannelIdentityService.resolveAccess(
+        serverDB,
+        platform,
+        applicationId,
+        author.userId,
+        { userId, agentId },
+      );
+      if (identity.enforced) {
+        if (identity.allowed) return true;
+        await thread.post('此机器人仅允许已绑定账号访问，请在清舟渠道管理页生成绑定码。');
+        return false;
+      }
       // Owner override. The bot's operator (`settings.userId`) sets the
       // policies for *other* users — locking themselves out of their own
       // bot is a footgun. Without this branch:
@@ -990,7 +1032,15 @@ export class BotMessageRouter {
 
       // Gate first — must run before tryDispatch so a /command from a
       // non-allowlisted sender can't slip through and side-effect.
-      if (!(await passGatesOrNotify(thread, message.author, replyLocale, 'onNewMention'))) {
+      if (
+        !(await passGatesOrNotify(
+          thread,
+          message.author,
+          replyLocale,
+          'onNewMention',
+          commandName(message.text),
+        ))
+      ) {
         return;
       }
 
@@ -1050,13 +1100,7 @@ export class BotMessageRouter {
       try {
         await new AgentBridgeService(serverDB, userId).handleMention(thread, merged, {
           agentId,
-          botContext: buildBotContext({
-            applicationId,
-            authorUserId: merged.author?.userId,
-            operatorUserId,
-            platform,
-            platformThreadId: thread.id,
-          }),
+          botContext: await resolveBotContext(merged.author?.userId, thread.id),
           charLimit,
           client,
           displayToolCalls,
@@ -1157,7 +1201,15 @@ export class BotMessageRouter {
 
       // Gate before tryDispatch so a /command from a non-allowlisted sender
       // (or in a disabled DM/group scope) cannot side-effect.
-      if (!(await passGatesOrNotify(thread, message.author, replyLocale, 'onSubscribedMessage'))) {
+      if (
+        !(await passGatesOrNotify(
+          thread,
+          message.author,
+          replyLocale,
+          'onSubscribedMessage',
+          commandName(message.text),
+        ))
+      ) {
         return;
       }
 
@@ -1238,13 +1290,7 @@ export class BotMessageRouter {
       try {
         await new AgentBridgeService(serverDB, userId).handleSubscribedMessage(thread, merged, {
           agentId,
-          botContext: buildBotContext({
-            applicationId,
-            authorUserId: merged.author?.userId,
-            operatorUserId,
-            platform,
-            platformThreadId: thread.id,
-          }),
+          botContext: await resolveBotContext(merged.author?.userId, thread.id),
           charLimit,
           client,
           displayToolCalls,
@@ -1345,6 +1391,7 @@ export class BotMessageRouter {
             message.author,
             replyLocale,
             `onNewMessage (${platform} catch-all)`,
+            commandName(message.text),
           ))
         ) {
           return;
@@ -1456,13 +1503,7 @@ export class BotMessageRouter {
         try {
           await new AgentBridgeService(serverDB, userId).handleMention(thread, merged, {
             agentId,
-            botContext: buildBotContext({
-              applicationId,
-              authorUserId: merged.author?.userId,
-              operatorUserId,
-              platform,
-              platformThreadId: thread.id,
-            }),
+            botContext: await resolveBotContext(merged.author?.userId, thread.id),
             charLimit,
             client,
             displayToolCalls,
@@ -1524,6 +1565,34 @@ export class BotMessageRouter {
     } = info;
 
     return [
+      ...(supportsChannelIdentity(platform)
+        ? [
+            {
+              name: 'bind',
+              description: 'Bind your channel account using the code from Qingzhou',
+              handler: async (ctx: CommandContext) => {
+                if (!ctx.isDM || !ctx.authorUserId) {
+                  await ctx.post('请在与机器人的私聊中发送绑定命令。');
+                  return;
+                }
+                try {
+                  await new ChannelIdentityService(serverDB, userId).completeChallenge(
+                    providerId,
+                    ctx.args,
+                    ctx.authorUserId,
+                    ctx.authorUserName,
+                  );
+                  await this.invalidateBot(platform, applicationId);
+                  await ctx.post('账号已绑定，机器人已启用仅绑定账号访问。');
+                } catch {
+                  await ctx.post(
+                    '绑定未完成，请检查绑定码是否有效，或先在清舟撤销已有绑定后重试。',
+                  );
+                }
+              },
+            },
+          ]
+        : []),
       {
         name: 'status',
         description: 'Show execution status and pending channel interaction',
@@ -1665,7 +1734,15 @@ export class BotMessageRouter {
           // operator through (operator bypass for pairing), but a
           // pre-approved third party would also pass that gate. The
           // command itself enforces owner-only at the action layer.
-          if (!operatorUserId || !ctx.authorUserId || ctx.authorUserId !== operatorUserId) {
+          const identity = await ChannelIdentityService.resolveAccess(
+            serverDB,
+            platform,
+            applicationId,
+            ctx.authorUserId,
+            { userId, agentId },
+          );
+          const verifiedOperator = identity.enforced ? identity.operatorUserId : operatorUserId;
+          if (!verifiedOperator || !ctx.authorUserId || ctx.authorUserId !== verifiedOperator) {
             await ctx.post(renderCommandReply('cmdApproveNotOwner', ctx.replyLocale));
             return;
           }
@@ -1812,6 +1889,7 @@ export class BotMessageRouter {
       author: { userId?: string; userName?: string },
       replyLocale: BotReplyLocale,
       caller: string,
+      command?: string,
     ) => Promise<boolean>,
   ): void {
     // --- Native slash commands (Slack, Discord) ---
@@ -1830,10 +1908,19 @@ export class BotMessageRouter {
           userName: event.user?.userName,
         };
         const replyLocale = locale.fallback;
-        if (!(await gate(threadLike, authorLike, replyLocale, `onSlashCommand /${cmd.name}`))) {
+        if (
+          !(await gate(
+            threadLike,
+            authorLike,
+            replyLocale,
+            `onSlashCommand /${cmd.name}`,
+            cmd.name,
+          ))
+        ) {
           return;
         }
         await cmd.handler({
+          isDM: threadLike.isDM,
           args: event.text,
           authorUserId: authorLike.userId,
           authorUserName: authorLike.userName,
@@ -1864,11 +1951,18 @@ export class BotMessageRouter {
       if (!result) return;
       const replyLocale = locale.detectFromMessage(message);
       if (
-        !(await gate(thread, message.author, replyLocale, `onNewMessage /${result.command.name}`))
+        !(await gate(
+          thread,
+          message.author,
+          replyLocale,
+          `onNewMessage /${result.command.name}`,
+          result.command.name,
+        ))
       ) {
         return;
       }
       await result.command.handler({
+        isDM: thread.isDM,
         args: result.args,
         authorUserId: message.author?.userId,
         authorUserName: message.author?.userName,

@@ -46,7 +46,7 @@ vi.mock('../MessageGatewayClient', () => ({
 
 vi.mock('../GatewayManager', () => ({
   createGatewayManager: () => mockGatewayManager,
-  getGatewayManager: () => (mockGatewayManager.isRunning ? mockGatewayManager : null),
+  getGatewayManager: () => mockGatewayManager,
 }));
 
 vi.mock('@/database/core/db-adaptor', () => ({
@@ -95,6 +95,7 @@ describe('GatewayService', () => {
     mockInitWithEnvKey.mockResolvedValue({});
     mockFindEnabledByPlatform.mockResolvedValue([]);
     mockUpdateBotRuntimeStatus.mockResolvedValue({});
+    mockGatewayManager.startClient.mockResolvedValue('started');
     service = new GatewayService();
   });
 
@@ -147,6 +148,34 @@ describe('GatewayService', () => {
   });
 
   // ─── syncGatewayConnections ───
+
+  describe('local connection ownership', () => {
+    it('propagates queued when a different replica owns the connection', async () => {
+      mockGatewayManager.isRunning = true;
+      mockGatewayManager.startClient.mockResolvedValue('queued');
+
+      await expect(service.startClient('qq', 'app-1', 'owner')).resolves.toBe('queued');
+      expect(mockGatewayManager.startClient).toHaveBeenCalledWith('qq', 'app-1', 'owner');
+    });
+
+    it('stops a point-to-point client before the manager has globally started', async () => {
+      mockGatewayManager.isRunning = false;
+
+      await service.stopClient('wechat', 'app-1', 'owner');
+
+      expect(mockGatewayManager.stopClient).toHaveBeenCalledWith('wechat', 'app-1');
+      expect(mockUpdateBotRuntimeStatus).not.toHaveBeenCalled();
+    });
+
+    it('lets the owning transport publish its disconnected state', async () => {
+      mockGatewayManager.isRunning = true;
+
+      await service.stopClient('feishu', 'app-1', 'owner');
+
+      expect(mockGatewayManager.stopClient).toHaveBeenCalledWith('feishu', 'app-1');
+      expect(mockUpdateBotRuntimeStatus).not.toHaveBeenCalled();
+    });
+  });
 
   describe('syncGatewayConnections (via ensureRunning)', () => {
     beforeEach(() => {

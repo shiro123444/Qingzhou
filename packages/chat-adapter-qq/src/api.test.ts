@@ -1,12 +1,154 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { QQApiClient } from './api';
+import { QQApiClient, QQApiError } from './api';
+import type { QQStreamMessageRequest } from './types';
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
 describe('QQ API endpoints', () => {
+  const frame = (overrides: Partial<QQStreamMessageRequest> = {}): QQStreamMessageRequest => ({
+    content_raw: 'First text',
+    content_type: 'markdown',
+    index: 0,
+    input_mode: 'replace',
+    input_state: 1,
+    msg_id: 'inbound',
+    msg_seq: 3,
+    ...overrides,
+  });
+
+  it('sends cumulative C2C stream frames with one reply sequence and a terminal state', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(Response.json({ access_token: 'test-token', expires_in: 7200 }))
+      .mockResolvedValueOnce(Response.json({ id: 'stream-1', timestamp: 'now' }))
+      .mockResolvedValueOnce(Response.json({ id: 'stream-1', timestamp: 'later' }));
+    const api = new QQApiClient('app', 'secret');
+    const first = await api.sendC2CStreamMessage('target/id', frame());
+    const terminal = frame({
+      content_raw: 'First text and final text',
+      input_state: 10,
+      index: 1,
+      stream_msg_id: first.id,
+    });
+    await api.sendC2CStreamMessage('target/id', terminal);
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect(fetchSpy).toHaveBeenNthCalledWith(
+      2,
+      'https://api.bot.qq.com/v2/users/target%2Fid/stream_messages',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify(frame()) }),
+    );
+    expect(fetchSpy).toHaveBeenNthCalledWith(
+      3,
+      'https://api.bot.qq.com/v2/users/target%2Fid/stream_messages',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify(terminal) }),
+    );
+  });
+
+  it('rejects invalid or unanchored stream state before contacting QQ', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const api = new QQApiClient('app', 'secret');
+    for (const invalid of [
+      { msg_id: '' },
+      { event_id: 'also-an-event' },
+      { msg_seq: 0 },
+      { index: -1 },
+      { index: 1 },
+      { stream_msg_id: 'unexpected-on-first-frame' },
+      { content_raw: '' },
+    ]) {
+      await expect(api.sendC2CStreamMessage('target', frame(invalid))).rejects.toThrow(
+        'Invalid QQ',
+      );
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('surfaces business rejection and retry timing without exposing response text', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(Response.json({ access_token: 'test-token', expires_in: 7200 }))
+      .mockResolvedValueOnce(
+        Response.json(
+          { code: 50002, message: 'private-provider-detail' },
+          { status: 429, headers: { 'retry-after': '2' } },
+        ),
+      );
+    const api = new QQApiClient('app', 'secret');
+    const rejected = api.sendC2CStreamMessage('target', frame());
+    await expect(rejected).rejects.toMatchObject({
+      name: 'QQApiError',
+      httpStatus: 429,
+      code: 50002,
+      retryAfterMs: 2000,
+    });
+    await expect(rejected).rejects.not.toThrow('private-provider-detail');
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('treats a nonzero business code as rejection even with HTTP 200', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(Response.json({ access_token: 'test-token', expires_in: 7200 }))
+      .mockResolvedValueOnce(Response.json({ code: 40034090, message: 'no capability' }));
+    const api = new QQApiClient('app', 'secret');
+    await expect(api.sendC2CStreamMessage('target', frame())).rejects.toBeInstanceOf(QQApiError);
+  });
+
+  it('does not retry or fall back after an unknown stream send outcome', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(Response.json({ access_token: 'test-token', expires_in: 7200 }))
+      .mockRejectedValueOnce(new TypeError('connection interrupted'));
+    const api = new QQApiClient('app', 'secret');
+    await expect(api.sendC2CStreamMessage('target', frame())).rejects.toThrow(
+      'connection interrupted',
+    );
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('preserves an ambiguous malformed stream receipt instead of starting another message', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(Response.json({ access_token: 'test-token', expires_in: 7200 }))
+      .mockResolvedValueOnce(Response.json({}));
+    const api = new QQApiClient('app', 'secret');
+    await expect(api.sendC2CStreamMessage('target', frame())).rejects.toThrow('message id');
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['image/gif', 1],
+    ['image/webp', 1],
+    ['image/bmp', 1],
+    ['video/mp4', 2],
+    ['audio/silk', 3],
+    ['audio/mpeg', 3],
+    ['audio/wav', 3],
+    ['audio/ogg', 3],
+    ['application/pdf', 4],
+    ['application/octet-stream', 4],
+  ])(
+    'uploads %s using its native QQ media type %i without making a visible send',
+    async (mimeType, fileType) => {
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce(Response.json({ access_token: 'test-token', expires_in: 7200 }))
+        .mockResolvedValueOnce(Response.json({ file_info: 'media-info' }));
+      await new QQApiClient('app', 'secret').uploadFile('c2c', 'target', {
+        bytes: new Uint8Array([1, 2, 3]),
+        filename: 'artifact',
+        mimeType: String(mimeType),
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(JSON.parse(fetchSpy.mock.calls[1][1]!.body as string)).toMatchObject({
+        file_type: fileType,
+        srv_send_msg: false,
+      });
+    },
+  );
+
   it.each(['group', 'c2c'] as const)(
     'uploads owned bytes privately before the separately sent %s file message',
     async (threadType) => {

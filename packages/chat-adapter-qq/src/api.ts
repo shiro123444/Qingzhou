@@ -3,12 +3,41 @@ import type {
   QQGatewayUrlResponse,
   QQSendMessageParams,
   QQSendMessageResponse,
+  QQStreamMessageRequest,
 } from './types';
 import { QQ_MSG_TYPE } from './types';
 
 const AUTH_URL = 'https://bots.qq.com/app/getAppAccessToken';
 const API_BASE_URL = 'https://api.bot.qq.com';
 const MAX_TEXT_LENGTH = 2000;
+const MEDIA_TYPE_BY_MIME: Record<string, number> = {
+  'audio/mpeg': 3,
+  'audio/mp3': 3,
+  'audio/ogg': 3,
+  'audio/silk': 3,
+  'audio/wav': 3,
+  'audio/x-wav': 3,
+  'image/bmp': 1,
+  'image/gif': 1,
+  'image/jpeg': 1,
+  'image/png': 1,
+  'image/webp': 1,
+  'video/mp4': 2,
+};
+
+/** A received platform rejection. Network failures have no delivery verdict. */
+export class QQApiError extends Error {
+  constructor(
+    public readonly httpStatus: number,
+    public readonly code?: number,
+    public readonly retryAfterMs?: number,
+  ) {
+    super(
+      `QQ API rejected request (HTTP ${httpStatus}${code === undefined ? '' : `, code ${code}`})`,
+    );
+    this.name = 'QQApiError';
+  }
+}
 
 export class QQApiClient {
   private readonly appId: string;
@@ -67,15 +96,28 @@ export class QQApiClient {
 
     const response = await fetch(url, init);
 
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`QQ API ${method} ${path} failed: ${response.status} ${text}`);
-    }
-
     // Some endpoints return empty response
     const contentType = response.headers.get('content-type');
+    const payload = contentType?.includes('application/json') ? await response.json() : undefined;
+    const fields =
+      payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {};
+    const code =
+      typeof fields.code === 'number'
+        ? fields.code
+        : typeof fields.err_code === 'number'
+          ? fields.err_code
+          : undefined;
+    if (!response.ok || (code !== undefined && code !== 0)) {
+      const retryAfter = response.headers.get('retry-after');
+      const retryAfterSeconds = retryAfter ? Number(retryAfter) : NaN;
+      throw new QQApiError(
+        response.status,
+        code,
+        Number.isFinite(retryAfterSeconds) ? Math.max(0, retryAfterSeconds * 1000) : undefined,
+      );
+    }
     if (contentType?.includes('application/json')) {
-      return response.json() as Promise<T>;
+      return payload as T;
     }
 
     return {} as T;
@@ -156,6 +198,35 @@ export class QQApiClient {
     return this.call<QQSendMessageResponse>('POST', `/v2/users/${openId}/messages`, params);
   }
 
+  /** One ledgered stream frame. Callers own sequence state and delivery recovery. */
+  async sendC2CStreamMessage(
+    openId: string,
+    frame: QQStreamMessageRequest,
+  ): Promise<QQSendMessageResponse> {
+    if (
+      !openId ||
+      !!frame.msg_id === !!frame.event_id ||
+      !Number.isSafeInteger(frame.msg_seq) ||
+      frame.msg_seq < 1 ||
+      !Number.isSafeInteger(frame.index) ||
+      frame.index < 0 ||
+      frame.input_mode !== 'replace' ||
+      frame.content_type !== 'markdown' ||
+      ![1, 10].includes(frame.input_state) ||
+      !frame.content_raw ||
+      (frame.index === 0 ? !!frame.stream_msg_id : !frame.stream_msg_id)
+    )
+      throw new Error('Invalid QQ C2C stream frame');
+    const receipt = await this.call<QQSendMessageResponse>(
+      'POST',
+      `/v2/users/${encodeURIComponent(openId)}/stream_messages`,
+      { ...frame },
+    );
+    if (!receipt || typeof receipt.id !== 'string' || !receipt.id)
+      throw new Error('QQ stream response is missing its message id');
+    return receipt;
+  }
+
   /**
    * Send direct message in a guild (DMS)
    */
@@ -216,7 +287,7 @@ export class QQApiClient {
   ): Promise<string> {
     if (file.bytes.length < 1 || file.bytes.length > 10 * 1024 * 1024)
       throw new Error('QQ direct file replies support files up to 10 MiB');
-    const fileType = ['image/png', 'image/jpeg'].includes(file.mimeType) ? 1 : 4;
+    const fileType = MEDIA_TYPE_BY_MIME[file.mimeType.toLowerCase()] ?? 4;
     const prefix = threadType === 'group' ? 'groups' : 'users';
     const result = await this.call<{ file_info?: string }>(
       'POST',

@@ -137,7 +137,7 @@ describe('GatewayManager', () => {
     it('should handle missing provider gracefully', async () => {
       await manager.start();
 
-      await expect(manager.startClient('fakeplatform', 'app-1', 'user-1')).resolves.toBeUndefined();
+      await expect(manager.startClient('fakeplatform', 'app-1', 'user-1')).resolves.toBe('queued');
     });
   });
 

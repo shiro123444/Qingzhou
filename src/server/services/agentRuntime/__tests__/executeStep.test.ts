@@ -1,6 +1,8 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { ChannelIdentityService } from '@/server/services/bot/channelIdentity';
+
 import { AgentRuntimeService } from '../AgentRuntimeService';
 import { hookDispatcher } from '../hooks';
 
@@ -240,6 +242,63 @@ describe('AgentRuntimeService.executeStep - step idempotency (distributed lock)'
     const service = new AgentRuntimeService({} as any, 'user-1', { queueService: null });
     return service;
   };
+
+  it('blocks a new delayed step when its original channel account was revoked', async () => {
+    const access = vi.spyOn(ChannelIdentityService, 'resolveAccess').mockResolvedValue({
+      enforced: true,
+      allowed: false,
+      operatorUserId: undefined,
+    });
+    try {
+      const service = createService();
+      const coordinator = (service as any).coordinator;
+      coordinator.loadAgentState.mockResolvedValue({
+        status: 'running',
+        stepCount: 5,
+        metadata: {
+          userId: 'user-1',
+          botContext: {
+            platform: 'wechat',
+            applicationId: 'app',
+            senderExternalUserId: 'sender',
+            isOwner: true,
+          },
+        },
+      });
+      const factory = vi.spyOn(service as any, 'createAgentRuntime');
+      await expect(
+        service.executeStep({ operationId: 'revoked-step', stepIndex: 5 }),
+      ).rejects.toThrow('no longer authorizes');
+      expect(factory).not.toHaveBeenCalled();
+    } finally {
+      access.mockRestore();
+    }
+  });
+
+  it('keeps committed-step recovery idempotent after channel revocation', async () => {
+    const access = vi.spyOn(ChannelIdentityService, 'resolveAccess').mockResolvedValue({
+      enforced: true,
+      allowed: false,
+      operatorUserId: undefined,
+    });
+    try {
+      const service = createService();
+      const coordinator = (service as any).coordinator;
+      coordinator.loadAgentState.mockResolvedValue({
+        status: 'running',
+        stepCount: 6,
+        metadata: {
+          botContext: { platform: 'wechat', applicationId: 'app', senderExternalUserId: 'sender' },
+        },
+      });
+      const result = await service.executeStep({ operationId: 'already-committed', stepIndex: 5 });
+      expect(result).toMatchObject({ success: true, stepResult: null });
+      expect(access).not.toHaveBeenCalled();
+      expect(coordinator.saveStepResultWithLease).not.toHaveBeenCalled();
+    } finally {
+      access.mockRestore();
+    }
+  });
 
   it('should return locked=true when acquireStepLease returns null', async () => {
     const service = createService();

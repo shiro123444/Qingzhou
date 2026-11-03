@@ -1,5 +1,5 @@
 export { createQQAdapter, QQAdapter } from './adapter';
-export { QQApiClient } from './api';
+export { QQApiClient, QQApiError } from './api';
 export { signWebhookResponse } from './crypto';
 export { QQFormatConverter } from './format-converter';
 export type { GatewayLogger, QQGatewayForwarder, QQGatewayOptions } from './gateway';
@@ -17,6 +17,7 @@ export type {
   QQRawMessage,
   QQSendMessageParams,
   QQSendMessageResponse,
+  QQStreamMessageRequest,
   QQThreadId,
   QQWebhookEventData,
   QQWebhookPayload,

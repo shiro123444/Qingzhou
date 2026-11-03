@@ -1,0 +1,138 @@
+import { TRPCError } from '@trpc/server';
+import { and, desc, eq, inArray } from 'drizzle-orm';
+import { z } from 'zod';
+
+import { agentBotProviders, agents, botInboundEvents } from '@/database/schemas';
+import type { LobeChatDatabase } from '@/database/type';
+import { authedProcedure, router } from '@/libs/trpc/lambda';
+import { serverDatabase } from '@/libs/trpc/lambda/middleware';
+import {
+  extractDmSettings,
+  extractGroupSettings,
+  normalizeAllowFromEntries,
+  platformRegistry,
+  resolveConnectionMode,
+} from '@/server/services/bot/platforms';
+import { getBotRuntimeStatus } from '@/server/services/gateway/runtimeStatus';
+import type {
+  ChannelAccessSettings,
+  ChannelActivitySummary,
+  ChannelDetail,
+  ChannelProviderSummary,
+  ManagedChannelPlatform,
+} from '@/types/channel';
+
+const managedPlatforms: ManagedChannelPlatform[] = ['wechat', 'qq', 'feishu', 'lark'];
+const procedure = authedProcedure.use(serverDatabase);
+
+/** Project only management metadata. Credentials never leave the provider table. */
+function ownedProviders(db: LobeChatDatabase, userId: string, providerId?: string) {
+  return db
+    .select({
+      agentId: agentBotProviders.agentId,
+      agentTitle: agents.title,
+      applicationId: agentBotProviders.applicationId,
+      enabled: agentBotProviders.enabled,
+      id: agentBotProviders.id,
+      platform: agentBotProviders.platform,
+      settings: agentBotProviders.settings,
+      updatedAt: agentBotProviders.updatedAt,
+    })
+    .from(agentBotProviders)
+    .leftJoin(agents, and(eq(agents.id, agentBotProviders.agentId), eq(agents.userId, userId)))
+    .where(
+      and(
+        eq(agentBotProviders.userId, userId),
+        inArray(agentBotProviders.platform, managedPlatforms),
+        providerId ? eq(agentBotProviders.id, providerId) : undefined,
+      ),
+    )
+    .orderBy(desc(agentBotProviders.updatedAt));
+}
+
+type Provider = Awaited<ReturnType<typeof ownedProviders>>[number];
+
+async function summarize(provider: Provider): Promise<ChannelProviderSummary> {
+  const status = await getBotRuntimeStatus(provider.platform, provider.applicationId);
+  return {
+    agentId: provider.agentId,
+    agentTitle: provider.agentTitle,
+    applicationId: provider.applicationId,
+    connectionMode: resolveConnectionMode(
+      platformRegistry.getPlatform(provider.platform),
+      provider.settings,
+    ),
+    enabled: provider.enabled,
+    id: provider.id,
+    platform: provider.platform as ManagedChannelPlatform,
+    runtimeStatus: {
+      applicationId: status.applicationId,
+      platform: status.platform,
+      status: status.status,
+      updatedAt: status.updatedAt,
+    },
+    updatedAt: provider.updatedAt,
+  };
+}
+
+function accessSettings(settings: Provider['settings']): ChannelAccessSettings {
+  const identity = settings?.channelIdentity;
+  return {
+    allowFrom: normalizeAllowFromEntries(settings?.allowFrom),
+    channelIdentity: {
+      requireBinding:
+        !!identity &&
+        typeof identity === 'object' &&
+        'requireBinding' in identity &&
+        identity.requireBinding === true,
+    },
+    dmPolicy: extractDmSettings(settings).policy,
+    groupAllowFrom: normalizeAllowFromEntries(settings?.groupAllowFrom),
+    groupPolicy: extractGroupSettings(settings).policy,
+  };
+}
+
+export const channelRouter = router({
+  list: procedure.query(async ({ ctx }): Promise<ChannelProviderSummary[]> => {
+    const providers = await ownedProviders(ctx.serverDB, ctx.userId);
+    return Promise.all(providers.map(summarize));
+  }),
+
+  detail: procedure
+    .input(z.object({ providerId: z.string().min(1).max(100) }))
+    .query(async ({ ctx, input }): Promise<ChannelDetail> => {
+      const [provider] = await ownedProviders(ctx.serverDB, ctx.userId, input.providerId);
+      if (!provider) throw new TRPCError({ code: 'NOT_FOUND', message: 'Channel not found' });
+      const recent = await ctx.serverDB
+        .select({
+          attempts: botInboundEvents.attempts,
+          createdAt: botInboundEvents.createdAt,
+          id: botInboundEvents.id,
+          status: botInboundEvents.status,
+          updatedAt: botInboundEvents.updatedAt,
+        })
+        .from(botInboundEvents)
+        .where(
+          and(
+            eq(botInboundEvents.userId, ctx.userId),
+            eq(botInboundEvents.platform, provider.platform),
+            eq(botInboundEvents.applicationId, provider.applicationId),
+          ),
+        )
+        .orderBy(desc(botInboundEvents.createdAt), desc(botInboundEvents.id))
+        .limit(30);
+      const activity: ChannelActivitySummary[] = recent.map((event) => ({
+        attempts: event.attempts,
+        createdAt: event.createdAt,
+        direction: 'inbound',
+        id: event.id,
+        status: event.status,
+        updatedAt: event.updatedAt,
+      }));
+      return {
+        activity,
+        provider: await summarize(provider),
+        settings: accessSettings(provider.settings),
+      };
+    }),
+});

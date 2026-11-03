@@ -7,6 +7,7 @@ const log = debug('bot-platform:feishu:gateway');
 export interface FeishuWSOptions {
   appId: string;
   appSecret: string;
+  assertConnectionHeld?: () => void;
   /** 'feishu' or 'lark' — determines the API domain */
   domain: 'feishu' | 'lark';
   /** URL to forward events to (POST) */
@@ -23,6 +24,8 @@ export interface FeishuWSOptions {
 export class FeishuWSConnection {
   private readonly options: FeishuWSOptions;
   private wsClient: any = null;
+  private closed = false;
+  private readonly forwarding = new Set<Promise<void>>();
 
   constructor(options: FeishuWSOptions) {
     this.options = options;
@@ -34,15 +37,32 @@ export class FeishuWSConnection {
    */
   async start(): Promise<void> {
     const lark = await import('@larksuiteoapi/node-sdk');
+    this.options.assertConnectionHeld?.();
 
     const eventDispatcher = new lark.EventDispatcher({});
 
-    // Register handler for incoming messages
+    const forward = async (eventType: string, data: unknown) => {
+      if (this.closed) throw new Error('Feishu gateway is closing');
+      log('Received %s event', eventType);
+      const task = this.forwardEvent(eventType, data);
+      this.forwarding.add(task);
+      try {
+        await task;
+      } finally {
+        this.forwarding.delete(task);
+      }
+    };
     eventDispatcher.register({
-      'im.message.receive_v1': async (data: any) => {
-        log('Received im.message.receive_v1 event');
-        await this.forwardEvent('im.message.receive_v1', data);
+      'card.action.trigger': async (data: unknown) => {
+        await forward('card.action.trigger', data);
+        return {
+          toast: {
+            type: 'info',
+            content: this.options.domain === 'lark' ? 'Request received' : '请求已收到',
+          },
+        };
       },
+      'im.message.receive_v1': (data: unknown) => forward('im.message.receive_v1', data),
     });
 
     const domain = this.options.domain === 'lark' ? lark.Domain.Lark : lark.Domain.Feishu;
@@ -61,12 +81,14 @@ export class FeishuWSConnection {
   /**
    * Close the WebSocket connection.
    */
-  close(): void {
+  async close(): Promise<void> {
+    this.closed = true;
     if (this.wsClient) {
       this.wsClient.close({ force: true });
       this.wsClient = null;
       log('WSClient closed');
     }
+    await Promise.allSettled(this.forwarding);
   }
 
   /**
@@ -76,6 +98,7 @@ export class FeishuWSConnection {
    * SDK-authenticated events use a separate, app-secret-signed internal envelope.
    */
   private async forwardEvent(eventType: string, data: any): Promise<void> {
+    this.options.assertConnectionHeld?.();
     const header = { app_id: this.options.appId, event_type: eventType };
 
     const webhookPayload = {
@@ -94,7 +117,7 @@ export class FeishuWSConnection {
       });
       const response = await fetch(this.options.webhookUrl, {
         ...init,
-        signal: AbortSignal.timeout(30_000),
+        signal: AbortSignal.timeout(eventType === 'card.action.trigger' ? 2500 : 30_000),
       });
       if (!response.ok) throw new Error(`Webhook forwarding failed (HTTP ${response.status})`);
     } catch (err) {

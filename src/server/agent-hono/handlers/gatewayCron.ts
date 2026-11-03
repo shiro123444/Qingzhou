@@ -4,15 +4,10 @@ import { after } from 'next/server';
 
 import { getServerDB } from '@/database/core/db-adaptor';
 import { AgentBotProviderModel } from '@/database/models/agentBotProvider';
-import { getAgentRuntimeRedisClient } from '@/server/modules/AgentRuntime/redis';
 import { KeyVaultsGateKeeper } from '@/server/modules/KeyVaultsEncrypt';
-import type { BotPlatformRuntimeContext } from '@/server/services/bot/platforms';
-import {
-  platformRegistry,
-  resolveBotProviderConfig,
-  resolveConnectionMode,
-} from '@/server/services/bot/platforms';
+import { platformRegistry, resolveConnectionMode } from '@/server/services/bot/platforms';
 import { BotConnectQueue } from '@/server/services/gateway/botConnectQueue';
+import { GatewayManager } from '@/server/services/gateway/GatewayManager';
 
 const log = debug('lobe-server:bot:gateway:cron');
 
@@ -24,38 +19,7 @@ const POLL_INTERVAL_MS = 30_000; // 30 seconds
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const waitUntil = (task: Promise<unknown>) => {
-  after(() => task);
-};
-
-function createRuntimeContext(): BotPlatformRuntimeContext {
-  return {
-    appUrl: process.env.APP_URL,
-    redisClient: getAgentRuntimeRedisClient() as any,
-  };
-}
-
-function createGatewayBot(
-  platform: string,
-  applicationId: string,
-  credentials: Record<string, string>,
-  settings: Record<string, unknown> | null | undefined,
-) {
-  const definition = platformRegistry.getPlatform(platform);
-  if (!definition) {
-    throw new Error(`Unsupported platform: ${platform}`);
-  }
-
-  const { config } = resolveBotProviderConfig(definition, {
-    applicationId,
-    credentials,
-    settings,
-  });
-
-  return platformRegistry.createClient(platform, config, createRuntimeContext());
-}
-
-async function processConnectQueue(remainingMs: number): Promise<number> {
+async function processConnectQueue(manager: GatewayManager): Promise<number> {
   const queue = new BotConnectQueue();
   const items = await queue.popAll();
 
@@ -96,20 +60,12 @@ async function processConnectQueue(remainingMs: number): Promise<number> {
         continue;
       }
 
-      const bot = createGatewayBot(
-        item.platform,
-        provider.applicationId,
-        provider.credentials,
-        provider.settings,
-      );
-
-      await bot.start({
-        durationMs: remainingMs,
-        waitUntil,
-      });
-
-      processed++;
-      log('Started queued bot platform=%s appId=%s', item.platform, item.applicationId);
+      const status = await manager.startClient(item.platform, item.applicationId, item.userId);
+      if (status === 'started') {
+        processed++;
+        await queue.remove(item.platform, item.applicationId);
+        log('Started queued bot platform=%s appId=%s', item.platform, item.applicationId);
+      }
     } catch (err) {
       log(
         'Failed to start queued bot platform=%s appId=%s: %O',
@@ -118,8 +74,6 @@ async function processConnectQueue(remainingMs: number): Promise<number> {
         err,
       );
     }
-
-    await queue.remove(item.platform, item.applicationId);
   }
 
   return processed;
@@ -145,77 +99,48 @@ export async function gatewayCron(c: Context): Promise<Response> {
   }
 
   const platforms = platformRegistry.listPlatforms();
+  const manager = new GatewayManager({ definitions: platforms, persistentOnly: true });
+  const pollEnd = Date.now() + GATEWAY_DURATION_MS;
+  try {
+    await manager.start();
+    const serverDB = await getServerDB();
+    const gateKeeper = await KeyVaultsGateKeeper.initWithEnvKey();
+    let started = 0;
+    let total = 0;
+    const stats: Array<{ platform: string; started: number; total: number }> = [];
 
-  const serverDB = await getServerDB();
-  const gateKeeper = await KeyVaultsGateKeeper.initWithEnvKey();
+    for (const platform of platforms) {
+      const providers = await AgentBotProviderModel.findEnabledByPlatform(
+        serverDB,
+        platform.id,
+        gateKeeper,
+      );
+      const persistent = providers.filter(
+        (provider) => resolveConnectionMode(platform, provider.settings) !== 'webhook',
+      );
+      const owned = persistent.filter((provider) =>
+        manager.hasClient(platform.id, provider.applicationId),
+      );
+      started += owned.length;
+      total += persistent.length;
+      stats.push({ platform: platform.id, started: owned.length, total: persistent.length });
+    }
 
-  let started = 0;
-  let total = 0;
-  const stats: Array<{ platform: string; started: number; total: number }> = [];
-
-  for (const platform of platforms) {
-    const providers = await AgentBotProviderModel.findEnabledByPlatform(
-      serverDB,
-      platform.id,
-      gateKeeper,
-    );
-
-    log('Found %d enabled %s providers', providers.length, platform.name);
-
-    let platformStarted = 0;
-    let platformTotal = 0;
-
-    for (const provider of providers) {
-      const { applicationId, credentials, settings } = provider;
-
-      // Per-provider mode overrides the platform default. Webhook providers
-      // never need a persistent listener even if the platform default is gateway.
-      const effectiveMode = resolveConnectionMode(platform, settings);
-      if (effectiveMode === 'webhook') {
-        log('Skipping webhook-mode provider platform=%s appId=%s', platform.id, applicationId);
-        continue;
-      }
-
-      platformTotal++;
-      total++;
-
+    const queued = await processConnectQueue(manager);
+    after(async () => {
       try {
-        const bot = createGatewayBot(platform.id, applicationId, credentials, settings);
-
-        await bot.start({
-          durationMs: GATEWAY_DURATION_MS,
-          waitUntil,
-        });
-
-        platformStarted++;
-        started++;
-        log('Started gateway listener for platform=%s appId=%s', platform.id, applicationId);
-      } catch (err) {
-        log(
-          'Failed to start gateway listener for platform=%s appId=%s: %O',
-          platform.id,
-          applicationId,
-          err,
-        );
+        while (Date.now() < pollEnd) {
+          await sleep(Math.min(POLL_INTERVAL_MS, pollEnd - Date.now()));
+          if (Date.now() >= pollEnd) break;
+          await processConnectQueue(manager);
+        }
+      } finally {
+        await manager.stop();
       }
-    }
-
-    stats.push({ platform: platform.id, started: platformStarted, total: platformTotal });
+    });
+    return c.json({ platforms: stats, queued, started, total });
+  } catch (error) {
+    await manager.stop();
+    throw error;
   }
-
-  const queued = await processConnectQueue(GATEWAY_DURATION_MS);
-
-  after(async () => {
-    const pollEnd = Date.now() + GATEWAY_DURATION_MS;
-
-    while (Date.now() < pollEnd) {
-      await sleep(POLL_INTERVAL_MS);
-      if (Date.now() >= pollEnd) break;
-
-      const remainingMs = pollEnd - Date.now();
-      await processConnectQueue(remainingMs);
-    }
-  });
-
-  return c.json({ platforms: stats, queued, started, total });
 }

@@ -3,7 +3,7 @@
 import { Flexbox } from '@lobehub/ui';
 import { createStaticStyles } from 'antd-style';
 import { memo, useEffect, useMemo, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useSearchParams } from 'react-router-dom';
 
 import Loading from '@/components/Loading/BrandTextLoading';
 import NavHeader from '@/features/NavHeader';
@@ -28,7 +28,10 @@ const styles = createStaticStyles(({ css }) => ({
 
 const ChannelPage = memo(() => {
   const { aid } = useParams<{ aid?: string }>();
-  const [activeProviderId, setActiveProviderId] = useState<string>('');
+  const [searchParams] = useSearchParams();
+  const [activeProviderId, setActiveProviderId] = useState<string>(
+    () => searchParams.get('platform') || '',
+  );
 
   const { data: platforms, isLoading: platformsLoading } = useAgentStore((s) =>
     s.useFetchPlatformDefinitions(),

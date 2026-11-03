@@ -2,9 +2,9 @@
 
 本批接续 [租约与 Redis 回调台账](./channel-runtime-reliability-rollout.md)，实现的是 **Bot 回调投递层** 的 SQL inbox/outbox，不是微信、QQ、飞书等平台原始入站事件的完整 inbox。
 
-按用户要求，本批不调用子代理、不执行测试；代码完成不代表已经验收、执行迁移或上线。上一批的 675 项测试结果不能作为本批的验证结果。
+初始实现批次按当时要求未执行测试。2026-11-03 已补充隔离 PostgreSQL、Redis 和恢复扫描器验收，结果见本文末节。开发业务库迁移、生产调度配置及供应商实网验证仍需分别验收。
 
-本轮静态检查：`bunx tsgo --noEmit`、定向 ESLint 均通过，`git diff --check` 通过；未运行 Vitest、数据库 / Redis 集成测试或平台实网验证。
+初始批次静态检查通过 `bunx tsgo --noEmit`、定向 ESLint 和 `git diff --check`。以下各节保留该批次的实现与部署边界，末节记录后续实际验证。
 
 ## 数据路径
 
@@ -132,7 +132,7 @@ Authorization: Bearer <CRON_SECRET>
 
 本批没有运行迁移、没有创建线上 cron、没有提交 Git，也没有调用实际平台账号。
 
-## 后续验收清单（本批未执行）
+## 初始批次待验收清单
 
 - 真实 PostgreSQL 的唯一键争抢、SKIP LOCKED、owner CAS、过期回收、跨租户隔离；
 - runtime Lua 提交后崩溃、SQL 写入后 Redis ACK 丢失、部分意图交接、坏 progress 不阻断 final；
@@ -143,10 +143,46 @@ Authorization: Bearer <CRON_SECRET>
 - 账号删除、bot 禁用 / 转移、Messenger 解绑再绑定后的投递授权；
 - 更新旧回调 handler、runtime Lua 参数等已有测试断言，再执行定向及集成回归。
 
-## 未覆盖的边界
+## 初始批次范围边界
+
+原始平台入站 inbox 和会话恢复已在后续实现，2026-11-03 的测试覆盖见末节。以下记录初始投递层批次的边界，其他路径仍需单独验证。
 
 - 原始平台入站事件的持久 inbox、跨进程 active-thread 管理和不同 operation 的全局顺序；
 - Bridge 独立 local-mode 完成发送路径、自定义外部 webhook 的统一持久台账；
 - 核对前端页面、供应商自动结果查询、归档 / 保留期后台任务；
 - 所有外部工具副作用的端到端 exactly-once；
 - 在非受租约保护的 runtime 提交路径中，直接调用 dispatcher 之前的崩溃缺口。
+
+## 2026-11-03 恢复链路验收
+
+使用临时 PostgreSQL 17 与 Redis 7 容器。数据库限定为本机 `qingzhou_channel_test`，每个测试套件创建随机 schema 并在结束时删除。Redis 使用独立本地端口的数据库 15，测试拒绝默认 6379 端口，未使用应用 `REDIS_URL`，未清空开发业务数据。0108、0109 仅应用于隔离 schema。
+
+本次共通过 138 项聚焦检查，其中 34 项连接真实数据库或 Redis。
+
+| 范围 | 通过数量 | 验证内容 |
+| --- | --- | --- |
+| `botDelivery.integration.test.ts` | 10 | 收件去重、竞争领取、SKIP LOCKED、outbox 事务、旧 owner 拒绝、unknown 隔离、人工核对与审计 |
+| `botInbound.integration.test.ts` | 12 | 原始入站去重、会话顺序、dispatch 前后崩溃恢复、控制通道、游标恢复、会话 owner 与停止传播 |
+| `BotDeliveryService.integration.test.ts` | 7 | Redis 意图经 SQL outbox/inbox 恢复、SQL 写失败保留、迟到 ACK 的 CAS、无效进度不阻断 final、unknown 隔离、账号删除、跨 worker 分片续传 |
+| `redisLease.integration.test.ts` | 5 | Lua 租约竞争、过期 owner 拒绝、运行状态原子提交、跨实例 completion 去重、未知投递保留 |
+| `BotCallbackService.test.ts`、`callbackLedger.test.ts`、`BotInboundService.test.ts`、`deliveryEnvelope.test.ts` | 104 | 平台投递、台账、入站 worker 和回调身份的聚焦单元回归 |
+
+新增扫描器测试使用真实 PostgreSQL、Redis、SQL 台账和 worker。平台回调入口由测试替身承接，其中分片恢复用例通过真实 `PostgresCallbackLedger` 记录效果，模拟第一次已发送、第二次尚未发送时中断，重建 worker 后仅发送剩余分片。SQL 故障与并发更新在明确的边界注入。测试没有调用真实平台消息 API，也没有模拟整台数据库断电。
+
+修复了既有台账测试的异步时序假设。测试现在等待发送函数实际进入后再推进时钟，并检查超时后 `unknown_delivery` 标记保留，避免由微任务数量变化产生假失败和未处理拒绝。
+
+### 复现入口
+
+给隔离容器分配临时本地端口，将 `CHANNEL_TEST_DATABASE_URL` 指向专用测试库，将 `CHANNEL_TEST_REDIS_URL` 指向临时 Redis 的 `/15`。两个地址均有本地测试限定检查。既有 UNIX socket 入口 `AGENT_TEST_REDIS_SOCKET` 继续可用，且不能与 URL 同时提供。
+
+```powershell
+# 在 packages/database 中执行
+bunx vitest run --silent=passed-only src/models/__tests__/botDelivery.integration.test.ts src/models/__tests__/botInbound.integration.test.ts
+
+# 在仓库根目录执行
+bunx vitest run --silent=passed-only src/server/services/bot/__tests__/BotDeliveryService.integration.test.ts src/server/modules/AgentRuntime/__tests__/redisLease.integration.test.ts src/server/services/bot/__tests__/BotCallbackService.test.ts src/server/services/bot/__tests__/callbackLedger.test.ts src/server/services/bot/__tests__/BotInboundService.test.ts src/server/services/bot/__tests__/deliveryEnvelope.test.ts
+```
+
+本次改动文件的定向 ESLint 通过。全仓类型检查沿用当前工作区基线诊断，需在发布前处理。剩余验收包括真实供应商发送与结果核对、部署环境独立 cron、开发/生产迁移、数据库断电持久化，以及服务实例整进程终止和网络分区故障演练。
+
+2026-11-03 渠道管理页联调时，已备份本机开发库，并通过项目迁移入口补齐 0108、0109。上文“未执行迁移”记录的是初始实现批次。生产迁移与独立恢复调度仍需分别验收。

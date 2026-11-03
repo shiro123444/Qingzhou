@@ -1,3 +1,7 @@
+import { createHash } from 'node:crypto';
+
+import { buildLarkReplyCard, type LarkReplyCard } from './cards';
+
 const BASE_URLS: Record<string, string> = {
   feishu: 'https://open.feishu.cn/open-apis',
   lark: 'https://open.larksuite.com/open-apis',
@@ -34,6 +38,30 @@ export class LarkApiClient {
       msg_type: 'text',
       receive_id: chatId,
     });
+    return { messageId: data.data.message_id, raw: data.data };
+  }
+
+  /** Stable delivery UUID complements the durable sender's unknown/delivered ledger. */
+  async sendReplyCard(
+    chatId: string,
+    card: LarkReplyCard,
+  ): Promise<{ messageId: string; raw: any }> {
+    if (!card.deliveryId) throw new Error('Feishu card delivery ID is required');
+    const payload = {
+      content: JSON.stringify(buildLarkReplyCard(card)),
+      msg_type: 'interactive',
+      receive_id: chatId,
+      uuid: createHash('sha256')
+        .update(JSON.stringify([chatId, card.deliveryId]))
+        .digest('hex')
+        .slice(0, 40),
+    };
+    // Card requests have a 30 KB platform limit, including escaped JSON and metadata.
+    if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > 28_000)
+      throw new Error('Feishu card exceeds the supported message size');
+    const data = await this.call('POST', '/im/v1/messages?receive_id_type=chat_id', payload);
+    if (typeof data.data?.message_id !== 'string' || !data.data.message_id)
+      throw new Error('Feishu card response has no message ID');
     return { messageId: data.data.message_id, raw: data.data };
   }
 

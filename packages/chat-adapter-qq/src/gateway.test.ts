@@ -396,6 +396,62 @@ describe('QQGatewayConnection', () => {
   });
 
   describe('close', () => {
+    it('cancels a pending heartbeat jitter on close', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0.5);
+      const { conn, connectPromise, ws } = await connectAndGetWs();
+      ws.simulateMessage({ op: QQ_WS_OP_CODES.HELLO, d: { heartbeat_interval: 45_000 } });
+      ws.simulateMessage({
+        d: { session_id: 'sess_1', user: { id: 'bot_1', username: 'TestBot' } },
+        op: QQ_WS_OP_CODES.DISPATCH,
+        s: 1,
+        t: 'READY',
+      });
+      await connectPromise;
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      conn.close();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('keeps only one heartbeat schedule when HELLO restarts during jitter', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0.5);
+      const { conn, connectPromise, ws } = await connectAndGetWs();
+      ws.simulateMessage({ op: QQ_WS_OP_CODES.HELLO, d: { heartbeat_interval: 10_000 } });
+      ws.simulateMessage({
+        d: { session_id: 'sess_1', user: { id: 'bot_1', username: 'TestBot' } },
+        op: QQ_WS_OP_CODES.DISPATCH,
+        s: 1,
+        t: 'READY',
+      });
+      await connectPromise;
+      await vi.advanceTimersByTimeAsync(1000);
+      ws.simulateMessage({ op: QQ_WS_OP_CODES.HELLO, d: { heartbeat_interval: 10_000 } });
+      await vi.advanceTimersByTimeAsync(5000);
+      const heartbeats = ws.sentMessages
+        .map((message) => JSON.parse(message))
+        .filter((message) => message.op === QQ_WS_OP_CODES.HEARTBEAT);
+      expect(heartbeats).toHaveLength(1);
+      expect(vi.getTimerCount()).toBe(1);
+      conn.close();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('clears duration and pending reconnect timers on unload', async () => {
+      const { conn, connectPromise, ws } = await connectAndGetWs({ durationMs: 60_000 });
+      ws.simulateMessage({
+        d: { session_id: 'sess_1', user: { id: 'bot_1', username: 'TestBot' } },
+        op: QQ_WS_OP_CODES.DISPATCH,
+        s: 1,
+        t: 'READY',
+      });
+      await connectPromise;
+      ws.close(4000, 'network reset');
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      conn.close();
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(MockWebSocket.instances).toHaveLength(1);
+    });
+
     it('should clean up on close()', async () => {
       const { conn, connectPromise, ws } = await connectAndGetWs();
 

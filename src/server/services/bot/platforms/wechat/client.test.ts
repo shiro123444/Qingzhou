@@ -97,6 +97,114 @@ describe('WechatGatewayClient', () => {
     await Promise.all(backgroundTasks);
   });
 
+  it('joins an in-flight forwarded batch before stop resolves', async () => {
+    let finishForward!: (response: Response) => void;
+    let notifyForward!: () => void;
+    const forwarding = new Promise<void>((resolve) => {
+      notifyForward = resolve;
+    });
+    mockGetUpdates.mockReset();
+    mockGetUpdates.mockResolvedValueOnce({ msgs: [] }).mockResolvedValueOnce({
+      get_updates_buf: 'committed-cursor',
+      msgs: [{ from_user_id: 'alice', message_id: 1, message_type: 1, item_list: [] }],
+    });
+    vi.mocked(fetch).mockImplementationOnce(() => {
+      notifyForward();
+      return new Promise<Response>((resolve) => {
+        finishForward = resolve;
+      });
+    });
+    const saveCursor = vi.fn().mockResolvedValue(undefined);
+    const client = new WechatClientFactory().createClient(
+      {
+        applicationId: 'wechat-app',
+        platform: 'wechat',
+        credentials: { botId: 'bot-id', botToken: 'bot-token' },
+        settings: {},
+      },
+      {
+        appUrl: 'https://example.com',
+        redisClient: runtimeRedis as any,
+        pollingCursorStore: { load: async () => undefined, save: saveCursor },
+      },
+    );
+    await client.start({ durationMs: 10_000 });
+    await forwarding;
+    let stopped = false;
+    const stopping = client.stop().then(() => {
+      stopped = true;
+    });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+    finishForward(new Response(null, { status: 202 }));
+    await stopping;
+    expect(saveCursor).toHaveBeenCalledWith('committed-cursor');
+    expect(mockGetUpdates).toHaveBeenCalledTimes(2);
+  });
+
+  it('waits for the previous poll generation before refreshing', async () => {
+    let finishOldPoll!: () => void;
+    mockGetUpdates.mockReset();
+    mockGetUpdates
+      .mockResolvedValueOnce({ msgs: [] })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishOldPoll = () => resolve({ msgs: [] });
+          }),
+      )
+      .mockResolvedValueOnce({ msgs: [] })
+      .mockImplementationOnce(
+        (_cursor: string, signal: AbortSignal) =>
+          new Promise((_resolve, reject) => {
+            signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+          }),
+      );
+    const client = new WechatClientFactory().createClient(
+      {
+        applicationId: 'wechat-app',
+        platform: 'wechat',
+        credentials: { botId: 'bot-id', botToken: 'bot-token' },
+        settings: {},
+      },
+      { appUrl: 'https://example.com', redisClient: runtimeRedis as any },
+    );
+    await client.start({ durationMs: 10_000 });
+    const refreshing = (client as any).refresh();
+    await Promise.resolve();
+    expect(mockGetUpdates).toHaveBeenCalledTimes(2);
+    finishOldPoll();
+    await refreshing;
+    expect(mockGetUpdates).toHaveBeenCalledTimes(4);
+    await client.stop();
+  });
+
+  it('removes completed backoff abort listeners and skips already-cancelled waits', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new WechatClientFactory().createClient(
+        {
+          applicationId: 'wechat-app',
+          platform: 'wechat',
+          credentials: { botId: 'bot-id', botToken: 'bot-token' },
+          settings: {},
+        },
+        {},
+      );
+      const abort = new AbortController();
+      const remove = vi.spyOn(abort.signal, 'removeEventListener');
+      const sleeping = (client as any).sleep(10, abort.signal);
+      await vi.advanceTimersByTimeAsync(10);
+      await sleeping;
+      expect(remove).toHaveBeenCalledWith('abort', expect.any(Function));
+      abort.abort();
+      await (client as any).sleep(10, abort.signal);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('forwards messages received during the readiness probe', async () => {
     let resolveLoop: ((value: any) => void) | undefined;
 

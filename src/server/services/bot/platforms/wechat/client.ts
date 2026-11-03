@@ -73,6 +73,8 @@ class WechatGatewayClient implements PlatformClient {
   private context: BotPlatformRuntimeContext;
   private api: WechatApiClient;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private pollTask?: Promise<void>;
+  private refreshTask?: Promise<void>;
   private stopped = false;
   /** Cached context tokens per user ID for replies */
   private contextTokens = new Map<string, string>();
@@ -98,7 +100,7 @@ class WechatGatewayClient implements PlatformClient {
     const runtimeStatusTtlMs = durationMs + CONNECTED_STATUS_TTL_BUFFER_MS;
     const waitUntil = options?.waitUntil ?? ((task: Promise<any>) => task.catch(() => {}));
     const webhookUrl = `${(this.context.appUrl || '').trim()}/api/agent/webhooks/wechat/${this.applicationId}`;
-    await updateBotRuntimeStatus(
+    await (this.context.updateRuntimeStatus ?? updateBotRuntimeStatus)(
       {
         applicationId: this.applicationId,
         platform: this.id,
@@ -109,11 +111,13 @@ class WechatGatewayClient implements PlatformClient {
 
     try {
       const cursor = await this.primePolling(webhookUrl);
+      this.context.assertConnectionHeld?.();
 
       if (this.abort.signal.aborted || this.stopped) return;
 
       // Start the long-polling loop in background
-      const pollTask = this.pollLoop(durationMs, webhookUrl, cursor);
+      const pollTask = this.pollLoop(durationMs, webhookUrl, cursor, this.abort.signal);
+      this.pollTask = pollTask;
       waitUntil(pollTask);
 
       // When called from GatewayManager (no explicit options), schedule auto-refresh
@@ -127,14 +131,13 @@ class WechatGatewayClient implements PlatformClient {
             this.applicationId,
             durationMs / 60_000,
           );
-          this.abort.abort();
-          this.start().catch((err) => {
+          this.refreshTask = this.refresh().catch((err) => {
             log('Failed to refresh WechatBot appId=%s: %O', this.applicationId, err);
           });
         }, durationMs);
       }
 
-      await updateBotRuntimeStatus(
+      await (this.context.updateRuntimeStatus ?? updateBotRuntimeStatus)(
         {
           applicationId: this.applicationId,
           platform: this.id,
@@ -145,7 +148,7 @@ class WechatGatewayClient implements PlatformClient {
 
       log('WechatBot appId=%s started, webhookUrl=%s', this.applicationId, webhookUrl);
     } catch (error) {
-      await updateBotRuntimeStatus(
+      await (this.context.updateRuntimeStatus ?? updateBotRuntimeStatus)(
         {
           applicationId: this.applicationId,
           errorMessage: getRuntimeStatusErrorMessage(error),
@@ -166,7 +169,9 @@ class WechatGatewayClient implements PlatformClient {
       this.refreshTimer = null;
     }
     this.abort.abort();
-    await updateBotRuntimeStatus(
+    // Join forwarding/backoff from the old generation before its owner unloads.
+    await Promise.allSettled([this.pollTask, this.refreshTask]);
+    await (this.context.updateRuntimeStatus ?? updateBotRuntimeStatus)(
       {
         applicationId: this.applicationId,
         platform: this.id,
@@ -178,22 +183,31 @@ class WechatGatewayClient implements PlatformClient {
 
   // --- Long-polling loop ---
 
+  private async refresh(): Promise<void> {
+    this.abort.abort();
+    await this.pollTask;
+    if (this.stopped) return;
+    await this.start();
+  }
+
   private async pollLoop(
     durationMs: number,
     webhookUrl: string,
     initialCursor?: string,
+    signal: AbortSignal = this.abort.signal,
   ): Promise<void> {
     const endTime = Date.now() + durationMs;
     let cursor = initialCursor;
     let retryDelay = 1000; // Start at 1s, exponential up to MAX_RETRY_DELAY_MS
 
-    while (!this.stopped && !this.abort.signal.aborted && Date.now() < endTime) {
+    while (!this.stopped && !signal.aborted && Date.now() < endTime) {
       try {
-        const response = await this.api.getUpdates(cursor, this.abort.signal);
+        const response = await this.api.getUpdates(cursor, signal);
 
         await this.processUpdates(response.msgs, webhookUrl);
 
         // Do not skip this batch when authenticated forwarding is rejected.
+        this.context.assertConnectionHeld?.();
         if (response.get_updates_buf) {
           await this.context.pollingCursorStore?.save(response.get_updates_buf);
           cursor = response.get_updates_buf;
@@ -201,7 +215,7 @@ class WechatGatewayClient implements PlatformClient {
         // A successful poll is not a successful batch until forwarding has completed.
         retryDelay = 1000;
       } catch (err: any) {
-        if (this.abort.signal.aborted) break;
+        if (signal.aborted) break;
 
         // Session expired (errcode -14) — clear cursor, long backoff
         if (err?.code === -14) {
@@ -210,14 +224,14 @@ class WechatGatewayClient implements PlatformClient {
             this.applicationId,
             SESSION_EXPIRED_BACKOFF_MS / 60_000,
           );
-          await this.sleep(SESSION_EXPIRED_BACKOFF_MS);
+          await this.sleep(SESSION_EXPIRED_BACKOFF_MS, signal);
           break;
         }
 
         log('WechatBot appId=%s poll error: %s', this.applicationId, err?.message || err);
 
         // Exponential backoff capped at MAX_RETRY_DELAY_MS (matches reference)
-        await this.sleep(retryDelay);
+        await this.sleep(retryDelay, signal);
         retryDelay = Math.min(retryDelay * 2, MAX_RETRY_DELAY_MS);
       }
     }
@@ -239,9 +253,11 @@ class WechatGatewayClient implements PlatformClient {
     try {
       const signal = AbortSignal.any([this.abort.signal, probeAbort.signal]);
       previousCursor = await this.context.pollingCursorStore?.load();
+      this.context.assertConnectionHeld?.();
       const response = await this.api.getUpdates(previousCursor, signal);
 
       await this.processUpdates(response.msgs, webhookUrl);
+      this.context.assertConnectionHeld?.();
       if (response.get_updates_buf)
         await this.context.pollingCursorStore?.save(response.get_updates_buf);
       return response.get_updates_buf || previousCursor;
@@ -264,6 +280,7 @@ class WechatGatewayClient implements PlatformClient {
     if (!msgs || msgs.length === 0) return;
 
     for (const msg of msgs) {
+      this.context.assertConnectionHeld?.();
       // Skip bot's own messages and non-finished user messages
       if (msg.message_type === MessageType.BOT) continue;
       if (msg.message_state !== undefined && msg.message_state !== MessageState.FINISH) continue;
@@ -281,6 +298,7 @@ class WechatGatewayClient implements PlatformClient {
    * Forward a polled message to the webhook endpoint for Chat SDK processing.
    */
   private async forwardToWebhook(webhookUrl: string, msg: WechatRawMessage): Promise<void> {
+    this.context.assertConnectionHeld?.();
     const response = await fetch(webhookUrl, {
       ...signGatewayRequest({
         applicationId: this.applicationId,
@@ -311,13 +329,16 @@ class WechatGatewayClient implements PlatformClient {
     });
   }
 
-  private sleep(ms: number): Promise<void> {
+  private sleep(ms: number, signal: AbortSignal = this.abort.signal): Promise<void> {
+    if (signal.aborted) return Promise.resolve();
     return new Promise((resolve) => {
-      const timer = setTimeout(resolve, ms);
-      this.abort.signal.addEventListener('abort', () => {
+      const finish = () => {
         clearTimeout(timer);
+        signal.removeEventListener('abort', finish);
         resolve();
-      });
+      };
+      const timer = setTimeout(finish, ms);
+      signal.addEventListener('abort', finish, { once: true });
     });
   }
 
