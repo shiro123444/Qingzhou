@@ -1,7 +1,9 @@
 'use client';
 
 import {
+  type ChangeEvent as ReactChangeEvent,
   type CSSProperties,
+  type DragEvent as ReactDragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
@@ -43,13 +45,22 @@ interface DockGeometry {
 }
 interface DragSession {
   anchor: DockAnchor | null;
+  armed: boolean;
+  captured: boolean;
+  captureElement: HTMLElement;
   moved: boolean;
+  pendingRange?: { commit: (value: number) => void; value: number };
   pointerId: number;
+  range: HTMLInputElement | null;
+  rangeScrubbing: boolean;
   start: DockPoint;
   startX: number;
   startY: number;
+  timer?: ReturnType<typeof setTimeout>;
   userId: string;
 }
+
+export const CAPSULE_RANGE_HOLD_MS = 180;
 
 const readViewport = (): DockViewport => {
   const viewport = window.visualViewport;
@@ -106,6 +117,11 @@ export function useCapsulePosition({
   });
   const drag = useRef<DragSession | null>(null);
   const suppressClick = useRef(false);
+  const blockedRange = useRef<HTMLInputElement | null>(null);
+  const latestPointer = useRef<DockPoint>({ x: 0, y: 0 });
+  const moveRef = useRef<(event: PointerEvent) => void>(() => {});
+  const finishRef = useRef<(pointerId: number, cancelled: boolean) => void>(() => {});
+  const [rangePreview, setRangePreview] = useState<{ id: string; value: number } | null>(null);
   const geometry = useRef<DockGeometry | null>(null);
   const measureRef = useRef<() => void>(() => {});
   const [layout, setLayout] = useState<DockGeometry | null>(null);
@@ -145,7 +161,19 @@ export function useCapsulePosition({
   measureRef.current = measure;
 
   useLayoutEffect(() => {
-    drag.current = null;
+    if (drag.current) {
+      clearTimeout(drag.current.timer);
+      const active = drag.current;
+      drag.current = null;
+      try {
+        if (active.captureElement.hasPointerCapture(active.pointerId))
+          active.captureElement.releasePointerCapture(active.pointerId);
+      } catch {
+        /* A detached surface no longer owns pointer capture. */
+      }
+    }
+    blockedRange.current = null;
+    setRangePreview(null);
     suppressClick.current = false;
     setDragging(false);
     setStorageWarning(false);
@@ -227,33 +255,85 @@ export function useCapsulePosition({
   };
   const reset = () => save(null);
 
-  const onPointerDown = (event: ReactPointerEvent<HTMLElement>) => {
+  const onPointerDownCapture = (event: ReactPointerEvent<HTMLElement>) => {
     if (!userId || !event.isPrimary || event.button !== 0 || !geometry.current) return;
+    // A new gesture also releases suppression when a touch drag emitted no click.
     suppressClick.current = false;
-    event.currentTarget.focus({ preventScroll: true });
-    try {
-      event.currentTarget.setPointerCapture(event.pointerId);
-    } catch {
-      return;
-    }
-    drag.current = {
+    // Details/queue panels remain scrollable and keep ordinary input behavior.
+    if (!(event.target instanceof Element) || !event.target.closest('[data-capsule-body]')) return;
+    if (drag.current) finishRef.current(drag.current.pointerId, true);
+    blockedRange.current = null;
+    const range =
+      event.target instanceof Element
+        ? event.target.closest<HTMLInputElement>('input[type="range"]')
+        : null;
+    const active: DragSession = {
       pointerId: event.pointerId,
       userId,
+      captureElement: event.currentTarget,
+      captured: false,
+      range,
+      rangeScrubbing: false,
+      armed: !range,
       startX: event.clientX,
       startY: event.clientY,
       start: geometry.current.point,
       moved: false,
       anchor: null,
     };
+    latestPointer.current = { x: event.clientX, y: event.clientY };
+    drag.current = active;
+    if (range) {
+      active.timer = setTimeout(() => {
+        if (
+          drag.current !== active ||
+          preferred.current.userId !== active.userId ||
+          active.rangeScrubbing
+        )
+          return;
+        active.armed = true;
+        active.startX = latestPointer.current.x;
+        active.startY = latestPointer.current.y;
+        active.start = geometry.current?.point ?? active.start;
+      }, CAPSULE_RANGE_HOLD_MS);
+    }
   };
-  const onPointerMove = (event: ReactPointerEvent<HTMLElement>) => {
+
+  const onPointerMove = (event: PointerEvent) => {
     const active = drag.current;
     const measured = geometry.current;
     if (!active || active.pointerId !== event.pointerId || active.userId !== userId || !measured)
       return;
+    latestPointer.current = { x: event.clientX, y: event.clientY };
+    if (!active.armed) {
+      // A scrub begun before the hold deadline stays a scrub for its entire gesture.
+      if (
+        active.range &&
+        Math.hypot(event.clientX - active.startX, event.clientY - active.startY) >=
+          DOCK_DRAG_THRESHOLD
+      ) {
+        active.rangeScrubbing = true;
+        clearTimeout(active.timer);
+      }
+      return;
+    }
     const dx = event.clientX - active.startX;
     const dy = event.clientY - active.startY;
     if (!active.moved && Math.hypot(dx, dy) < DOCK_DRAG_THRESHOLD) return;
+    if (!active.captured) {
+      try {
+        active.captureElement.setPointerCapture(event.pointerId);
+      } catch {
+        finishRef.current(event.pointerId, true);
+        return;
+      }
+      active.captured = true;
+      active.pendingRange = undefined;
+      setRangePreview(null);
+      dock.current
+        ?.querySelector<HTMLElement>('[data-capsule-body]')
+        ?.focus({ preventScroll: true });
+    }
     active.moved = true;
     event.preventDefault();
     const point = clampDockPoint(
@@ -265,21 +345,67 @@ export function useCapsulePosition({
     setDragging(true);
     measureRef.current();
   };
-  const finishPointer = (event: ReactPointerEvent<HTMLElement>, cancelled: boolean) => {
+  moveRef.current = onPointerMove;
+
+  const finishPointer = (pointerId: number, cancelled: boolean) => {
     const active = drag.current;
-    if (!active || active.pointerId !== event.pointerId) return;
+    if (!active || active.pointerId !== pointerId) return;
+    clearTimeout(active.timer);
     drag.current = null;
     setDragging(false);
+    setRangePreview(null);
     suppressClick.current = !cancelled && active.moved;
-    if (!cancelled && active.moved && active.userId === userId && active.anchor)
-      save(active.anchor);
-    else measureRef.current();
+    blockedRange.current = active.range;
+    if (!cancelled && active.userId === userId) {
+      if (active.moved && active.anchor) save(active.anchor);
+      else {
+        active.pendingRange?.commit(active.pendingRange.value);
+        measureRef.current();
+      }
+    } else measureRef.current();
     try {
-      if (event.currentTarget.hasPointerCapture(event.pointerId))
-        event.currentTarget.releasePointerCapture(event.pointerId);
+      if (active.captured && active.captureElement.hasPointerCapture(pointerId))
+        active.captureElement.releasePointerCapture(pointerId);
     } catch {
-      /* The browser may already have released a cancelled pointer. */
+      /* Native range capture may have already ended. */
     }
+  };
+  finishRef.current = finishPointer;
+
+  useLayoutEffect(() => {
+    const move = (event: PointerEvent) => moveRef.current(event);
+    const up = (event: PointerEvent) => finishRef.current(event.pointerId, false);
+    const cancel = (event: PointerEvent) => finishRef.current(event.pointerId, true);
+    const blur = () => {
+      if (drag.current) finishRef.current(drag.current.pointerId, true);
+    };
+    document.addEventListener('pointermove', move, { capture: true, passive: false });
+    document.addEventListener('pointerup', up, true);
+    document.addEventListener('pointercancel', cancel, true);
+    window.addEventListener('blur', blur);
+    return () => {
+      document.removeEventListener('pointermove', move, true);
+      document.removeEventListener('pointerup', up, true);
+      document.removeEventListener('pointercancel', cancel, true);
+      window.removeEventListener('blur', blur);
+      const active = drag.current;
+      if (active) {
+        clearTimeout(active.timer);
+        drag.current = null;
+        try {
+          if (active.captureElement.hasPointerCapture(active.pointerId))
+            active.captureElement.releasePointerCapture(active.pointerId);
+        } catch {
+          /* Unmount releases capture without touching audio. */
+        }
+      }
+    };
+  }, []);
+
+  const onLostPointerCaptureCapture = (event: ReactPointerEvent<HTMLElement>) => {
+    const active = drag.current;
+    if (active?.captured && event.target === active.captureElement)
+      finishPointer(event.pointerId, true);
   };
   const onClickCapture = (event: ReactMouseEvent<HTMLElement>) => {
     if (!suppressClick.current || event.detail === 0) return;
@@ -287,7 +413,19 @@ export function useCapsulePosition({
     event.preventDefault();
     event.stopPropagation();
   };
-  const onKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
+  const onKeyDownCapture = (event: ReactKeyboardEvent<HTMLElement>) => {
+    if (event.key === 'Escape' && drag.current) {
+      event.preventDefault();
+      finishPointer(drag.current.pointerId, true);
+      return;
+    }
+    if (event.target instanceof HTMLInputElement && event.target.type === 'range') {
+      blockedRange.current = null;
+      return;
+    }
+    // Child controls keep their own arrow/Home semantics. Only the focused body moves.
+    if (!(event.target instanceof HTMLElement) || !event.target.hasAttribute('data-capsule-body'))
+      return;
     if (event.key === 'Home') {
       event.preventDefault();
       reset();
@@ -306,6 +444,24 @@ export function useCapsulePosition({
       measured.viewport,
     );
     save(dockPointToAnchor(point, measured.size, measured.viewport));
+  };
+
+  const changeRange = (
+    event: ReactChangeEvent<HTMLInputElement>,
+    commit: (value: number) => void,
+  ) => {
+    const input = event.currentTarget;
+    const value = Number(input.value);
+    if (!Number.isFinite(value)) return;
+    const active = drag.current;
+    if (active?.range === input) {
+      if (active.moved) return;
+      active.pendingRange = { commit, value };
+      setRangePreview({ id: input.dataset.capsuleRange ?? '', value });
+      return;
+    }
+    if (blockedRange.current === input) return;
+    commit(value);
   };
 
   const left = layout ? layout.point.x - layout.offsetX : 0;
@@ -327,14 +483,15 @@ export function useCapsulePosition({
     panelSide: layout?.panelSide ?? 'above',
     storageWarning,
     reset,
-    dragHandleProps: {
-      onPointerDown,
-      onPointerMove,
-      onPointerUp: (event: ReactPointerEvent<HTMLElement>) => finishPointer(event, false),
-      onPointerCancel: (event: ReactPointerEvent<HTMLElement>) => finishPointer(event, true),
-      onLostPointerCapture: (event: ReactPointerEvent<HTMLElement>) => finishPointer(event, true),
+    rangeValue: (id: string, fallback: number) =>
+      rangePreview?.id === id ? rangePreview.value : fallback,
+    changeRange,
+    surfaceProps: {
+      onPointerDownCapture,
+      onLostPointerCaptureCapture,
       onClickCapture,
-      onKeyDown,
+      onKeyDownCapture,
+      onDragStartCapture: (event: ReactDragEvent<HTMLElement>) => event.preventDefault(),
     },
   };
 }

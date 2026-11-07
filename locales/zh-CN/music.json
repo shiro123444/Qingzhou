@@ -4,7 +4,7 @@
   "capsuleCollapse": "收起播放器",
   "capsuleDetails": "播放设置",
   "capsuleDrag": "移动悬浮播放器",
-  "capsuleDragHint": "拖动调整位置，也可用方向键移动，Home 键复位。",
+  "capsuleDragHint": "任意位置均可拖动；进度条需先按住再拖动。方向键移动，Home 键复位。",
   "capsuleEmptyHint": "把喜欢的音乐放在手边",
   "capsuleExpand": "展开播放器",
   "capsuleMore": "播放设置与队列",
@@ -21,6 +21,7 @@
   "capsuleVolume": "悬浮播放器：音量",
   "chooseTrack": "选一首，慢慢听",
   "chooseTrackHint": "上传喜欢的音频，留一段属于自己的时间。",
+  "closeStudio": "收起完整播放器",
   "collection": "我的音频库",
   "continuousListening": "切换页面，音乐继续",
   "emptyLibrary": "上传音频，或搜索你的音频库。",
@@ -71,5 +72,6 @@
   "title": "清舟音乐",
   "upload": "上传音频",
   "uploadError": "上传失败，请选择小于 64 MiB 的音频文件后重试。",
+  "viewNavigation": "音乐视图",
   "volume": "音量"
 }

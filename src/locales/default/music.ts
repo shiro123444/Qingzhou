@@ -2,7 +2,8 @@ export default {
   capsuleCollapse: 'Collapse player',
   capsuleDetails: 'Playback settings',
   capsuleDrag: 'Move floating player',
-  capsuleDragHint: 'Drag to move. Use arrow keys; Home resets the position.',
+  capsuleDragHint:
+    'Drag anywhere to move. Hold the progress bar before dragging. Arrow keys move; Home resets.',
   capsuleEmptyHint: 'Your music, within reach.',
   capsuleExpand: 'Expand player',
   capsuleMore: 'Playback settings and queue',
@@ -19,6 +20,7 @@ export default {
   capsuleVolume: 'Floating player: volume',
   chooseTrack: 'Choose a track. Settle in.',
   chooseTrackHint: 'Bring your own audio and make this space yours.',
+  closeStudio: 'Close full player',
   collection: 'Your collection',
   continuousListening: 'Keep listening across Qingzhou.',
   fromLibrary: 'From your library',
@@ -73,4 +75,5 @@ export default {
   upload: 'Upload audio',
   uploadError: 'Upload failed. Choose an audio file under 64 MiB and try again.',
   volume: 'Volume',
+  viewNavigation: 'Music views',
 };

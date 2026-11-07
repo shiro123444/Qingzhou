@@ -1,6 +1,7 @@
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import i18n from 'i18next';
 import { I18nextProvider } from 'react-i18next';
+import { MemoryRouter } from 'react-router-dom';
 import { afterEach, expect, it, vi } from 'vitest';
 
 import { MusicPlayerProvider } from '@/features/MusicPlayer/context';
@@ -35,11 +36,13 @@ it('discards another account search even when its transport completes after canc
     storage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
   });
   const page = (userId: string | null) => (
-    <I18nextProvider i18n={i18n}>
-      <MusicPlayerProvider engine={engine} userId={userId}>
-        <MusicStudio />
-      </MusicPlayerProvider>
-    </I18nextProvider>
+    <MemoryRouter>
+      <I18nextProvider i18n={i18n}>
+        <MusicPlayerProvider engine={engine} userId={userId}>
+          <MusicStudio />
+        </MusicPlayerProvider>
+      </I18nextProvider>
+    </MemoryRouter>
   );
   const view = render(page('alice'));
   await waitFor(() => expect(search).toHaveBeenCalledTimes(1));

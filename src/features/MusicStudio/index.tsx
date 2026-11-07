@@ -6,9 +6,10 @@ import {
   ArrowDown,
   ArrowUp,
   AudioLines,
-  Disc3,
+  ChevronDown,
   ListMusic,
   ListPlus,
+  Music2,
   Pause,
   Play,
   Repeat2,
@@ -21,8 +22,9 @@ import {
   Volume2,
   VolumeX,
 } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Link } from 'react-router-dom';
 
 import { useAudioEngine, useMusicPlayer } from '@/features/MusicPlayer/context';
 import { type RepeatMode } from '@/features/MusicPlayer/engine';
@@ -30,46 +32,6 @@ import { activeLyric, formatTime, MAX_LRC_BYTES } from '@/features/MusicPlayer/l
 import { type MusicTrack } from '@/types/music';
 
 import { styles } from './style';
-
-/** An abstract Qingzhou cover, used until the library has real embedded artwork. */
-function CoverIllustration() {
-  return (
-    <svg aria-hidden fill="none" viewBox="0 0 320 320">
-      <circle cx="238" cy="80" fill="white" opacity="0.28" r="37" />
-      <path
-        d="M-20 180C45 148 88 220 166 181S279 154 341 184V340H-20Z"
-        fill="white"
-        opacity="0.12"
-      />
-      <path
-        d="M-20 218C58 177 116 257 202 212S296 196 340 218V340H-20Z"
-        fill="#103D51"
-        opacity="0.24"
-      />
-      <path
-        d="M-20 259C45 232 113 283 185 258S284 244 340 263V340H-20Z"
-        fill="white"
-        opacity="0.1"
-      />
-      <path d="M133 207H207L192 223H149Z" fill="#164B59" />
-      <path d="M171 121V201H137Z" fill="#F6FAEB" opacity="0.95" />
-      <path d="M178 142L204 201H178Z" fill="#D9EBDC" opacity="0.82" />
-      <path
-        d="M117 236C143 230 153 242 178 236C203 230 217 241 237 235"
-        opacity="0.45"
-        stroke="white"
-        strokeLinecap="round"
-        strokeWidth="1.5"
-      />
-      <path
-        d="M101 251C126 246 135 254 151 251M187 254C207 248 225 256 249 250"
-        opacity="0.22"
-        stroke="white"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
 
 export default function MusicStudio() {
   const { t } = useTranslation('music');
@@ -81,7 +43,7 @@ export default function MusicStudio() {
   });
   const tracks = library.userId === s.userId ? library.tracks : [];
   const [query, setQuery] = useState('');
-  const [view, setView] = useState<'library' | 'queue'>('library');
+  const [view, setView] = useState<'player' | 'library' | 'queue'>('player');
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<'requestError' | 'uploadError' | 'lyricError' | null>(null);
@@ -89,9 +51,13 @@ export default function MusicStudio() {
   const upload = useRef<HTMLInputElement>(null);
   const lyricInput = useRef<HTMLInputElement>(null);
   const highlight = useRef<HTMLParagraphElement>(null);
+  const lyricScroll = useRef<HTMLDivElement>(null);
   const lifetime = useRef<AbortController | null>(null);
   const active = s.queue.find((item) => item.id === s.activeId);
-  const lines = s.activeId ? (s.lyrics[s.activeId]?.lines ?? []) : [];
+  const lines = useMemo(
+    () => (s.activeId ? (s.lyrics[s.activeId]?.lines ?? []) : []),
+    [s.activeId, s.lyrics],
+  );
   const currentLine = activeLyric(lines, s.positionMs);
   const playing = ['playing', 'buffering', 'loading'].includes(s.status);
   const activeIndex = s.queue.findIndex((track) => track.id === s.activeId);
@@ -139,8 +105,17 @@ export default function MusicStudio() {
   }, [engine, query, revision, s.userId]);
 
   useEffect(() => {
-    highlight.current?.scrollIntoView?.({ block: 'nearest' });
-  }, [currentLine, s.activeId]);
+    const container = lyricScroll.current;
+    const line = highlight.current;
+    if (view !== 'player' || !container || !line) return;
+    container.scrollTop = Math.max(
+      0,
+      container.scrollTop +
+        line.getBoundingClientRect().top -
+        container.getBoundingClientRect().top -
+        (container.clientHeight - line.clientHeight) / 2,
+    );
+  }, [currentLine, lines, s.activeId, view]);
 
   async function uploadAudio(file?: File) {
     const controller = lifetime.current;
@@ -153,6 +128,7 @@ export default function MusicStudio() {
       await engine.client.uploadAudio(file, controller.signal);
       if (isCurrent()) {
         setQuery('');
+        setView('library');
         setRevision((value) => value + 1);
       }
     } catch {
@@ -179,28 +155,73 @@ export default function MusicStudio() {
     }
   }
 
+  function playTrack(track: MusicTrack) {
+    engine.playTrack(track);
+    setView('player');
+  }
+
   return (
-    <main className={styles.studio}>
+    <main aria-label={t('player')} className={styles.studio} data-view={view}>
       <div className={styles.inner}>
         <header className={styles.header}>
           <div className={styles.brand}>
-            <span aria-hidden className={styles.brandIcon}>
-              <AudioLines size={20} />
-            </span>
-            <div>
-              <p className={styles.eyebrow}>{t('listeningSpace')}</p>
-              <h1>{t('title')}</h1>
-            </div>
+            <AudioLines aria-hidden size={23} strokeWidth={1.7} />
+            <h1>{t('title')}</h1>
           </div>
-          <Button
-            className={styles.uploadButton}
-            disabled={!s.userId}
-            icon={Upload}
-            loading={uploading}
-            onClick={() => upload.current?.click()}
-          >
-            {t('upload')}
-          </Button>
+          <div aria-label={t('viewNavigation')} className={styles.tabs} role="tablist">
+            {(['player', 'library', 'queue'] as const).map((item) => {
+              const label = t(item === 'player' ? 'nowPlaying' : item);
+              return (
+                <button
+                  aria-controls={'music-view-' + item}
+                  aria-label={label}
+                  aria-selected={view === item}
+                  className={styles.tab}
+                  id={'music-tab-' + item}
+                  key={item}
+                  role="tab"
+                  tabIndex={view === item ? 0 : -1}
+                  onClick={() => setView(item)}
+                  onKeyDown={(event) => {
+                    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+                    event.preventDefault();
+                    const items = ['player', 'library', 'queue'] as const;
+                    const index = items.indexOf(item);
+                    const next =
+                      event.key === 'Home'
+                        ? 0
+                        : event.key === 'End'
+                          ? 2
+                          : (index + (event.key === 'ArrowRight' ? 1 : -1) + 3) % 3;
+                    setView(items[next]);
+                    document.getElementById('music-tab-' + items[next])?.focus();
+                  }}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+          <div className={styles.headerActions}>
+            <Button
+              className={styles.uploadButton}
+              disabled={!s.userId}
+              icon={Upload}
+              loading={uploading}
+              type="text"
+              onClick={() => upload.current?.click()}
+            >
+              {t('upload')}
+            </Button>
+            <Link
+              aria-label={t('closeStudio')}
+              className={styles.closeButton}
+              title={t('closeStudio')}
+              to="/"
+            >
+              <ChevronDown aria-hidden size={27} />
+            </Link>
+          </div>
         </header>
         <input
           hidden
@@ -213,148 +234,152 @@ export default function MusicStudio() {
             event.target.value = '';
           }}
         />
+        <input
+          hidden
+          accept=".lrc,text/plain"
+          aria-label={t('importLrc')}
+          ref={lyricInput}
+          type="file"
+          onChange={(event) => {
+            void importLyrics(event.target.files?.[0]);
+            event.target.value = '';
+          }}
+        />
         {!s.userId && <Alert showIcon title={t('login')} type="info" />}
         {error && (
           <Alert closable showIcon title={t(error)} type="error" onClose={() => setError(null)} />
         )}
 
-        <div className={styles.deck}>
+        <div
+          aria-labelledby="music-tab-player"
+          className={styles.scene}
+          hidden={view !== 'player'}
+          id="music-view-player"
+          role="tabpanel"
+        >
           <section aria-label={t('nowPlaying')} className={styles.player}>
-            <div className={styles.playerTopline}>
-              <span className={styles.sectionLabel}>{t('nowPlaying')}</span>
-              <span className={styles.status} data-playing={s.status === 'playing'}>
-                <span aria-hidden className={styles.statusDot} />
-                {t(s.status)}
-              </span>
+            <div aria-hidden className={styles.cover}>
+              <Music2 size={104} strokeWidth={1.1} />
             </div>
-            <div className={styles.playerBody}>
-              <div aria-hidden className={styles.artwork}>
-                <div className={styles.artworkGlow} />
-                <div className={styles.coverArt} data-playing={s.status === 'playing'}>
-                  <CoverIllustration />
-                  <span className={styles.coverSignature}>
-                    <AudioLines size={15} />
-                    {t('title')}
-                  </span>
-                </div>
-              </div>
-              <div className={styles.trackInfo}>
-                <p className={styles.trackOrigin}>{active ? t('fromLibrary') : t('title')}</p>
-                <h2 className={styles.trackTitle} title={active?.name}>
-                  {active?.name ?? t('chooseTrack')}
-                </h2>
-                <p className={styles.trackDescription}>
-                  {active ? audioFormat(active) + ' · ' + audioSize(active) : t('chooseTrackHint')}
-                </p>
-                <div className={styles.timeline}>
-                  <input
-                    aria-label={t('seek')}
-                    disabled={!s.durationMs}
-                    max={s.durationMs || 1}
-                    min={0}
-                    step={100}
-                    type="range"
-                    value={Math.min(s.positionMs, s.durationMs || 0)}
-                    onChange={(event) => engine.seek(Number(event.target.value))}
-                  />
-                  <div className={styles.timestamps}>
-                    <span>{formatTime(s.positionMs)}</span>
-                    <span>{formatTime(s.durationMs)}</span>
-                  </div>
-                </div>
-                <div className={styles.transport}>
-                  <button
-                    aria-label={t('shuffle')}
-                    aria-pressed={s.shuffle}
-                    className={styles.iconButton}
-                    data-active={s.shuffle}
-                    disabled={!s.queue.length}
-                    onClick={() => engine.setShuffle(!s.shuffle)}
-                  >
-                    <Shuffle size={18} />
-                  </button>
-                  <button
-                    aria-label={t('previous')}
-                    className={styles.iconButton}
-                    disabled={!s.queue.length}
-                    onClick={() => engine.previous()}
-                  >
-                    <SkipBack fill="currentColor" size={21} />
-                  </button>
-                  <button
-                    aria-label={t(playing ? 'pause' : 'play')}
-                    className={styles.playButton}
-                    disabled={!s.queue.length}
-                    onClick={() => (playing ? engine.pause() : engine.play())}
-                  >
-                    {playing ? (
-                      <Pause fill="currentColor" size={23} />
-                    ) : (
-                      <Play fill="currentColor" size={23} />
-                    )}
-                  </button>
-                  <button
-                    aria-label={t('next')}
-                    className={styles.iconButton}
-                    disabled={!s.queue.length}
-                    onClick={() => engine.next()}
-                  >
-                    <SkipForward fill="currentColor" size={21} />
-                  </button>
-                  <label className={styles.repeatControl} data-active={s.repeat !== 'sequence'}>
-                    <Repeat2 aria-hidden size={18} />
-                    <select
-                      aria-label={t('repeat')}
-                      value={s.repeat}
-                      onChange={(event) => engine.setRepeat(event.target.value as RepeatMode)}
-                    >
-                      <option value="sequence">{t('sequence')}</option>
-                      <option value="list">{t('list')}</option>
-                      <option value="single">{t('single')}</option>
-                    </select>
-                    {s.repeat === 'single' && <span aria-hidden>1</span>}
-                  </label>
-                </div>
-                <div className={styles.playerFoot}>
-                  <span className={styles.queuePosition}>
-                    <ListMusic size={14} />
-                    {activeIndex >= 0 ? String(activeIndex + 1).padStart(2, '0') : '—'}
-                    <span>/</span>
-                    {String(s.queue.length).padStart(2, '0')}
-                  </span>
-                  <label className={styles.volume}>
-                    {s.volume === 0 ? (
-                      <VolumeX aria-hidden size={16} />
-                    ) : (
-                      <Volume2 aria-hidden size={16} />
-                    )}
-                    <input
-                      aria-label={t('volume')}
-                      max={1}
-                      min={0}
-                      step={0.01}
-                      type="range"
-                      value={s.volume}
-                      onChange={(event) => engine.setVolume(Number(event.target.value))}
-                    />
-                  </label>
-                </div>
-                {s.error && (
-                  <Button size="small" onClick={() => engine.play()}>
-                    {t('retry')}
-                  </Button>
+            <div className={styles.trackInfo}>
+              <h2 className={styles.trackTitle} title={active?.name}>
+                {active?.name ?? t('chooseTrack')}
+              </h2>
+              <p className={styles.trackDescription}>
+                {active ? audioFormat(active) + ' · ' + audioSize(active) : t('fromLibrary')}
+              </p>
+            </div>
+            <div className={styles.timeline}>
+              <span>{formatTime(s.positionMs)}</span>
+              <input
+                aria-label={t('seek')}
+                disabled={!s.durationMs}
+                max={s.durationMs || 1}
+                min={0}
+                step={100}
+                type="range"
+                value={Math.min(s.positionMs, s.durationMs || 0)}
+                style={{
+                  background: `linear-gradient(to right, #69a5de ${Math.min(100, (s.positionMs / (s.durationMs || 1)) * 100)}%, rgb(255 255 255 / 28%) 0)`,
+                }}
+                onChange={(event) => engine.seek(Number(event.target.value))}
+              />
+              <span>{formatTime(s.durationMs)}</span>
+            </div>
+            <div className={styles.transport}>
+              <button
+                aria-label={t('shuffle')}
+                aria-pressed={s.shuffle}
+                className={styles.iconButton}
+                data-active={s.shuffle}
+                disabled={!s.queue.length}
+                onClick={() => engine.setShuffle(!s.shuffle)}
+              >
+                <Shuffle size={22} />
+              </button>
+              <button
+                aria-label={t('previous')}
+                className={styles.iconButton}
+                disabled={!s.queue.length}
+                onClick={() => engine.previous()}
+              >
+                <SkipBack fill="currentColor" size={25} />
+              </button>
+              <button
+                aria-label={t(playing ? 'pause' : 'play')}
+                className={styles.playButton}
+                disabled={!s.queue.length}
+                onClick={() => (playing ? engine.pause() : engine.play())}
+              >
+                {playing ? (
+                  <Pause fill="currentColor" size={30} />
+                ) : (
+                  <Play fill="currentColor" size={30} />
                 )}
-              </div>
+              </button>
+              <button
+                aria-label={t('next')}
+                className={styles.iconButton}
+                disabled={!s.queue.length}
+                onClick={() => engine.next()}
+              >
+                <SkipForward fill="currentColor" size={25} />
+              </button>
+              <label className={styles.repeatControl} data-active={s.repeat !== 'sequence'}>
+                <Repeat2 aria-hidden size={25} />
+                <select
+                  aria-label={t('repeat')}
+                  value={s.repeat}
+                  onChange={(event) => engine.setRepeat(event.target.value as RepeatMode)}
+                >
+                  <option value="sequence">{t('sequence')}</option>
+                  <option value="list">{t('list')}</option>
+                  <option value="single">{t('single')}</option>
+                </select>
+                {s.repeat === 'single' && <span aria-hidden>1</span>}
+              </label>
             </div>
-            <div className={styles.continuousHint}>
-              <span aria-hidden />
-              {t('continuousListening')}
+            <div className={styles.playerFoot}>
+              <button
+                aria-label={t('queue')}
+                className={styles.queuePosition}
+                onClick={() => setView('queue')}
+              >
+                <ListMusic size={15} />
+                {activeIndex >= 0 ? activeIndex + 1 : '—'} / {s.queue.length}
+              </button>
+              <span className={styles.status}>{t(s.status)}</span>
+              <label className={styles.volume}>
+                {s.volume === 0 ? (
+                  <VolumeX aria-hidden size={16} />
+                ) : (
+                  <Volume2 aria-hidden size={16} />
+                )}
+                <input
+                  aria-label={t('volume')}
+                  max={1}
+                  min={0}
+                  step={0.01}
+                  type="range"
+                  value={s.volume}
+                  onChange={(event) => engine.setVolume(Number(event.target.value))}
+                />
+              </label>
             </div>
+            {!active && (
+              <button className={styles.chooseButton} onClick={() => setView('library')}>
+                {t('library')}
+              </button>
+            )}
+            {s.error && (
+              <Button size="small" onClick={() => engine.play()}>
+                {t('retry')}
+              </Button>
+            )}
           </section>
 
           <section className={styles.lyricPanel}>
-            <div className={styles.sectionHeading}>
-              <h2>{t('lyrics')}</h2>
+            <div className={styles.lyricToolbar}>
               <Button
                 disabled={!active}
                 size="small"
@@ -364,21 +389,14 @@ export default function MusicStudio() {
                 {t('importLrc')}
               </Button>
             </div>
-            <input
-              hidden
-              accept=".lrc,text/plain"
-              aria-label={t('importLrc')}
-              ref={lyricInput}
-              type="file"
-              onChange={(event) => {
-                void importLyrics(event.target.files?.[0]);
-                event.target.value = '';
-              }}
-            />
-            <div aria-label={t('lyrics')} className={styles.lyrics} data-empty={lines.length === 0}>
+            <div
+              aria-label={t('lyrics')}
+              className={styles.lyrics}
+              data-empty={lines.length === 0}
+              ref={lyricScroll}
+            >
               {lines.length === 0 ? (
                 <div className={styles.emptyLyrics}>
-                  <AudioLines aria-hidden size={35} strokeWidth={1} />
                   <p>{t('emptyLyrics')}</p>
                   <span>{t('lyricHint')}</span>
                 </div>
@@ -397,57 +415,43 @@ export default function MusicStudio() {
           </section>
         </div>
 
-        <section aria-label={t('collection')} className={styles.collection}>
-          <div className={styles.collectionHeader}>
-            <div className={styles.tabs}>
-              <button
-                aria-pressed={view === 'library'}
-                className={styles.tab}
-                data-active={view === 'library'}
-                onClick={() => setView('library')}
-              >
-                {t('library')}
-                <span>{tracks.length}</span>
-              </button>
-              <button
-                aria-pressed={view === 'queue'}
-                className={styles.tab}
-                data-active={view === 'queue'}
-                onClick={() => setView('queue')}
-              >
-                {t('queue')}
-                <span>{s.queue.length}</span>
-              </button>
-            </div>
-            <div className={styles.collectionActions}>
-              {view === 'library' && (
-                <Input
-                  allowClear
-                  aria-label={t('search')}
-                  className={styles.search}
-                  maxLength={200}
-                  placeholder={t('search')}
-                  prefix={<Search aria-hidden size={15} />}
-                  type="search"
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                  onPressEnter={() => setRevision((value) => value + 1)}
-                />
-              )}
-              <Button
-                disabled={!displayedTracks.length}
-                icon={Play}
-                size="small"
-                onClick={() => {
-                  engine.enqueue(displayedTracks);
-                  if (displayedTracks[0]) engine.playTrack(displayedTracks[0]);
-                }}
-              >
-                {t('playAll')}
-              </Button>
-            </div>
+        <section
+          aria-labelledby={view === 'queue' ? 'music-tab-queue' : 'music-tab-library'}
+          className={styles.collection}
+          hidden={view === 'player'}
+          id={'music-view-' + (view === 'queue' ? 'queue' : 'library')}
+          role="tabpanel"
+        >
+          <div className={styles.collectionHeading}>
+            <h2>{t(view === 'queue' ? 'queue' : 'library')}</h2>
+            <span>{displayedTracks.length}</span>
           </div>
-
+          <div className={styles.collectionToolbar}>
+            <Button
+              disabled={!displayedTracks.length}
+              icon={Play}
+              onClick={() => {
+                engine.enqueue(displayedTracks);
+                if (displayedTracks[0]) playTrack(displayedTracks[0]);
+              }}
+            >
+              {t('playAll')}
+            </Button>
+            {view !== 'queue' && (
+              <Input
+                allowClear
+                aria-label={t('search')}
+                className={styles.search}
+                maxLength={200}
+                placeholder={t('search')}
+                prefix={<Search aria-hidden size={16} />}
+                type="search"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                onPressEnter={() => setRevision((value) => value + 1)}
+              />
+            )}
+          </div>
           {loading && view === 'library' && (
             <p className={styles.loading} role="status">
               {t('loading')}
@@ -458,7 +462,7 @@ export default function MusicStudio() {
           )}
           {!loading && displayedTracks.length === 0 && (
             <div className={styles.emptyCollection}>
-              <Disc3 aria-hidden size={34} strokeWidth={1.2} />
+              <Music2 aria-hidden size={42} strokeWidth={1} />
               <h3>
                 {view === 'queue'
                   ? t('emptyQueue')
@@ -466,14 +470,8 @@ export default function MusicStudio() {
                     ? t('noSearchResults')
                     : t('emptyLibrary')}
               </h3>
-              <p>
-                {view === 'queue'
-                  ? t('chooseTrackHint')
-                  : query
-                    ? t('noSearchResultsHint')
-                    : t('chooseTrackHint')}
-              </p>
-              {view === 'library' && !query && (
+              <p>{query ? t('noSearchResultsHint') : t('chooseTrackHint')}</p>
+              {view !== 'queue' && !query && (
                 <Button
                   disabled={!s.userId}
                   icon={Upload}
@@ -485,102 +483,93 @@ export default function MusicStudio() {
               )}
             </div>
           )}
-          {view === 'library' ? (
-            <ul aria-label={t('library')} className={styles.libraryGrid}>
-              {tracks.map((track, index) => (
-                <li
-                  aria-current={s.activeId === track.id}
-                  className={styles.libraryCard}
-                  key={track.id}
-                >
-                  <span aria-hidden className={styles.trackArt} data-tone={index % 4}>
-                    <CoverIllustration />
+          <ul aria-label={t('library')} className={styles.list} hidden={view === 'queue'}>
+            {tracks.map((track, index) => (
+              <li aria-current={s.activeId === track.id} className={styles.trackRow} key={track.id}>
+                <span aria-hidden className={styles.rowNumber}>
+                  {String(index + 1).padStart(2, '0')}
+                </span>
+                <span aria-hidden className={styles.trackArt}>
+                  <Music2 size={21} strokeWidth={1.4} />
+                </span>
+                <div className={styles.rowInfo}>
+                  <span className={styles.name} title={track.name}>
+                    {track.name}
                   </span>
-                  <div className={styles.rowInfo}>
-                    <span className={styles.name} title={track.name}>
-                      {track.name}
-                    </span>
-                    <span className={styles.fileMeta}>
-                      {audioFormat(track)} · {audioSize(track)}
-                    </span>
-                  </div>
-                  <div className={styles.rowActions}>
-                    <Button
-                      aria-label={t('play') + ' ' + track.name}
-                      icon={Play}
-                      size="small"
-                      type="text"
-                      onClick={() => engine.playTrack(track)}
-                    />
-                    <Button
-                      aria-label={t('enqueue') + ' ' + track.name}
-                      icon={ListPlus}
-                      size="small"
-                      type="text"
-                      onClick={() => engine.enqueue([track])}
-                    />
-                  </div>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <ol aria-label={t('queue')} className={styles.list}>
-              {s.queue.map((track, index) => (
-                <li
-                  aria-current={s.activeId === track.id}
-                  className={styles.trackRow}
-                  key={track.id}
-                >
-                  <span aria-hidden className={styles.rowNumber}>
-                    {String(index + 1).padStart(2, '0')}
+                  <span className={styles.fileMeta}>{audioFormat(track)}</span>
+                </div>
+                <span className={styles.fileSize}>{audioSize(track)}</span>
+                <div className={styles.rowActions}>
+                  <Button
+                    aria-label={t('play') + ' ' + track.name}
+                    icon={Play}
+                    size="small"
+                    type="text"
+                    onClick={() => playTrack(track)}
+                  />
+                  <Button
+                    aria-label={t('enqueue') + ' ' + track.name}
+                    icon={ListPlus}
+                    size="small"
+                    type="text"
+                    onClick={() => engine.enqueue([track])}
+                  />
+                </div>
+              </li>
+            ))}
+          </ul>
+          <ol aria-label={t('queue')} className={styles.list} hidden={view !== 'queue'}>
+            {s.queue.map((track, index) => (
+              <li aria-current={s.activeId === track.id} className={styles.trackRow} key={track.id}>
+                <span aria-hidden className={styles.rowNumber}>
+                  {String(index + 1).padStart(2, '0')}
+                </span>
+                <span aria-hidden className={styles.trackArt}>
+                  <Music2 size={21} strokeWidth={1.4} />
+                </span>
+                <div className={styles.rowInfo}>
+                  <span className={styles.name} title={track.name}>
+                    {track.name}
                   </span>
-                  <span aria-hidden className={styles.trackArt} data-tone={index % 4}>
-                    <CoverIllustration />
+                  <span className={styles.fileMeta}>
+                    {audioFormat(track)} · {audioSize(track)}
                   </span>
-                  <div className={styles.rowInfo}>
-                    <span className={styles.name} title={track.name}>
-                      {track.name}
-                    </span>
-                    <span className={styles.fileMeta}>
-                      {audioFormat(track)} · {audioSize(track)}
-                    </span>
-                  </div>
-                  <div className={styles.rowActions}>
-                    <Button
-                      aria-label={t('play') + ' ' + track.name}
-                      icon={Play}
-                      size="small"
-                      type="text"
-                      onClick={() => engine.playTrack(track)}
-                    />
-                    <Button
-                      aria-label={t('moveUp') + ' ' + track.name}
-                      disabled={index === 0}
-                      icon={ArrowUp}
-                      size="small"
-                      type="text"
-                      onClick={() => engine.move(track.id, -1)}
-                    />
-                    <Button
-                      aria-label={t('moveDown') + ' ' + track.name}
-                      disabled={index === s.queue.length - 1}
-                      icon={ArrowDown}
-                      size="small"
-                      type="text"
-                      onClick={() => engine.move(track.id, 1)}
-                    />
-                    <Button
-                      aria-label={t('remove') + ' ' + track.name}
-                      icon={Trash2}
-                      size="small"
-                      type="text"
-                      onClick={() => engine.remove(track.id)}
-                    />
-                  </div>
-                </li>
-              ))}
-            </ol>
-          )}
+                </div>
+                <div className={styles.rowActions}>
+                  <Button
+                    aria-label={t('play') + ' ' + track.name}
+                    icon={Play}
+                    size="small"
+                    type="text"
+                    onClick={() => playTrack(track)}
+                  />
+                  <Button
+                    aria-label={t('moveUp') + ' ' + track.name}
+                    disabled={index === 0}
+                    icon={ArrowUp}
+                    size="small"
+                    type="text"
+                    onClick={() => engine.move(track.id, -1)}
+                  />
+                  <Button
+                    aria-label={t('moveDown') + ' ' + track.name}
+                    disabled={index === s.queue.length - 1}
+                    icon={ArrowDown}
+                    size="small"
+                    type="text"
+                    onClick={() => engine.move(track.id, 1)}
+                  />
+                  <Button
+                    aria-label={t('remove') + ' ' + track.name}
+                    icon={Trash2}
+                    size="small"
+                    type="text"
+                    onClick={() => engine.remove(track.id)}
+                  />
+                </div>
+              </li>
+            ))}
+          </ol>
         </section>
       </div>
     </main>

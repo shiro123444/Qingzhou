@@ -5,15 +5,14 @@ import {
   ChevronDown,
   ChevronUp,
   ExternalLink,
-  GripVertical,
   ListMusic,
   MoreHorizontal,
+  Music2,
   Pause,
   Play,
   Repeat,
   Repeat1,
   RotateCcw,
-  Sailboat,
   Shuffle,
   SkipBack,
   SkipForward,
@@ -76,6 +75,7 @@ export default function MiniPlayer() {
 
   return (
     <section
+      {...position.surfaceProps}
       aria-label={t('player')}
       className={styles.dock}
       data-collapsed={collapsed}
@@ -160,12 +160,15 @@ export default function MiniPlayer() {
               <Volume2 aria-hidden size={16} />
               <input
                 aria-label={t('capsuleVolume')}
+                data-capsule-range="volume"
                 max={1}
                 min={0}
                 step={0.01}
                 type="range"
-                value={s.volume}
-                onChange={(event) => engine.setVolume(Number(event.target.value))}
+                value={position.rangeValue('volume', s.volume)}
+                onChange={(event) =>
+                  position.changeRange(event, (value) => engine.setVolume(value))
+                }
               />
             </label>
           </div>
@@ -185,41 +188,42 @@ export default function MiniPlayer() {
         </div>
       )}
       {collapsed ? (
-        <button
-          {...position.dragHandleProps}
+        <div
           data-capsule-body
           aria-description={t('capsuleDragHint')}
-          aria-expanded={false}
-          aria-label={t('capsuleExpand')}
+          aria-label={t('capsuleDrag')}
           className={styles.orb}
-          title={`${track?.name ?? t('title')} · ${t('capsuleDragHint')}`}
-          onClick={(event) => {
-            if (!event.defaultPrevented) setCollapsedPreference(false);
-          }}
+          role="group"
+          tabIndex={0}
         >
-          <span aria-hidden className={styles.record} data-playing={s.status === 'playing'}>
-            <span className={styles.recordLabel}>
-              <Sailboat size={20} />
-            </span>
-          </span>
-          {s.status === 'playing' && <span className={styles.orbIndicator} />}
-        </button>
-      ) : (
-        <div data-capsule-body className={styles.capsule} data-empty={!s.queue.length}>
           <button
-            {...position.dragHandleProps}
-            aria-description={t('capsuleDragHint')}
-            aria-label={t('capsuleDrag')}
-            className={styles.dragHandle}
-            title={t('capsuleDragHint')}
+            aria-expanded={false}
+            aria-label={t('capsuleExpand')}
+            className={styles.artworkLink}
+            title={`${track?.name ?? t('title')} · ${t('capsuleDragHint')}`}
+            onClick={(event) => {
+              if (!event.defaultPrevented) setCollapsedPreference(false);
+            }}
           >
-            <GripVertical size={15} />
+            <span aria-hidden className={styles.record} data-playing={s.status === 'playing'}>
+              <Music2 size={24} />
+            </span>
+            {s.status === 'playing' && <span className={styles.orbIndicator} />}
           </button>
+        </div>
+      ) : (
+        <div
+          data-capsule-body
+          aria-description={t('capsuleDragHint')}
+          aria-label={t('capsuleDrag')}
+          className={styles.capsule}
+          data-empty={!s.queue.length}
+          role="group"
+          tabIndex={0}
+        >
           <Link aria-label={t('openStudio')} className={styles.artworkLink} to="/music">
             <span aria-hidden className={styles.record} data-playing={s.status === 'playing'}>
-              <span className={styles.recordLabel}>
-                <Sailboat size={17} />
-              </span>
+              <Music2 size={21} />
             </span>
           </Link>
           <Link className={styles.track} to="/music">
@@ -241,9 +245,9 @@ export default function MiniPlayer() {
                 onClick={() => (playing ? engine.pause() : engine.play())}
               >
                 {playing ? (
-                  <Pause fill="currentColor" size={18} />
+                  <Pause fill="currentColor" size={25} />
                 ) : (
-                  <Play fill="currentColor" size={18} />
+                  <Play fill="currentColor" size={25} />
                 )}
               </button>
               <button
@@ -281,13 +285,14 @@ export default function MiniPlayer() {
               <input
                 aria-label={t('capsuleSeek')}
                 aria-valuetext={`${formatTime(s.positionMs)} / ${formatTime(s.durationMs)}`}
+                data-capsule-range="seek"
                 disabled={!s.durationMs}
                 max={s.durationMs || 1}
                 min={0}
                 step={100}
                 type="range"
-                value={Math.min(s.positionMs, s.durationMs || 0)}
-                onChange={(event) => engine.seek(Number(event.target.value))}
+                value={position.rangeValue('seek', Math.min(s.positionMs, s.durationMs || 0))}
+                onChange={(event) => position.changeRange(event, (value) => engine.seek(value))}
               />
             </div>
           )}

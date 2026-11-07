@@ -17,6 +17,7 @@ import { type AudioEngine } from './engine';
 
 // Playwright is an existing e2e workspace dependency. Keep it out of the production bundle.
 interface Locator {
+  boundingBox: () => Promise<{ x: number; y: number; width: number; height: number } | null>;
   click: () => Promise<void>;
   fill: (value: string) => Promise<void>;
   getAttribute: (name: string) => Promise<string | null>;
@@ -251,8 +252,9 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
         .setInputFiles({ buffer: bytes, mimeType: 'audio/mpeg', name: 'Rain.mp3' });
       await page.waitForFunction(
         () =>
-          document.querySelector('[aria-label="Your audio"]')?.textContent?.includes('Rain.mp3') ===
-          true,
+          document
+            .querySelector('ul[aria-label="Your audio"]')
+            ?.textContent?.includes('Rain.mp3') === true,
       );
       await page.getByRole('button', { name: 'Play Rain.mp3', exact: true }).click();
       await page.waitForFunction(
@@ -272,20 +274,71 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
           const rect = document.querySelector('[data-capsule-body]')!.getBoundingClientRect();
           return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom };
         });
-      const grip = await page.evaluate(() => {
-        const rect = document
-          .querySelector('[aria-label="Move floating player"]')!
-          .getBoundingClientRect();
-        return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-      });
-      await page.mouse.move(grip.x, grip.y);
+      await page.getByRole('link', { name: music.closeStudio, exact: true }).click();
+      await page.waitForFunction(() => location.pathname === '/');
+      expect(await page.evaluate(() => window.musicTest.audio!.paused)).toBe(false);
+      await page.getByRole('link', { name: 'Presentation', exact: true }).click();
+      await page.waitForFunction(() => location.pathname === '/presentation');
+      const titleBounds = (await page.locator('[data-capsule-body] strong').boundingBox())!;
+      await page.mouse.move(
+        titleBounds.x + titleBounds.width / 2,
+        titleBounds.y + titleBounds.height / 2,
+      );
       await page.mouse.down();
       await page.mouse.move(220, 180, { steps: 12 });
       await page.mouse.up();
       const dragged = await capsuleBounds();
       expect(dragged.left).toBeLessThan(300);
       expect(dragged.top).toBeLessThan(240);
-      await page.getByRole('button', { name: music.capsuleDrag, exact: true }).press('ArrowRight');
+      expect(await page.evaluate(() => location.pathname)).toBe('/presentation');
+      const dragFrom = async (selector: string, dx: number, dy: number, hold = false) => {
+        const rect = (await page!.locator(selector).boundingBox())!;
+        const x = rect.x + rect.width / 2;
+        const y = rect.y + rect.height / 2;
+        await page!.mouse.move(x, y);
+        await page!.mouse.down();
+        if (hold) await new Promise((resolve) => setTimeout(resolve, 240));
+        await page!.mouse.move(x + dx, y + dy, { steps: 10 });
+        await page!.mouse.up();
+      };
+      await dragFrom('[data-capsule-body] button[aria-label="Floating player: pause"]', 50, 30);
+      expect((await capsuleBounds()).left).toBeGreaterThan(dragged.left + 40);
+      expect(await page.evaluate(() => window.musicTest.audio!.paused)).toBe(false);
+      await page.getByRole('button', { name: music.capsulePause, exact: true }).click();
+      await page.waitForFunction(() => window.musicTest.audio!.paused);
+      const beforeRangeDrag = await page.evaluate(() => window.musicTest.audio!.currentTime);
+      const beforeRangeDock = await capsuleBounds();
+      await dragFrom('[data-capsule-body] input[type="range"]', 45, 30, true);
+      expect((await capsuleBounds()).left).toBeGreaterThan(beforeRangeDock.left + 35);
+      expect(await page.evaluate(() => window.musicTest.audio!.currentTime)).toBeCloseTo(
+        beforeRangeDrag,
+        1,
+      );
+      const rangeDock = await capsuleBounds();
+      await dragFrom('[data-capsule-body] input[type="range"]', 25, 0);
+      expect(await capsuleBounds()).toEqual(rangeDock);
+      expect(await page.evaluate(() => window.musicTest.audio!.currentTime)).not.toBeCloseTo(
+        beforeRangeDrag,
+        1,
+      );
+      // Starting a normal seek must keep seeking even if the pointer is held past 180 ms.
+      const seeking = (await page
+        .locator('[data-capsule-body] input[type="range"]')
+        .boundingBox())!;
+      const seekingX = seeking.x + seeking.width / 3;
+      const seekingY = seeking.y + seeking.height / 2;
+      await page.mouse.move(seekingX, seekingY);
+      await page.mouse.down();
+      await page.mouse.move(seekingX + 15, seekingY, { steps: 3 });
+      await new Promise((resolve) => setTimeout(resolve, 240));
+      await page.mouse.move(seekingX + 35, seekingY, { steps: 10 });
+      await page.mouse.up();
+      expect(await capsuleBounds()).toEqual(rangeDock);
+      await page.getByRole('slider', { name: music.capsuleSeek, exact: true }).press('Home');
+      expect(await capsuleBounds()).toEqual(rangeDock);
+      await page.getByRole('button', { name: music.capsulePlay, exact: true }).click();
+      await page.waitForFunction(() => !window.musicTest.audio!.paused);
+      await page.locator('[data-capsule-body]').press('ArrowRight');
       const keyboardMoved = await capsuleBounds();
       expect(keyboardMoved.left).toBeGreaterThan(dragged.left);
       const capsulePosition = await page.evaluate(() => window.musicTest.audio!.currentTime);
@@ -341,7 +394,7 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       );
       await page.getByRole('button', { name: music.capsuleExpand, exact: true }).click();
       // Temporary composer avoidance must not overwrite the user's saved anchor.
-      await page.getByRole('button', { name: music.capsuleDrag, exact: true }).press('Home');
+      await page.locator('[data-capsule-body]').press('Home');
       const reset = await capsuleBounds();
       await page.getByRole('link', { name: 'Chat', exact: true }).click();
       await page.waitForFunction(() => {
@@ -382,6 +435,25 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
         fullPage: true,
         path: '.data/music-m2-validation/capsule-mobile.png',
       });
+      const panelTouch = await page.context().newCDPSession(page);
+      const panelTitle = (await page.locator('[data-capsule-body] strong').boundingBox())!;
+      const panelX = panelTitle.x + panelTitle.width / 2;
+      const panelY = panelTitle.y + panelTitle.height / 2;
+      await panelTouch.send('Input.dispatchTouchEvent', {
+        type: 'touchStart',
+        touchPoints: [{ x: panelX, y: panelY, id: 1 }],
+      });
+      await panelTouch.send('Input.dispatchTouchEvent', {
+        type: 'touchMove',
+        touchPoints: [{ x: panelX, y: panelY - 40, id: 1 }],
+      });
+      await panelTouch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      await panelTouch.detach();
+      await page.getByRole('button', { name: music.capsuleShuffle, exact: true }).click();
+      expect(await page.evaluate(() => window.musicTest.engine.store.getState().shuffle)).toBe(
+        true,
+      );
+      await page.getByRole('button', { name: music.capsuleShuffle, exact: true }).click();
       await page.getByRole('button', { name: music.capsuleMore, exact: true }).click();
       await page.getByRole('button', { name: music.capsuleCollapse, exact: true }).click();
       await page.setViewportSize({ width: 1440, height: 1000 });
@@ -443,6 +515,7 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
             ?.textContent?.includes('Rain.mp3') === true,
       );
       await page.getByRole('button', { name: 'Add to queue Wind.mp3', exact: true }).click();
+      await page.getByRole('tab', { name: music.nowPlaying, exact: true }).click();
       await page.getByRole('button', { name: 'Next track', exact: true }).click();
       await page.waitForFunction(
         () =>
@@ -479,7 +552,7 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       expect(
         await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
       ).toBe(true);
-      await page.getByRole('button', { name: music.capsuleExpand, exact: true }).press('ArrowLeft');
+      await page.locator('[data-capsule-body]').press('ArrowLeft');
       const beforeRefresh = await capsuleBounds();
       await page.evaluate(() => window.musicTest.engine.flush());
       await page.reload();
