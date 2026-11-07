@@ -1,10 +1,19 @@
 // @vitest-environment node
-import { registerLegacyLearningFiles } from './legacy';
-
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, lstat, readFile, readdir, rm, writeFile, access } from 'node:fs/promises';
+import {
+  access,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -15,10 +24,13 @@ import {
   requestLearningErasure,
   withAccountData,
 } from './files';
+import { registerLegacyLearningFiles } from './legacy';
+
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 let root: string;
 beforeEach(async () => {
-  root = await mkdtemp(path.join(tmpdir(), 'learning-lifecycle-'));
+  // macOS exposes its temporary directory through /var; keep the no-symlink boundary intact.
+  root = await realpath(await mkdtemp(path.join(tmpdir(), 'learning-lifecycle-')));
   vi.stubEnv('QINGZHOU_LEARNING_LIFECYCLE_ROOT', path.join(root, 'queue'));
   vi.stubEnv('QINGZHOU_HARNESS_DATA_ROOT', path.join(root, 'harness'));
   vi.stubEnv('CORDIS_PRESENTATION_DATA_DIR', path.join(root, 'presentation'));
