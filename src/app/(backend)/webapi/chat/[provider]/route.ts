@@ -1,3 +1,4 @@
+import { REQUEST_TOPIC_ID_HEADER } from '@lobechat/const';
 import { type ChatCompletionErrorPayload } from '@lobechat/model-runtime';
 import { AGENT_RUNTIME_ERROR_SET } from '@lobechat/model-runtime';
 import { ChatErrorType } from '@lobechat/types';
@@ -17,7 +18,9 @@ export const POST = checkAuth(async (req: Request, { params, userId, serverDB })
 
   try {
     // ============  1. init chat model   ============ //
-    const modelRuntime = await initModelRuntimeFromDB(serverDB, userId, provider);
+    const modelRuntime = await initModelRuntimeFromDB(serverDB, userId, provider, {
+      sessionId: req.headers.get(REQUEST_TOPIC_ID_HEADER) ?? undefined,
+    });
 
     // ============  2. create chat completion   ============ //
 

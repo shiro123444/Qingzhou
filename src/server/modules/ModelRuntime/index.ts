@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { type GoogleGenAIOptions } from '@google/genai';
 import { ModelRuntime, type ModelRuntimeHooks } from '@lobechat/model-runtime';
 import { LobeVertexAI } from '@lobechat/model-runtime/vertexai';
@@ -21,6 +23,7 @@ import { getLLMConfig } from '@/envs/llm';
 
 import { KeyVaultsGateKeeper } from '../KeyVaultsEncrypt';
 import apiKeyManager from './apiKeyManager';
+import { getOpenCodeGoHeaders } from './opencode-go';
 
 export * from './trace';
 
@@ -360,6 +363,20 @@ export const initModelRuntimeWithUserPayload = (
 ) => {
   const runtimeProvider = payload.runtimeProvider ?? provider;
 
+  return initializeResolvedRuntime(
+    runtimeProvider,
+    payload,
+    { ...getParamsFromPayload(runtimeProvider, payload), ...params },
+    hooks,
+  );
+};
+
+const initializeResolvedRuntime = (
+  runtimeProvider: string,
+  payload: ClientSecretPayload,
+  params: any,
+  hooks?: ModelRuntimeHooks,
+) => {
   if (runtimeProvider === ModelProvider.VertexAI) {
     const vertexOptions = buildVertexOptions(payload, params);
     const runtime = LobeVertexAI.initFromVertexAI(vertexOptions);
@@ -367,15 +384,7 @@ export const initModelRuntimeWithUserPayload = (
     return new ModelRuntime(runtime, hooks);
   }
 
-  const runtime = ModelRuntime.initializeWithProvider(
-    runtimeProvider,
-    {
-      ...getParamsFromPayload(runtimeProvider, payload),
-      ...params,
-    },
-    hooks,
-  );
-  return runtime;
+  return ModelRuntime.initializeWithProvider(runtimeProvider, params, hooks);
 };
 
 /**
@@ -400,7 +409,7 @@ export const initModelRuntimeFromDB = async (
   db: LobeChatDatabase,
   userId: string,
   provider: string,
-  requirements?: { singleDispatch?: boolean },
+  requirements?: { sessionId?: string; singleDispatch?: boolean },
 ): Promise<ModelRuntime> => {
   // 1. Get user's provider configuration from database
   const aiProviderModel = new AiProviderModel(db, userId);
@@ -424,11 +433,29 @@ export const initModelRuntimeFromDB = async (
   // 4. Get business hooks (billing in cloud, undefined in OSS)
   const hooks = getBusinessModelRuntimeHooks(userId, provider);
 
-  // 5. Initialize ModelRuntime with the payload and hooks
-  return initModelRuntimeWithUserPayload(
-    provider,
+  // Resolve the endpoint once, preserving key rotation and provider-specific defaults.
+  const params: {
+    baseURL?: string;
+    defaultHeaders?: Record<string, string>;
+    [key: string]: unknown;
+  } = getParamsFromPayload(runtimeProvider, payload);
+  const headers = getOpenCodeGoHeaders(params.baseURL, {
+    userId,
+    sessionId: requirements?.sessionId?.trim() || randomUUID(),
+  });
+
+  // 5. Initialize ModelRuntime with the resolved payload, connection headers and hooks.
+  return initializeResolvedRuntime(
+    runtimeProvider,
     payload,
-    { userId, ...(requirements?.singleDispatch ? singleDispatchOptions(runtimeProvider) : {}) },
+    {
+      ...params,
+      userId,
+      ...(Object.keys(headers).length > 0 && {
+        defaultHeaders: { ...params.defaultHeaders, ...headers },
+      }),
+      ...(requirements?.singleDispatch ? singleDispatchOptions(runtimeProvider) : {}),
+    },
     hooks,
   );
 };

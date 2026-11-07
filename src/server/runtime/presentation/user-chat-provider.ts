@@ -1,3 +1,5 @@
+import { getOpenCodeGoHeaders } from '@/server/modules/ModelRuntime/opencode-go';
+
 import type { RuntimeScope } from '../../../../packages/runtime-contracts/src';
 import {
   createMultimodalChatPort,
@@ -81,11 +83,18 @@ export const createUserChatProvider = (options: {
         '此步骤需要读取图片，请在 PPT 模型选择中选择已启用视觉能力的模型；纯文字对话和大纲可使用当前模型',
       );
     }
+    const goHeaders = getOpenCodeGoHeaders(connection.baseURL, context.scope);
     const port = createMultimodalChatPort({
       allowRequestModelOverride: false,
       apiKey: connection.apiKey,
       endpoint: userChatEndpoint(connection.baseURL),
-      fetcher: options.fetcher,
+      fetcher: Object.keys(goHeaders).length
+        ? (endpoint, init) => {
+            const headers = new Headers(init.headers);
+            for (const [name, value] of Object.entries(goHeaders)) headers.set(name, value);
+            return options.fetcher(endpoint, { ...init, headers });
+          }
+        : options.fetcher,
       model: connection.model,
       providerId: connection.provider,
     });

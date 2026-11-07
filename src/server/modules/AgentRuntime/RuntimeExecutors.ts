@@ -836,7 +836,9 @@ export const createRuntimeExecutors = (
 
       // Initialize ModelRuntime (read user's keyVaults from database)
       assertStepActive(ctx);
-      const modelRuntime = await initModelRuntimeFromDB(ctx.serverDB, ctx.userId!, provider);
+      const modelRuntime = await initModelRuntimeFromDB(ctx.serverDB, ctx.userId!, provider, {
+        sessionId: ctx.topicId || operationId,
+      });
       assertStepActive(ctx);
 
       // Construct ChatStreamPayload
@@ -1521,6 +1523,7 @@ export const createRuntimeExecutors = (
         ctx.serverDB,
         ctx.userId,
         compressionModel.provider,
+        { sessionId: ctx.topicId || operationId },
       );
       assertStepActive(ctx);
 

@@ -24,10 +24,14 @@ import {
 import { LobeVertexAI } from '@lobechat/model-runtime/vertexai';
 import { type ClientSecretPayload } from '@lobechat/types';
 import { ModelProvider } from 'model-bank';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import * as businessModelRuntime from '@/business/server/model-runtime';
+import * as aiProviderDatabase from '@/database/models/aiProvider';
 
 import {
   buildPayloadFromKeyVaults,
+  initModelRuntimeFromDB,
   initModelRuntimeWithUserPayload,
   resolveRuntimeProvider,
   singleDispatchOptions,
@@ -567,6 +571,128 @@ describe('initModelRuntimeWithUserPayload method', () => {
       // 例如，如果默认使用 OpenAI:
       expect(runtime['_runtime']).toBeInstanceOf(LobeOpenAI);
     });
+  });
+});
+
+describe('user-scoped OpenCode Go connections', () => {
+  const db = {} as any;
+  const baseURL = 'https://opencode.ai/inference/go/v1';
+  let provider = vi.fn();
+
+  beforeEach(() => {
+    provider = vi.fn().mockResolvedValue({
+      id: 'custom-go',
+      enabled: true,
+      source: 'custom',
+      name: 'Fixture Go',
+      settings: { sdkType: 'openai' },
+      keyVaults: { apiKey: 'fixture-go-key', baseURL },
+    });
+    vi.spyOn(aiProviderDatabase, 'AiProviderModel').mockImplementation(function () {
+      return { getAiProviderById: provider };
+    } as any);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it('sends stable application and conversation headers on actual SDK requests, isolated by user and topic', async () => {
+    const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) =>
+      Response.json({
+        id: 'fixture-completion',
+        object: 'chat.completion',
+        choices: [
+          { index: 0, message: { content: 'OK', role: 'assistant' }, finish_reason: 'stop' },
+        ],
+      }),
+    );
+    const initialize = ModelRuntime.initializeWithProvider;
+    vi.spyOn(ModelRuntime, 'initializeWithProvider').mockImplementation(
+      (provider, options, hooks) => initialize(provider, { ...options, fetch: fetcher }, hooks),
+    );
+    for (const [userId, sessionId] of [
+      ['alice', 'topic-one'],
+      ['alice', 'topic-one'],
+      ['alice', 'topic-two'],
+      ['bob', 'topic-one'],
+    ]) {
+      const runtime = await initModelRuntimeFromDB(db, userId, 'custom-go', { sessionId });
+      const response = await runtime.chat({
+        messages: [{ content: 'Fixture request', role: 'user' }],
+        model: 'fixture-model',
+        responseMode: 'json',
+        stream: false,
+      });
+      expect(await response.json()).toMatchObject({ id: 'fixture-completion' });
+    }
+    const headers = fetcher.mock.calls.map(([, init]) => new Headers(init?.headers));
+    expect(headers[0].get('User-Agent')).toMatch(/^Qingzhou\//u);
+    const sessions = headers.map((header) => header.get('x-opencode-session'));
+    expect(sessions[0]).toMatch(/^[a-f\d]{64}$/u);
+    expect(sessions[0]).toBe(sessions[1]);
+    expect(new Set([sessions[0], sessions[2], sessions[3]]).size).toBe(3);
+    expect(JSON.stringify(sessions)).not.toMatch(/alice|bob|topic-/u);
+  });
+
+  it('does not share a no-topic fallback across runtimes or accounts', async () => {
+    const initialize = vi
+      .spyOn(ModelRuntime, 'initializeWithProvider')
+      .mockReturnValue({} as ModelRuntime);
+    await initModelRuntimeFromDB(db, 'alice', 'custom-go');
+    await initModelRuntimeFromDB(db, 'alice', 'custom-go');
+    await initModelRuntimeFromDB(db, 'bob', 'custom-go');
+    const sessions = initialize.mock.calls.map(
+      ([, options]) =>
+        (options as { defaultHeaders: Record<string, string> }).defaultHeaders[
+          'x-opencode-session'
+        ],
+    );
+    expect(new Set(sessions).size).toBe(3);
+    expect(sessions.every((session) => /^[a-f\d]{64}$/u.test(session))).toBe(true);
+  });
+
+  it('uses the resolved environment endpoint and preserves billing hooks and single-dispatch restrictions', async () => {
+    provider.mockResolvedValue({
+      settings: { sdkType: 'openai' },
+      keyVaults: { apiKey: 'fixture-key' },
+    });
+    vi.stubEnv('OPENAI_PROXY_URL', baseURL);
+    const hooks = { beforeChat: vi.fn() };
+    vi.spyOn(businessModelRuntime, 'getBusinessModelRuntimeHooks').mockReturnValue(hooks);
+    const initialize = vi
+      .spyOn(ModelRuntime, 'initializeWithProvider')
+      .mockReturnValue({} as ModelRuntime);
+    await initModelRuntimeFromDB(db, 'alice', 'custom-go', {
+      sessionId: 'topic',
+      singleDispatch: true,
+    });
+    expect(initialize).toHaveBeenCalledWith(
+      'openai',
+      expect.objectContaining({
+        baseURL,
+        maxRetries: 0,
+        userId: 'alice',
+        defaultHeaders: {
+          'User-Agent': expect.stringMatching(/^Qingzhou\//u),
+          'x-opencode-session': expect.stringMatching(/^[a-f\d]{64}$/u),
+        },
+      }),
+      hooks,
+    );
+  });
+
+  it('does not add Go identity headers merely because a provider has a Go-like name', async () => {
+    provider.mockResolvedValue({
+      settings: { sdkType: 'openai' },
+      keyVaults: { apiKey: 'fixture-key', baseURL: 'https://other.example.test/v1' },
+    });
+    const initialize = vi
+      .spyOn(ModelRuntime, 'initializeWithProvider')
+      .mockReturnValue({} as ModelRuntime);
+    await initModelRuntimeFromDB(db, 'alice', 'opencode-go', { sessionId: 'topic' });
+    expect(initialize.mock.calls[0][1]).not.toHaveProperty('defaultHeaders');
   });
 });
 

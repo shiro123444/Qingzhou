@@ -1,11 +1,12 @@
 // @vitest-environment node
+import { REQUEST_TOPIC_ID_HEADER } from '@lobechat/const';
 import { type LobeRuntimeAI } from '@lobechat/model-runtime';
 import { ModelRuntime } from '@lobechat/model-runtime';
 import { ChatErrorType } from '@lobechat/types';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { auth } from '@/auth';
-import { initModelRuntimeFromDB } from '@/server/modules/ModelRuntime';
+import { createTraceOptions, initModelRuntimeFromDB } from '@/server/modules/ModelRuntime';
 
 import { POST } from './route';
 
@@ -66,7 +67,29 @@ describe('POST handler', () => {
         expect.anything(),
         'test-user-id',
         'test-provider',
+        { sessionId: undefined },
       );
+    });
+
+    it('passes the conversation header even when tracing is disabled', async () => {
+      request = new Request('https://test.com', {
+        method: 'POST',
+        headers: { [REQUEST_TOPIC_ID_HEADER]: 'conversation-without-tracing' },
+        body: JSON.stringify({ model: 'test-model' }),
+      });
+      vi.mocked(initModelRuntimeFromDB).mockResolvedValue({
+        chat: vi.fn().mockResolvedValue(new Response('OK')),
+      } as any);
+
+      await POST(request, { params: Promise.resolve({ provider: 'custom-go' }) });
+
+      expect(initModelRuntimeFromDB).toHaveBeenCalledWith(
+        expect.anything(),
+        'test-user-id',
+        'custom-go',
+        { sessionId: 'conversation-without-tracing' },
+      );
+      expect(createTraceOptions).not.toHaveBeenCalled();
     });
 
     it('should return Unauthorized error when no session exists', async () => {

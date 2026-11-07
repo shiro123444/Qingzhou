@@ -1,6 +1,8 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from 'vitest';
 
+import { getOpenCodeGoHeaders } from '@/server/modules/ModelRuntime/opencode-go';
+
 import { createTrustedChatImages } from './multimodal-chat-provider-glm';
 import {
   createUserChatProvider,
@@ -53,11 +55,60 @@ describe('user-scoped presentation provider', () => {
     expect(fetcher.mock.calls[0][1].headers).toMatchObject({
       Authorization: 'Bearer secret-alice',
     });
+    expect(new Headers(fetcher.mock.calls[0][1].headers).has('x-opencode-session')).toBe(false);
+    expect(new Headers(fetcher.mock.calls[0][1].headers).has('User-Agent')).toBe(false);
     expect(JSON.parse(String(fetcher.mock.calls[0][1].body))).toMatchObject({
       model: 'selected-alice',
     });
     expect(JSON.parse(String(fetcher.mock.calls[0][1].body)).thinking).toBeUndefined();
     expect(JSON.stringify(port.manifest)).not.toContain('secret');
+  });
+
+  it('adds Go identity without changing authorization, payload or cancellation', async () => {
+    const fetcher = makeFetcher();
+    const baseURL = 'https://opencode.ai/inference/go/v1';
+    const port = createUserChatProvider({
+      fetcher,
+      resolve: async () => ({ ...connection('alice'), baseURL }),
+    });
+    const controller = new AbortController();
+    await port.chat(request, { scope, signal: controller.signal });
+    const [endpoint, init] = fetcher.mock.calls[0];
+    const headers = new Headers(init.headers);
+    expect(endpoint).toBe(`${baseURL}/chat/completions`);
+    for (const [name, value] of Object.entries(getOpenCodeGoHeaders(baseURL, scope)))
+      expect(headers.get(name)).toBe(value);
+    expect(headers.get('Authorization')).toBe('Bearer secret-alice');
+    expect(headers.get('Content-Type')).toBe('application/json');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      messages: request.messages,
+      model: 'selected-alice',
+    });
+    expect(init.signal?.aborted).toBe(false);
+    controller.abort();
+    expect(init.signal?.aborted).toBe(true);
+  });
+
+  it('keeps Go identity stable across calls and separate across users and sessions', async () => {
+    const fetcher = makeFetcher();
+    const port = createUserChatProvider({
+      fetcher,
+      resolve: async ({ userId }) => ({
+        ...connection(userId),
+        baseURL: 'https://opencode.ai/inference/go/v1',
+      }),
+    });
+    await port.chat(request, { scope });
+    await port.chat(request, { scope: { ...scope } });
+    await port.chat(request, { scope: { ...scope, userId: 'bob' } });
+    await port.chat(request, { scope: { ...scope, sessionId: 'different-session' } });
+    const sessions = fetcher.mock.calls.map(([, init]) =>
+      new Headers(init.headers).get('x-opencode-session'),
+    );
+    expect(sessions[0]).toBeTruthy();
+    expect(sessions[1]).toBe(sessions[0]);
+    expect(new Set(sessions)).toHaveProperty('size', 3);
   });
 
   it('isolates concurrent users and picks up saved model/credential changes', async () => {

@@ -3,11 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as ContextEngineering from '@/server/modules/Mecha/ContextEngineering';
 import { initModelRuntimeFromDB } from '@/server/modules/ModelRuntime';
+import { createSkillMaterialRegistry } from '@/server/runtime/improvement/skill-material';
 import { HookDispatcher } from '@/server/services/agentRuntime/hooks/HookDispatcher';
+import * as managedSkills from '@/server/services/agentRuntime/managedSkills';
 import { ChannelIdentityService } from '@/server/services/bot/channelIdentity';
 import * as QueueImpls from '@/server/services/queue/impls';
-import * as managedSkills from '@/server/services/agentRuntime/managedSkills';
-import { createSkillMaterialRegistry } from '@/server/runtime/improvement/skill-material';
 
 import { createRuntimeExecutors, type RuntimeExecutorContext } from '../RuntimeExecutors';
 
@@ -492,6 +492,23 @@ describe('RuntimeExecutors', () => {
       ...overrides,
     });
 
+    it.each(['topic-connection', undefined])(
+      'binds the chat connection to the topic or operation when topic is %s',
+      async (topicId) => {
+        ctx.topicId = topicId;
+        await createRuntimeExecutors(ctx).call_llm!(
+          {
+            type: 'call_llm',
+            payload: { model: 'gpt-4', provider: 'openai', messages: [] },
+          } as any,
+          createMockState(),
+        );
+        expect(initModelRuntimeFromDB).toHaveBeenCalledWith(ctx.serverDB, ctx.userId, 'openai', {
+          sessionId: topicId || ctx.operationId,
+        });
+      },
+    );
+
     it('uses the selected material provider in ordinary context compilation and records its local receipt', async () => {
       const registry = createSkillMaterialRegistry();
       const lease = registry.acquire(registry.binding('skills.sections@1.0.0'));
@@ -795,65 +812,72 @@ describe('RuntimeExecutors', () => {
       expect((result.nextContext?.payload as any).parentMessageId).toBe('persisted-assistant-id');
     });
 
-    it('should execute compress_context and return compression_result', async () => {
-      const mockChat = vi.fn().mockImplementation(async (_payload, options) => {
-        await options?.callback?.onText?.('summary');
-        await options?.callback?.onCompletion?.({
-          usage: {
-            completionTokens: 5,
-            promptTokens: 10,
-            totalTokens: 15,
-          },
+    it.each(['topic-connection', undefined])(
+      'should execute compress_context with topic %s and return compression_result',
+      async (topicId) => {
+        ctx.topicId = topicId;
+        const mockChat = vi.fn().mockImplementation(async (_payload, options) => {
+          await options?.callback?.onText?.('summary');
+          await options?.callback?.onCompletion?.({
+            usage: {
+              completionTokens: 5,
+              promptTokens: 10,
+              totalTokens: 15,
+            },
+          });
+          return new Response('done');
         });
-        return new Response('done');
-      });
-      vi.mocked(initModelRuntimeFromDB).mockResolvedValueOnce({ chat: mockChat } as any);
+        vi.mocked(initModelRuntimeFromDB).mockResolvedValueOnce({ chat: mockChat } as any);
 
-      mockMessageModel.query.mockResolvedValue([
-        { content: 'history', id: 'msg-history', role: 'user' },
-        { content: 'loading', id: 'assistant-existing', role: 'assistant' },
-      ]);
-      mockCreateCompressionGroup.mockResolvedValue({
-        messageGroupId: 'group-123',
-        messagesToSummarize: [{ content: 'history', id: 'msg-history', role: 'user' }],
-        success: true,
-      });
-      mockFinalizeCompression.mockResolvedValue({
-        messages: [
-          { content: 'summary', id: 'group-123', role: 'compressedGroup' },
+        mockMessageModel.query.mockResolvedValue([
+          { content: 'history', id: 'msg-history', role: 'user' },
           { content: 'loading', id: 'assistant-existing', role: 'assistant' },
-        ],
-        success: true,
-      });
+        ]);
+        mockCreateCompressionGroup.mockResolvedValue({
+          messageGroupId: 'group-123',
+          messagesToSummarize: [{ content: 'history', id: 'msg-history', role: 'user' }],
+          success: true,
+        });
+        mockFinalizeCompression.mockResolvedValue({
+          messages: [
+            { content: 'summary', id: 'group-123', role: 'compressedGroup' },
+            { content: 'loading', id: 'assistant-existing', role: 'assistant' },
+          ],
+          success: true,
+        });
 
-      const executors = createRuntimeExecutors(ctx);
-      const state = createMockState({
-        messages: [{ content: 'x '.repeat(70000), role: 'user' }],
-      });
+        const executors = createRuntimeExecutors(ctx);
+        const state = createMockState({
+          messages: [{ content: 'x '.repeat(70000), role: 'user' }],
+        });
 
-      const instruction = createCompressContextInstruction([
-        { content: 'x '.repeat(70000), role: 'user' },
-      ]);
+        const instruction = createCompressContextInstruction([
+          { content: 'x '.repeat(70000), role: 'user' },
+        ]);
 
-      const result = await executors.compress_context!(instruction, state);
+        const result = await executors.compress_context!(instruction, state);
 
-      expect(mockCreateCompressionGroup).toHaveBeenCalledTimes(1);
-      expect(mockFinalizeCompression).toHaveBeenCalledTimes(1);
-      expect(mockChat).toHaveBeenCalledTimes(1);
-      expect(result.nextContext?.phase).toBe('compression_result');
-      expect((result.nextContext?.payload as any).compressedMessages[0]).toEqual({
-        content: 'summary',
-        id: 'group-123',
-        role: 'compressedGroup',
-      });
-      expect((result.nextContext?.payload as any).parentMessageId).toBe('assistant-existing');
-      expect(result.events).toContainEqual({
-        groupId: 'group-123',
-        parentMessageId: 'assistant-existing',
-        type: 'compression_complete',
-      });
-      expect(result.newState.usage.llm.tokens.total).toBe(15);
-    });
+        expect(initModelRuntimeFromDB).toHaveBeenCalledWith(ctx.serverDB, ctx.userId, 'openai', {
+          sessionId: topicId || ctx.operationId,
+        });
+        expect(mockCreateCompressionGroup).toHaveBeenCalledTimes(1);
+        expect(mockFinalizeCompression).toHaveBeenCalledTimes(1);
+        expect(mockChat).toHaveBeenCalledTimes(1);
+        expect(result.nextContext?.phase).toBe('compression_result');
+        expect((result.nextContext?.payload as any).compressedMessages[0]).toEqual({
+          content: 'summary',
+          id: 'group-123',
+          role: 'compressedGroup',
+        });
+        expect((result.nextContext?.payload as any).parentMessageId).toBe('assistant-existing');
+        expect(result.events).toContainEqual({
+          groupId: 'group-123',
+          parentMessageId: 'assistant-existing',
+          type: 'compression_complete',
+        });
+        expect(result.newState.usage.llm.tokens.total).toBe(15);
+      },
+    );
 
     it('should skip compress_context when topic metadata is missing', async () => {
       const executors = createRuntimeExecutors({
