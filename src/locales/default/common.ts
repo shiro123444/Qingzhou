@@ -1,4 +1,6 @@
 export default {
+  'cmdk.music': 'Music',
+  'tab.music': 'Music',
   'presentationTrial.serial.budget':
     'Two rounds share at most {{tokens}} tokens and {{seconds}} seconds. Uses your selected model; the original is preserved.',
   'presentationTrial.serial.enable': 'Try one serial refinement (two rounds total)',

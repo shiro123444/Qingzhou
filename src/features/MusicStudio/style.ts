@@ -2,11 +2,12 @@ import { createStaticStyles } from 'antd-style';
 
 export const styles = createStaticStyles(({ css, cssVar }) => ({
   studio: css`
-    --music-accent: #69a5de;
+    --music-range-track: ${cssVar.colorFillSecondary};
 
     isolation: isolate;
     position: relative;
 
+    container-type: inline-size;
     overflow: auto;
     flex: 1;
 
@@ -19,25 +20,18 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     background: ${cssVar.colorBgContainer};
 
     &[data-view='player'] {
-      color: #f2f2f3;
-      background: #434951;
-
-      &::before {
-        pointer-events: none;
-        content: '';
-
-        position: fixed;
-        z-index: -1;
-        inset: 0;
-
-        background:
-          radial-gradient(ellipse at 13% 22%, #858c94 0, transparent 36%),
-          radial-gradient(ellipse at 72% 14%, #675256 0, transparent 39%),
-          radial-gradient(ellipse at 54% 68%, #263f67 0, transparent 43%),
-          radial-gradient(ellipse at 16% 85%, #625453 0, transparent 42%),
-          radial-gradient(ellipse at 90% 85%, #555a5d 0, transparent 43%), #42474f;
-        filter: blur(55px);
-      }
+      background:
+        radial-gradient(
+          ellipse at 16% 44%,
+          color-mix(in srgb, var(--music-accent) 7%, transparent),
+          transparent 55%
+        ),
+        radial-gradient(
+          ellipse at 94% 90%,
+          color-mix(in srgb, #aabca1 6%, transparent),
+          transparent 50%
+        ),
+        ${cssVar.colorBgContainer};
     }
 
     [hidden] {
@@ -47,7 +41,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     button,
     input,
     select {
-      font: inherit;
+      font-family: inherit;
     }
 
     button:focus-visible,
@@ -66,30 +60,30 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       cursor: pointer;
 
       min-width: 0;
-      height: 3px;
+      height: 4px;
       margin: 0;
       border: 0;
-      border-radius: 2px;
+      border-radius: 4px;
 
       appearance: none;
       accent-color: var(--music-accent);
-      background: rgb(255 255 255 / 28%);
+      background: var(--music-range-track);
 
       &::-webkit-slider-thumb {
-        width: 7px;
-        height: 7px;
+        width: 10px;
+        height: 10px;
         border: 0;
-        border-radius: 1px;
+        border-radius: 50%;
 
         appearance: none;
         background: var(--music-accent);
       }
 
       &::-moz-range-thumb {
-        width: 7px;
-        height: 7px;
+        width: 10px;
+        height: 10px;
         border: 0;
-        border-radius: 1px;
+        border-radius: 50%;
 
         background: var(--music-accent);
       }
@@ -107,55 +101,77 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     box-sizing: border-box;
     width: 100%;
     min-height: 100%;
-    padding-block: 26px 32px;
-    padding-inline: 36px;
+    padding-block: 12px 24px;
+    padding-inline: 24px;
 
-    @media (width <= 768px) {
-      padding-block: 20px 108px;
-      padding-inline: 22px;
+    @container (width <= 768px) {
+      padding-block: 12px 108px;
+      padding-inline: 20px;
     }
 
-    @media (width <= 480px) {
-      padding-block: 18px 120px;
-      padding-inline: 18px;
+    @container (width <= 480px) {
+      padding-block: 12px 120px;
+      padding-inline: 16px;
     }
   `,
   header: css`
     display: flex;
     flex: none;
-    gap: 20px;
+    gap: 16px;
     align-items: center;
     justify-content: space-between;
 
     min-width: 0;
+    min-height: 42px;
+    padding-block-end: 12px;
+    border-block-end: 1px solid ${cssVar.colorBorderSecondary};
 
-    @media (width <= 800px) {
+    @container (width <= 960px) {
       flex-wrap: wrap;
-      gap: 14px;
+      gap: 10px;
     }
   `,
   brand: css`
     display: flex;
-    gap: 10px;
+    gap: 8px;
     align-items: center;
     min-width: 0;
 
     h1 {
       margin: 0;
-      font-size: 17px;
+      font-size: 15px;
       font-weight: 600;
-      letter-spacing: 0.3px;
+      white-space: nowrap;
     }
+  `,
+  brandIcon: css`
+    display: grid;
+    flex: none;
+    place-items: center;
+
+    width: 28px;
+    height: 28px;
+    border-radius: ${cssVar.borderRadius};
+
+    color: var(--music-accent);
+
+    background: var(--music-accent-soft);
   `,
   tabs: css`
     display: flex;
-    gap: 24px;
+    gap: 4px;
     align-items: center;
 
-    @media (width <= 800px) {
+    @container (width <= 960px) {
       justify-content: center;
       order: 3;
       width: 100%;
+    }
+
+    @container (width <= 480px) {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 2px;
     }
   `,
   tab: css`
@@ -163,45 +179,58 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     position: relative;
 
-    padding-block: 12px;
-    padding-inline: 0;
+    display: inline-flex;
+    gap: 7px;
+    align-items: center;
+    justify-content: center;
+
+    min-width: 0;
+    min-height: 34px;
+    padding-block: 6px;
+    padding-inline: 12px;
     border: 0;
+    border-radius: ${cssVar.borderRadius};
 
     font-size: 13px;
     font-weight: 500;
-    color: inherit;
+    color: ${cssVar.colorTextSecondary};
+    white-space: nowrap;
 
-    opacity: 0.55;
     background: transparent;
 
+    > span:last-child {
+      overflow: hidden;
+      max-width: 100%;
+      text-overflow: ellipsis;
+    }
+
     &[aria-selected='true'] {
-      opacity: 1;
-
-      &::after {
-        content: '';
-
-        position: absolute;
-        inset-block-end: 3px;
-        inset-inline: 25%;
-
-        height: 2px;
-        border-radius: 2px;
-
-        background: currentcolor;
-      }
+      color: var(--music-accent);
+      background: var(--music-accent-soft);
     }
 
     &:hover {
-      opacity: 1;
+      color: ${cssVar.colorText};
+      background: ${cssVar.colorFillTertiary};
+    }
+
+    @container (width <= 480px) {
+      flex-direction: column;
+      gap: 4px;
+
+      min-height: 48px;
+      padding-inline: 4px;
+
+      font-size: 11px;
     }
   `,
   headerActions: css`
     display: flex;
     flex: none;
-    gap: 18px;
+    gap: 8px;
     align-items: center;
 
-    @media (width <= 480px) {
+    @container (width <= 480px) {
       gap: 10px;
     }
   `,
@@ -210,17 +239,15 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     flex: none;
     place-items: center;
 
-    width: 34px;
-    height: 34px;
+    width: 32px;
+    height: 32px;
+    border-radius: ${cssVar.borderRadius};
 
-    color: inherit;
-
-    opacity: 0.85;
+    color: ${cssVar.colorTextSecondary};
 
     &:hover {
-      transform: translateY(2px);
-      color: inherit;
-      opacity: 1;
+      color: ${cssVar.colorText};
+      background: ${cssVar.colorFillTertiary};
     }
   `,
   uploadButton: css`
@@ -236,21 +263,21 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     display: grid;
     grid-template-columns: minmax(0, 43fr) minmax(0, 57fr);
     flex: 1;
-    gap: clamp(40px, 6vw, 100px);
+    gap: clamp(32px, 5cqw, 80px);
     align-items: center;
 
     width: 100%;
-    max-width: 1520px;
-    min-height: calc(100dvh - 206px);
+    max-width: 1240px;
+    min-height: calc(100dvh - 184px);
     margin-inline: auto;
-    padding-block: 40px 24px;
+    padding-block: 32px 24px;
 
-    @media (width <= 880px) {
+    @container (width <= 880px) {
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
       gap: 30px;
     }
 
-    @media (width <= 680px) {
+    @container (width <= 640px) {
       grid-template-columns: minmax(0, 1fr);
       gap: 26px;
       padding-block-start: 28px;
@@ -264,7 +291,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     width: 100%;
     min-width: 0;
-    max-width: 470px;
+    max-width: 400px;
     margin-inline: auto;
   `,
   cover: css`
@@ -273,21 +300,18 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     place-items: center;
 
     aspect-ratio: 1;
-    width: max(160px, min(400px, 33vw, calc(100dvh - 330px)));
+    width: max(160px, min(360px, 33cqw, calc(100dvh - 340px)));
     max-width: 100%;
-    border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--music-accent) 14%, transparent);
+    border-radius: ${cssVar.borderRadiusLG};
 
-    color: rgb(225 232 242 / 72%);
+    color: var(--music-cover-ink);
 
-    background:
-      radial-gradient(ellipse at 20% 10%, rgb(143 165 182 / 38%), transparent 65%),
-      linear-gradient(145deg, #637382, #394654 65%, #344552);
-    box-shadow:
-      0 16px 34px rgb(0 0 0 / 24%),
-      0 2px 8px rgb(0 0 0 / 12%);
+    background: var(--music-cover-bg);
+    box-shadow: 0 14px 36px color-mix(in srgb, var(--music-accent) 7%, transparent);
 
-    @media (width <= 680px) {
-      width: min(72vw, 340px);
+    @container (width <= 640px) {
+      width: min(70cqw, 300px);
     }
   `,
   trackInfo: css`
@@ -314,7 +338,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     font-size: 14px;
     line-height: 1.5;
-    color: rgb(255 255 255 / 60%);
+    color: ${cssVar.colorTextSecondary};
   `,
   timeline: css`
     display: flex;
@@ -326,7 +350,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     font-size: 12px;
     font-variant-numeric: tabular-nums;
-    color: rgb(255 255 255 / 86%);
+    color: ${cssVar.colorTextSecondary};
 
     input {
       flex: 1;
@@ -357,14 +381,15 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     height: 44px;
     padding: 0;
     border: 0;
+    border-radius: ${cssVar.borderRadius};
 
-    color: #f2f2f3;
+    color: ${cssVar.colorTextSecondary};
 
     background: transparent;
 
     &:hover {
-      transform: scale(1.08);
-      color: white;
+      color: ${cssVar.colorText};
+      background: ${cssVar.colorFillTertiary};
     }
 
     &[data-active='true'] {
@@ -382,14 +407,14 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     height: 48px;
     padding: 0;
     border: 0;
+    border-radius: 50%;
 
-    color: #f2f2f3;
+    color: ${cssVar.colorBgContainer};
 
-    background: transparent;
+    background: ${cssVar.colorText};
 
     &:hover {
-      transform: scale(1.08);
-      color: white;
+      background: ${cssVar.colorTextSecondary};
     }
   `,
   repeatControl: css`
@@ -402,7 +427,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     width: 40px;
     height: 44px;
 
-    color: #f2f2f3;
+    color: ${cssVar.colorTextSecondary};
 
     &[data-active='true'] {
       color: var(--music-accent);
@@ -443,7 +468,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     margin-block-start: 16px;
 
     font-size: 11px;
-    color: rgb(255 255 255 / 55%);
+    color: ${cssVar.colorTextTertiary};
   `,
   queuePosition: css`
     cursor: pointer;
@@ -462,7 +487,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     background: transparent;
 
     &:hover {
-      color: white;
+      color: ${cssVar.colorText};
     }
   `,
   status: css`
@@ -486,25 +511,25 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     margin-block-start: 20px;
     padding-block: 8px;
     padding-inline: 18px;
-    border: 1px solid rgb(255 255 255 / 24%);
-    border-radius: 5px;
+    border: 1px solid ${cssVar.colorBorder};
+    border-radius: ${cssVar.borderRadius};
 
     font-size: 12px;
-    color: rgb(255 255 255 / 90%);
+    color: ${cssVar.colorText};
 
     background: transparent;
 
     &:hover {
-      background: rgb(255 255 255 / 8%);
+      background: ${cssVar.colorFillTertiary};
     }
   `,
   lyricPanel: css`
     position: relative;
     align-self: stretch;
     min-width: 0;
-    min-height: 540px;
+    min-height: 480px;
 
-    @media (width <= 680px) {
+    @container (width <= 640px) {
       min-height: 360px;
     }
   `,
@@ -515,11 +540,11 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     inset-inline-end: 0;
 
     button {
-      color: rgb(255 255 255 / 54%);
+      color: ${cssVar.colorTextSecondary};
 
       &:hover {
-        color: white !important;
-        background: rgb(255 255 255 / 7%) !important;
+        color: ${cssVar.colorText} !important;
+        background: ${cssVar.colorFillTertiary} !important;
       }
     }
   `,
@@ -528,9 +553,9 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     min-width: 0;
     max-width: 1400px;
     margin-inline: auto;
-    padding-block-start: 46px;
+    padding-block-start: 32px;
 
-    @media (width <= 680px) {
+    @container (width <= 680px) {
       padding-block-start: 30px;
     }
   `,
@@ -541,8 +566,8 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     h2 {
       margin: 0;
-      font-size: 30px;
-      font-weight: 650;
+      font-size: 24px;
+      font-weight: 600;
     }
 
     span {
@@ -558,7 +583,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     margin-block: 28px 24px;
 
-    @media (width <= 480px) {
+    @container (width <= 480px) {
       flex-wrap: wrap;
       gap: 14px;
     }
@@ -568,7 +593,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     border-color: ${cssVar.colorBorderSecondary};
     background: ${cssVar.colorFillQuaternary};
 
-    @media (width <= 480px) {
+    @container (width <= 480px) {
       order: 2;
       width: 100%;
     }
@@ -626,7 +651,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     min-height: 74px;
     padding-block: 10px;
     padding-inline: 16px;
-    border-radius: 5px;
+    border-radius: ${cssVar.borderRadius};
 
     &:nth-child(odd) {
       background: ${cssVar.colorFillQuaternary};
@@ -637,15 +662,16 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     }
 
     &[aria-current='true'] {
-      color: #568fbe;
+      color: var(--music-accent);
+      background: var(--music-accent-soft);
     }
 
-    @media (width <= 680px) {
+    @container (width <= 680px) {
       gap: 10px;
       padding-inline: 10px;
     }
 
-    @media (width <= 420px) {
+    @container (width <= 420px) {
       flex-wrap: wrap;
     }
   `,
@@ -655,7 +681,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     font-size: 12px;
     color: ${cssVar.colorTextQuaternary};
 
-    @media (width <= 480px) {
+    @container (width <= 480px) {
       display: none;
     }
   `,
@@ -666,11 +692,11 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     width: 44px;
     height: 44px;
-    border-radius: 4px;
+    border-radius: ${cssVar.borderRadius};
 
-    color: #d9e2eb;
+    color: var(--music-cover-ink);
 
-    background: linear-gradient(145deg, #748796, #425466);
+    background: var(--music-cover-bg);
   `,
   rowInfo: css`
     display: flex;
@@ -698,7 +724,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     font-size: 12px;
     color: ${cssVar.colorTextTertiary};
 
-    @media (width <= 680px) {
+    @container (width <= 680px) {
       display: none;
     }
   `,
@@ -708,7 +734,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     gap: 3px;
     align-items: center;
 
-    @media (width <= 420px) {
+    @container (width <= 420px) {
       justify-content: flex-end;
       width: 100%;
     }

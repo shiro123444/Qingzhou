@@ -567,6 +567,28 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
           volume: window.musicTest.audio!.volume,
         })),
       ).toEqual({ repeat: 'list', shuffle: true, volume: 0 });
+      // A wide sidebar can leave a narrow workspace even on a desktop-sized viewport.
+      await page.evaluate(() => {
+        document.querySelector('main')!.style.maxWidth = '288px';
+      });
+      await page.getByRole('tab', { name: music.queue, exact: true }).click();
+      expect(
+        await page.evaluate(() => {
+          const main = document.querySelector('main')!;
+          return main.scrollWidth <= main.clientWidth;
+        }),
+      ).toBe(true);
+      await page.getByRole('tab', { name: music.plugins, exact: true }).click();
+      expect(
+        await page.evaluate(() => {
+          const main = document.querySelector('main')!;
+          return main.scrollWidth <= main.clientWidth;
+        }),
+      ).toBe(true);
+      await page.evaluate(() => {
+        document.querySelector('main')!.style.maxWidth = '';
+      });
+      await page.getByRole('tab', { name: music.nowPlaying, exact: true }).click();
       await mkdir('.data/music-m2-validation', { recursive: true });
       await page.screenshot({ fullPage: true, path: '.data/music-m2-validation/desktop.png' });
       await page.setViewportSize({ width: 390, height: 850 });
@@ -577,6 +599,14 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
           ),
       );
       await page.screenshot({ fullPage: true, path: '.data/music-m2-validation/compact.png' });
+      expect(
+        await page.evaluate(() =>
+          [...document.querySelectorAll('[role="tab"]')].every((tab) => {
+            const rect = tab.getBoundingClientRect();
+            return rect.left >= 0 && rect.right <= window.innerWidth;
+          }),
+        ),
+      ).toBe(true);
       expect(
         await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
       ).toBe(true);

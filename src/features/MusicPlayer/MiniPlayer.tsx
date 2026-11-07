@@ -1,5 +1,7 @@
 'use client';
 
+import { Icon } from '@lobehub/ui';
+import { cx } from 'antd-style';
 import {
   AudioLines,
   ChevronDown,
@@ -26,6 +28,7 @@ import { styles } from './capsule.style';
 import { useAudioEngine, useMusicPlayer } from './context';
 import { type RepeatMode } from './engine';
 import { formatTime } from './lyrics';
+import { musicTheme } from './musicTheme';
 import { useCapsulePosition } from './useCapsulePosition';
 
 export default function MiniPlayer() {
@@ -77,7 +80,7 @@ export default function MiniPlayer() {
     <section
       {...position.surfaceProps}
       aria-label={t('player')}
-      className={styles.dock}
+      className={cx(styles.dock, musicTheme)}
       data-collapsed={collapsed}
       data-dragging={position.dragging}
       data-panel-side={position.panelSide}
@@ -90,7 +93,7 @@ export default function MiniPlayer() {
         <div data-music-panel aria-label={t('capsuleDetails')} className={styles.panel}>
           <div className={styles.panelHeading}>
             <span>
-              <ListMusic size={15} />
+              <Icon aria-hidden icon={ListMusic} size={{ size: 18, strokeWidth: 1.75 }} />
               {t('queue')} <small>{s.queue.length}</small>
             </span>
             <span className={styles.transport}>
@@ -100,10 +103,10 @@ export default function MiniPlayer() {
                 title={t('capsuleResetPosition')}
                 onClick={position.reset}
               >
-                <RotateCcw size={15} />
+                <Icon aria-hidden icon={RotateCcw} size={{ size: 18, strokeWidth: 1.75 }} />
               </button>
               <Link aria-label={t('openStudio')} to="/music" onClick={() => setDetails(false)}>
-                <ExternalLink size={15} />
+                <Icon aria-hidden icon={ExternalLink} size={{ size: 18, strokeWidth: 1.75 }} />
               </Link>
             </span>
           </div>
@@ -119,7 +122,11 @@ export default function MiniPlayer() {
                   >
                     <span className={styles.queueNumber}>
                       {s.activeId === item.id ? (
-                        <AudioLines size={14} />
+                        <Icon
+                          aria-hidden
+                          icon={AudioLines}
+                          size={{ size: 18, strokeWidth: 1.75 }}
+                        />
                       ) : (
                         String(index + 1).padStart(2, '0')
                       )}
@@ -141,7 +148,7 @@ export default function MiniPlayer() {
               title={t('shuffle')}
               onClick={() => engine.setShuffle(!s.shuffle)}
             >
-              <Shuffle size={16} />
+              <Icon aria-hidden icon={Shuffle} size={{ size: 18, strokeWidth: 1.75 }} />
             </button>
             <button
               aria-label={t('capsuleRepeat')}
@@ -154,10 +161,14 @@ export default function MiniPlayer() {
                 )
               }
             >
-              {s.repeat === 'single' ? <Repeat1 size={16} /> : <Repeat size={16} />}
+              {s.repeat === 'single' ? (
+                <Icon aria-hidden icon={Repeat1} size={{ size: 18, strokeWidth: 1.75 }} />
+              ) : (
+                <Icon aria-hidden icon={Repeat} size={{ size: 18, strokeWidth: 1.75 }} />
+              )}
             </button>
             <label className={styles.volume}>
-              <Volume2 aria-hidden size={16} />
+              <Icon aria-hidden icon={Volume2} size={{ size: 18, strokeWidth: 1.75 }} />
               <input
                 aria-label={t('capsuleVolume')}
                 data-capsule-range="volume"
@@ -206,7 +217,7 @@ export default function MiniPlayer() {
             }}
           >
             <span aria-hidden className={styles.record} data-playing={s.status === 'playing'}>
-              <Music2 size={24} />
+              <Icon aria-hidden icon={Music2} size={{ size: 24, strokeWidth: 1.75 }} />
             </span>
             {s.status === 'playing' && <span className={styles.orbIndicator} />}
           </button>
@@ -223,7 +234,7 @@ export default function MiniPlayer() {
         >
           <Link aria-label={t('openStudio')} className={styles.artworkLink} to="/music">
             <span aria-hidden className={styles.record} data-playing={s.status === 'playing'}>
-              <Music2 size={21} />
+              <Icon aria-hidden icon={Music2} size={{ size: 24, strokeWidth: 1.75 }} />
             </span>
           </Link>
           <Link className={styles.track} to="/music">
@@ -237,7 +248,7 @@ export default function MiniPlayer() {
                 className={`${styles.iconButton} ${styles.secondaryTransport}`}
                 onClick={() => engine.previous()}
               >
-                <SkipBack fill="currentColor" size={15} />
+                <Icon aria-hidden icon={SkipBack} size={{ size: 18, strokeWidth: 1.75 }} />
               </button>
               <button
                 aria-label={t(playing ? 'capsulePause' : 'capsulePlay')}
@@ -245,9 +256,9 @@ export default function MiniPlayer() {
                 onClick={() => (playing ? engine.pause() : engine.play())}
               >
                 {playing ? (
-                  <Pause fill="currentColor" size={25} />
+                  <Icon aria-hidden icon={Pause} size={{ size: 20, strokeWidth: 1.75 }} />
                 ) : (
-                  <Play fill="currentColor" size={25} />
+                  <Icon aria-hidden icon={Play} size={{ size: 20, strokeWidth: 1.75 }} />
                 )}
               </button>
               <button
@@ -255,7 +266,7 @@ export default function MiniPlayer() {
                 className={`${styles.iconButton} ${styles.secondaryTransport}`}
                 onClick={() => engine.next()}
               >
-                <SkipForward fill="currentColor" size={15} />
+                <Icon aria-hidden icon={SkipForward} size={{ size: 18, strokeWidth: 1.75 }} />
               </button>
             </div>
           )}
@@ -266,7 +277,11 @@ export default function MiniPlayer() {
               className={styles.iconButton}
               onClick={() => setDetails((value) => !value)}
             >
-              {details ? <ChevronDown size={17} /> : <MoreHorizontal size={17} />}
+              {details ? (
+                <Icon aria-hidden icon={ChevronDown} size={{ size: 18, strokeWidth: 1.75 }} />
+              ) : (
+                <Icon aria-hidden icon={MoreHorizontal} size={{ size: 18, strokeWidth: 1.75 }} />
+              )}
             </button>
             <button
               aria-label={t('capsuleCollapse')}
@@ -274,7 +289,7 @@ export default function MiniPlayer() {
               title={t('capsuleCollapse')}
               onClick={collapse}
             >
-              <ChevronUp size={12} />
+              <Icon aria-hidden icon={ChevronUp} size={{ size: 14, strokeWidth: 1.75 }} />
             </button>
           </div>
           {!!s.queue.length && (

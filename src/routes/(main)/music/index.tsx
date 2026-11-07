@@ -1,3 +1,3 @@
 'use client';
 
-export { default } from '@/features/MusicStudio';
+export { default } from '@/features/MusicWorkspace';

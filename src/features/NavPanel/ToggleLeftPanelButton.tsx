@@ -40,6 +40,9 @@ const ToggleLeftPanelButton = memo<ToggleLeftPanelButtonProps>(
         id={TOGGLE_BUTTON_ID}
         size={size || DESKTOP_HEADER_ICON_SMALL_SIZE}
         title={title || t('toggleLeftPanel.title', { ns: 'hotkey' })}
+        aria-label={
+          typeof title === 'string' ? title : t('toggleLeftPanel.title', { ns: 'hotkey' })
+        }
         tooltipProps={{
           hotkey,
           placement: 'bottom',

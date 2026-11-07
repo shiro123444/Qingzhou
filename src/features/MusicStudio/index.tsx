@@ -1,34 +1,39 @@
 'use client';
 
-import { Button } from '@lobehub/ui';
+import { Button, Icon } from '@lobehub/ui';
 import { Alert, Input } from 'antd';
+import { cx } from 'antd-style';
 import {
   ArrowDown,
   ArrowUp,
   AudioLines,
   ChevronDown,
+  Library,
   ListMusic,
   ListPlus,
   Music2,
   Pause,
   Play,
+  Puzzle,
   Repeat2,
   Search,
   Shuffle,
   SkipBack,
   SkipForward,
+  TextQuote,
   Trash2,
   Upload,
   Volume2,
   VolumeX,
 } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 
 import { useAudioEngine, useMusicPlayer } from '@/features/MusicPlayer/context';
 import { type RepeatMode } from '@/features/MusicPlayer/engine';
 import { formatTime, MAX_LRC_BYTES } from '@/features/MusicPlayer/lyrics';
+import { musicTheme } from '@/features/MusicPlayer/musicTheme';
 import { useMusicPluginState } from '@/features/MusicPlayer/plugins/context';
 import LyricsPanel from '@/features/MusicPlayer/plugins/LyricsPanel';
 import MusicPluginSettings from '@/features/MusicPlayer/plugins/MusicPluginSettings';
@@ -38,8 +43,9 @@ import { styles } from './style';
 
 const views = ['player', 'library', 'queue', 'plugins'] as const;
 type StudioView = (typeof views)[number];
+const viewIcons = { library: Library, player: AudioLines, plugins: Puzzle, queue: ListMusic };
 
-export default function MusicStudio() {
+export default function MusicStudio({ navigation }: { navigation?: ReactNode }) {
   const { t } = useTranslation('music');
   const engine = useAudioEngine();
   const lyricsStatus = useMusicPluginState((state) => state.status);
@@ -148,11 +154,14 @@ export default function MusicStudio() {
   }
 
   return (
-    <main aria-label={t('player')} className={styles.studio} data-view={view}>
+    <main aria-label={t('player')} className={cx(styles.studio, musicTheme)} data-view={view}>
       <div className={styles.inner}>
         <header className={styles.header}>
           <div className={styles.brand}>
-            <AudioLines aria-hidden size={23} strokeWidth={1.7} />
+            {navigation}
+            <span aria-hidden className={styles.brandIcon}>
+              <Icon icon={Music2} size={18} />
+            </span>
             <h1>{t('title')}</h1>
           </div>
           <div aria-label={t('viewNavigation')} className={styles.tabs} role="tablist">
@@ -184,7 +193,8 @@ export default function MusicStudio() {
                     document.getElementById('music-tab-' + views[next])?.focus();
                   }}
                 >
-                  {label}
+                  <Icon aria-hidden icon={viewIcons[item]} size={16} />
+                  <span>{label}</span>
                 </button>
               );
             })}
@@ -206,7 +216,7 @@ export default function MusicStudio() {
               title={t('closeStudio')}
               to="/"
             >
-              <ChevronDown aria-hidden size={27} />
+              <Icon aria-hidden icon={ChevronDown} size={20} />
             </Link>
           </div>
         </header>
@@ -246,7 +256,7 @@ export default function MusicStudio() {
         >
           <section aria-label={t('nowPlaying')} className={styles.player}>
             <div aria-hidden className={styles.cover}>
-              <Music2 size={104} strokeWidth={1.1} />
+              <Icon icon={Music2} size={{ size: 88, strokeWidth: 1.25 }} />
             </div>
             <div className={styles.trackInfo}>
               <h2 className={styles.trackTitle} title={active?.name}>
@@ -267,7 +277,7 @@ export default function MusicStudio() {
                 type="range"
                 value={Math.min(s.positionMs, s.durationMs || 0)}
                 style={{
-                  background: `linear-gradient(to right, #69a5de ${Math.min(100, (s.positionMs / (s.durationMs || 1)) * 100)}%, rgb(255 255 255 / 28%) 0)`,
+                  background: `linear-gradient(to right, var(--music-accent) ${Math.min(100, (s.positionMs / (s.durationMs || 1)) * 100)}%, var(--music-range-track) 0)`,
                 }}
                 onChange={(event) => engine.seek(Number(event.target.value))}
               />
@@ -282,7 +292,7 @@ export default function MusicStudio() {
                 disabled={!s.queue.length}
                 onClick={() => engine.setShuffle(!s.shuffle)}
               >
-                <Shuffle size={22} />
+                <Icon aria-hidden icon={Shuffle} size={20} />
               </button>
               <button
                 aria-label={t('previous')}
@@ -290,7 +300,7 @@ export default function MusicStudio() {
                 disabled={!s.queue.length}
                 onClick={() => engine.previous()}
               >
-                <SkipBack fill="currentColor" size={25} />
+                <Icon aria-hidden icon={SkipBack} size={22} />
               </button>
               <button
                 aria-label={t(playing ? 'pause' : 'play')}
@@ -299,9 +309,9 @@ export default function MusicStudio() {
                 onClick={() => (playing ? engine.pause() : engine.play())}
               >
                 {playing ? (
-                  <Pause fill="currentColor" size={30} />
+                  <Icon aria-hidden fill="currentColor" icon={Pause} size={24} />
                 ) : (
-                  <Play fill="currentColor" size={30} />
+                  <Icon aria-hidden fill="currentColor" icon={Play} size={24} />
                 )}
               </button>
               <button
@@ -310,10 +320,10 @@ export default function MusicStudio() {
                 disabled={!s.queue.length}
                 onClick={() => engine.next()}
               >
-                <SkipForward fill="currentColor" size={25} />
+                <Icon aria-hidden icon={SkipForward} size={22} />
               </button>
               <label className={styles.repeatControl} data-active={s.repeat !== 'sequence'}>
-                <Repeat2 aria-hidden size={25} />
+                <Icon aria-hidden icon={Repeat2} size={20} />
                 <select
                   aria-label={t('repeat')}
                   value={s.repeat}
@@ -332,15 +342,15 @@ export default function MusicStudio() {
                 className={styles.queuePosition}
                 onClick={() => setView('queue')}
               >
-                <ListMusic size={15} />
+                <Icon aria-hidden icon={ListMusic} size={16} />
                 {activeIndex >= 0 ? activeIndex + 1 : '—'} / {s.queue.length}
               </button>
               <span className={styles.status}>{t(s.status)}</span>
               <label className={styles.volume}>
                 {s.volume === 0 ? (
-                  <VolumeX aria-hidden size={16} />
+                  <Icon aria-hidden icon={VolumeX} size={16} />
                 ) : (
-                  <Volume2 aria-hidden size={16} />
+                  <Icon aria-hidden icon={Volume2} size={16} />
                 )}
                 <input
                   aria-label={t('volume')}
@@ -369,6 +379,7 @@ export default function MusicStudio() {
             <div className={styles.lyricToolbar}>
               <Button
                 disabled={!active || lyricsStatus !== 'active'}
+                icon={TextQuote}
                 size="small"
                 type="text"
                 onClick={() => lyricInput.current?.click()}
@@ -409,7 +420,7 @@ export default function MusicStudio() {
                 className={styles.search}
                 maxLength={200}
                 placeholder={t('search')}
-                prefix={<Search aria-hidden size={16} />}
+                prefix={<Icon aria-hidden icon={Search} size={16} />}
                 type="search"
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
@@ -427,7 +438,7 @@ export default function MusicStudio() {
           )}
           {!loading && displayedTracks.length === 0 && (
             <div className={styles.emptyCollection}>
-              <Music2 aria-hidden size={42} strokeWidth={1} />
+              <Icon aria-hidden icon={Music2} size={{ size: 40, strokeWidth: 1.5 }} />
               <h3>
                 {view === 'queue'
                   ? t('emptyQueue')
@@ -455,7 +466,7 @@ export default function MusicStudio() {
                   {String(index + 1).padStart(2, '0')}
                 </span>
                 <span aria-hidden className={styles.trackArt}>
-                  <Music2 size={21} strokeWidth={1.4} />
+                  <Icon icon={Music2} size={20} />
                 </span>
                 <div className={styles.rowInfo}>
                   <span className={styles.name} title={track.name}>
@@ -490,7 +501,7 @@ export default function MusicStudio() {
                   {String(index + 1).padStart(2, '0')}
                 </span>
                 <span aria-hidden className={styles.trackArt}>
-                  <Music2 size={21} strokeWidth={1.4} />
+                  <Icon icon={Music2} size={20} />
                 </span>
                 <div className={styles.rowInfo}>
                   <span className={styles.name} title={track.name}>

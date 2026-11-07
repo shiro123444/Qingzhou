@@ -50,6 +50,8 @@ interface SidebarItemConfig {
 const ALL_SIDEBAR_ITEMS: SidebarItemConfig[] = [
   { id: 'tasks', labelKey: 'tab.tasks', routeId: 'tasks' },
   { id: 'pages', labelKey: 'tab.pages', routeId: 'page' },
+  { id: 'presentation', labelKey: 'tab.presentation', routeId: 'presentation' },
+  { id: 'music', labelKey: 'tab.music', routeId: 'music' },
   { id: 'channels', labelKey: 'tab.channels', routeId: 'channels' },
   { id: 'recents', labelKey: 'recents' },
   { alwaysVisible: true, id: 'agent', labelKey: 'navPanel.agent' },

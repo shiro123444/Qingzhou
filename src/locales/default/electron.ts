@@ -1,4 +1,5 @@
 export default {
+  'navigation.music': 'Music',
   'navigation.channels': 'Channels',
   'navigation.chat': 'Chat',
   'navigation.discover': 'Discover',

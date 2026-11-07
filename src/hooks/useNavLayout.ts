@@ -71,6 +71,12 @@ export const useNavLayout = (): NavLayout => {
           url: '/presentation',
         },
         {
+          icon: getRouteById('music')!.icon,
+          key: SidebarTabKey.Music,
+          title: t('tab.music'),
+          url: '/music',
+        },
+        {
           icon: getRouteById('channels')!.icon,
           key: SidebarTabKey.Channels,
           title: t('tab.channels'),

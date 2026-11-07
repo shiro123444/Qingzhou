@@ -54,6 +54,7 @@ export const DEFAULT_SIDEBAR_ITEMS: string[] = [
   'tasks',
   'pages',
   'presentation',
+  'music',
   'channels',
   'recents',
   'agent',

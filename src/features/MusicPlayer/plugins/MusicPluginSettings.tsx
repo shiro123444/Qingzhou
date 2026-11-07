@@ -1,6 +1,6 @@
 'use client';
 
-import { Button } from '@lobehub/ui';
+import { Button, Icon } from '@lobehub/ui';
 import { Switch } from 'antd';
 import { BookOpen, MousePointer2, TextQuote } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -29,7 +29,7 @@ export default function MusicPluginSettings() {
       <article aria-label={t('lyricsPlugin')} className={styles.plugin}>
         <div className={styles.pluginOverview}>
           <span aria-hidden className={styles.pluginIcon}>
-            <TextQuote size={25} strokeWidth={1.4} />
+            <Icon icon={TextQuote} size={{ size: 22, strokeWidth: 1.75 }} />
           </span>
           <div className={styles.pluginInfo}>
             <div className={styles.pluginTitle}>
@@ -61,11 +61,11 @@ export default function MusicPluginSettings() {
           <h4>{t('pluginPermissions')}</h4>
           <ul className={styles.permissionList}>
             <li>
-              <BookOpen aria-hidden size={15} />
+              <Icon aria-hidden icon={BookOpen} size={{ size: 16, strokeWidth: 1.75 }} />
               {t('lyricsPluginReadPermission')}
             </li>
             <li>
-              <MousePointer2 aria-hidden size={15} />
+              <Icon aria-hidden icon={MousePointer2} size={{ size: 16, strokeWidth: 1.75 }} />
               {t('lyricsPluginSeekPermission')}
             </li>
           </ul>

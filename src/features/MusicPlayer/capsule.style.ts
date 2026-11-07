@@ -54,16 +54,16 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     height: 76px;
     padding-block: 12px;
     padding-inline: 12px;
-    border: 1px solid color-mix(in srgb, ${cssVar.colorText} 10%, transparent);
-    border-radius: 14px;
+    border: 1px solid ${cssVar.colorBorderSecondary};
+    border-radius: 16px;
 
     color: ${cssVar.colorText};
 
     background: color-mix(in srgb, ${cssVar.colorBgElevated} 88%, transparent);
     backdrop-filter: blur(22px) saturate(1.2);
     box-shadow:
-      0 12px 36px rgb(0 0 0 / 13%),
-      0 2px 7px rgb(0 0 0 / 5%);
+      0 12px 32px color-mix(in srgb, ${cssVar.colorText} 8%, transparent),
+      0 2px 6px color-mix(in srgb, ${cssVar.colorText} 4%, transparent);
 
     &:active {
       cursor: grabbing;
@@ -88,7 +88,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     height: 48px;
     padding: 0;
     border: 0;
-    border-radius: 5px;
+    border-radius: 10px;
 
     background: transparent;
 
@@ -106,14 +106,14 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     height: 100%;
     border-radius: inherit;
 
-    color: #dce5ef;
+    color: var(--music-cover-ink);
 
-    background: linear-gradient(145deg, #7b8c9b, #495969 75%, #405161);
+    background: var(--music-cover-bg);
   `,
   recordLabel: css`
     display: grid;
     place-items: center;
-    color: #dce5ef;
+    color: var(--music-cover-ink);
   `,
   track: css`
     overflow: hidden;
@@ -169,16 +169,19 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     height: 30px;
     padding: 0;
     border: 0;
-    border-radius: 4px;
+    border-radius: 8px;
 
     color: ${cssVar.colorTextSecondary};
 
     background: transparent;
 
-    transition: color 150ms;
+    transition:
+      color 150ms,
+      background 150ms;
 
     &:hover {
       color: ${cssVar.colorText};
+      background: ${cssVar.colorFillTertiary};
     }
 
     &:focus-visible {
@@ -187,7 +190,8 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     }
 
     &[aria-pressed='true'] {
-      color: #679bcb;
+      color: var(--music-accent);
+      background: var(--music-accent-soft);
     }
   `,
   secondaryTransport: css`
@@ -203,13 +207,14 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     place-items: center;
 
     width: 36px;
-    height: 38px;
+    height: 36px;
     padding: 0;
     border: 0;
+    border-radius: 50%;
 
-    color: ${cssVar.colorText};
+    color: ${cssVar.colorBgContainer};
 
-    background: transparent;
+    background: ${cssVar.colorText};
 
     transition: transform 150ms;
 
@@ -267,7 +272,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     background: linear-gradient(
       to right,
-      #679bcb var(--music-progress),
+      var(--music-accent) var(--music-progress),
       ${cssVar.colorFillSecondary} var(--music-progress)
     );
 
@@ -292,7 +297,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
         appearance: none;
         opacity: 0;
-        background: #679bcb;
+        background: var(--music-accent);
       }
 
       &::-moz-range-thumb {
@@ -302,7 +307,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
         border-radius: 1px;
 
         opacity: 0;
-        background: #679bcb;
+        background: var(--music-accent);
       }
 
       &:hover::-webkit-slider-thumb,
@@ -332,12 +337,12 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     width: 60px;
     height: 60px;
     padding: 5px;
-    border: 1px solid color-mix(in srgb, ${cssVar.colorText} 10%, transparent);
-    border-radius: 12px;
+    border: 1px solid ${cssVar.colorBorderSecondary};
+    border-radius: 16px;
 
     background: color-mix(in srgb, ${cssVar.colorBgElevated} 88%, transparent);
     backdrop-filter: blur(22px);
-    box-shadow: 0 8px 24px rgb(0 0 0 / 13%);
+    box-shadow: 0 8px 24px color-mix(in srgb, ${cssVar.colorText} 10%, transparent);
 
     > button {
       cursor: pointer;
@@ -346,7 +351,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       height: 100%;
       padding: 0;
       border: 0;
-      border-radius: 6px;
+      border-radius: 11px;
 
       background: transparent;
     }
@@ -370,7 +375,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     border: 2px solid ${cssVar.colorBgContainer};
     border-radius: 50%;
 
-    background: #679bcb;
+    background: var(--music-accent);
   `,
   panel: css`
     position: absolute;
@@ -384,13 +389,13 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     max-height: var(--music-panel-max-height, calc(100dvh - 120px));
     padding: 16px;
     border: 1px solid ${cssVar.colorBorderSecondary};
-    border-radius: 14px;
+    border-radius: 16px;
 
     color: ${cssVar.colorText};
 
     background: color-mix(in srgb, ${cssVar.colorBgElevated} 94%, transparent);
     backdrop-filter: blur(24px);
-    box-shadow: 0 14px 48px rgb(0 0 0 / 16%);
+    box-shadow: 0 14px 42px color-mix(in srgb, ${cssVar.colorText} 12%, transparent);
 
     [data-panel-side='below'] & {
       inset-block: calc(100% + 12px) auto;
@@ -451,7 +456,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     padding-block: 9px;
     padding-inline: 8px;
     border: 0;
-    border-radius: 4px;
+    border-radius: 8px;
 
     font: inherit;
     font-size: 12px;
@@ -473,7 +478,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     &[aria-current='true'] {
       color: ${cssVar.colorText};
-      background: color-mix(in srgb, #679bcb 8%, transparent);
+      background: var(--music-accent-soft);
     }
 
     &:focus-visible {
@@ -498,7 +503,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     height: 5px;
     border-radius: 50%;
 
-    background: #679bcb;
+    background: var(--music-accent);
   `,
   settings: css`
     display: flex;
@@ -527,7 +532,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       min-width: 0;
       height: 3px;
 
-      accent-color: #679bcb;
+      accent-color: var(--music-accent);
     }
   `,
   empty: css`

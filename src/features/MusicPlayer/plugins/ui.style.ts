@@ -38,7 +38,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       font-size: clamp(22px, 2.3vw, 34px);
       font-weight: 500;
       line-height: 1.7;
-      color: rgb(255 255 255 / 56%);
+      color: ${cssVar.colorTextSecondary};
       overflow-wrap: anywhere;
 
       transition: color 0.3s ease;
@@ -61,11 +61,11 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       background: transparent;
 
       &:hover {
-        color: white;
+        color: ${cssVar.colorText};
       }
     }
 
-    @media (width <= 680px) {
+    @container (width <= 680px) {
       padding-block: 70px 100px;
       padding-inline: 0;
 
@@ -88,14 +88,14 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       margin-block-end: 18px;
       font-size: clamp(22px, 2.3vw, 32px);
       font-weight: 400;
-      color: rgb(255 255 255 / 76%);
+      color: ${cssVar.colorTextSecondary};
     }
 
     span {
       display: block;
       font-size: 13px;
       line-height: 1.9;
-      color: rgb(255 255 255 / 36%);
+      color: ${cssVar.colorTextSecondary};
     }
   `,
   settings: css`
@@ -104,26 +104,33 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     margin-inline: auto;
     padding-block: 46px 30px;
 
-    @media (width <= 680px) {
+    @container (width <= 680px) {
       padding-block-start: 30px;
     }
   `,
   heading: css`
     margin: 0;
-    font-size: 30px;
-    font-weight: 650;
+    font-size: 24px;
+    font-weight: 600;
   `,
   plugin: css`
-    margin-block-start: 30px;
-    padding-block: 24px;
-    border-block: 1px solid ${cssVar.colorBorderSecondary};
+    margin-block-start: 24px;
+    padding: 24px;
+    border: 1px solid ${cssVar.colorBorderSecondary};
+    border-radius: 16px;
+
+    background: color-mix(in srgb, ${cssVar.colorBgContainer} 88%, transparent);
+
+    @container (width <= 600px) {
+      padding: 18px;
+    }
   `,
   pluginOverview: css`
     display: flex;
     gap: 18px;
     align-items: center;
 
-    @media (width <= 600px) {
+    @container (width <= 600px) {
       flex-wrap: wrap;
       gap: 14px;
     }
@@ -135,11 +142,11 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     width: 48px;
     height: 48px;
-    border-radius: 8px;
+    border-radius: 12px;
 
-    color: #dce5ef;
+    color: var(--music-accent);
 
-    background: linear-gradient(145deg, #7b8c9b, #495969 75%, #405161);
+    background: var(--music-accent-soft);
   `,
   pluginInfo: css`
     flex: 1;
@@ -166,8 +173,15 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     }
 
     span {
+      padding-block: 2px;
+      padding-inline: 7px;
+      border-radius: 6px;
+
       font-size: 11px;
-      color: ${cssVar.colorTextTertiary};
+      line-height: 1.6;
+      color: ${cssVar.colorTextSecondary};
+
+      background: ${cssVar.colorFillTertiary};
     }
   `,
   pluginControls: css`
@@ -176,17 +190,31 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     gap: 14px;
     align-items: center;
 
-    @media (width <= 600px) {
+    @container (width <= 600px) {
       justify-content: flex-end;
       width: 100%;
     }
   `,
   pluginStatus: css`
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+
     font-size: 12px;
     color: ${cssVar.colorTextTertiary};
 
+    &::before {
+      content: '';
+
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+
+      background: currentcolor;
+    }
+
     &[data-status='enabled'] {
-      color: #568fbe;
+      color: var(--music-accent);
     }
 
     &[data-status='error'] {
@@ -194,8 +222,10 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     }
   `,
   permissions: css`
-    margin-block-start: 28px;
+    margin-block-start: 22px;
     margin-inline-start: 66px;
+    padding-block-start: 20px;
+    border-block-start: 1px solid ${cssVar.colorBorderSecondary};
 
     h4 {
       margin-block: 0 12px;
@@ -206,7 +236,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       color: ${cssVar.colorTextSecondary};
     }
 
-    @media (width <= 600px) {
+    @container (width <= 600px) {
       margin-inline-start: 0;
     }
   `,
@@ -227,7 +257,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
       font-size: 12px;
       line-height: 1.7;
-      color: ${cssVar.colorTextTertiary};
+      color: ${cssVar.colorTextSecondary};
     }
 
     svg {
@@ -246,7 +276,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     line-height: 1.7;
     color: ${cssVar.colorError};
 
-    @media (width <= 600px) {
+    @container (width <= 600px) {
       flex-wrap: wrap;
       margin-inline-start: 0;
     }
@@ -259,7 +289,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     line-height: 1.7;
     color: ${cssVar.colorWarning};
 
-    @media (width <= 600px) {
+    @container (width <= 600px) {
       margin-inline-start: 0;
     }
   `,
@@ -269,16 +299,16 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     margin-block-start: 20px;
     padding-block: 8px;
     padding-inline: 14px;
-    border: 1px solid rgb(255 255 255 / 24%);
-    border-radius: 5px;
+    border: 1px solid ${cssVar.colorBorder};
+    border-radius: 8px;
 
     font-size: 13px;
-    color: rgb(255 255 255 / 90%);
+    color: ${cssVar.colorText};
 
     background: transparent;
 
     &:hover {
-      background: rgb(255 255 255 / 8%);
+      background: ${cssVar.colorFillTertiary};
     }
   `,
 }));
