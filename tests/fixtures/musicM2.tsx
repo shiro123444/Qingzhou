@@ -75,7 +75,29 @@ function Fixture() {
               <PlayerShell>
                 <Routes>
                   <Route element={<MusicStudio />} path="/music" />
-                  <Route element={<h1>Chat workspace</h1>} path="/chat" />
+                  <Route
+                    path="/chat"
+                    element={
+                      <>
+                        <h1>Chat workspace</h1>
+                        <div
+                          data-music-player-avoid="composer"
+                          style={{
+                            position: 'fixed',
+                            right: 20,
+                            bottom: 20,
+                            width: 'min(640px, calc(100vw - 40px))',
+                            height: 148,
+                            border: '1px solid #c8d8db',
+                            borderRadius: 24,
+                            background: '#f5f9f9',
+                          }}
+                        >
+                          Chat input
+                        </div>
+                      </>
+                    }
+                  />
                   <Route element={<h1>Presentation workspace</h1>} path="/presentation" />
                 </Routes>
               </PlayerShell>

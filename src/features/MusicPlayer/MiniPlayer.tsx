@@ -4,14 +4,16 @@ import {
   AudioLines,
   ChevronDown,
   ChevronUp,
-  Disc3,
   ExternalLink,
+  GripVertical,
   ListMusic,
   MoreHorizontal,
   Pause,
   Play,
   Repeat,
   Repeat1,
+  RotateCcw,
+  Sailboat,
   Shuffle,
   SkipBack,
   SkipForward,
@@ -25,6 +27,7 @@ import { styles } from './capsule.style';
 import { useAudioEngine, useMusicPlayer } from './context';
 import { type RepeatMode } from './engine';
 import { formatTime } from './lyrics';
+import { useCapsulePosition } from './useCapsulePosition';
 
 export default function MiniPlayer() {
   const { t } = useTranslation('music');
@@ -36,6 +39,13 @@ export default function MiniPlayer() {
   const [details, setDetails] = useState(false);
   const dock = useRef<HTMLElement>(null);
   const collapsed = collapsedPreference ?? pathname === '/music';
+  const position = useCapsulePosition({
+    collapsed,
+    details,
+    dock,
+    routeKey: pathname,
+    userId: s.userId,
+  });
   const track = s.queue.find((item) => item.id === s.activeId);
   const playing = ['playing', 'buffering', 'loading'].includes(s.status);
   const progress = s.durationMs ? Math.min(100, (s.positionMs / s.durationMs) * 100) : 0;
@@ -69,19 +79,33 @@ export default function MiniPlayer() {
       aria-label={t('player')}
       className={styles.dock}
       data-collapsed={collapsed}
+      data-dragging={position.dragging}
+      data-panel-side={position.panelSide}
+      data-positioned={position.ready}
       data-testid="music-capsule"
       ref={dock}
+      style={position.style}
     >
       {!collapsed && details && (
-        <div aria-label={t('capsuleDetails')} className={styles.panel}>
+        <div data-music-panel aria-label={t('capsuleDetails')} className={styles.panel}>
           <div className={styles.panelHeading}>
             <span>
               <ListMusic size={15} />
               {t('queue')} <small>{s.queue.length}</small>
             </span>
-            <Link aria-label={t('openStudio')} to="/music" onClick={() => setDetails(false)}>
-              <ExternalLink size={15} />
-            </Link>
+            <span className={styles.transport}>
+              <button
+                aria-label={t('capsuleResetPosition')}
+                className={styles.iconButton}
+                title={t('capsuleResetPosition')}
+                onClick={position.reset}
+              >
+                <RotateCcw size={15} />
+              </button>
+              <Link aria-label={t('openStudio')} to="/music" onClick={() => setDetails(false)}>
+                <ExternalLink size={15} />
+              </Link>
+            </span>
           </div>
           {s.queue.length ? (
             <ol aria-label={t('capsuleQueue')} className={styles.queue}>
@@ -145,34 +169,56 @@ export default function MiniPlayer() {
               />
             </label>
           </div>
-          {(s.error || s.storageWarning || s.restoring) && (
+          {(s.error || s.storageWarning || s.restoring || position.storageWarning) && (
             <p className={styles.notice} role="status">
-              {t(s.restoring ? 'restoring' : s.error ? s.status : 'storageWarning')}
+              {t(
+                s.restoring
+                  ? 'restoring'
+                  : s.error
+                    ? s.status
+                    : position.storageWarning
+                      ? 'capsulePositionWarning'
+                      : 'storageWarning',
+              )}
             </p>
           )}
         </div>
       )}
       {collapsed ? (
         <button
+          {...position.dragHandleProps}
+          data-capsule-body
+          aria-description={t('capsuleDragHint')}
           aria-expanded={false}
           aria-label={t('capsuleExpand')}
           className={styles.orb}
-          title={track?.name ?? t('title')}
-          onClick={() => setCollapsedPreference(false)}
+          title={`${track?.name ?? t('title')} · ${t('capsuleDragHint')}`}
+          onClick={(event) => {
+            if (!event.defaultPrevented) setCollapsedPreference(false);
+          }}
         >
           <span aria-hidden className={styles.record} data-playing={s.status === 'playing'}>
             <span className={styles.recordLabel}>
-              <Disc3 size={18} />
+              <Sailboat size={20} />
             </span>
           </span>
           {s.status === 'playing' && <span className={styles.orbIndicator} />}
         </button>
       ) : (
-        <div className={styles.capsule} data-empty={!s.queue.length}>
+        <div data-capsule-body className={styles.capsule} data-empty={!s.queue.length}>
+          <button
+            {...position.dragHandleProps}
+            aria-description={t('capsuleDragHint')}
+            aria-label={t('capsuleDrag')}
+            className={styles.dragHandle}
+            title={t('capsuleDragHint')}
+          >
+            <GripVertical size={15} />
+          </button>
           <Link aria-label={t('openStudio')} className={styles.artworkLink} to="/music">
             <span aria-hidden className={styles.record} data-playing={s.status === 'playing'}>
               <span className={styles.recordLabel}>
-                <Disc3 size={15} />
+                <Sailboat size={17} />
               </span>
             </span>
           </Link>

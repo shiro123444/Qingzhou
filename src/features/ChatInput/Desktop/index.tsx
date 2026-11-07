@@ -156,6 +156,7 @@ const DesktopChatInput = memo<DesktopChatInputProps>(
     const content = (
       <Flexbox
         className={cx(styles.container, expand && styles.fullscreen)}
+        data-music-player-avoid="composer"
         gap={8}
         paddingBlock={expand ? 0 : showFootnote ? '0 12px' : '0 8px'}
       >

@@ -9,7 +9,6 @@ import {
   Disc3,
   ListMusic,
   ListPlus,
-  Music2,
   Pause,
   Play,
   Repeat2,
@@ -31,6 +30,46 @@ import { activeLyric, formatTime, MAX_LRC_BYTES } from '@/features/MusicPlayer/l
 import { type MusicTrack } from '@/types/music';
 
 import { styles } from './style';
+
+/** An abstract Qingzhou cover, used until the library has real embedded artwork. */
+function CoverIllustration() {
+  return (
+    <svg aria-hidden fill="none" viewBox="0 0 320 320">
+      <circle cx="238" cy="80" fill="white" opacity="0.28" r="37" />
+      <path
+        d="M-20 180C45 148 88 220 166 181S279 154 341 184V340H-20Z"
+        fill="white"
+        opacity="0.12"
+      />
+      <path
+        d="M-20 218C58 177 116 257 202 212S296 196 340 218V340H-20Z"
+        fill="#103D51"
+        opacity="0.24"
+      />
+      <path
+        d="M-20 259C45 232 113 283 185 258S284 244 340 263V340H-20Z"
+        fill="white"
+        opacity="0.1"
+      />
+      <path d="M133 207H207L192 223H149Z" fill="#164B59" />
+      <path d="M171 121V201H137Z" fill="#F6FAEB" opacity="0.95" />
+      <path d="M178 142L204 201H178Z" fill="#D9EBDC" opacity="0.82" />
+      <path
+        d="M117 236C143 230 153 242 178 236C203 230 217 241 237 235"
+        opacity="0.45"
+        stroke="white"
+        strokeLinecap="round"
+        strokeWidth="1.5"
+      />
+      <path
+        d="M101 251C126 246 135 254 151 251M187 254C207 248 225 256 249 250"
+        opacity="0.22"
+        stroke="white"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
 
 export default function MusicStudio() {
   const { t } = useTranslation('music');
@@ -191,12 +230,13 @@ export default function MusicStudio() {
             <div className={styles.playerBody}>
               <div aria-hidden className={styles.artwork}>
                 <div className={styles.artworkGlow} />
-                <div className={styles.vinyl} data-playing={s.status === 'playing'}>
-                  <div className={styles.vinylLabel}>
-                    <Music2 size={28} strokeWidth={1.4} />
-                  </div>
+                <div className={styles.coverArt} data-playing={s.status === 'playing'}>
+                  <CoverIllustration />
+                  <span className={styles.coverSignature}>
+                    <AudioLines size={15} />
+                    {t('title')}
+                  </span>
                 </div>
-                <span className={styles.tonearm} />
               </div>
               <div className={styles.trackInfo}>
                 <p className={styles.trackOrigin}>{active ? t('fromLibrary') : t('title')}</p>
@@ -446,22 +486,15 @@ export default function MusicStudio() {
             </div>
           )}
           {view === 'library' ? (
-            <ul aria-label={t('library')} className={styles.list}>
+            <ul aria-label={t('library')} className={styles.libraryGrid}>
               {tracks.map((track, index) => (
                 <li
                   aria-current={s.activeId === track.id}
-                  className={styles.trackRow}
+                  className={styles.libraryCard}
                   key={track.id}
                 >
-                  <span aria-hidden className={styles.rowNumber}>
-                    {s.activeId === track.id && s.status === 'playing' ? (
-                      <AudioLines size={16} />
-                    ) : (
-                      String(index + 1).padStart(2, '0')
-                    )}
-                  </span>
-                  <span aria-hidden className={styles.trackArt}>
-                    <Music2 size={17} strokeWidth={1.4} />
+                  <span aria-hidden className={styles.trackArt} data-tone={index % 4}>
+                    <CoverIllustration />
                   </span>
                   <div className={styles.rowInfo}>
                     <span className={styles.name} title={track.name}>
@@ -501,8 +534,8 @@ export default function MusicStudio() {
                   <span aria-hidden className={styles.rowNumber}>
                     {String(index + 1).padStart(2, '0')}
                   </span>
-                  <span aria-hidden className={styles.trackArt}>
-                    <Music2 size={17} strokeWidth={1.4} />
+                  <span aria-hidden className={styles.trackArt} data-tone={index % 4}>
+                    <CoverIllustration />
                   </span>
                   <div className={styles.rowInfo}>
                     <span className={styles.name} title={track.name}>

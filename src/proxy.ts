@@ -30,6 +30,7 @@ export const config = {
     '/tasks',
     '/runtime(.*)',
     '/presentation(.*)',
+    '/music(.*)',
     '/sites(.*)',
     '/tasks(.*)',
     '/task',

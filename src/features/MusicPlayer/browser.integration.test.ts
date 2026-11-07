@@ -25,10 +25,21 @@ interface Locator {
   setInputFiles: (file: { buffer: Buffer; mimeType: string; name: string }) => Promise<void>;
 }
 interface BrowserPage {
+  context: () => {
+    newCDPSession: (page: BrowserPage) => Promise<{
+      detach: () => Promise<void>;
+      send: (method: string, parameters: Record<string, unknown>) => Promise<unknown>;
+    }>;
+  };
   evaluate: <T>(fn: () => T | Promise<T>) => Promise<T>;
   getByRole: (role: string, options: { exact?: boolean; name: string }) => Locator;
   goto: (url: string, options: { waitUntil: 'commit' }) => Promise<unknown>;
   locator: (selector: string) => Locator;
+  mouse: {
+    down: () => Promise<void>;
+    move: (x: number, y: number, options?: { steps: number }) => Promise<void>;
+    up: () => Promise<void>;
+  };
   on: (event: 'pageerror', handler: (error: Error) => void) => void;
   reload: () => Promise<unknown>;
   screenshot: (options: { fullPage: boolean; path: string }) => Promise<unknown>;
@@ -250,10 +261,72 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       expect(await page.evaluate(() => window.musicTest.audio!.duration)).toBeGreaterThan(7.9);
       // Folding the global surface must never stop or recreate its audio engine.
       await page.getByRole('button', { name: music.capsuleExpand, exact: true }).click();
+      await page.waitForFunction(
+        () =>
+          document
+            .querySelector('[data-testid="music-capsule"]')
+            ?.getAttribute('data-positioned') === 'true',
+      );
+      const capsuleBounds = () =>
+        page!.evaluate(() => {
+          const rect = document.querySelector('[data-capsule-body]')!.getBoundingClientRect();
+          return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom };
+        });
+      const grip = await page.evaluate(() => {
+        const rect = document
+          .querySelector('[aria-label="Move floating player"]')!
+          .getBoundingClientRect();
+        return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+      });
+      await page.mouse.move(grip.x, grip.y);
+      await page.mouse.down();
+      await page.mouse.move(220, 180, { steps: 12 });
+      await page.mouse.up();
+      const dragged = await capsuleBounds();
+      expect(dragged.left).toBeLessThan(300);
+      expect(dragged.top).toBeLessThan(240);
+      await page.getByRole('button', { name: music.capsuleDrag, exact: true }).press('ArrowRight');
+      const keyboardMoved = await capsuleBounds();
+      expect(keyboardMoved.left).toBeGreaterThan(dragged.left);
       const capsulePosition = await page.evaluate(() => window.musicTest.audio!.currentTime);
       await page.getByRole('button', { name: music.capsuleCollapse, exact: true }).click();
+      const folded = await capsuleBounds();
+      expect(Math.abs(folded.right - keyboardMoved.right)).toBeLessThan(2);
+      expect(Math.abs(folded.bottom - keyboardMoved.bottom)).toBeLessThan(2);
+      await page.mouse.move((folded.left + folded.right) / 2, (folded.top + folded.bottom) / 2);
+      await page.mouse.down();
+      await page.mouse.move(
+        (folded.left + folded.right) / 2 - 60,
+        (folded.top + folded.bottom) / 2 - 40,
+        { steps: 10 },
+      );
+      await page.mouse.up();
+      const orbDragged = await capsuleBounds();
+      expect(orbDragged.left).toBeLessThan(folded.left - 50);
+      expect(
+        await page.locator('[data-testid="music-capsule"]').getAttribute('data-collapsed'),
+      ).toBe('true');
+      const touch = await page.context().newCDPSession(page);
+      const touchX = (orbDragged.left + orbDragged.right) / 2;
+      const touchY = (orbDragged.top + orbDragged.bottom) / 2;
+      await touch.send('Input.dispatchTouchEvent', {
+        type: 'touchStart',
+        touchPoints: [{ x: touchX, y: touchY, id: 1 }],
+      });
+      await touch.send('Input.dispatchTouchEvent', {
+        type: 'touchMove',
+        touchPoints: [{ x: touchX - 30, y: touchY - 20, id: 1 }],
+      });
+      await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      await touch.detach();
+      const touchDragged = await capsuleBounds();
+      expect(touchDragged.left).toBeLessThan(orbDragged.left - 20);
+      expect(
+        await page.locator('[data-testid="music-capsule"]').getAttribute('data-collapsed'),
+      ).toBe('true');
       await page.getByRole('link', { name: 'Chat', exact: true }).click();
       await page.getByRole('link', { name: 'Presentation', exact: true }).click();
+      expect(await capsuleBounds()).toEqual(touchDragged);
       expect(
         await page.locator('[data-testid="music-capsule"]').getAttribute('data-collapsed'),
       ).toBe('true');
@@ -267,6 +340,21 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
         capsulePosition,
       );
       await page.getByRole('button', { name: music.capsuleExpand, exact: true }).click();
+      // Temporary composer avoidance must not overwrite the user's saved anchor.
+      await page.getByRole('button', { name: music.capsuleDrag, exact: true }).press('Home');
+      const reset = await capsuleBounds();
+      await page.getByRole('link', { name: 'Chat', exact: true }).click();
+      await page.waitForFunction(() => {
+        const a = document.querySelector('[data-capsule-body]')?.getBoundingClientRect();
+        const b = document.querySelector('[data-music-player-avoid]')?.getBoundingClientRect();
+        if (!a || !b) return false;
+        return a.right <= b.left || a.left >= b.right || a.bottom <= b.top || a.top >= b.bottom;
+      });
+      expect(await capsuleBounds()).not.toEqual(reset);
+      await page.getByRole('link', { name: 'Presentation', exact: true }).click();
+      await page.waitForFunction(() => !document.querySelector('[data-music-player-avoid]'));
+      expect(await capsuleBounds()).toEqual(reset);
+      await page.getByRole('link', { name: 'Chat', exact: true }).click();
       await mkdir('.data/music-m2-validation', { recursive: true });
       await page.screenshot({
         fullPage: true,
@@ -297,6 +385,7 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       await page.getByRole('button', { name: music.capsuleMore, exact: true }).click();
       await page.getByRole('button', { name: music.capsuleCollapse, exact: true }).click();
       await page.setViewportSize({ width: 1440, height: 1000 });
+      await page.getByRole('link', { name: 'Presentation', exact: true }).click();
       await page.getByRole('link', { name: 'Music', exact: true }).click();
       await page.getByRole('button', { name: 'Pause', exact: true }).click();
       await page.locator('input[type=file][accept=".lrc,text/plain"]').setInputFiles({
@@ -390,11 +479,14 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       expect(
         await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
       ).toBe(true);
+      await page.getByRole('button', { name: music.capsuleExpand, exact: true }).press('ArrowLeft');
+      const beforeRefresh = await capsuleBounds();
       await page.evaluate(() => window.musicTest.engine.flush());
       await page.reload();
       await page.waitForFunction(
         () => window.musicTest?.engine.store.getState().status === 'paused',
       );
+      expect(await capsuleBounds()).toEqual(beforeRefresh);
       expect(
         await page.evaluate(() => ({
           count: window.musicTest.audioCount,

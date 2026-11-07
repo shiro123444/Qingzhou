@@ -20,6 +20,10 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       pointer-events: auto;
     }
 
+    &[data-dragging='true'] {
+      user-select: none;
+    }
+
     &[data-collapsed='false'] {
       inset-block-end: max(108px, calc(env(safe-area-inset-bottom) + 96px));
     }
@@ -38,27 +42,26 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     position: relative;
 
     display: flex;
-    gap: 11px;
+    gap: 9px;
     align-items: center;
 
     width: 100%;
     height: 76px;
     padding-block: 10px 12px;
-    padding-inline: 13px 10px;
-    border: 1px solid color-mix(in srgb, ${cssVar.colorText} 13%, transparent);
+    padding-inline: 10px;
+    border: 1px solid color-mix(in srgb, #4f99ad 18%, ${cssVar.colorBorderSecondary});
     border-radius: 42px;
 
     color: ${cssVar.colorText};
 
-    background: color-mix(in srgb, ${cssVar.colorBgElevated} 88%, transparent);
+    background:
+      radial-gradient(ellipse at 12% 100%, rgb(79 153 173 / 10%), transparent 65%),
+      color-mix(in srgb, ${cssVar.colorBgElevated} 90%, transparent);
     backdrop-filter: blur(24px) saturate(1.3);
     box-shadow:
-      0 12px 45px rgb(0 0 0 / 12%),
-      0 2px 8px rgb(0 0 0 / 6%);
-
-    &[data-empty='true'] {
-      width: min(290px, 100%);
-    }
+      0 12px 40px rgb(20 69 82 / 12%),
+      0 2px 8px rgb(0 0 0 / 5%),
+      inset 0 1px 0 rgb(255 255 255 / 15%);
 
     @media (width <= 390px) {
       gap: 8px;
@@ -69,63 +72,64 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     flex: none;
     width: 45px;
     height: 45px;
-    border-radius: 50%;
+    border-radius: 14px;
   `,
   record: css`
     position: relative;
 
+    overflow: hidden;
     display: grid;
     place-items: center;
 
     width: 100%;
     height: 100%;
-    border: 1px solid rgb(255 255 255 / 10%);
-    border-radius: 50%;
+    border: 1px solid rgb(255 255 255 / 20%);
+    border-radius: inherit;
 
     background:
-      repeating-radial-gradient(
-        circle at center,
-        transparent 0 3px,
-        rgb(255 255 255 / 5%) 3.5px 4px
-      ),
-      conic-gradient(
-        from 35deg,
-        #151d1d,
-        #3a4444 15%,
-        #111817 28%,
-        #34403e 58%,
-        #17221f 75%,
-        #151d1d
-      );
-    box-shadow: 0 2px 8px rgb(0 0 0 / 22%);
+      radial-gradient(ellipse at 24% 12%, #d6e8df 0, transparent 60%),
+      linear-gradient(150deg, #8fc7cf, #448999 55%, #195c6d);
+    box-shadow: 0 2px 6px rgb(20 69 82 / 12%);
 
-    animation: qingzhou-capsule-record 18s linear infinite paused;
+    &::after {
+      pointer-events: none;
+      content: '';
 
-    &[data-playing='true'] {
-      animation-play-state: running;
+      position: absolute;
+      inset-block: 55% -75%;
+      inset-inline: -30%;
+      transform: rotate(-12deg);
+
+      border: 1px solid rgb(224 246 244 / 35%);
+      border-radius: 50%;
+
+      box-shadow: 0 -5px 0 rgb(224 246 244 / 10%);
     }
 
-    @keyframes qingzhou-capsule-record {
+    &[data-playing='true']::after {
+      animation: qingzhou-capsule-water 4s ease-in-out infinite alternate;
+    }
+
+    @keyframes qingzhou-capsule-water {
       to {
-        transform: rotate(360deg);
+        transform: translateY(4px) rotate(-4deg);
       }
     }
 
     @media (prefers-reduced-motion: reduce) {
-      animation: none;
+      &::after {
+        animation: none;
+      }
     }
   `,
   recordLabel: css`
+    position: relative;
+    z-index: 1;
+
     display: grid;
     place-items: center;
 
-    width: 45%;
-    height: 45%;
-    border-radius: 50%;
-
-    color: #132f25;
-
-    background: linear-gradient(135deg, #d5eddc, #80b89b);
+    color: #eff9f7;
   `,
   track: css`
     overflow: hidden;
@@ -167,6 +171,39 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     gap: 2px;
     align-items: center;
   `,
+  dragHandle: css`
+    touch-action: none;
+    cursor: grab;
+
+    display: grid;
+    flex: none;
+    place-items: center;
+
+    width: 24px;
+    height: 38px;
+    padding: 0;
+    border: 0;
+    border-radius: 8px;
+
+    color: ${cssVar.colorTextQuaternary};
+
+    background: transparent;
+
+    &:hover,
+    &:focus-visible {
+      color: #4f99ad;
+      background: color-mix(in srgb, #4f99ad 9%, transparent);
+    }
+
+    &:active {
+      cursor: grabbing;
+    }
+
+    &:focus-visible {
+      outline: 2px solid ${cssVar.colorPrimary};
+      outline-offset: 1px;
+    }
+  `,
   iconButton: css`
     cursor: pointer;
 
@@ -200,8 +237,8 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     }
 
     &[aria-pressed='true'] {
-      color: ${cssVar.colorSuccess};
-      background: color-mix(in srgb, ${cssVar.colorSuccess} 10%, transparent);
+      color: #4f99ad;
+      background: color-mix(in srgb, #4f99ad 10%, transparent);
     }
   `,
   secondaryTransport: css`
@@ -222,9 +259,9 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     border: 0;
     border-radius: 50%;
 
-    color: ${cssVar.colorBgContainer};
+    color: #f3faf8;
 
-    background: ${cssVar.colorText};
+    background: #286c7c;
 
     transition: transform 150ms;
 
@@ -233,7 +270,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     }
 
     &:focus-visible {
-      outline: 2px solid ${cssVar.colorSuccess};
+      outline: 2px solid ${cssVar.colorPrimary};
       outline-offset: 3px;
     }
   `,
@@ -285,7 +322,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     background: linear-gradient(
       to right,
-      #80b89b var(--music-progress),
+      #4f99ad var(--music-progress),
       ${cssVar.colorFillSecondary} var(--music-progress)
     );
 
@@ -310,7 +347,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
         appearance: none;
         opacity: 0;
-        background: #80b89b;
+        background: #4f99ad;
       }
 
       &::-moz-range-thumb {
@@ -320,7 +357,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
         border-radius: 50%;
 
         opacity: 0;
-        background: #80b89b;
+        background: #4f99ad;
       }
 
       &:hover::-webkit-slider-thumb,
@@ -340,7 +377,8 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     }
   `,
   orb: css`
-    cursor: pointer;
+    touch-action: none;
+    cursor: grab;
 
     position: relative;
 
@@ -348,20 +386,22 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     height: 60px;
     padding: 5px;
     border: 1px solid color-mix(in srgb, ${cssVar.colorText} 12%, transparent);
-    border-radius: 50%;
+    border-radius: 21px;
 
     background: color-mix(in srgb, ${cssVar.colorBgElevated} 90%, transparent);
     backdrop-filter: blur(18px);
-    box-shadow: 0 10px 30px rgb(0 0 0 / 15%);
-
-    transition: transform 150ms;
+    box-shadow: 0 10px 30px rgb(20 69 82 / 15%);
 
     &:hover {
-      transform: translateY(-2px);
+      border-color: color-mix(in srgb, #4f99ad 55%, transparent);
+    }
+
+    &:active {
+      cursor: grabbing;
     }
 
     &:focus-visible {
-      outline: 2px solid ${cssVar.colorSuccess};
+      outline: 2px solid ${cssVar.colorPrimary};
       outline-offset: 3px;
     }
   `,
@@ -375,13 +415,18 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     border: 2px solid ${cssVar.colorBgContainer};
     border-radius: 50%;
 
-    background: #80b89b;
+    background: #4f99ad;
   `,
   panel: css`
+    position: absolute;
+    inset-block-end: calc(100% + 12px);
+    inset-inline-end: 0;
+
     overflow: auto;
+    overscroll-behavior: contain;
 
     width: 100%;
-    max-height: calc(100dvh - 220px);
+    max-height: var(--music-panel-max-height, calc(100dvh - 120px));
     padding: 16px;
     border: 1px solid ${cssVar.colorBorderSecondary};
     border-radius: 24px;
@@ -391,6 +436,10 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     background: color-mix(in srgb, ${cssVar.colorBgElevated} 94%, transparent);
     backdrop-filter: blur(24px);
     box-shadow: 0 14px 48px rgb(0 0 0 / 16%);
+
+    [data-panel-side='below'] & {
+      inset-block: calc(100% + 12px) auto;
+    }
   `,
   panelHeading: css`
     display: flex;
@@ -419,7 +468,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       background: ${cssVar.colorFillSecondary};
     }
 
-    > a {
+    a {
       display: grid;
       place-items: center;
 
@@ -430,7 +479,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       color: ${cssVar.colorTextSecondary};
     }
 
-    > a:hover {
+    a:hover {
       background: ${cssVar.colorFillSecondary};
     }
   `,
@@ -476,7 +525,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     &[aria-current='true'] {
       color: ${cssVar.colorText};
-      background: color-mix(in srgb, ${cssVar.colorSuccess} 8%, transparent);
+      background: color-mix(in srgb, #4f99ad 8%, transparent);
     }
 
     &:focus-visible {
@@ -501,7 +550,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     height: 5px;
     border-radius: 50%;
 
-    background: #80b89b;
+    background: #4f99ad;
   `,
   settings: css`
     display: flex;
@@ -530,7 +579,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       min-width: 0;
       height: 3px;
 
-      accent-color: #80b89b;
+      accent-color: #4f99ad;
     }
   `,
   empty: css`

@@ -1,13 +1,8 @@
-import { createStaticStyles, keyframes } from 'antd-style';
-
-const turn = keyframes`
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
-`;
+import { createStaticStyles } from 'antd-style';
 
 export const styles = createStaticStyles(({ css, cssVar }) => ({
   studio: css`
-    --music-accent: #4caea4;
+    --music-accent: #478f9a;
 
     overflow: auto;
     flex: 1;
@@ -20,9 +15,9 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     background:
       radial-gradient(
-        ellipse at 30% 0%,
-        color-mix(in srgb, #5abcb1 6%, transparent),
-        transparent 55%
+        ellipse at 80% 8%,
+        color-mix(in srgb, #86b7c6 8%, transparent),
+        transparent 48%
       ),
       ${cssVar.colorBgLayout};
 
@@ -76,7 +71,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
   `,
   brand: css`
     display: flex;
-    gap: 13px;
+    gap: 14px;
     align-items: center;
     min-width: 0;
 
@@ -84,16 +79,16 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       margin-block: 5px 0;
       margin-inline: 0;
 
-      font-size: 25px;
+      font-size: 28px;
       font-weight: 650;
-      letter-spacing: -0.8px;
+      letter-spacing: -1px;
     }
 
     @media (width <= 480px) {
       gap: 10px;
 
       h1 {
-        font-size: 21px;
+        font-size: 22px;
       }
     }
   `,
@@ -126,23 +121,37 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     background: color-mix(in srgb, ${cssVar.colorBgContainer} 70%, transparent);
   `,
   deck: css`
+    isolation: isolate;
+    position: relative;
+
     overflow: hidden;
     display: grid;
-    grid-template-columns: minmax(0, 1.45fr) minmax(260px, 1fr);
+    grid-template-columns: minmax(260px, 0.95fr) minmax(0, 1.05fr);
 
     min-width: 0;
-    border: 1px solid ${cssVar.colorBorderSecondary};
-    border-radius: 28px;
+    border: 1px solid color-mix(in srgb, var(--music-accent) 9%, ${cssVar.colorBorderSecondary});
+    border-radius: 26px;
 
-    background: color-mix(in srgb, ${cssVar.colorBgContainer} 86%, transparent);
-    box-shadow: 0 18px 64px color-mix(in srgb, ${cssVar.colorText} 3%, transparent);
+    background:
+      radial-gradient(
+        ellipse at 8% 30%,
+        color-mix(in srgb, #6baeb3 13%, transparent),
+        transparent 62%
+      ),
+      radial-gradient(
+        ellipse at 95% 84%,
+        color-mix(in srgb, #7a9ab2 11%, transparent),
+        transparent 58%
+      ),
+      color-mix(in srgb, ${cssVar.colorBgContainer} 88%, transparent);
+    box-shadow: 0 12px 40px color-mix(in srgb, ${cssVar.colorText} 3%, transparent);
 
-    @media (width <= 1180px) {
+    @media (width <= 880px) {
       grid-template-columns: minmax(0, 1fr);
     }
 
     @media (width <= 480px) {
-      border-radius: 23px;
+      border-radius: 22px;
     }
   `,
   player: css`
@@ -150,8 +159,8 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     flex-direction: column;
 
     min-width: 0;
-    padding-block: 26px 20px;
-    padding-inline: 28px;
+    padding-block: 25px 20px;
+    padding-inline: 30px;
 
     @media (width <= 480px) {
       padding-block: 22px 18px;
@@ -188,19 +197,18 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     background: currentcolor;
   `,
   playerBody: css`
-    display: grid;
-    grid-template-columns: minmax(160px, 0.92fr) minmax(0, 1fr);
+    display: flex;
     flex: 1;
-    gap: 28px;
+    flex-direction: column;
+    gap: 25px;
     align-items: center;
+    justify-content: center;
 
     min-width: 0;
-    padding-block: 32px 28px;
+    padding-block: 22px 25px;
 
-    @media (width <= 640px) {
-      grid-template-columns: minmax(0, 1fr);
-      gap: 26px;
-      padding-block: 28px;
+    @media (width <= 480px) {
+      gap: 23px;
     }
   `,
   artwork: css`
@@ -208,141 +216,92 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     position: relative;
 
     aspect-ratio: 1;
-    width: min(100%, 260px);
-    margin: auto;
+    width: min(100%, 224px);
+    margin-inline: auto;
 
-    @media (width <= 640px) {
-      width: 220px;
+    @media (width <= 880px) {
+      width: min(100%, 240px);
     }
 
-    @media (width <= 390px) {
-      width: 196px;
+    @media (width <= 480px) {
+      width: min(100%, 216px);
     }
   `,
   artworkGlow: css`
     position: absolute;
     z-index: -1;
-    inset: -14%;
+    inset-block: 16px -20px;
+    inset-inline: -12px;
 
-    border-radius: 50%;
+    border-radius: 26px;
 
-    background: radial-gradient(
-      circle,
-      color-mix(in srgb, var(--music-accent) 21%, transparent),
-      transparent 68%
-    );
-    filter: blur(18px);
+    opacity: 0.3;
+    background: linear-gradient(135deg, #76b3bd, #245d73 52%, #c6d9b4);
+    filter: blur(25px);
   `,
-  vinyl: css`
+
+  coverArt: css`
     position: relative;
 
-    display: grid;
-    place-items: center;
+    overflow: hidden;
 
     width: 100%;
     height: 100%;
-    border: 1px solid #343f3d;
-    border-radius: 50%;
+    border: 1px solid #a5d3d244;
+    border-radius: 18px;
 
     background:
-      conic-gradient(
-        from 40deg,
-        transparent 0deg,
-        #c9ddd417 40deg,
-        transparent 85deg,
-        #0105035e 170deg,
-        #d4e5da19 220deg,
-        transparent 275deg
-      ),
-      repeating-radial-gradient(circle, #202724 0, #202724 1px, #171e1b 2px, #171e1b 4px);
+      radial-gradient(ellipse at 82% 8%, #d6e7ceaa, transparent 45%),
+      linear-gradient(155deg, #75adbc, #39778a 48%, #174a63 72%, #97c0b1);
     box-shadow:
-      inset 0 0 0 7px #1a211e,
-      inset 0 0 0 8px #35413b,
-      0 20px 32px #0003;
+      0 18px 30px #144b6b20,
+      0 4px 12px #0e2c4720;
 
-    animation: ${turn} 30s linear infinite;
-    animation-play-state: paused;
+    transition: box-shadow 250ms;
 
-    &::after {
-      content: '';
-
-      position: absolute;
-      inset: 49%;
-
-      border: 1px solid #e4e7db;
-      border-radius: 50%;
-
-      background: #25302b;
+    svg {
+      display: block;
+      width: 100%;
+      height: 100%;
     }
 
     &[data-playing='true'] {
-      animation-play-state: running;
-    }
-
-    @media (prefers-reduced-motion: reduce) {
-      animation: none;
+      box-shadow:
+        0 20px 34px #144b6b2c,
+        0 5px 14px #0e2c4728;
     }
   `,
-  vinylLabel: css`
-    display: grid;
-    place-items: center;
+  coverSignature: css`
+    position: absolute;
+    inset-block-end: 14px;
+    inset-inline: 15px;
 
-    width: 35%;
-    height: 35%;
-    border: 1px solid #78c8bb;
-    border-radius: 50%;
+    display: flex;
+    gap: 6px;
+    align-items: center;
 
-    color: #d5eee4;
-
-    background: radial-gradient(circle at 30% 25%, #a5d3b8, #4b9283 55%, #285e56);
-    box-shadow: 0 0 0 4px #101a1455;
+    font-size: 9px;
+    font-weight: 500;
+    color: #f2faf3b8;
+    letter-spacing: 1px;
 
     svg {
-      margin-block-start: -8px;
-      opacity: 0.75;
-    }
-  `,
-  tonearm: css`
-    position: absolute;
-    inset-block-start: 1%;
-    inset-inline-end: 2%;
-    transform-origin: right center;
-    transform: rotate(38deg);
-
-    width: 38%;
-    height: 10px;
-    border: 1px solid #9caba8;
-    border-radius: 7px;
-
-    background: linear-gradient(0deg, #526562, #ced8cc 50%, #849b94);
-    box-shadow: 0 3px 8px #0002;
-
-    &::after {
-      content: '';
-
-      position: absolute;
-      inset-block-start: -3px;
-      inset-inline-start: -8px;
-
-      width: 26px;
-      height: 16px;
-      border: 1px solid #4b625a;
-      border-radius: 4px;
-
-      background: #263e35;
+      width: 14px;
+      height: 14px;
     }
   `,
   trackInfo: css`
+    width: 100%;
     min-width: 0;
-
-    @media (width <= 640px) {
-      text-align: center;
-    }
+    max-width: 320px;
+    text-align: center;
   `,
   trackOrigin: css`
-    margin-block: 0 8px;
+    margin-block: 0 7px;
     margin-inline: 0;
-    font-size: 11px;
+
+    font-size: 10px;
+    line-height: 1.6;
     color: ${cssVar.colorTextTertiary};
   `,
   trackTitle: css`
@@ -353,14 +312,14 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     margin: 0;
 
-    font-size: clamp(21px, 2vw, 29px);
+    font-size: clamp(20px, 1.8vw, 25px);
     font-weight: 600;
-    line-height: 1.35;
-    letter-spacing: -0.7px;
+    line-height: 1.4;
+    letter-spacing: -0.6px;
     overflow-wrap: anywhere;
   `,
   trackDescription: css`
-    margin-block: 10px 0;
+    margin-block: 8px 0;
     margin-inline: 0;
 
     font-size: 11px;
@@ -368,7 +327,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     color: ${cssVar.colorTextTertiary};
   `,
   timeline: css`
-    margin-block-start: 26px;
+    margin-block-start: 22px;
 
     input {
       display: block;
@@ -442,25 +401,25 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     flex: none;
     place-items: center;
 
-    width: 54px;
-    height: 54px;
-    margin-inline: 5px;
+    width: 52px;
+    height: 52px;
+    margin-inline: 7px;
     padding: 0;
     border: 1px solid color-mix(in srgb, var(--music-accent) 70%, white);
     border-radius: 50%;
 
-    color: #f2fffb;
+    color: #f6fffc;
 
-    background: linear-gradient(145deg, #6ec3b3, #35988f);
-    box-shadow: 0 6px 18px #318d8330;
+    background: linear-gradient(145deg, #7aadb0, #397f91);
+    box-shadow: 0 5px 13px #397f9124;
 
     transition:
       transform 160ms,
       box-shadow 160ms;
 
     &:hover {
-      transform: scale(1.045);
-      box-shadow: 0 8px 22px #318d8345;
+      transform: scale(1.04);
+      box-shadow: 0 7px 18px #397f9138;
     }
 
     &:active {
@@ -554,8 +513,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     align-items: center;
     justify-content: center;
 
-    padding-block-start: 13px;
-    border-block-start: 1px solid ${cssVar.colorBorderSecondary};
+    padding-block-start: 4px;
 
     font-size: 10px;
     line-height: 1.6;
@@ -576,15 +534,14 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     flex-direction: column;
 
     min-width: 0;
-    padding-block: 26px 22px;
-    padding-inline: 26px;
-    border-inline-start: 1px solid ${cssVar.colorBorderSecondary};
+    padding-block: 25px;
+    padding-inline: 18px 30px;
 
-    background: color-mix(in srgb, var(--music-accent) 2%, transparent);
-
-    @media (width <= 1180px) {
-      border-block-start: 1px solid ${cssVar.colorBorderSecondary};
-      border-inline-start: 0;
+    @media (width <= 880px) {
+      padding-block: 22px;
+      padding-inline: 28px;
+      border-block-start: 1px solid
+        color-mix(in srgb, ${cssVar.colorBorderSecondary} 70%, transparent);
     }
 
     @media (width <= 480px) {
@@ -608,31 +565,38 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
   lyrics: css`
     scroll-behavior: smooth;
     scrollbar-width: thin;
+    scroll-padding-block: 58px;
 
     overflow: auto;
     display: flex;
     flex: 1;
     flex-direction: column;
 
-    min-height: 220px;
-    max-height: 350px;
-    margin-block-start: 18px;
-    padding-block: 22px;
+    min-height: 320px;
+    max-height: 550px;
+    margin-block-start: 5px;
+    padding-block: 58px;
+
+    mask-image: linear-gradient(transparent, #000 10%, #000 88%, transparent);
 
     p {
       margin: 0;
-      padding-block: 10px;
+      padding-block: 15px;
 
-      font-size: 19px;
-      font-weight: 500;
-      line-height: 1.7;
+      font-size: clamp(19px, 2vw, 26px);
+      font-weight: 600;
+      line-height: 1.65;
       color: ${cssVar.colorTextQuaternary};
+      overflow-wrap: anywhere;
 
-      transition: color 200ms;
+      transition:
+        color 220ms,
+        font-size 220ms;
     }
 
     p[aria-current='true'] {
-      color: var(--music-accent);
+      font-size: clamp(23px, 2.4vw, 31px);
+      color: ${cssVar.colorText};
     }
 
     button {
@@ -651,39 +615,51 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       justify-content: center;
     }
 
-    @media (width <= 1180px) {
-      min-height: 180px;
-      max-height: 250px;
+    @media (width <= 880px) {
+      min-height: 210px;
+      max-height: 270px;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      scroll-behavior: auto;
+
+      p {
+        transition: none;
+      }
     }
   `,
   emptyLyrics: css`
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    align-items: center;
+    gap: 15px;
+    align-items: flex-start;
 
-    max-width: 240px;
+    max-width: 260px;
     margin: auto;
 
-    color: ${cssVar.colorTextQuaternary};
-    text-align: center;
+    color: color-mix(in srgb, var(--music-accent) 50%, ${cssVar.colorTextQuaternary});
 
     p {
       padding: 0;
-      font-size: 14px;
-      font-weight: 400;
+      font-size: 21px;
+      font-weight: 600;
       color: ${cssVar.colorTextSecondary};
     }
 
     span {
-      font-size: 11px;
-      line-height: 1.8;
+      font-size: 12px;
+      line-height: 1.9;
       color: ${cssVar.colorTextTertiary};
+    }
+
+    @media (width <= 880px) {
+      align-items: center;
+      text-align: center;
     }
   `,
   collection: css`
     min-width: 0;
-    margin-block-start: 32px;
+    margin-block-start: 34px;
   `,
   collectionHeader: css`
     display: flex;
@@ -692,8 +668,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     justify-content: space-between;
 
     min-width: 0;
-    padding-block-end: 15px;
-    border-block-end: 1px solid ${cssVar.colorBorderSecondary};
+    padding-block-end: 18px;
 
     @media (width <= 768px) {
       flex-direction: column;
@@ -703,9 +678,15 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
   `,
   tabs: css`
     display: flex;
-    gap: 22px;
+    gap: 5px;
     align-items: center;
+
+    width: fit-content;
     min-width: 0;
+    padding: 4px;
+    border-radius: 13px;
+
+    background: ${cssVar.colorFillQuaternary};
   `,
   tab: css`
     cursor: pointer;
@@ -714,29 +695,31 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     gap: 8px;
     align-items: center;
 
-    padding-block: 4px;
-    padding-inline: 0;
+    padding-block: 8px;
+    padding-inline: 13px;
     border: 0;
+    border-radius: 10px;
 
     color: ${cssVar.colorTextTertiary};
 
     background: none;
 
+    transition:
+      color 150ms,
+      background 150ms;
+
     &[data-active='true'] {
       font-weight: 600;
-      color: ${cssVar.colorText};
+      color: var(--music-accent);
+      background: ${cssVar.colorBgContainer};
+      box-shadow: 0 2px 9px #00000008;
     }
 
     span {
-      padding-block: 1px;
-      padding-inline: 6px;
-      border-radius: 5px;
-
       font-size: 10px;
+      font-weight: 400;
       font-variant-numeric: tabular-nums;
       color: ${cssVar.colorTextTertiary};
-
-      background: ${cssVar.colorFillQuaternary};
     }
   `,
   collectionActions: css`
@@ -764,6 +747,65 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       flex: 1;
       width: 0;
       min-width: 0;
+    }
+  `,
+
+  libraryGrid: css`
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+
+    margin: 0;
+    padding: 0;
+
+    list-style: none;
+
+    @media (width >= 1640px) {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    @media (width <= 680px) {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  `,
+  libraryCard: css`
+    display: flex;
+    gap: 12px;
+    align-items: center;
+
+    min-width: 0;
+    padding: 11px;
+    border: 1px solid color-mix(in srgb, ${cssVar.colorBorderSecondary} 50%, transparent);
+    border-radius: 14px;
+
+    background: color-mix(in srgb, ${cssVar.colorBgContainer} 88%, transparent);
+    box-shadow: 0 3px 12px #00000003;
+
+    transition:
+      background 150ms,
+      transform 150ms,
+      box-shadow 150ms;
+
+    &:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 5px 16px #00000008;
+    }
+
+    &[aria-current='true'] {
+      color: var(--music-accent);
+      background: color-mix(in srgb, var(--music-accent) 7%, ${cssVar.colorBgContainer});
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      transition: none;
+
+      &:hover {
+        transform: none;
+      }
+    }
+
+    @media (width <= 480px) {
+      gap: 11px;
     }
   `,
   list: css`
@@ -810,27 +852,39 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     color: ${cssVar.colorTextQuaternary};
   `,
   trackArt: css`
+    position: relative;
+
+    overflow: hidden;
     display: grid;
     flex: none;
     place-items: center;
 
-    width: 38px;
-    height: 38px;
-    border: 1px solid color-mix(in srgb, var(--music-accent) 10%, ${cssVar.colorBorderSecondary});
-    border-radius: 10px;
+    width: 48px;
+    height: 48px;
+    border-radius: 9px;
 
-    color: color-mix(in srgb, var(--music-accent) 75%, ${cssVar.colorTextSecondary});
+    background: linear-gradient(145deg, #89b3c0, #417c92 65%, #a7c8bb);
 
-    background: linear-gradient(
-      145deg,
-      color-mix(in srgb, var(--music-accent) 16%, ${cssVar.colorBgContainer}),
-      ${cssVar.colorFillQuaternary}
-    );
+    svg {
+      width: 100%;
+      height: 100%;
+    }
+
+    &[data-tone='1'] {
+      background: linear-gradient(145deg, #9eb5bb, #607792 65%, #aebfca);
+    }
+
+    &[data-tone='2'] {
+      background: linear-gradient(145deg, #9dc5bd, #4c9696 65%, #c4d3ad);
+    }
+
+    &[data-tone='3'] {
+      background: linear-gradient(145deg, #a3bccb, #51768d 65%, #9cb4c0);
+    }
 
     @media (width <= 480px) {
-      width: 32px;
-      height: 32px;
-      border-radius: 8px;
+      width: 43px;
+      height: 43px;
     }
   `,
   rowInfo: css`
@@ -845,8 +899,8 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     overflow: hidden;
     display: block;
 
-    font-size: 12px;
-    font-weight: 500;
+    font-size: 13px;
+    font-weight: 550;
     text-overflow: ellipsis;
     white-space: nowrap;
   `,
@@ -879,15 +933,17 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     gap: 12px;
     align-items: center;
 
-    padding-block: 46px;
+    padding-block: 42px;
     padding-inline: 20px;
+    border: 1px dashed ${cssVar.colorBorderSecondary};
+    border-radius: 18px;
 
     color: ${cssVar.colorTextQuaternary};
     text-align: center;
 
     h3 {
       margin: 0;
-      font-size: 13px;
+      font-size: 14px;
       font-weight: 500;
       color: ${cssVar.colorTextSecondary};
     }
@@ -896,7 +952,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       max-width: 330px;
       margin: 0;
 
-      font-size: 11px;
+      font-size: 12px;
       line-height: 1.8;
       color: ${cssVar.colorTextTertiary};
     }
