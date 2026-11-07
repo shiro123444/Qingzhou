@@ -1,6 +1,6 @@
 # MoeKoe 插件与清舟 Cordis 的适配设计
 
-状态：源码研究与后续实施方案，**尚未接入 MoeKoe 插件运行时或插件市场**。当前改动聚焦音乐工作台和常驻胶囊；本设计不增加远程安装、扩展执行或本地程序启动能力。
+状态：已在浏览器中接入真实 Cordis 宿主、受控播放器端口和内置歌词插件，并提供按账户保存的插件开关。以下保留 MoeKoe 源码研究及后续兼容设计。**本次不支持直接运行 MoeKoe 原 ZIP，也未接入插件市场、远程安装或本地程序启动。**
 
 核对基线：MoeKoeMusic `16e61ea71518d17aa384adda1ec0e4750a358ecf`；MoeKoeMusic-Plugins `56cb2e6d09083b93ac690faf5cec89d0f2fe1ca9`。参考仓库位于忽略目录 `.data/references/`，未执行其中的第三方插件。
 
@@ -8,7 +8,7 @@
 
 Cordis 适合统一拥有音乐适配器的生命周期、依赖服务和资源清理。MoeKoe 原插件包不能直接作为清舟 Cordis 模块载入：其执行格式是 Chrome Manifest V3 扩展，宿主是 Electron 的持久 session，并依赖 Chrome API、MoeKoe 的 Vue 页面、预加载桥或本机 API。把 manifest 改名、包装一个 `apply()`，不会补齐这些运行条件。
 
-最小可落实路线是先定义清舟自己的播放器服务端口，将需要的插件功能改写成受信任的 Cordis 模块，继续使用现有 AudioEngine 和鉴权 MusicProvider。原 ZIP 兼容应作为独立的桌面专项，不能由当前 UI 重构顺带完成。
+当前已沿最小路线实现清舟自己的播放器服务端口和受信任的原生 Cordis 歌词模块，继续使用现有 AudioEngine 和鉴权 MusicProvider。这里复用了 Cordis 的真实依赖与生命周期机制；原 ZIP 兼容仍是独立的桌面专项。
 
 ## MoeKoe 的真实执行链路
 
@@ -49,17 +49,16 @@ Electron 官方也明确仅实现 Chrome 扩展 API 的一个子集，扩展必�
 
 当前媒体 DTO 的 `source` 固定为 `library`，播放地址限制为 `/api/runtime/music/tracks/…`（[types/music.ts](../../src/types/music.ts)）。加入酷狗或其他数据源会涉及曲目身份、服务凭证、schema 和媒体代理变更，不能通过让插件直接返回任意 URL 绕过现有约束。
 
-## 最小实施方案：先适配功能
+## 已落地的最小实现
 
-以下均为拟议文件和接口，当前尚不存在对应实现。
+1. [ports.ts](../../src/features/MusicPlayer/ports.ts) 实现账户会话范围的 `MusicPlayerPort`。`getSnapshot()` 返回当前曲目元数据、播放状态、进度、时长、音量、模式、账户与当前歌词的深冻结副本；`subscribe(listener)` 返回取消函数；`command()` 严格校验 `play/pause/previous/next/seek/setVolume` 及其字段。端口不暴露媒体地址、完整队列、HTMLAudioElement 或可变 store，命令直接交给同一个 AudioEngine。账户往返也不会恢复旧端口权限。
+2. [plugins/runtime.ts](../../src/features/MusicPlayer/plugins/runtime.ts) 的 `MusicPluginHost` 直接使用 `@lobechat/cordis-foundation` 导出的真实 `Context`。每次激活创建独立上下文，先 `provide('music.player', …)` 与 `provide('music.lyrics', …)`，再加载固定、随应用打包的歌词插件，等待原生 Fiber 完成并校验激活状态。歌词插件获得的命令能力进一步收窄为 `seek`；没有远程插件地址或任意模块执行入口。
+3. [plugins/lyrics-plugin.ts](../../src/features/MusicPlayer/plugins/lyrics-plugin.ts) 声明上述两个服务依赖，通过 `ctx.effect()` 拥有端口订阅，并向 `LyricsViewSlot` 发布不可变歌词视图。逐行高亮与点击跳转由该视图提供；跳转前核对当前曲目和歌词行，卸载时取消订阅并清空自己的槽位。[LyricsPanel.tsx](../../src/features/MusicPlayer/plugins/LyricsPanel.tsx) 用 React 渲染正式歌词槽，不访问 MoeKoe DOM 或框架私有实例。
+4. [MusicPlayer/context.tsx](../../src/features/MusicPlayer/context.tsx) 在常驻 MusicPlayerProvider 中持有宿主与现有引擎。插件启停和 SPA 页面切换不创建第二个媒体元素；禁用插件清空歌词展示并释放插件订阅，保留引擎中的歌词和正在进行的播放。插件依赖订阅与端口自身的账户监视订阅分别清理：端口会话在禁用、换号或宿主停止时同步撤销。
+5. [MusicPluginSettings.tsx](../../src/features/MusicPlayer/plugins/MusicPluginSettings.tsx) 提供内置歌词插件开关、读取/歌词跳转能力说明、启动失败重试与存储失败提示。开关保存在 `qingzhou:music:plugins:v1:<编码后的账户 ID>`，默认启用；账号切换后读取对应账户的设置。启动失败时可通过新的 Fiber 重试。
+6. 换号、关闭或停止宿主时，先同步撤销旧端口和激活权限，再让 Cordis 异步完成资源清理。旧视图、端口、迟到启动和槽位回调不能写入新激活。Cordis 根 Fiber 的 `dispose()` 实际具有重启语义，因此宿主清理后丢弃旧 Context；React StrictMode 的 cleanup/setup 可在同一宿主上重新启动。媒体停止与账户数据清理仍由 `AudioEngine.setAccount()` 负责。
 
-1. 在 `src/features/MusicPlayer/ports.ts` 定义 `MusicPlayerPort`，由 `AudioEngine` 的薄适配器实现。`snapshot()` 只返回当前曲目、播放状态、进度、时长、音量、模式和当前歌词；`subscribe(listener)` 返回取消函数；`command()` 使用严格枚举 `play/pause/previous/next/seek/setVolume`。命令直接调用现有 engine，播放成功仍由媒体事件决定。端口不暴露 HTMLAudioElement、整个 store 或任意执行函数。
-2. 从一个受信任、无原生程序依赖的功能开始，例如歌词展示或听歌时长。新组件订阅上述端口，用 React 正式槽位渲染；不访问 MoeKoe CSS 类名或 React/Vue 私有实例。扩展卸载仅取消订阅并移除自己的界面，保持主播放器继续播放。
-3. 如果该功能需要服务端能力，写应用内受信任的 `create…Plugin()`，沿现有 music runtime 的固定 modules/profile 装配。数据源适配继续实现 `MusicProvider`；调用级凭证和 user scope 由认证入口提供，取消信号一直传到底层请求。首个验证仍用现有账户音频库，避免同时引入新音乐源。
-4. 需要原生 Cordis 服务的长连接适配器用 `ctx.effect()` 注册取消函数、事件监听移除和连接关闭。服务端 Fiber、浏览器引擎和 Electron 主进程分别在自己的进程中拥有资源；跨进程采用带 schema 的消息，不能跨进程传 Cordis Context 或函数。
-5. 账号改变时撤销旧端口会话、停止其订阅/连接并递增 generation；迟到命令和事件不得作用于新账号。前端已有 `AudioEngine.setAccount()` 继续作为媒体停止与清理的唯一入口。
-
-这一步可复用 Cordis 生命周期和清舟的媒体能力，交付的是清舟原生插件功能。它不宣称兼容原 MoeKoe ZIP，也不需要先建设插件市场。
+当前交付的是清舟原生歌词插件，使用现有账户音频库与本地导入的 LRC，没有新增音乐源或服务端音乐操作。后续如增加数据源，仍需实现 `MusicProvider` 并沿服务端受信任 modules/profile、认证 scope 与取消信号接入；长连接或桌面资源应由各自进程中的 Cordis Fiber 拥有，跨进程传带 schema 的消息，不能传递 Context 或函数。
 
 ## 若以后明确要求运行原插件 ZIP
 
@@ -71,10 +70,16 @@ Electron 官方也明确仅实现 Chrome 扩展 API 的一个子集，扩展必�
 - Cordis 的宿主适配插件可在 `apply()` 中加载扩展并登记资源清理。卸载顺序为拒绝新命令、终止请求/订阅、停止并等待本地进程、关闭 bridge/popup、移除该扩展、撤销相关 IPC。取消/升级失败保留旧版本；工具 staging 无法自动回滚 Chromium 会话或 EXE 的副作用。
 - 安装还需要独立的快照和包校验、解压路径/体积限制、允许来源、版本回滚。市场 `networkAccess/fileAccess/binaryContent/storageAccess` 是静态识别结果，不是运行时隔离保证。native host 需单独的平台支持及用户授予能力，不能在云端服务器替代用户桌面执行。
 
-## 后续验收边界
+## 验收记录与后续边界
+
+2026-11-08 本轮定向验证：受控端口测试 10 项、原生 Cordis 宿主/歌词运行时测试 6 项、Studio UI 测试 2 项通过。覆盖深只读投影、严格命令、账户往返永久撤销、订阅清理、插件卸载不停止播放、权限收窄、开关分账户持久化、StrictMode 式重启、旧账户延迟启动隔离，以及启动失败重试与存储异常。
+
+真实 Chrome 回归已通过：浏览器直接加载 Cordis，真实音频播放时关闭插件不中断且 audio 实例仍为 1；跨页保留开关；重新启用恢复歌词；刷新恢复停用偏好；退出账号清空插件状态。同时复验既有拖动、队列、歌词跳转、播放恢复和窄屏布局。合计 81 项相关测试通过，另通过全项目类型检查、ESLint、Stylelint 与格式检查。
+
+本地 `localhost:3010/music` 使用已登录账号与现有试听片段完成页面验证：歌词插件启停、停用时胶囊继续播放、重新启用后点击歌词跳至 0:08 均正常；保留播放器预览。此结论适用于本地预览与本轮测试环境，未执行生产部署或独立手机路由联调。
 
 - 对原生端口：两个订阅者共用一个 audio 实例；跨页播放不中断；移除扩展后监听/定时器归零且核心播放继续；账号切换和取消后迟到消息失效；真实媒体事件与端口状态一致。
 - 对服务端适配器：沿用用户隔离、输入/输出 schema、调用取消与插件租约测试；新增源另外验证代理的 Range、身份和凭证不泄露。
 - 对原 ZIP 宿主：每个选定插件独立验收 API 子集、页面/路由依赖、隔离会话、重启恢复、卸载清理及目标操作系统。仅看到插件“已加载”不能算功能兼容。
 
-本研究未运行新增测试，也没有将上述方案标记为已实现。现有音乐 UI 与播放器验收记录见 [music-m2.md](./music-m2.md)。
+现有音乐 UI 与播放器验收记录见 [music-m2.md](./music-m2.md)。原 ZIP 宿主部分仍为后续设计，没有实现或兼容性验收结论。

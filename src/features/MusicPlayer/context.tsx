@@ -11,6 +11,8 @@ import {
 import { useStore } from 'zustand';
 
 import { AudioEngine, type PlayerState } from './engine';
+import { MusicPluginsProvider } from './plugins/context';
+import { MusicPluginHost } from './plugins/runtime';
 
 const EngineContext = createContext<AudioEngine | null>(null);
 
@@ -23,16 +25,27 @@ export function MusicPlayerProvider({
   userId: string | null;
 }>) {
   const [engine] = useState(() => supplied ?? new AudioEngine());
+  const [plugins] = useState(() => new MusicPluginHost(engine));
   useLayoutEffect(() => {
     void engine.setAccount(userId);
   }, [engine, userId]);
   useLayoutEffect(() => () => engine.dispose(), [engine]);
+  useLayoutEffect(() => {
+    void plugins.start();
+    return () => {
+      void plugins.stop();
+    };
+  }, [plugins]);
   useEffect(() => {
     const flush = () => engine.flush();
     window.addEventListener('pagehide', flush);
     return () => window.removeEventListener('pagehide', flush);
   }, [engine]);
-  return <EngineContext value={engine}>{children}</EngineContext>;
+  return (
+    <EngineContext value={engine}>
+      <MusicPluginsProvider host={plugins}>{children}</MusicPluginsProvider>
+    </EngineContext>
+  );
 }
 
 export function useAudioEngine() {

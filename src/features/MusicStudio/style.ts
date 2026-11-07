@@ -129,7 +129,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     min-width: 0;
 
-    @media (width <= 680px) {
+    @media (width <= 800px) {
       flex-wrap: wrap;
       gap: 14px;
     }
@@ -149,10 +149,10 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
   `,
   tabs: css`
     display: flex;
-    gap: 28px;
+    gap: 24px;
     align-items: center;
 
-    @media (width <= 680px) {
+    @media (width <= 800px) {
       justify-content: center;
       order: 3;
       width: 100%;
@@ -521,103 +521,6 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
         color: white !important;
         background: rgb(255 255 255 / 7%) !important;
       }
-    }
-  `,
-  lyrics: css`
-    scrollbar-width: none;
-
-    position: absolute;
-    inset-block: 12px 0;
-    inset-inline: 0;
-
-    overflow: auto;
-    overscroll-behavior: contain;
-
-    box-sizing: border-box;
-    padding-block: 100px 180px;
-    padding-inline: 16px;
-
-    text-align: center;
-
-    mask-image: linear-gradient(transparent, #000 12%, #000 84%, transparent);
-
-    &::-webkit-scrollbar {
-      display: none;
-    }
-
-    &[data-empty='true'] {
-      display: grid;
-      place-items: center;
-      padding-block: 50px;
-    }
-
-    p {
-      scroll-margin-block: 100px;
-
-      margin-block: 0 34px;
-      margin-inline: 0;
-
-      font-size: clamp(22px, 2.3vw, 34px);
-      font-weight: 500;
-      line-height: 1.7;
-      color: rgb(255 255 255 / 56%);
-      overflow-wrap: anywhere;
-
-      transition: color 0.3s ease;
-
-      &[aria-current='true'] {
-        color: var(--music-accent);
-      }
-    }
-
-    button {
-      cursor: pointer;
-
-      width: 100%;
-      padding: 0;
-      border: 0;
-
-      font: inherit;
-      color: inherit;
-
-      background: transparent;
-
-      &:hover {
-        color: white;
-      }
-    }
-
-    @media (width <= 680px) {
-      padding-block: 70px 100px;
-      padding-inline: 0;
-
-      p {
-        margin-block-end: 24px;
-        font-size: 23px;
-      }
-    }
-
-    @media (prefers-reduced-motion: reduce) {
-      p {
-        transition: none;
-      }
-    }
-  `,
-  emptyLyrics: css`
-    max-width: 340px;
-
-    p {
-      margin-block-end: 18px;
-      font-size: clamp(22px, 2.3vw, 32px);
-      font-weight: 400;
-      color: rgb(255 255 255 / 76%);
-    }
-
-    span {
-      display: block;
-      font-size: 13px;
-      line-height: 1.9;
-      color: rgb(255 255 255 / 36%);
     }
   `,
   collection: css`

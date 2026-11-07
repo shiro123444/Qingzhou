@@ -22,20 +22,27 @@ import {
   Volume2,
   VolumeX,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 
 import { useAudioEngine, useMusicPlayer } from '@/features/MusicPlayer/context';
 import { type RepeatMode } from '@/features/MusicPlayer/engine';
-import { activeLyric, formatTime, MAX_LRC_BYTES } from '@/features/MusicPlayer/lyrics';
+import { formatTime, MAX_LRC_BYTES } from '@/features/MusicPlayer/lyrics';
+import { useMusicPluginState } from '@/features/MusicPlayer/plugins/context';
+import LyricsPanel from '@/features/MusicPlayer/plugins/LyricsPanel';
+import MusicPluginSettings from '@/features/MusicPlayer/plugins/MusicPluginSettings';
 import { type MusicTrack } from '@/types/music';
 
 import { styles } from './style';
 
+const views = ['player', 'library', 'queue', 'plugins'] as const;
+type StudioView = (typeof views)[number];
+
 export default function MusicStudio() {
   const { t } = useTranslation('music');
   const engine = useAudioEngine();
+  const lyricsStatus = useMusicPluginState((state) => state.status);
   const s = useMusicPlayer((state) => state);
   const [library, setLibrary] = useState<{ tracks: MusicTrack[]; userId: string | null }>({
     tracks: [],
@@ -43,22 +50,15 @@ export default function MusicStudio() {
   });
   const tracks = library.userId === s.userId ? library.tracks : [];
   const [query, setQuery] = useState('');
-  const [view, setView] = useState<'player' | 'library' | 'queue'>('player');
+  const [view, setView] = useState<StudioView>('player');
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<'requestError' | 'uploadError' | 'lyricError' | null>(null);
   const [revision, setRevision] = useState(0);
   const upload = useRef<HTMLInputElement>(null);
   const lyricInput = useRef<HTMLInputElement>(null);
-  const highlight = useRef<HTMLParagraphElement>(null);
-  const lyricScroll = useRef<HTMLDivElement>(null);
   const lifetime = useRef<AbortController | null>(null);
   const active = s.queue.find((item) => item.id === s.activeId);
-  const lines = useMemo(
-    () => (s.activeId ? (s.lyrics[s.activeId]?.lines ?? []) : []),
-    [s.activeId, s.lyrics],
-  );
-  const currentLine = activeLyric(lines, s.positionMs);
   const playing = ['playing', 'buffering', 'loading'].includes(s.status);
   const activeIndex = s.queue.findIndex((track) => track.id === s.activeId);
   const displayedTracks = view === 'library' ? tracks : s.queue;
@@ -103,19 +103,6 @@ export default function MusicStudio() {
       controller.abort();
     };
   }, [engine, query, revision, s.userId]);
-
-  useEffect(() => {
-    const container = lyricScroll.current;
-    const line = highlight.current;
-    if (view !== 'player' || !container || !line) return;
-    container.scrollTop = Math.max(
-      0,
-      container.scrollTop +
-        line.getBoundingClientRect().top -
-        container.getBoundingClientRect().top -
-        (container.clientHeight - line.clientHeight) / 2,
-    );
-  }, [currentLine, lines, s.activeId, view]);
 
   async function uploadAudio(file?: File) {
     const controller = lifetime.current;
@@ -169,7 +156,7 @@ export default function MusicStudio() {
             <h1>{t('title')}</h1>
           </div>
           <div aria-label={t('viewNavigation')} className={styles.tabs} role="tablist">
-            {(['player', 'library', 'queue'] as const).map((item) => {
+            {views.map((item) => {
               const label = t(item === 'player' ? 'nowPlaying' : item);
               return (
                 <button
@@ -185,16 +172,16 @@ export default function MusicStudio() {
                   onKeyDown={(event) => {
                     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
                     event.preventDefault();
-                    const items = ['player', 'library', 'queue'] as const;
-                    const index = items.indexOf(item);
+                    const index = views.indexOf(item);
                     const next =
                       event.key === 'Home'
                         ? 0
                         : event.key === 'End'
-                          ? 2
-                          : (index + (event.key === 'ArrowRight' ? 1 : -1) + 3) % 3;
-                    setView(items[next]);
-                    document.getElementById('music-tab-' + items[next])?.focus();
+                          ? views.length - 1
+                          : (index + (event.key === 'ArrowRight' ? 1 : -1) + views.length) %
+                            views.length;
+                    setView(views[next]);
+                    document.getElementById('music-tab-' + views[next])?.focus();
                   }}
                 >
                   {label}
@@ -381,7 +368,7 @@ export default function MusicStudio() {
           <section className={styles.lyricPanel}>
             <div className={styles.lyricToolbar}>
               <Button
-                disabled={!active}
+                disabled={!active || lyricsStatus !== 'active'}
                 size="small"
                 type="text"
                 onClick={() => lyricInput.current?.click()}
@@ -389,36 +376,14 @@ export default function MusicStudio() {
                 {t('importLrc')}
               </Button>
             </div>
-            <div
-              aria-label={t('lyrics')}
-              className={styles.lyrics}
-              data-empty={lines.length === 0}
-              ref={lyricScroll}
-            >
-              {lines.length === 0 ? (
-                <div className={styles.emptyLyrics}>
-                  <p>{t('emptyLyrics')}</p>
-                  <span>{t('lyricHint')}</span>
-                </div>
-              ) : (
-                lines.map((line, index) => (
-                  <p
-                    aria-current={index === currentLine}
-                    key={String(index) + ':' + line.timeMs}
-                    ref={index === currentLine ? highlight : undefined}
-                  >
-                    <button onClick={() => engine.seek(line.timeMs)}>{line.text || '♪'}</button>
-                  </p>
-                ))
-              )}
-            </div>
+            <LyricsPanel visible={view === 'player'} />
           </section>
         </div>
 
         <section
           aria-labelledby={view === 'queue' ? 'music-tab-queue' : 'music-tab-library'}
           className={styles.collection}
-          hidden={view === 'player'}
+          hidden={view !== 'library' && view !== 'queue'}
           id={'music-view-' + (view === 'queue' ? 'queue' : 'library')}
           role="tabpanel"
         >
@@ -570,6 +535,14 @@ export default function MusicStudio() {
               </li>
             ))}
           </ol>
+        </section>
+        <section
+          aria-labelledby="music-tab-plugins"
+          hidden={view !== 'plugins'}
+          id="music-view-plugins"
+          role="tabpanel"
+        >
+          <MusicPluginSettings />
         </section>
       </div>
     </main>

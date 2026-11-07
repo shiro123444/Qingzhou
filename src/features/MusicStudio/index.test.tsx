@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import i18n from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
@@ -69,4 +69,41 @@ it('discards another account search even when its transport completes after canc
   view.rerender(page(null));
   expect(screen.queryByText('Bob audio')).not.toBeInTheDocument();
   expect(screen.getByText(music.login)).toBeInTheDocument();
+});
+
+it('lets the lyrics plugin be disabled and enabled without changing playback', async () => {
+  i18n.addResourceBundle('zh-CN', 'music', music);
+  const engine = new AudioEngine({
+    client: {
+      search: vi.fn().mockResolvedValue([]),
+      track: vi.fn(),
+      resolve: vi.fn(),
+      uploadAudio: vi.fn(),
+    },
+    storage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+  });
+  const play = vi.spyOn(engine, 'play');
+  const pause = vi.spyOn(engine, 'pause');
+  render(
+    <MemoryRouter>
+      <I18nextProvider i18n={i18n}>
+        <MusicPlayerProvider engine={engine} userId="lyrics-ui-test">
+          <MusicStudio />
+        </MusicPlayerProvider>
+      </I18nextProvider>
+    </MemoryRouter>,
+  );
+
+  fireEvent.click(screen.getByRole('tab', { name: music.plugins }));
+  expect(await screen.findByText(music.pluginEnabled)).toBeVisible();
+  fireEvent.click(screen.getByRole('switch', { name: music.lyricsPlugin }));
+  expect(await screen.findByText(music.pluginDisabled)).toBeVisible();
+  expect(screen.getByRole('switch', { name: music.lyricsPlugin })).not.toBeChecked();
+
+  fireEvent.click(screen.getByRole('tab', { name: music.nowPlaying }));
+  expect(screen.getByText(music.lyricsPluginDisabled)).toBeVisible();
+  fireEvent.click(screen.getByRole('button', { name: music.enableLyricsPlugin }));
+  expect(await screen.findByText(music.emptyLyrics)).toBeVisible();
+  expect(play).not.toHaveBeenCalled();
+  expect(pause).not.toHaveBeenCalled();
 });

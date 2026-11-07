@@ -1,7 +1,7 @@
 /** Browser-only fixture: real M2 components and M1 client, fixture-owned HTTP storage/auth. */
 import { ThemeProvider } from '@lobehub/ui';
 import i18n from 'i18next';
-import { StrictMode, useState } from 'react';
+import { StrictMode, useLayoutEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { BrowserRouter, Link, Route, Routes } from 'react-router-dom';
@@ -9,6 +9,8 @@ import { BrowserRouter, Link, Route, Routes } from 'react-router-dom';
 import { MusicPlayerProvider } from '@/features/MusicPlayer/context';
 import { AudioEngine } from '@/features/MusicPlayer/engine';
 import PlayerShell from '@/features/MusicPlayer/PlayerShell';
+import { useMusicPlugins } from '@/features/MusicPlayer/plugins/context';
+import { type MusicPluginHost } from '@/features/MusicPlayer/plugins/runtime';
 import MusicStudio from '@/features/MusicStudio';
 import music from '@/locales/default/music';
 import { MusicClient } from '@/services/music/client';
@@ -24,6 +26,7 @@ const test = {
   audio: undefined as HTMLAudioElement | undefined,
   audioCount: 0,
   engine: undefined as AudioEngine | undefined,
+  plugins: undefined as MusicPluginHost | undefined,
 };
 const client = new MusicClient(fetch, {
   upload: async (file, controller) => {
@@ -53,6 +56,14 @@ const engine = new AudioEngine({
 test.engine = engine;
 Object.assign(window, { musicTest: test });
 
+function PluginProbe() {
+  const plugins = useMusicPlugins();
+  useLayoutEffect(() => {
+    test.plugins = plugins;
+  }, [plugins]);
+  return null;
+}
+
 function Fixture() {
   const [userId, setUserId] = useState<string | null>('alice');
   return (
@@ -72,6 +83,7 @@ function Fixture() {
               <button onClick={() => setUserId(null)}>Sign out</button>
             </nav>
             <MusicPlayerProvider engine={engine} userId={userId}>
+              <PluginProbe />
               <PlayerShell>
                 <Routes>
                   <Route element={<MusicStudio />} path="/music" />

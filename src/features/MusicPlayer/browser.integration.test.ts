@@ -14,6 +14,7 @@ import { musicByteRange, OwnedFileMusicProvider } from '@/server/runtime/music/o
 import { createMusicRuntime } from '@/server/runtime/music/runtime';
 
 import { type AudioEngine } from './engine';
+import { type MusicPluginHost } from './plugins/runtime';
 
 // Playwright is an existing e2e workspace dependency. Keep it out of the production bundle.
 interface Locator {
@@ -53,7 +54,12 @@ interface BrowserPage {
 }
 declare global {
   interface Window {
-    musicTest: { audio?: HTMLAudioElement; audioCount: number; engine: AudioEngine };
+    musicTest: {
+      audio?: HTMLAudioElement;
+      audioCount: number;
+      engine: AudioEngine;
+      plugins: MusicPluginHost;
+    };
   }
 }
 
@@ -477,9 +483,31 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
         () => window.musicTest.engine.store.getState().status === 'playing',
       );
       const before = await page.evaluate(() => window.musicTest.audio!.currentTime);
+      await page.getByRole('tab', { name: music.plugins, exact: true }).click();
+      await page.getByRole('switch', { name: music.lyricsPlugin, exact: true }).click();
+      await page.waitForFunction(
+        () => window.musicTest.plugins.store.getState().status === 'disabled',
+      );
+      expect(
+        await page.evaluate(() => ({
+          paused: window.musicTest.audio!.paused,
+          count: window.musicTest.audioCount,
+          lyrics: window.musicTest.plugins.store.getState().lyrics,
+        })),
+      ).toEqual({ paused: false, count: 1, lyrics: null });
       await page.getByRole('link', { name: 'Chat', exact: true }).click();
       await page.getByRole('link', { name: 'Presentation', exact: true }).click();
       await page.getByRole('link', { name: 'Music', exact: true }).click();
+      expect(await page.evaluate(() => window.musicTest.plugins.store.getState().enabled)).toBe(
+        false,
+      );
+      await page.getByRole('button', { name: music.enableLyricsPlugin, exact: true }).click();
+      await page.waitForFunction(
+        () => window.musicTest.plugins.store.getState().status === 'active',
+      );
+      expect(
+        await page.evaluate(() => window.musicTest.plugins.store.getState().lyrics?.lines.length),
+      ).toBe(3);
       expect(
         await page.evaluate(() => ({
           count: window.musicTest.audioCount,
@@ -555,6 +583,18 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       await page.locator('[data-capsule-body]').press('ArrowLeft');
       const beforeRefresh = await capsuleBounds();
       await page.evaluate(() => window.musicTest.engine.flush());
+      await page.getByRole('tab', { name: music.plugins, exact: true }).click();
+      await page.getByRole('switch', { name: music.lyricsPlugin, exact: true }).click();
+      await page.waitForFunction(
+        () => window.musicTest.plugins.store.getState().status === 'disabled',
+      );
+      await page.screenshot({
+        fullPage: true,
+        path: '.data/music-m2-validation/plugins-mobile.png',
+      });
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+      ).toBe(true);
       await page.reload();
       await page.waitForFunction(
         () => window.musicTest?.engine.store.getState().status === 'paused',
@@ -567,6 +607,13 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
           position: window.musicTest.engine.store.getState().positionMs,
         })),
       ).toEqual({ count: 0, queue: 2, position: 2000 });
+      expect(await page.evaluate(() => window.musicTest.plugins.store.getState().enabled)).toBe(
+        false,
+      );
+      await page.getByRole('button', { name: music.enableLyricsPlugin, exact: true }).click();
+      await page.waitForFunction(
+        () => window.musicTest.plugins.store.getState().status === 'active',
+      );
       await page.getByRole('button', { name: 'Play', exact: true }).click();
       await page.waitForFunction(
         () => window.musicTest.engine.store.getState().status === 'playing',
@@ -587,6 +634,11 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
           src: window.musicTest.audio!.getAttribute('src'),
         })),
       ).toEqual({ paused: true, queue: 0, src: null });
+      expect(await page.evaluate(() => window.musicTest.plugins.store.getState())).toMatchObject({
+        userId: null,
+        status: 'disabled',
+        lyrics: null,
+      });
       expect(errors).toEqual([]);
     } catch (error) {
       await mkdir('.data/music-m2-validation', { recursive: true });
