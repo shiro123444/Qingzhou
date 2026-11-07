@@ -1,3 +1,5 @@
+import { WechatApiRejection } from '@lobechat/chat-adapter-wechat';
+import { ReplyUnavailableError } from '../../replyBudget';
 import type { WechatRawMessage } from '@lobechat/chat-adapter-wechat';
 import {
   createWechatAdapter,
@@ -408,13 +410,10 @@ class WechatGatewayClient implements PlatformClient {
   getMessenger(platformThreadId: string): PlatformMessenger {
     const targetId = extractChatId(platformThreadId);
 
-    // Resolve context token: in-memory cache first, then Redis fallback.
+    // Resolve the latest shared token before each visible send.
     // This allows queue-mode callbacks (fresh client instances) to recover
     // the token that was persisted by the long-polling instance.
     const resolveToken = async (): Promise<string> => {
-      const cached = this.contextTokens.get(targetId);
-      if (cached) return cached;
-
       if (this.context.redisClient) {
         const redisKey = this.contextTokenRedisKey(targetId);
         const token = await this.context.redisClient.get(redisKey);
@@ -424,26 +423,40 @@ class WechatGatewayClient implements PlatformClient {
         }
       }
 
-      return '';
+      return this.context.redisClient ? '' : (this.contextTokens.get(targetId) ?? '');
+    };
+    const requireToken = async () => {
+      const token = await resolveToken();
+      if (!token) throw new ReplyUnavailableError('reply_context_missing');
+      return token;
+    };
+    const send = async (run: () => Promise<unknown>) => {
+      try {
+        await run();
+      } catch (error) {
+        if (error instanceof WechatApiRejection)
+          throw new ReplyUnavailableError('platform_rejected');
+        throw error;
+      }
     };
 
     return {
       prepareFile: async ({ bytes, filename, deliveryId }) => {
-        const token = await resolveToken();
-        if (!token) throw new Error('WeChat file replies require a conversation context token');
+        await requireToken();
         const item = await this.api.uploadFile(targetId, bytes, filename);
         return async () => {
-          await this.api.sendFile(targetId, item, token, deliveryId);
+          const token = await requireToken();
+          await send(() => this.api.sendFile(targetId, item, token, deliveryId));
         };
       },
       createMessage: async (content) => {
-        const token = await resolveToken();
-        await this.api.sendMessage(targetId, content, token);
+        const token = await requireToken();
+        await send(() => this.api.sendTextChunk(targetId, content, token));
       },
       editMessage: async (_messageId, content) => {
         // WeChat doesn't support editing — send a new message
-        const token = await resolveToken();
-        await this.api.sendMessage(targetId, content, token);
+        const token = await requireToken();
+        await send(() => this.api.sendTextChunk(targetId, content, token));
       },
       removeReaction: () => Promise.resolve(),
       triggerTyping: async () => {

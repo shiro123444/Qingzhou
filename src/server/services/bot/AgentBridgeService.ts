@@ -846,7 +846,13 @@ export class AgentBridgeService {
       // reply as its own message instead of editing.
       await safeSideEffect(() => thread.startTyping(), 'startTyping (executeWithWebhooks)');
       await safeSideEffect(
-        () => thread.post(renderStart(userMessage.text, { lng: replyLocale, timezone })),
+        () =>
+          thread.post(
+            renderStart(userMessage.text, { lng: replyLocale, timezone }) +
+              (['qq', 'wechat'].includes(botContext?.platformThreadId?.split(':')[0] ?? '')
+                ? '\n结果会保留在清舟，可发送 /result 取回。'
+                : ''),
+          ),
         'post ack (no-edit platform)',
       );
     } else {

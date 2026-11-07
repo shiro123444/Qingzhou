@@ -1,3 +1,4 @@
+import { ChannelTaskModel } from '@/database/models/channelTask';
 import { TRPCError } from '@trpc/server';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
@@ -93,6 +94,69 @@ function accessSettings(settings: Provider['settings']): ChannelAccessSettings {
 }
 
 export const channelRouter = router({
+  tasks: procedure
+    .input(z.object({ providerId: z.string().min(1).max(100) }))
+    .query(async ({ ctx, input }) => {
+      const [provider] = await ownedProviders(ctx.serverDB, ctx.userId, input.providerId);
+      if (!provider) throw new TRPCError({ code: 'NOT_FOUND' });
+      const tasks = await new ChannelTaskModel(ctx.serverDB, ctx.userId).list(
+        provider.platform,
+        provider.applicationId,
+      );
+      return tasks
+        .filter((task) => task.agentId === provider.agentId)
+        .map(({ id, operationId, completed, delivery, createdAt, updatedAt }) => ({
+          id,
+          operationId,
+          completed,
+          delivery,
+          createdAt,
+          updatedAt,
+        }));
+    }),
+  task: procedure
+    .input(
+      z.object({
+        providerId: z.string().min(1).max(100),
+        taskId: z.string().regex(/^[a-f0-9]{64}$/),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const [provider] = await ownedProviders(ctx.serverDB, ctx.userId, input.providerId);
+      if (!provider) throw new TRPCError({ code: 'NOT_FOUND' });
+      const [task] = await new ChannelTaskModel(ctx.serverDB, ctx.userId).list(
+        provider.platform,
+        provider.applicationId,
+        undefined,
+        input.taskId,
+      );
+      if (!task || task.agentId !== provider.agentId) throw new TRPCError({ code: 'NOT_FOUND' });
+      const {
+        id,
+        operationId,
+        completed,
+        content,
+        artifactIds,
+        delivery,
+        reason,
+        createdAt,
+        updatedAt,
+        topicId,
+      } = task;
+      return {
+        id,
+        operationId,
+        completed,
+        content,
+        artifactIds,
+        delivery,
+        reason,
+        createdAt,
+        updatedAt,
+        topicId,
+        provider: await summarize(provider),
+      };
+    }),
   list: procedure.query(async ({ ctx }): Promise<ChannelProviderSummary[]> => {
     const providers = await ownedProviders(ctx.serverDB, ctx.userId);
     return Promise.all(providers.map(summarize));

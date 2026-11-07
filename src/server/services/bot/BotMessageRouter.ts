@@ -1,3 +1,5 @@
+import { ChannelTaskModel } from '@/database/models/channelTask';
+import { withChannelReplyContext } from './replyBudget';
 import { createIoRedisState } from '@chat-adapter/state-ioredis';
 import { DEFAULT_BOT_DEBOUNCE_MS } from '@lobechat/const';
 import { Chat, ConsoleLogger, type Message, type MessageContext } from 'chat';
@@ -1022,295 +1024,302 @@ export class BotMessageRouter {
       return { count: participants.length + 1, isNewParticipant: true };
     };
 
-    bot.onNewMention(async (thread, message, context?: MessageContext) => {
-      const replyLocale = detectReplyLocale(message);
-      // Record the original @mentioner so the first follow-up in
-      // `onSubscribedMessage` recognises them as participant #1 instead of
-      // a "newcomer" — otherwise count would be 0 at that moment and the
-      // single-user-relaxation logic wouldn't kick in.
-      await trackThreadParticipant(thread, message);
+    bot.onNewMention(
+      withChannelReplyContext(async (thread, message, context?: MessageContext) => {
+        const replyLocale = detectReplyLocale(message);
+        // Record the original @mentioner so the first follow-up in
+        // `onSubscribedMessage` recognises them as participant #1 instead of
+        // a "newcomer" — otherwise count would be 0 at that moment and the
+        // single-user-relaxation logic wouldn't kick in.
+        await trackThreadParticipant(thread, message);
 
-      // Gate first — must run before tryDispatch so a /command from a
-      // non-allowlisted sender can't slip through and side-effect.
-      if (
-        !(await passGatesOrNotify(
-          thread,
-          message.author,
-          replyLocale,
-          'onNewMention',
-          commandName(message.text),
-        ))
-      ) {
-        return;
-      }
-
-      if (await tryDispatch(thread, message.text, message.author, replyLocale)) return;
-      if (await tryAnswerInteraction(thread, message)) return;
-
-      log(
-        'onNewMention raw: agent=%s, platform=%s, msgId=%s, textLen=%d, attachments=%o, skipped=%d',
-        agentId,
-        platform,
-        message.id,
-        message.text?.length ?? 0,
-        summarizeMessageAttachments(message),
-        context?.skipped?.length ?? 0,
-      );
-      if (context?.skipped?.length) {
-        log(
-          'onNewMention skipped messages: %o',
-          context.skipped.map((m) => ({
-            attachments: summarizeMessageAttachments(m),
-            id: m.id,
-            textLen: m.text?.length ?? 0,
-          })),
-        );
-      }
-
-      const merged = BotMessageRouter.mergeSkippedMessages(message, context);
-      void emitAgentSignalSourceEvent(
-        {
-          payload: {
-            agentId,
-            applicationId,
-            platform,
-            message: merged.text,
-            platformThreadId: thread.id,
-          },
-          sourceId: merged.id,
-          sourceType: 'bot.message.merged',
-        },
-        {
-          agentId,
-          db: serverDB,
-          userId,
-        },
-        { ignoreError: true },
-      );
-
-      log(
-        'onNewMention: agent=%s, platform=%s, author=%s, thread=%s, merged=%d, mergedAttachments=%d',
-        agentId,
-        platform,
-        message.author.userName,
-        thread.id,
-        (context?.skipped?.length ?? 0) + 1,
-        ((merged as any).attachments as unknown[] | undefined)?.length ?? 0,
-      );
-      try {
-        await new AgentBridgeService(serverDB, userId).handleMention(thread, merged, {
-          agentId,
-          botContext: await resolveBotContext(merged.author?.userId, thread.id),
-          charLimit,
-          client,
-          displayToolCalls,
-          replyLocale,
-        });
-      } catch (error) {
-        if (inboundExecution.getStore()) throw error;
-        const operationId = AgentBridgeService.getActiveOperationId(thread.id);
-        log(
-          'onNewMention: unhandled error from handleMention: operationId=%s, %O',
-          operationId,
-          error,
-        );
-        try {
-          await thread.post({ markdown: renderError(operationId, replyLocale) });
-        } catch {
-          // best-effort notification
+        // Gate first — must run before tryDispatch so a /command from a
+        // non-allowlisted sender can't slip through and side-effect.
+        if (
+          !(await passGatesOrNotify(
+            thread,
+            message.author,
+            replyLocale,
+            'onNewMention',
+            commandName(message.text),
+          ))
+        ) {
+          return;
         }
-      }
-    });
 
-    bot.onSubscribedMessage(async (thread, message, context?: MessageContext) => {
-      if (message.author.isBot === true) return;
-      const replyLocale = detectReplyLocale(message);
+        if (await tryDispatch(thread, message.text, message.author, replyLocale)) return;
+        if (await tryAnswerInteraction(thread, message)) return;
 
-      // Group / channel / thread policy: only respond when the bot is @-mentioned.
-      // DMs are 1:1 conversations, so every message is implicitly addressed to the bot.
-      // Without this guard, the bot would reply to every follow-up in a subscribed
-      // thread — including messages between other users — and hijack the conversation.
-      // Skipped (debounced) messages are also inspected so a mention queued behind a
-      // non-mention still triggers a reply.
-      //
-      // Commands are exempt from the @-mention requirement (Telegram/Feishu users
-      // type `/new` directly without mentioning the bot), but they are NOT exempt
-      // from the access gates below.
-      //
-      // LOBE-8981: a subscribed channel thread with only one human follower
-      // is functionally a private 1:1 with the bot, so the @mention
-      // requirement is dropped while `count <= 1`. Tracked + counted here
-      // regardless of which exemption ultimately fires so the
-      // 1-human-vs-many transition is visible to the announcement gate.
-      const { count: humanCount } = await trackThreadParticipant(thread, message);
-      const isSingleHumanThread = humanCount <= 1;
-      const isAddressedToBot =
-        thread.isDM ||
-        message.isMention === true ||
-        context?.skipped?.some((m) => m.isMention === true) === true ||
-        isSingleHumanThread;
-      const isCommand = looksLikeCommand(message.text);
-      // LOBE-8891: operator-configured keyword match also wakes the bot in a
-      // subscribed group thread. Skipped (debounced) siblings are inspected
-      // too so a keyword queued behind a non-trigger still fires — same
-      // pattern as the mention check above.
-      const matchesWatchKeyword =
-        watchKeywords.length > 0 &&
-        (messageMatchesWatchKeyword(message.text, watchKeywords) ||
-          context?.skipped?.some((m) => messageMatchesWatchKeyword(m.text, watchKeywords)) ===
-            true);
-
-      if (!isAddressedToBot && !isCommand && !matchesWatchKeyword) {
         log(
-          'onSubscribedMessage: skip non-mention in group thread, agent=%s, platform=%s, author=%s, thread=%s',
+          'onNewMention raw: agent=%s, platform=%s, msgId=%s, textLen=%d, attachments=%o, skipped=%d',
           agentId,
           platform,
-          message.author.userName,
-          thread.id,
+          message.id,
+          message.text?.length ?? 0,
+          summarizeMessageAttachments(message),
+          context?.skipped?.length ?? 0,
         );
-        // LOBE-8981: first skip in this thread → tell participants the bot
-        // is now mention-only so newcomers don't think it broke. Dedupe by
-        // thread id so we never announce more than once.
-        if (!thread.isDM && humanCount >= 2) {
-          try {
-            const fresh = await bot
-              .getState()
-              .setIfNotExists(mentionRequiredAnnouncedKey(thread.id), '1', PARTICIPANTS_TTL_MS);
-            if (fresh) {
-              await thread.post(
-                "Multiple people are talking in this thread now. From here on I'll only respond when you @mention me.",
-              );
-            }
-          } catch (error) {
-            log('onSubscribedMessage: mention-mode announcement failed: %O', error);
-          }
-        }
-        return;
-      }
-
-      if (matchesWatchKeyword && !isAddressedToBot && !isCommand) {
-        log(
-          'onSubscribedMessage: keyword match wakes bot, agent=%s, platform=%s, author=%s, thread=%s, keywords=%o',
-          agentId,
-          platform,
-          message.author.userName,
-          thread.id,
-          watchKeywords,
-        );
-      }
-
-      // Gate before tryDispatch so a /command from a non-allowlisted sender
-      // (or in a disabled DM/group scope) cannot side-effect.
-      if (
-        !(await passGatesOrNotify(
-          thread,
-          message.author,
-          replyLocale,
-          'onSubscribedMessage',
-          commandName(message.text),
-        ))
-      ) {
-        return;
-      }
-
-      if (await tryDispatch(thread, message.text, message.author, replyLocale)) return;
-      if (await tryAnswerInteraction(thread, message)) return;
-
-      log(
-        'onSubscribedMessage raw: agent=%s, platform=%s, msgId=%s, textLen=%d, attachments=%o, skipped=%d',
-        agentId,
-        platform,
-        message.id,
-        message.text?.length ?? 0,
-        summarizeMessageAttachments(message),
-        context?.skipped?.length ?? 0,
-      );
-      if (context?.skipped?.length) {
-        log(
-          'onSubscribedMessage skipped messages: %o',
-          context.skipped.map((m) => ({
-            attachments: summarizeMessageAttachments(m),
-            id: m.id,
-            textLen: m.text?.length ?? 0,
-          })),
-        );
-      }
-
-      let merged = BotMessageRouter.mergeSkippedMessages(message, context);
-      // LOBE-8891: when a keyword (and not a mention / DM / command) is what
-      // wakes the bot, prepend the matched entries' operator-authored
-      // instructions to the user message so the agent gets a directive
-      // rather than only the raw chatter. Mentions, DMs, and commands are
-      // skipped on purpose — those flows are user-initiated and should not
-      // have an operator prompt silently injected on top.
-      if (matchesWatchKeyword && !isAddressedToBot && !isCommand) {
-        const applied = BotMessageRouter.applyWatchKeywordInstructions(merged, watchKeywordEntries);
-        merged = applied.merged;
-        if (applied.instructionCount > 0) {
+        if (context?.skipped?.length) {
           log(
-            'onSubscribedMessage: injecting %d watch-keyword instruction(s), agent=%s, platform=%s, thread=%s, prefixLen=%d',
-            applied.instructionCount,
-            agentId,
-            platform,
-            thread.id,
-            applied.prefixLength,
+            'onNewMention skipped messages: %o',
+            context.skipped.map((m) => ({
+              attachments: summarizeMessageAttachments(m),
+              id: m.id,
+              textLen: m.text?.length ?? 0,
+            })),
           );
         }
-      }
-      void emitAgentSignalSourceEvent(
-        {
-          payload: {
-            agentId,
-            applicationId,
-            platform,
-            message: merged.text,
-            platformThreadId: thread.id,
+
+        const merged = BotMessageRouter.mergeSkippedMessages(message, context);
+        void emitAgentSignalSourceEvent(
+          {
+            payload: {
+              agentId,
+              applicationId,
+              platform,
+              message: merged.text,
+              platformThreadId: thread.id,
+            },
+            sourceId: merged.id,
+            sourceType: 'bot.message.merged',
           },
-          sourceId: merged.id,
-          sourceType: 'bot.message.merged',
-        },
-        {
-          agentId,
-          db: serverDB,
-          userId,
-        },
-        { ignoreError: true },
-      );
+          {
+            agentId,
+            db: serverDB,
+            userId,
+          },
+          { ignoreError: true },
+        );
 
-      log(
-        'onSubscribedMessage: agent=%s, platform=%s, author=%s, thread=%s, merged=%d, mergedAttachments=%d',
-        agentId,
-        platform,
-        message.author.userName,
-        thread.id,
-        (context?.skipped?.length ?? 0) + 1,
-        ((merged as any).attachments as unknown[] | undefined)?.length ?? 0,
-      );
-
-      try {
-        await new AgentBridgeService(serverDB, userId).handleSubscribedMessage(thread, merged, {
-          agentId,
-          botContext: await resolveBotContext(merged.author?.userId, thread.id),
-          charLimit,
-          client,
-          displayToolCalls,
-          replyLocale,
-        });
-      } catch (error) {
-        if (inboundExecution.getStore()) throw error;
-        const operationId = AgentBridgeService.getActiveOperationId(thread.id);
         log(
-          'onSubscribedMessage: unhandled error from handleSubscribedMessage: operationId=%s, %O',
-          operationId,
-          error,
+          'onNewMention: agent=%s, platform=%s, author=%s, thread=%s, merged=%d, mergedAttachments=%d',
+          agentId,
+          platform,
+          message.author.userName,
+          thread.id,
+          (context?.skipped?.length ?? 0) + 1,
+          ((merged as any).attachments as unknown[] | undefined)?.length ?? 0,
         );
         try {
-          await thread.post({ markdown: renderError(operationId, replyLocale) });
-        } catch {
-          // best-effort notification
+          await new AgentBridgeService(serverDB, userId).handleMention(thread, merged, {
+            agentId,
+            botContext: await resolveBotContext(merged.author?.userId, thread.id),
+            charLimit,
+            client,
+            displayToolCalls,
+            replyLocale,
+          });
+        } catch (error) {
+          if (inboundExecution.getStore()) throw error;
+          const operationId = AgentBridgeService.getActiveOperationId(thread.id);
+          log(
+            'onNewMention: unhandled error from handleMention: operationId=%s, %O',
+            operationId,
+            error,
+          );
+          try {
+            await thread.post({ markdown: renderError(operationId, replyLocale) });
+          } catch {
+            // best-effort notification
+          }
         }
-      }
-    });
+      }),
+    );
+
+    bot.onSubscribedMessage(
+      withChannelReplyContext(async (thread, message, context?: MessageContext) => {
+        if (message.author.isBot === true) return;
+        const replyLocale = detectReplyLocale(message);
+
+        // Group / channel / thread policy: only respond when the bot is @-mentioned.
+        // DMs are 1:1 conversations, so every message is implicitly addressed to the bot.
+        // Without this guard, the bot would reply to every follow-up in a subscribed
+        // thread — including messages between other users — and hijack the conversation.
+        // Skipped (debounced) messages are also inspected so a mention queued behind a
+        // non-mention still triggers a reply.
+        //
+        // Commands are exempt from the @-mention requirement (Telegram/Feishu users
+        // type `/new` directly without mentioning the bot), but they are NOT exempt
+        // from the access gates below.
+        //
+        // LOBE-8981: a subscribed channel thread with only one human follower
+        // is functionally a private 1:1 with the bot, so the @mention
+        // requirement is dropped while `count <= 1`. Tracked + counted here
+        // regardless of which exemption ultimately fires so the
+        // 1-human-vs-many transition is visible to the announcement gate.
+        const { count: humanCount } = await trackThreadParticipant(thread, message);
+        const isSingleHumanThread = humanCount <= 1;
+        const isAddressedToBot =
+          thread.isDM ||
+          message.isMention === true ||
+          context?.skipped?.some((m) => m.isMention === true) === true ||
+          isSingleHumanThread;
+        const isCommand = looksLikeCommand(message.text);
+        // LOBE-8891: operator-configured keyword match also wakes the bot in a
+        // subscribed group thread. Skipped (debounced) siblings are inspected
+        // too so a keyword queued behind a non-trigger still fires — same
+        // pattern as the mention check above.
+        const matchesWatchKeyword =
+          watchKeywords.length > 0 &&
+          (messageMatchesWatchKeyword(message.text, watchKeywords) ||
+            context?.skipped?.some((m) => messageMatchesWatchKeyword(m.text, watchKeywords)) ===
+              true);
+
+        if (!isAddressedToBot && !isCommand && !matchesWatchKeyword) {
+          log(
+            'onSubscribedMessage: skip non-mention in group thread, agent=%s, platform=%s, author=%s, thread=%s',
+            agentId,
+            platform,
+            message.author.userName,
+            thread.id,
+          );
+          // LOBE-8981: first skip in this thread → tell participants the bot
+          // is now mention-only so newcomers don't think it broke. Dedupe by
+          // thread id so we never announce more than once.
+          if (!thread.isDM && humanCount >= 2) {
+            try {
+              const fresh = await bot
+                .getState()
+                .setIfNotExists(mentionRequiredAnnouncedKey(thread.id), '1', PARTICIPANTS_TTL_MS);
+              if (fresh) {
+                await thread.post(
+                  "Multiple people are talking in this thread now. From here on I'll only respond when you @mention me.",
+                );
+              }
+            } catch (error) {
+              log('onSubscribedMessage: mention-mode announcement failed: %O', error);
+            }
+          }
+          return;
+        }
+
+        if (matchesWatchKeyword && !isAddressedToBot && !isCommand) {
+          log(
+            'onSubscribedMessage: keyword match wakes bot, agent=%s, platform=%s, author=%s, thread=%s, keywords=%o',
+            agentId,
+            platform,
+            message.author.userName,
+            thread.id,
+            watchKeywords,
+          );
+        }
+
+        // Gate before tryDispatch so a /command from a non-allowlisted sender
+        // (or in a disabled DM/group scope) cannot side-effect.
+        if (
+          !(await passGatesOrNotify(
+            thread,
+            message.author,
+            replyLocale,
+            'onSubscribedMessage',
+            commandName(message.text),
+          ))
+        ) {
+          return;
+        }
+
+        if (await tryDispatch(thread, message.text, message.author, replyLocale)) return;
+        if (await tryAnswerInteraction(thread, message)) return;
+
+        log(
+          'onSubscribedMessage raw: agent=%s, platform=%s, msgId=%s, textLen=%d, attachments=%o, skipped=%d',
+          agentId,
+          platform,
+          message.id,
+          message.text?.length ?? 0,
+          summarizeMessageAttachments(message),
+          context?.skipped?.length ?? 0,
+        );
+        if (context?.skipped?.length) {
+          log(
+            'onSubscribedMessage skipped messages: %o',
+            context.skipped.map((m) => ({
+              attachments: summarizeMessageAttachments(m),
+              id: m.id,
+              textLen: m.text?.length ?? 0,
+            })),
+          );
+        }
+
+        let merged = BotMessageRouter.mergeSkippedMessages(message, context);
+        // LOBE-8891: when a keyword (and not a mention / DM / command) is what
+        // wakes the bot, prepend the matched entries' operator-authored
+        // instructions to the user message so the agent gets a directive
+        // rather than only the raw chatter. Mentions, DMs, and commands are
+        // skipped on purpose — those flows are user-initiated and should not
+        // have an operator prompt silently injected on top.
+        if (matchesWatchKeyword && !isAddressedToBot && !isCommand) {
+          const applied = BotMessageRouter.applyWatchKeywordInstructions(
+            merged,
+            watchKeywordEntries,
+          );
+          merged = applied.merged;
+          if (applied.instructionCount > 0) {
+            log(
+              'onSubscribedMessage: injecting %d watch-keyword instruction(s), agent=%s, platform=%s, thread=%s, prefixLen=%d',
+              applied.instructionCount,
+              agentId,
+              platform,
+              thread.id,
+              applied.prefixLength,
+            );
+          }
+        }
+        void emitAgentSignalSourceEvent(
+          {
+            payload: {
+              agentId,
+              applicationId,
+              platform,
+              message: merged.text,
+              platformThreadId: thread.id,
+            },
+            sourceId: merged.id,
+            sourceType: 'bot.message.merged',
+          },
+          {
+            agentId,
+            db: serverDB,
+            userId,
+          },
+          { ignoreError: true },
+        );
+
+        log(
+          'onSubscribedMessage: agent=%s, platform=%s, author=%s, thread=%s, merged=%d, mergedAttachments=%d',
+          agentId,
+          platform,
+          message.author.userName,
+          thread.id,
+          (context?.skipped?.length ?? 0) + 1,
+          ((merged as any).attachments as unknown[] | undefined)?.length ?? 0,
+        );
+
+        try {
+          await new AgentBridgeService(serverDB, userId).handleSubscribedMessage(thread, merged, {
+            agentId,
+            botContext: await resolveBotContext(merged.author?.userId, thread.id),
+            charLimit,
+            client,
+            displayToolCalls,
+            replyLocale,
+          });
+        } catch (error) {
+          if (inboundExecution.getStore()) throw error;
+          const operationId = AgentBridgeService.getActiveOperationId(thread.id);
+          log(
+            'onSubscribedMessage: unhandled error from handleSubscribedMessage: operationId=%s, %O',
+            operationId,
+            error,
+          );
+          try {
+            await thread.post({ markdown: renderError(operationId, replyLocale) });
+          } catch {
+            // best-effort notification
+          }
+        }
+      }),
+    );
 
     // Register slash command handlers (native + text-based). The gate
     // helper is passed in so command paths share the access checks with
@@ -1347,179 +1356,182 @@ export class BotMessageRouter {
     const dmCatchAllEnabled = dmSettings.policy !== 'disabled';
     const keywordCatchAllEnabled = watchKeywordEntries.length > 0;
     if (dmCatchAllEnabled || keywordCatchAllEnabled) {
-      bot.onNewMessage(/./, async (thread, message, context?: MessageContext) => {
-        if (message.author.isBot === true) return;
+      bot.onNewMessage(
+        /./,
+        withChannelReplyContext(async (thread, message, context?: MessageContext) => {
+          if (message.author.isBot === true) return;
 
-        // Skip text-based slash commands — already handled by registerCommands
-        // (which applies the same gates).
-        if (BotMessageRouter.dispatchTextCommand(message.text, commands)) return;
+          // Skip text-based slash commands — already handled by registerCommands
+          // (which applies the same gates).
+          if (BotMessageRouter.dispatchTextCommand(message.text, commands)) return;
 
-        const isDM = thread.isDM === true;
+          const isDM = thread.isDM === true;
 
-        // Channel-side keyword wake: only relevant for non-DM threads, since
-        // DMs already pass the gate below via `isDM`. Inspect the current
-        // message AND any debounced siblings, mirroring `onSubscribedMessage`
-        // so a keyword queued behind a non-trigger message still fires.
-        const matchesWatchKeyword =
-          !isDM &&
-          keywordCatchAllEnabled &&
-          (messageMatchesWatchKeyword(message.text, watchKeywords) ||
-            context?.skipped?.some((m) => messageMatchesWatchKeyword(m.text, watchKeywords)) ===
-              true);
+          // Channel-side keyword wake: only relevant for non-DM threads, since
+          // DMs already pass the gate below via `isDM`. Inspect the current
+          // message AND any debounced siblings, mirroring `onSubscribedMessage`
+          // so a keyword queued behind a non-trigger message still fires.
+          const matchesWatchKeyword =
+            !isDM &&
+            keywordCatchAllEnabled &&
+            (messageMatchesWatchKeyword(message.text, watchKeywords) ||
+              context?.skipped?.some((m) => messageMatchesWatchKeyword(m.text, watchKeywords)) ===
+                true);
 
-        // If neither path applies, return so the regex doesn't act as a
-        // channel-wide hijack. DMs still need the dmCatchAllEnabled gate
-        // because a DM message can arrive while DM policy is disabled.
-        if (!(isDM && dmCatchAllEnabled) && !matchesWatchKeyword) return;
+          // If neither path applies, return so the regex doesn't act as a
+          // channel-wide hijack. DMs still need the dmCatchAllEnabled gate
+          // because a DM message can arrive while DM policy is disabled.
+          if (!(isDM && dmCatchAllEnabled) && !matchesWatchKeyword) return;
 
-        if (matchesWatchKeyword) {
+          if (matchesWatchKeyword) {
+            log(
+              'onNewMessage (%s catch-all): keyword match wakes bot in channel, agent=%s, author=%s, thread=%s, keywords=%o',
+              platform,
+              agentId,
+              message.author.userName,
+              thread.id,
+              watchKeywords,
+            );
+          }
+
+          const replyLocale = detectReplyLocale(message);
+
+          if (
+            !(await passGatesOrNotify(
+              thread,
+              message.author,
+              replyLocale,
+              `onNewMessage (${platform} catch-all)`,
+              commandName(message.text),
+            ))
+          ) {
+            return;
+          }
+
           log(
-            'onNewMessage (%s catch-all): keyword match wakes bot in channel, agent=%s, author=%s, thread=%s, keywords=%o',
+            'onNewMessage raw (%s catch-all): agent=%s, msgId=%s, textLen=%d, attachments=%o, skipped=%d',
+            platform,
+            agentId,
+            message.id,
+            message.text?.length ?? 0,
+            summarizeMessageAttachments(message),
+            context?.skipped?.length ?? 0,
+          );
+          if (context?.skipped?.length) {
+            log(
+              'onNewMessage skipped messages: %o',
+              context.skipped.map((m) => ({
+                attachments: summarizeMessageAttachments(m),
+                id: m.id,
+                textLen: m.text?.length ?? 0,
+              })),
+            );
+          }
+
+          let merged = BotMessageRouter.mergeSkippedMessages(message, context);
+          // LOBE-8891: same instruction-injection rule as `onSubscribedMessage`
+          // — prepend the matched entries' operator-authored instructions when
+          // the keyword (not a mention / DM / command) is what wakes the bot.
+          // DMs are explicit user intent and never get the prefix.
+          if (matchesWatchKeyword) {
+            const applied = BotMessageRouter.applyWatchKeywordInstructions(
+              merged,
+              watchKeywordEntries,
+            );
+            merged = applied.merged;
+            if (applied.instructionCount > 0) {
+              log(
+                'onNewMessage (%s catch-all): injecting %d watch-keyword instruction(s), agent=%s, thread=%s, prefixLen=%d',
+                platform,
+                applied.instructionCount,
+                agentId,
+                thread.id,
+                applied.prefixLength,
+              );
+            }
+
+            // Discord (and any platform that prefers thread isolation) opts
+            // into spawning a sub-thread for the reply via this hook. The
+            // chat-sdk Discord adapter only auto-creates a thread on
+            // @-mention, so without this the keyword wake would clutter the
+            // parent channel with the bot's output. Best-effort: on hook
+            // failure we keep the original thread.id and reply in the
+            // channel rather than dropping the message.
+            if (typeof client.openThreadForChannelWake === 'function') {
+              try {
+                const upgraded = await client.openThreadForChannelWake(
+                  thread.id,
+                  (message as { raw?: unknown }).raw,
+                );
+                if (upgraded && upgraded !== thread.id) {
+                  log(
+                    'onNewMessage (%s catch-all): opened reply thread for keyword wake, %s -> %s',
+                    platform,
+                    thread.id,
+                    upgraded,
+                  );
+                  (thread as { id: string }).id = upgraded;
+                }
+              } catch (error) {
+                log(
+                  'onNewMessage (%s catch-all): openThreadForChannelWake threw, posting in channel: %O',
+                  platform,
+                  error,
+                );
+              }
+            }
+          }
+          void emitAgentSignalSourceEvent(
+            {
+              payload: {
+                agentId,
+                applicationId,
+                platform,
+                message: merged.text,
+                platformThreadId: thread.id,
+              },
+              sourceId: merged.id,
+              sourceType: 'bot.message.merged',
+            },
+            {
+              agentId,
+              db: serverDB,
+              userId,
+            },
+            { ignoreError: true },
+          );
+
+          log(
+            'onNewMessage (%s catch-all): agent=%s, author=%s, thread=%s, text=%s, mergedAttachments=%d',
             platform,
             agentId,
             message.author.userName,
             thread.id,
-            watchKeywords,
+            message.text?.slice(0, 80),
+            ((merged as any).attachments as unknown[] | undefined)?.length ?? 0,
           );
-        }
 
-        const replyLocale = detectReplyLocale(message);
-
-        if (
-          !(await passGatesOrNotify(
-            thread,
-            message.author,
-            replyLocale,
-            `onNewMessage (${platform} catch-all)`,
-            commandName(message.text),
-          ))
-        ) {
-          return;
-        }
-
-        log(
-          'onNewMessage raw (%s catch-all): agent=%s, msgId=%s, textLen=%d, attachments=%o, skipped=%d',
-          platform,
-          agentId,
-          message.id,
-          message.text?.length ?? 0,
-          summarizeMessageAttachments(message),
-          context?.skipped?.length ?? 0,
-        );
-        if (context?.skipped?.length) {
-          log(
-            'onNewMessage skipped messages: %o',
-            context.skipped.map((m) => ({
-              attachments: summarizeMessageAttachments(m),
-              id: m.id,
-              textLen: m.text?.length ?? 0,
-            })),
-          );
-        }
-
-        let merged = BotMessageRouter.mergeSkippedMessages(message, context);
-        // LOBE-8891: same instruction-injection rule as `onSubscribedMessage`
-        // — prepend the matched entries' operator-authored instructions when
-        // the keyword (not a mention / DM / command) is what wakes the bot.
-        // DMs are explicit user intent and never get the prefix.
-        if (matchesWatchKeyword) {
-          const applied = BotMessageRouter.applyWatchKeywordInstructions(
-            merged,
-            watchKeywordEntries,
-          );
-          merged = applied.merged;
-          if (applied.instructionCount > 0) {
-            log(
-              'onNewMessage (%s catch-all): injecting %d watch-keyword instruction(s), agent=%s, thread=%s, prefixLen=%d',
-              platform,
-              applied.instructionCount,
+          try {
+            await new AgentBridgeService(serverDB, userId).handleMention(thread, merged, {
               agentId,
-              thread.id,
-              applied.prefixLength,
-            );
-          }
-
-          // Discord (and any platform that prefers thread isolation) opts
-          // into spawning a sub-thread for the reply via this hook. The
-          // chat-sdk Discord adapter only auto-creates a thread on
-          // @-mention, so without this the keyword wake would clutter the
-          // parent channel with the bot's output. Best-effort: on hook
-          // failure we keep the original thread.id and reply in the
-          // channel rather than dropping the message.
-          if (typeof client.openThreadForChannelWake === 'function') {
+              botContext: await resolveBotContext(merged.author?.userId, thread.id),
+              charLimit,
+              client,
+              displayToolCalls,
+              replyLocale,
+            });
+          } catch (error) {
+            if (inboundExecution.getStore()) throw error;
+            log('onNewMessage: unhandled error from handleMention: %O', error);
             try {
-              const upgraded = await client.openThreadForChannelWake(
-                thread.id,
-                (message as { raw?: unknown }).raw,
-              );
-              if (upgraded && upgraded !== thread.id) {
-                log(
-                  'onNewMessage (%s catch-all): opened reply thread for keyword wake, %s -> %s',
-                  platform,
-                  thread.id,
-                  upgraded,
-                );
-                (thread as { id: string }).id = upgraded;
-              }
-            } catch (error) {
-              log(
-                'onNewMessage (%s catch-all): openThreadForChannelWake threw, posting in channel: %O',
-                platform,
-                error,
-              );
+              const errMsg = error instanceof Error ? error.message : String(error);
+              await thread.post({ markdown: renderInlineError(errMsg, replyLocale) });
+            } catch {
+              // best-effort notification
             }
           }
-        }
-        void emitAgentSignalSourceEvent(
-          {
-            payload: {
-              agentId,
-              applicationId,
-              platform,
-              message: merged.text,
-              platformThreadId: thread.id,
-            },
-            sourceId: merged.id,
-            sourceType: 'bot.message.merged',
-          },
-          {
-            agentId,
-            db: serverDB,
-            userId,
-          },
-          { ignoreError: true },
-        );
-
-        log(
-          'onNewMessage (%s catch-all): agent=%s, author=%s, thread=%s, text=%s, mergedAttachments=%d',
-          platform,
-          agentId,
-          message.author.userName,
-          thread.id,
-          message.text?.slice(0, 80),
-          ((merged as any).attachments as unknown[] | undefined)?.length ?? 0,
-        );
-
-        try {
-          await new AgentBridgeService(serverDB, userId).handleMention(thread, merged, {
-            agentId,
-            botContext: await resolveBotContext(merged.author?.userId, thread.id),
-            charLimit,
-            client,
-            displayToolCalls,
-            replyLocale,
-          });
-        } catch (error) {
-          if (inboundExecution.getStore()) throw error;
-          log('onNewMessage: unhandled error from handleMention: %O', error);
-          try {
-            const errMsg = error instanceof Error ? error.message : String(error);
-            await thread.post({ markdown: renderInlineError(errMsg, replyLocale) });
-          } catch {
-            // best-effort notification
-          }
-        }
-      });
+        }),
+      );
     }
   }
 
@@ -1565,6 +1577,13 @@ export class BotMessageRouter {
     } = info;
 
     return [
+      {
+        name: 'help',
+        description: 'Show available commands',
+        handler: async (ctx) => {
+          await ctx.post(renderCommandReply('cmdHelp', ctx.replyLocale));
+        },
+      },
       ...(supportsChannelIdentity(platform)
         ? [
             {
@@ -1593,6 +1612,28 @@ export class BotMessageRouter {
             },
           ]
         : []),
+      {
+        name: 'result',
+        description: 'Retrieve your latest completed channel task',
+        handler: async (ctx) => {
+          if (!ctx.authorUserId) return;
+          const [task] = await new ChannelTaskModel(serverDB, userId).list(
+            platform,
+            applicationId,
+            { threadId: ctx.threadId, userId: ctx.authorUserId },
+            ctx.args.trim() || undefined,
+          );
+          if (!task || task.agentId !== agentId) {
+            await ctx.post('当前会话没有可取回的任务结果。');
+            return;
+          }
+          const url = `${appEnv.APP_URL}/channels/${platform === 'lark' ? 'feishu' : platform}/${providerId}/activity/tasks/${task.id}`;
+          const preview = task.content.slice(0, 1000);
+          await ctx.post(
+            `${preview || '任务已结束。'}\n\n${task.content.length > 1000 ? '完整结果：' : '任务详情：'}${url}${task.artifactIds.length ? `\n附件 ${task.artifactIds.length} 个，请在清舟会话中查看。` : ''}`,
+          );
+        },
+      },
       {
         name: 'status',
         description: 'Show execution status and pending channel interaction',
@@ -1944,34 +1985,37 @@ export class BotMessageRouter {
     // so that platforms like Slack can dispatch commands from @-mentions.
     const namePattern = commands.map((c) => c.name).join('|');
     const regex = new RegExp(`(?:^|\\s)\\/(?:${namePattern})(?:\\s|$|@)`);
-    bot.onNewMessage(regex, async (thread, message) => {
-      if (message.author.isBot === true) return;
-      const sanitized = client.sanitizeUserInput?.(message.text ?? '') ?? message.text;
-      const result = BotMessageRouter.dispatchTextCommand(sanitized, commands);
-      if (!result) return;
-      const replyLocale = locale.detectFromMessage(message);
-      if (
-        !(await gate(
-          thread,
-          message.author,
+    bot.onNewMessage(
+      regex,
+      withChannelReplyContext(async (thread, message) => {
+        if (message.author.isBot === true) return;
+        const sanitized = client.sanitizeUserInput?.(message.text ?? '') ?? message.text;
+        const result = BotMessageRouter.dispatchTextCommand(sanitized, commands);
+        if (!result) return;
+        const replyLocale = locale.detectFromMessage(message);
+        if (
+          !(await gate(
+            thread,
+            message.author,
+            replyLocale,
+            `onNewMessage /${result.command.name}`,
+            result.command.name,
+          ))
+        ) {
+          return;
+        }
+        await result.command.handler({
+          isDM: thread.isDM,
+          args: result.args,
+          authorUserId: message.author?.userId,
+          authorUserName: message.author?.userName,
+          post: (text) => thread.post(text),
           replyLocale,
-          `onNewMessage /${result.command.name}`,
-          result.command.name,
-        ))
-      ) {
-        return;
-      }
-      await result.command.handler({
-        isDM: thread.isDM,
-        args: result.args,
-        authorUserId: message.author?.userId,
-        authorUserName: message.author?.userName,
-        post: (text) => thread.post(text),
-        replyLocale,
-        setState: (state, opts) => thread.setState(state, opts),
-        threadId: thread.id,
-      });
-    });
+          setState: (state, opts) => thread.setState(state, opts),
+          threadId: thread.id,
+        });
+      }),
+    );
   }
 }
 

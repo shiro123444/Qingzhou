@@ -231,4 +231,54 @@ describe('channel management metadata', () => {
     });
     expect(result.settings).not.toHaveProperty('userId');
   });
+  it('does not query task content for a provider outside the authenticated owner', async () => {
+    const fixture = database([[]]);
+    getServerDB.mockResolvedValue(fixture.db);
+    await expect(
+      createCaller({ userId: 'owner' }).task({ providerId: 'other', taskId: 'a'.repeat(64) }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect(fixture.db.select).toHaveBeenCalledTimes(1);
+    expect(dialect.sqlToQuery(fixture.predicates[0] as any).params).toContain('owner');
+  });
+  it('projects a task detail without sender identity or delivery secrets', async () => {
+    const fixture = database([
+      [provider],
+      [
+        {
+          id: 'a'.repeat(64),
+          createdAt: now,
+          updatedAt: now,
+          state: {
+            channelTask: {
+              agentId: 'agent-1',
+              applicationId: 'app-1',
+              platform: 'wechat',
+              operationId: 'op',
+              completed: true,
+              content: 'answer',
+              artifactIds: [],
+              delivery: 'retained',
+              reason: 'reply_context_missing',
+              platformThreadId: 'private-thread',
+              senderExternalUserId: 'private-sender',
+            },
+          },
+        },
+      ],
+    ]);
+    getServerDB.mockResolvedValue(fixture.db);
+    const result = await createCaller({ userId: 'owner' }).task({
+      providerId: 'provider-1',
+      taskId: 'a'.repeat(64),
+    });
+    expect(result.content).toBe('answer');
+    expect(JSON.stringify(result)).not.toContain('private-');
+    expect(JSON.stringify(result)).not.toContain('secret');
+    expect(dialect.sqlToQuery(fixture.predicates[1] as any).params).toEqual([
+      'owner',
+      'wechat',
+      'app-1',
+      'a'.repeat(64),
+    ]);
+  });
 });

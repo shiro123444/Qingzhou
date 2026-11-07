@@ -14,7 +14,7 @@ export function isInboundStopCommand(platform: string, payload: unknown): boolea
   }
   return (
     typeof text === 'string' &&
-    /^\/(?:stop|status|confirm|reject|answer)(?:@[\w-]+)?(?:\s|$)/i.test(
+    /^\/(?:help|stop|status|result|confirm|reject|answer)(?:@[\w-]+)?(?:\s|$)/i.test(
       text.replaceAll(/<@[^>]+>/g, '').trim(),
     )
   );

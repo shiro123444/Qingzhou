@@ -1,5 +1,6 @@
 export interface QQAdapterConfig {
   appId: string;
+  getReplyOptions?: (threadId: string) => Promise<{ msgId: string; msgSeq: number } | undefined>;
   /** Server-only internal gateway auth. A Response rejects; errors fail closed. No native fallback. */
   authenticateWebhook?: (request: Request) => Promise<Response | void>;
   /** Atomic replay claim shared across replicas. Without it, only bounded process-local protection. */

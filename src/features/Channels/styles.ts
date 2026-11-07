@@ -1,6 +1,13 @@
 import { createStaticStyles } from 'antd-style';
 
 export const styles = createStaticStyles(({ css, cssVar }) => ({
+  result: css`
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    margin-block: 20px;
+    line-height: 1.7;
+    color: ${cssVar.colorText};
+  `,
   actions: css`
     display: flex;
     flex-wrap: wrap;
@@ -55,6 +62,17 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
   `,
   section: css`
     margin-block-start: 24px;
+  `,
+  sectionTitle: css`
+    margin: 0;
+    color: ${cssVar.colorText};
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 1.5;
+  `,
+  taskSection: css`
+    display: grid;
+    gap: 16px;
   `,
   stat: css`
     font-size: 28px;

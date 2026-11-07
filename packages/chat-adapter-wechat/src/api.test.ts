@@ -9,6 +9,7 @@ import {
   pollQrStatus,
   resolveAesKey,
   WechatApiClient,
+  WechatApiRejection,
 } from './api';
 import { WECHAT_RET_CODES } from './types';
 
@@ -196,6 +197,26 @@ describe('WechatApiClient', () => {
 
       await expect(client.sendMessage('u', 'hi', 'ctx')).rejects.toThrow('send failed');
     });
+  });
+
+  it('keeps a managed text effect to one request and refuses oversized content before sending', async () => {
+    await expect(client.sendTextChunk('u', 'x'.repeat(2001), 'ctx')).rejects.toThrow(
+      'exceeds limit',
+    );
+    expect(mockFetch).not.toHaveBeenCalled();
+    mockFetch.mockResolvedValueOnce(jsonResponse({ ret: 0 }));
+    await client.sendTextChunk('u', 'x'.repeat(2000), 'ctx');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+  it('distinguishes an explicit platform rejection from an ambiguous connection failure', async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({ ret: -2, errmsg: 'rejected' }));
+    await expect(client.sendTextChunk('u', 'answer', 'ctx')).rejects.toBeInstanceOf(
+      WechatApiRejection,
+    );
+    mockFetch.mockRejectedValueOnce(new Error('connection lost'));
+    await expect(client.sendTextChunk('u', 'answer', 'ctx')).rejects.not.toBeInstanceOf(
+      WechatApiRejection,
+    );
   });
 
   // ---------- sendTyping ----------

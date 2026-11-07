@@ -22,3 +22,21 @@ describe('Feishu/Lark durable control dispatch', () => {
     },
   );
 });
+
+it('routes result retrieval while another operation holds the conversation', () => {
+  expect(isInboundStopCommand('wechat', { item_list: [{ text_item: { text: '/result' } }] })).toBe(
+    true,
+  );
+  expect(isInboundStopCommand('qq', { d: { content: '/result task-id' } })).toBe(true);
+  expect(
+    isInboundStopCommand('feishu', {
+      event: { message: { content: JSON.stringify({ text: '/result' }) } },
+    }),
+  ).toBe(true);
+});
+
+it('allows help while a model task holds the conversation', () => {
+  expect(isInboundStopCommand('wechat', { item_list: [{ text_item: { text: '/help' } }] })).toBe(
+    true,
+  );
+});

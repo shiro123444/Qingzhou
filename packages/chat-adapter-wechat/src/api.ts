@@ -31,7 +31,7 @@ const BASE_INFO: BaseInfo = { channel_version: CHANNEL_VERSION };
  * Generate a random X-WECHAT-UIN header value as required by the iLink API.
  */
 function randomUin(): string {
-  const uint32 = Math.floor(Math.random() * 0xFFFF_FFFF);
+  const uint32 = Math.floor(Math.random() * 0xffff_ffff);
   return btoa(String(uint32));
 }
 
@@ -42,6 +42,15 @@ function buildHeaders(botToken: string): Record<string, string> {
     'Content-Type': 'application/json',
     'X-WECHAT-UIN': randomUin(),
   };
+}
+
+export class WechatApiRejection extends Error {
+  constructor(
+    readonly code: number,
+    message: string,
+  ) {
+    super(message);
+  }
 }
 
 /**
@@ -62,9 +71,10 @@ async function parseResponse<T>(response: Response, label: string): Promise<T> {
   const ret = (payload as { ret?: number } | null)?.ret;
   if (typeof ret === 'number' && ret !== WECHAT_RET_CODES.OK) {
     const body = payload as { errcode?: number; errmsg?: string; ret: number };
-    throw Object.assign(new Error(body.errmsg ?? `${label} failed with ret=${ret}`), {
-      code: body.errcode ?? ret,
-    });
+    throw new WechatApiRejection(
+      body.errcode ?? ret,
+      body.errmsg ?? `${label} failed with ret=${ret}`,
+    );
   }
 
   return payload;
@@ -151,6 +161,12 @@ export class WechatApiClient {
     }
 
     return lastResponse;
+  }
+
+  /** A single ledger effect must map to a single platform request. */
+  async sendTextChunk(toUserId: string, text: string, contextToken: string) {
+    if (text.length > MAX_TEXT_LENGTH) throw new Error('WeChat reply chunk exceeds limit');
+    return this.sendMessage(toUserId, text, contextToken);
   }
 
   /** Upload bytes before committing the user-visible file message. Never logs CDN keys. */

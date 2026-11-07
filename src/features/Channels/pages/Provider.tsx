@@ -1,4 +1,5 @@
-'use client';
+import ChannelTasks from '../components/Tasks';
+('use client');
 
 import { Button, Flexbox, Text } from '@lobehub/ui';
 import { App, Descriptions, Empty, Switch, Table, Tag } from 'antd';
@@ -184,7 +185,8 @@ export default function ChannelProviderPage() {
         />
       )}
       {section === 'activity' && (
-        <Flexbox gap={16}>
+        <Flexbox gap={24}>
+          <ChannelTasks platform={platform} providerId={providerId} />
           <Flexbox horizontal align="center" justify="space-between">
             <Text weight={600}>{t('channels.recentInbound')}</Text>
             <Link to="/settings/bot-delivery">{t('channels.delivery')}</Link>

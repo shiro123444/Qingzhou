@@ -1,3 +1,11 @@
+import { ChannelTaskModel } from '@/database/models/channelTask';
+import { ReplyUnavailableError } from '../replyBudget';
+const taskRecord = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock('../ChannelTaskService', () => ({
+  ChannelTaskService: class {
+    record = taskRecord;
+  },
+}));
 import { describe, expect, it, vi } from 'vitest';
 
 import { BotInboundModel } from '@/database/models/botInbound';
@@ -279,6 +287,52 @@ describe('BotCallbackService', () => {
   });
 
   describe('current channel identity authorization', () => {
+    it('retains the full result after a known-unsent rejection and never replays that callback', async () => {
+      taskRecord.mockResolvedValueOnce('task');
+      const status = vi.spyOn(ChannelTaskModel.prototype, 'delivery').mockResolvedValue(undefined);
+      mockCreateMessage.mockRejectedValueOnce(new ReplyUnavailableError('reply_budget_exhausted'));
+      const body = makeBody({
+        type: 'completion',
+        userId: 'user-1',
+        platformThreadId: 'qq:c2c:sender',
+        lastAssistantContent: 'Complete answer',
+      });
+      await expect(service.handleCallback(body)).resolves.toEqual({ status: 'retained' });
+      expect(status).toHaveBeenCalledWith('task', 'retained', 'reply_budget_exhausted');
+      await expect(service.handleCallback(body)).resolves.toEqual({ status: 'skipped' });
+      expect(mockCreateMessage).toHaveBeenCalledTimes(1);
+      status.mockRestore();
+    });
+
+    it('saves a final result even when an earlier send has an uncertain outcome', async () => {
+      taskRecord.mockResolvedValueOnce('task');
+      const status = vi.spyOn(ChannelTaskModel.prototype, 'delivery').mockResolvedValue(undefined);
+      const begin = vi
+        .spyOn(CallbackDeliverySession, 'begin')
+        .mockRejectedValueOnce(new CallbackDeliveryError('unknown_delivery'));
+      const body = makeBody({
+        type: 'completion',
+        userId: 'user-1',
+        lastAssistantContent: 'Recoverable answer',
+      });
+      await expect(service.handleCallback(body)).rejects.toMatchObject({
+        status: 'unknown_delivery',
+      });
+      expect(taskRecord).toHaveBeenCalledWith(body);
+      expect(status).toHaveBeenCalledWith('task', 'unknown', 'unknown_delivery');
+      expect(mockCreateMessage).not.toHaveBeenCalled();
+      begin.mockRestore();
+      status.mockRestore();
+    });
+
+    it('does not dispatch a result if durable retention fails', async () => {
+      taskRecord.mockRejectedValueOnce(new Error('database unavailable'));
+      await expect(service.handleCallback(makeBody({ type: 'completion' }))).rejects.toThrow(
+        'database unavailable',
+      );
+      expect(mockCreateMessage).not.toHaveBeenCalled();
+    });
+
     it('refuses a revoked dedicated bot identity before sending a result', async () => {
       const access = vi.spyOn(ChannelIdentityService, 'resolveAccess').mockResolvedValue({
         enforced: true,

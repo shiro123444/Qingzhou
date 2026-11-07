@@ -15,6 +15,8 @@ import {
   updateBotRuntimeStatus,
 } from '@/server/services/gateway/runtimeStatus';
 
+import { allocateQQReply, ReplyUnavailableError } from '../../replyBudget';
+
 import { stripMarkdown } from '../stripMarkdown';
 import {
   type BotPlatformRuntimeContext,
@@ -80,16 +82,7 @@ function replyOptions(
   context: BotPlatformRuntimeContext,
   threadId: string,
 ) {
-  let sequence = 0;
-  return async () => {
-    const msgId = context.replyToMessageId;
-    if (!msgId) return undefined;
-    const key = `qq:reply-seq:${config.applicationId}:${threadId}:${msgId}`;
-    const redis = context.redisClient;
-    const msgSeq = redis?.incr ? await redis.incr(key) : ++sequence;
-    if (redis?.expire) await redis.expire(key, 86_400);
-    return { msgId, msgSeq };
-  };
+  return () => allocateQQReply(config.applicationId, threadId, context);
 }
 
 function qqFileTransport(
@@ -129,11 +122,13 @@ function qqStreamTransport(
     threadType !== 'c2c' ||
     !context.replyToMessageId ||
     !context.redisClient?.incr ||
-    !isFresh()
+    typeof receivedAt !== 'number' ||
+    !Number.isFinite(receivedAt) ||
+    receivedAt > Date.now()
   )
     return {};
   const assertFresh = () => {
-    if (!isFresh()) throw new Error('QQ C2C stream reply window expired');
+    if (!isFresh()) throw new ReplyUnavailableError('reply_window_expired');
   };
   return {
     prepareReplyStream: async () => {
@@ -252,6 +247,7 @@ class QQGatewayClient implements PlatformClient {
 
       const adapter = createQQAdapter({
         appId: this.config.applicationId,
+        getReplyOptions: (threadId) => allocateQQReply(this.applicationId, threadId, this.context),
         authenticateWebhook: createGatewayAuthenticator({
           durableReceipt: !!this.context.persistVerifiedWebhook,
           applicationId: this.applicationId,
@@ -381,6 +377,7 @@ class QQGatewayClient implements PlatformClient {
       qq: createQQAdapter({
         persistVerifiedWebhook: this.context.persistVerifiedWebhook,
         appId: this.config.applicationId,
+        getReplyOptions: (threadId) => allocateQQReply(this.applicationId, threadId, this.context),
         authenticateWebhook: createGatewayAuthenticator({
           durableReceipt: !!this.context.persistVerifiedWebhook,
           applicationId: this.applicationId,
@@ -499,6 +496,7 @@ class QQWebhookClient implements PlatformClient {
       qq: createQQAdapter({
         persistVerifiedWebhook: this.context.persistVerifiedWebhook,
         appId: this.config.applicationId,
+        getReplyOptions: (threadId) => allocateQQReply(this.applicationId, threadId, this.context),
         claimWebhookReplay,
         clientSecret: this.config.credentials.appSecret,
       }),

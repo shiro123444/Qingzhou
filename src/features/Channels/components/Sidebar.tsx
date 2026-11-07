@@ -24,7 +24,7 @@ import { styles } from '../styles';
 
 export function ChannelSidebarBody() {
   const { t } = useTranslation('common');
-  const { platform, providerId, section } = useParams();
+  const { platform, providerId, section, taskId } = useParams();
   const { data: providers = [] } = useChannelProviders();
   return (
     <Flexbox gap={2} padding={4}>
@@ -70,7 +70,7 @@ export function ChannelSidebarBody() {
                         to={channelPath(provider.platform, provider.id, value)}
                       >
                         <NavItem
-                          active={section === value}
+                          active={section === value || (!!taskId && value === 'activity')}
                           icon={SECTION_ICONS[value]}
                           iconSize={15}
                           title={t(`channels.sections.${value}`)}

@@ -711,6 +711,14 @@ export const desktopRoutes: RouteObject[] = [
                     ),
                     path: ':section',
                   },
+                  {
+                    path: 'activity/tasks/:taskId',
+                    element: dynamicElement(
+                      () =>
+                        import('@/routes/(main)/channels/[platform]/[providerId]/activity/tasks/[taskId]'),
+                      'Desktop > Channels > Task',
+                    ),
+                  },
                 ],
                 path: ':providerId',
               },

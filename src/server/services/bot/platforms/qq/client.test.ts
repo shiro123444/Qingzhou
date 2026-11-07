@@ -91,7 +91,11 @@ describe('QQ passive reply context', () => {
           platform: 'qq',
           settings: { connectionMode },
         },
-        { replyToMessageId: 'original', redisClient: { incr } as any },
+        {
+          replyToMessageId: 'original',
+          replyToMessageReceivedAt: Date.now(),
+          redisClient: { incr, expire: vi.fn() } as any,
+        },
       );
       const messenger = client.getMessenger('qq:group:target');
       const file = {
@@ -128,7 +132,11 @@ describe('QQ passive reply context', () => {
             platform: 'qq',
             settings: { connectionMode },
           },
-          { replyToMessageId: 'original-id', redisClient: { incr, expire } as any },
+          {
+            replyToMessageId: 'original-id',
+            replyToMessageReceivedAt: Date.now(),
+            redisClient: { incr, expire } as any,
+          },
         );
       await create().getMessenger('qq:group:test').createMessage('first');
       await create().getMessenger('qq:group:test').createMessage('second');
@@ -162,7 +170,7 @@ describe('QQ native C2C stream replies', () => {
     vi.mocked(QQApiClient).mockImplementation(
       () => ({ sendC2CStreamMessage, sendC2CMessage }) as any,
     );
-    const incr = vi.fn().mockResolvedValue(7);
+    const incr = vi.fn().mockResolvedValue(2);
     const client = new QQClientFactory().createClient(
       {
         applicationId: 'app',
@@ -195,7 +203,7 @@ describe('QQ native C2C stream replies', () => {
       sendC2CStreamMessage.mockResolvedValueOnce({ id: 'stream-message', remain_msg_len: 200 });
       const messenger = client.getMessenger('qq:c2c:target');
       const prepared = await messenger.prepareReplyStream!();
-      expect(prepared).toEqual({ msgSeq: 7, replyMessageId: 'original' });
+      expect(prepared).toEqual({ msgSeq: 2, replyMessageId: 'original' });
       const first = await messenger.sendReplyStreamFrame!({
         ...prepared,
         content: 'Hello',
@@ -221,7 +229,7 @@ describe('QQ native C2C stream replies', () => {
         input_mode: 'replace',
         input_state: 1,
         msg_id: 'original',
-        msg_seq: 7,
+        msg_seq: 2,
       });
       expect(sendC2CStreamMessage).toHaveBeenNthCalledWith(2, 'target', {
         content_raw: 'Hello world',
@@ -230,7 +238,7 @@ describe('QQ native C2C stream replies', () => {
         input_mode: 'replace',
         input_state: 10,
         msg_id: 'original',
-        msg_seq: 7,
+        msg_seq: 2,
         stream_msg_id: 'stream-message',
       });
     },
@@ -240,7 +248,6 @@ describe('QQ native C2C stream replies', () => {
     for (const options of [
       { enabled: false, receivedAt: Date.now() },
       { receivedAt: undefined },
-      { receivedAt: Date.now() - 300_000 },
       { receivedAt: Date.now() + 60_000 },
       { replyMessageId: '', receivedAt: Date.now() },
     ]) {
@@ -254,7 +261,7 @@ describe('QQ native C2C stream replies', () => {
   });
 
   it.each(['websocket', 'webhook'] as const)(
-    'keeps ordinary replies available without exposing native streaming when Redis is absent in %s mode',
+    'retains ordinary replies without sending when the shared budget is unavailable in %s mode',
     async (connectionMode) => {
       const { client, incr, sendC2CStreamMessage, sendC2CMessage } = createStreamClient({
         connectionMode,
@@ -266,11 +273,8 @@ describe('QQ native C2C stream replies', () => {
       expect(messenger.sendReplyStreamFrame).toBeUndefined();
       expect(incr).not.toHaveBeenCalled();
       expect(sendC2CStreamMessage).not.toHaveBeenCalled();
-      await messenger.createMessage('ordinary');
-      expect(sendC2CMessage).toHaveBeenCalledWith('target', 'ordinary', {
-        msgId: 'original',
-        msgSeq: 1,
-      });
+      await expect(messenger.createMessage('ordinary')).rejects.toThrow('reply_budget_unavailable');
+      expect(sendC2CMessage).not.toHaveBeenCalled();
     },
   );
 
@@ -291,7 +295,7 @@ describe('QQ native C2C stream replies', () => {
       expect(mockInitialize).not.toHaveBeenCalled();
       expect(mockStartGateway).not.toHaveBeenCalled();
       await expect(messenger.prepareReplyStream!()).resolves.toEqual({
-        msgSeq: 7,
+        msgSeq: 2,
         replyMessageId: 'current-message',
       });
       expect(incr).toHaveBeenCalledTimes(1);
@@ -321,7 +325,7 @@ describe('QQ native C2C stream replies', () => {
         msgSeq: 1,
         replyMessageId: 'original',
       }),
-    ).rejects.toThrow('window expired');
+    ).rejects.toThrow('reply_window_expired');
     expect(sendC2CStreamMessage).not.toHaveBeenCalled();
   });
 

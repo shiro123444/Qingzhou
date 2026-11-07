@@ -3,7 +3,7 @@
 import { InfoCircleOutlined } from '@ant-design/icons';
 import { Alert, Button, type ButtonProps, Modal, QRCode, Spin, Typography } from 'antd';
 import { QrCode, RefreshCw } from 'lucide-react';
-import { memo, useCallback, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { agentBotProviderService } from '@/services/agentBotProvider';
@@ -26,9 +26,11 @@ const QrCodeAuth = memo<QrCodeAuthProps>(
     const [error, setError] = useState<string>();
     const [loading, setLoading] = useState(false);
     const pollingRef = useRef(false);
+    const generationRef = useRef(0);
     const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const stopPolling = useCallback(() => {
+      generationRef.current++;
       pollingRef.current = false;
       if (timerRef.current) {
         clearTimeout(timerRef.current);
@@ -36,15 +38,19 @@ const QrCodeAuth = memo<QrCodeAuthProps>(
       }
     }, []);
 
+    useEffect(() => stopPolling, [stopPolling]);
+
     const startQrFlow = useCallback(async () => {
       setLoading(true);
       setError(undefined);
       setStatus('');
       setQrImgUrl(undefined);
       stopPolling();
+      const generation = generationRef.current;
 
       try {
         const qr = await agentBotProviderService.wechatGetQrCode();
+        if (generation !== generationRef.current) return;
         setQrImgUrl(qr.qrcode_img_content);
         setStatus('wait');
         setLoading(false);
@@ -52,11 +58,11 @@ const QrCodeAuth = memo<QrCodeAuthProps>(
         // Start polling
         pollingRef.current = true;
         const poll = async () => {
-          if (!pollingRef.current) return;
+          if (!pollingRef.current || generation !== generationRef.current) return;
 
           try {
             const res = await agentBotProviderService.wechatPollQrStatus(qr.qrcode);
-            if (!pollingRef.current) return;
+            if (!pollingRef.current || generation !== generationRef.current) return;
 
             setStatus(res.status);
 
@@ -79,7 +85,7 @@ const QrCodeAuth = memo<QrCodeAuthProps>(
 
             timerRef.current = setTimeout(poll, QR_POLL_INTERVAL_MS);
           } catch {
-            if (pollingRef.current) {
+            if (pollingRef.current && generation === generationRef.current) {
               timerRef.current = setTimeout(poll, QR_POLL_INTERVAL_MS);
             }
           }
@@ -87,6 +93,7 @@ const QrCodeAuth = memo<QrCodeAuthProps>(
 
         timerRef.current = setTimeout(poll, QR_POLL_INTERVAL_MS);
       } catch (err: any) {
+        if (generation !== generationRef.current) return;
         setError(err?.message || 'Failed to get QR code');
         setLoading(false);
       }

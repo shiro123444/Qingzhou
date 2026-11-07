@@ -1,4 +1,33 @@
 export default {
+  'channels.tasks.title': 'Tasks',
+  'channels.tasks.empty': 'Tasks appear after a message is received',
+  'channels.tasks.task': 'Task',
+  'channels.tasks.detail': 'Task details',
+  'channels.tasks.result': 'Result',
+  'channels.tasks.copy': 'Copy result',
+  'channels.tasks.copyCommand': 'Copy retrieval command',
+  'channels.tasks.copied': 'Copied',
+  'channels.tasks.conversation': 'Open conversation',
+  'channels.tasks.retained': 'Result saved. View it here or use the retrieval command.',
+  'channels.tasks.unknown': 'Platform receipt is uncertain. Automatic resend is paused.',
+  'channels.tasks.noText': 'This task has no text result',
+  'channels.tasks.running': 'Task in progress',
+  'channels.tasks.files': '{{count}} attachment(s) \u00b7 Open the conversation to view',
+  'channels.tasks.status.running': 'Running',
+  'channels.tasks.status.pending': 'Pending',
+  'channels.tasks.status.submitted': 'Submitted to platform',
+  'channels.tasks.status.retained': 'Result available',
+  'channels.tasks.status.unknown': 'Needs review',
+  'channels.tasks.reason.reply_budget_exhausted':
+    'The reply allowance for this message is exhausted.',
+  'channels.tasks.reason.reply_window_expired':
+    'The reply window has ended. Send a new message to retrieve the result.',
+  'channels.tasks.reason.reply_context_missing':
+    'A new conversation message is needed before replying.',
+  'channels.tasks.reason.reply_budget_unavailable': 'The reply budget service is unavailable.',
+  'channels.tasks.reason.platform_rejected':
+    'The platform rejected this send. Send a new message to retrieve the result.',
+
   'channels.enableToBind': 'Enable this bot to link an account.',
   'channels.title': 'Channels',
   'channels.overview': 'All channels',

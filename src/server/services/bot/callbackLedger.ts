@@ -1,3 +1,4 @@
+import { ReplyUnavailableError } from './replyBudget';
 import { createHash, randomUUID } from 'node:crypto';
 
 import debug from 'debug';
@@ -471,6 +472,11 @@ export class CallbackDeliverySession {
       }, 30_000);
       recordReceipt?.(result);
     } catch (cause) {
+      if (cause instanceof ReplyUnavailableError) {
+        delete this.state.effects[key];
+        await this.save();
+        throw cause;
+      }
       throw new CallbackDeliveryError('unknown_delivery', { cause });
     }
     this.state.effects[key] = 'delivered';

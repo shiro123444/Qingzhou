@@ -213,6 +213,7 @@ export function renderFinalReply(content: string): string {
  * through this map.
  */
 type SystemStrings = {
+  cmdHelp: string;
   cmdApproveDisabled: string;
   cmdApproveFailed: string;
   cmdApproveNotOwner: string;
@@ -264,6 +265,8 @@ const SYSTEM_STRINGS: Partial<Record<BotReplyLocale, SystemStrings>> = {
     cmdApproveSuccess: (label) => `Approved ${label}.`,
     cmdApproveUnknownCode: 'That pairing code is unknown or has expired.',
     cmdApproveUsage: 'Usage: `/approve <code>`',
+    cmdHelp:
+      'Available commands:\n/help — Show commands\n/new — Start a new conversation\n/status — Check the current task\n/stop — Stop the current task\n/result — Retrieve your latest result\n/result <task-id> — Retrieve a specific result\n\nFor confirmation or questions, follow the reply instructions in the task message.',
     cmdNewReset: 'Conversation reset. Your next message will start a new topic.',
     cmdStopNotActive: 'No active execution to stop.',
     cmdStopRequested: 'Stop requested.',
@@ -318,6 +321,8 @@ const SYSTEM_STRINGS: Partial<Record<BotReplyLocale, SystemStrings>> = {
     cmdApproveSuccess: (label) => `已审批 ${label}。`,
     cmdApproveUnknownCode: '该配对码不存在或已过期。',
     cmdApproveUsage: '用法：`/approve <配对码>`',
+    cmdHelp:
+      '可用命令：\n/help — 查看帮助\n/new — 开始新对话\n/status — 查看当前任务\n/stop — 停止当前任务\n/result — 取回最近的任务结果\n/result <任务编号> — 取回指定结果\n\n需要确认或补充信息时，按任务消息中的提示回复即可。',
     cmdNewReset: '对话已重置，下一条消息会开启新话题。',
     cmdStopNotActive: '当前没有正在执行的任务可以停止。',
     cmdStopRequested: '已发出停止请求。',
@@ -462,6 +467,7 @@ export function renderInlineError(message: string, lng?: BotReplyLocale): string
 }
 
 export type CommandReplyKey =
+  | 'cmdHelp'
   | 'cmdApproveDisabled'
   | 'cmdApproveFailed'
   | 'cmdApproveNotOwner'

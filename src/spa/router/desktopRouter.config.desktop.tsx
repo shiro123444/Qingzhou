@@ -29,6 +29,7 @@ import ChannelsLayout from '@/routes/(main)/channels/_layout';
 import ChannelPlatformPage from '@/routes/(main)/channels/[platform]';
 import ChannelProviderRedirect from '@/routes/(main)/channels/[platform]/[providerId]';
 import ChannelProviderPage from '@/routes/(main)/channels/[platform]/[providerId]/[section]';
+import ChannelTaskPage from '@/routes/(main)/channels/[platform]/[providerId]/activity/tasks/[taskId]';
 import CommunityLayout from '@/routes/(main)/community/_layout';
 import CommunityDetailLayout from '@/routes/(main)/community/(detail)/_layout';
 import CommunityDetailAgentPage from '@/routes/(main)/community/(detail)/agent';
@@ -560,6 +561,7 @@ export const desktopRoutes: RouteObject[] = [
                 children: [
                   { element: <ChannelProviderRedirect />, index: true },
                   { element: <ChannelProviderPage />, path: ':section' },
+                  { element: <ChannelTaskPage />, path: 'activity/tasks/:taskId' },
                 ],
                 path: ':providerId',
               },

@@ -305,22 +305,23 @@ export class QQAdapter implements Adapter<QQThreadId, QQRawMessage> {
     const { type, id, guildId } = this.decodeThreadId(threadId);
     const text = this.formatConverter.renderPostable(message);
 
+    const options = await this.config.getReplyOptions?.(threadId);
     let response;
     switch (type) {
       case 'group': {
-        response = await this.api.sendGroupMessage(id, text);
+        response = await this.api.sendGroupMessage(id, text, options);
         break;
       }
       case 'guild': {
-        response = await this.api.sendGuildMessage(id, text);
+        response = await this.api.sendGuildMessage(id, text, options);
         break;
       }
       case 'c2c': {
-        response = await this.api.sendC2CMessage(id, text);
+        response = await this.api.sendC2CMessage(id, text, options);
         break;
       }
       case 'dms': {
-        response = await this.api.sendDmsMessage(guildId || id, text);
+        response = await this.api.sendDmsMessage(guildId || id, text, options);
         break;
       }
       default: {
@@ -394,7 +395,8 @@ export class QQAdapter implements Adapter<QQThreadId, QQRawMessage> {
     if (!this._botUserId) return hasDisplayNameMention;
     return (
       hasDisplayNameMention ||
-      data.mentions?.some((mention) => this.resolveAuthorId(mention) === this._botUserId) === true ||
+      data.mentions?.some((mention) => this.resolveAuthorId(mention) === this._botUserId) ===
+        true ||
       data.content?.includes(`<@${this._botUserId}>`) === true ||
       data.content?.includes(`<@!${this._botUserId}>`) === true
     );
@@ -414,7 +416,10 @@ export class QQAdapter implements Adapter<QQThreadId, QQRawMessage> {
         type: 'guild',
       });
     } else {
-      threadId = this.encodeThreadId({ id: this.resolveAuthorId(raw.author) || 'unknown', type: 'c2c' });
+      threadId = this.encodeThreadId({
+        id: this.resolveAuthorId(raw.author) || 'unknown',
+        type: 'c2c',
+      });
     }
 
     const attachments = this.mapQQAttachments(raw.attachments);

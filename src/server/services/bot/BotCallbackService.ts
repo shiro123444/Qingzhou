@@ -1,3 +1,6 @@
+import { ChannelTaskModel } from '@/database/models/channelTask';
+import { ChannelTaskService } from './ChannelTaskService';
+import { ReplyUnavailableError } from './replyBudget';
 import debug from 'debug';
 
 import type { MessengerPlatform } from '@/config/messenger';
@@ -116,7 +119,9 @@ export class BotCallbackService {
     this.db = db;
   }
 
-  async handleCallback(body: BotCallbackBody): Promise<{ status: 'delivered' | 'skipped' }> {
+  async handleCallback(
+    body: BotCallbackBody,
+  ): Promise<{ status: 'delivered' | 'skipped' | 'retained' }> {
     body = normalizeBotPausePayload(
       body as unknown as Record<string, unknown>,
     ) as unknown as BotCallbackBody;
@@ -136,18 +141,40 @@ export class BotCallbackService {
       (isQueueAgentRuntimeEnabled()
         ? new PostgresCallbackLedger(this.db, body.userId!)
         : undefined);
-    const delivery = await CallbackDeliverySession.begin(body, callbackHash(intent), backend);
-    if (!delivery) return { status: 'skipped' };
+    const taskId = await new ChannelTaskService(this.db).record(body);
+    let delivery: CallbackDeliverySession | null = null;
     try {
+      delivery = await CallbackDeliverySession.begin(body, callbackHash(intent), backend);
+      if (!delivery) return { status: 'skipped' };
       await this.deliverCallback(body, delivery);
+      if (taskId && body.type === 'completion')
+        await new ChannelTaskModel(this.db, body.userId!).delivery(taskId, 'submitted');
       await delivery.complete(
         body.type === 'completion' || body.reason === 'waiting_for_human'
           ? { redactReceiptFields: ['content'] }
           : undefined,
       );
       return { status: 'delivered' };
+    } catch (error) {
+      if (error instanceof ReplyUnavailableError && taskId && delivery) {
+        if (body.type === 'completion')
+          await new ChannelTaskModel(this.db, body.userId!).delivery(
+            taskId,
+            'retained',
+            error.reason,
+          );
+        await delivery.complete({ redactReceiptFields: ['content'] });
+        return { status: body.type === 'completion' ? 'retained' : 'skipped' };
+      }
+      if (taskId && error instanceof CallbackDeliveryError && error.status === 'unknown_delivery')
+        await new ChannelTaskModel(this.db, body.userId!).delivery(
+          taskId,
+          'unknown',
+          'unknown_delivery',
+        );
+      throw error;
     } finally {
-      await delivery.release();
+      await delivery?.release();
     }
   }
 
@@ -394,7 +421,9 @@ export class BotCallbackService {
       credentials,
       settings: (row as any).settings as Record<string, unknown> | undefined,
     });
-    const charLimit = (settings.charLimit as number) || undefined;
+    const configuredLimit = (settings.charLimit as number) || undefined;
+    const charLimit =
+      platform === 'wechat' ? Math.min(configuredLimit || 2000, 2000) : configuredLimit;
 
     const client = entry.clientFactory.createClient(config, {
       replyToMessageId: params.replyToMessageId,

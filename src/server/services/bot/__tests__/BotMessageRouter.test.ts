@@ -2021,6 +2021,30 @@ describe('BotMessageRouter', () => {
   });
 
   describe('command access gates (P1: /commands must respect allowFrom + DM/group policy)', () => {
+    it.each(['mention', 'subscribed', 'cmdRegexHandler'] as const)(
+      'answers /help through %s without invoking the model',
+      async (path) => {
+        const handlers = await loadAllHandlers({ allowFrom: 'alice-id' });
+        const thread = {
+          id: 'telegram:channel-1',
+          channelId: 'channel-1',
+          isDM: true,
+          post: vi.fn().mockResolvedValue(undefined),
+          setState: vi.fn().mockResolvedValue(undefined),
+        };
+        await handlers[path](thread, {
+          id: 'help-message',
+          text: '/help',
+          author: { isBot: false, userId: 'alice-id', userName: 'alice' },
+          isMention: true,
+        });
+        expect(thread.post).toHaveBeenCalledTimes(1);
+        expect(thread.post.mock.calls[0][0]).toContain('/result');
+        expect(mockHandleMention).not.toHaveBeenCalled();
+        expect(mockHandleSubscribedMessage).not.toHaveBeenCalled();
+      },
+    );
+
     it('rejects a former operator’s stop command after binding revocation', async () => {
       const { slashStop } = await loadAllHandlers({ userId: 'former-owner', dmPolicy: 'open' });
       mockResolveIdentityAccess.mockResolvedValue({ enforced: true, allowed: false });

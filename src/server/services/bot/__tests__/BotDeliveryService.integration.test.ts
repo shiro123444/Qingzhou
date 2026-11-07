@@ -1,3 +1,4 @@
+import { ChannelTaskModel } from '@/database/models/channelTask';
 // @vitest-environment node
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -127,6 +128,68 @@ describe.skipIf(!databaseUrl || !redisUrl)(
       await pool.end();
       await admin.query(`DROP SCHEMA IF EXISTS "${namespace}" CASCADE`);
       await admin.end();
+    });
+
+    it('keeps immutable task results separate from callback ledgers and isolates owners and senders', async () => {
+      const model = new ChannelTaskModel(db, 'owner');
+      const task = {
+        agentId: 'agent',
+        applicationId: 'app',
+        artifactIds: ['file'],
+        completed: true,
+        content: 'Saved answer',
+        delivery: 'pending' as const,
+        operationId: 'operation',
+        platform: 'wechat',
+        platformThreadId: 'wechat:dm:sender',
+        senderExternalUserId: 'sender',
+      };
+      const id = await model.record(task);
+      await model.delivery(id, 'retained', 'reply_context_missing');
+      await model.record({ ...task, completed: false, content: 'late progress' });
+      await model.record({ ...task, content: 'changed retry' });
+      const [saved] = await new ChannelTaskModel(db, 'owner').list(
+        'wechat',
+        'app',
+        { threadId: task.platformThreadId, userId: 'sender' },
+        id,
+      );
+      expect(saved).toMatchObject({
+        content: 'Saved answer',
+        completed: true,
+        delivery: 'retained',
+        artifactIds: ['file'],
+      });
+      expect(
+        await model.list('wechat', 'app', { threadId: task.platformThreadId, userId: 'other' }, id),
+      ).toEqual([]);
+      expect(await model.list('wechat', 'other', undefined, id)).toEqual([]);
+      expect(await new ChannelTaskModel(db, 'other').list('wechat', 'app', undefined, id)).toEqual(
+        [],
+      );
+      await pool.query("DELETE FROM users WHERE id = 'owner'");
+      expect(await model.list('wechat', 'app')).toEqual([]);
+    });
+
+    it('ends retained jobs without reporting platform delivery or retrying an expired reply', async () => {
+      handleCallback.mockResolvedValue({ status: 'retained' });
+      await stage([payload()]);
+      await service.sweep();
+      const jobs = (
+        await pool.query('SELECT status, payload, error_code, delivered_at FROM bot_delivery_jobs')
+      ).rows;
+      expect(jobs).toHaveLength(2);
+      expect(
+        jobs.every(
+          (job) =>
+            job.status === 'dead' &&
+            job.error_code === 'result_retained' &&
+            job.payload === null &&
+            job.delivered_at === null,
+        ),
+      ).toBe(true);
+      await service.sweep();
+      expect(handleCallback).toHaveBeenCalledTimes(1);
     });
 
     it('recovers staged intents and ignores a replay after delivery', async () => {
