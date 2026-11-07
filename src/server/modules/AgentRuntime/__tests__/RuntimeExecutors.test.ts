@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as ContextEngineering from '@/server/modules/Mecha/ContextEngineering';
 import { initModelRuntimeFromDB } from '@/server/modules/ModelRuntime';
 import { HookDispatcher } from '@/server/services/agentRuntime/hooks/HookDispatcher';
+import { ChannelIdentityService } from '@/server/services/bot/channelIdentity';
 import * as QueueImpls from '@/server/services/queue/impls';
 import * as managedSkills from '@/server/services/agentRuntime/managedSkills';
 import { createSkillMaterialRegistry } from '@/server/runtime/improvement/skill-material';
@@ -1726,6 +1727,102 @@ describe('RuntimeExecutors', () => {
       toolManifestMap: {},
       usage: createMockUsage(),
       ...overrides,
+    });
+
+    it('rechecks a revoked binding before retrying the next tool attempt', async () => {
+      const access = vi.spyOn(ChannelIdentityService, 'resolveAccess').mockResolvedValue({
+        enforced: true,
+        allowed: true,
+        operatorUserId: 'sender',
+      });
+      try {
+        const state = createMockState({
+          metadata: {
+            agentId: 'delegated-agent',
+            botContext: {
+              applicationId: 'bot-app',
+              platform: 'wechat',
+              senderExternalUserId: 'sender',
+              platformThreadId: 'wechat:sender',
+              isOwner: true,
+            },
+          },
+        });
+        mockToolExecutionService.executeTool.mockImplementationOnce(async () => {
+          access.mockResolvedValue({ enforced: true, allowed: false, operatorUserId: undefined });
+          return { success: false, content: '', error: { kind: 'retry' } };
+        });
+        const executors = createRuntimeExecutors(ctx);
+        const result = await executors.call_tool!(
+          {
+            type: 'call_tool',
+            payload: {
+              parentMessageId: 'parent',
+              toolCalling: {
+                apiName: 'write',
+                arguments: '{}',
+                id: 'tool',
+                identifier: 'write-tool',
+                type: 'default',
+              },
+            },
+          },
+          state,
+        );
+        expect(mockToolExecutionService.executeTool).toHaveBeenCalledTimes(1);
+        expect(result.events).toEqual(
+          expect.arrayContaining([expect.objectContaining({ type: 'error' })]),
+        );
+        expect(access).toHaveBeenLastCalledWith(ctx.serverDB, 'wechat', 'bot-app', 'sender', {
+          userId: 'user-123',
+          agentId: undefined,
+        });
+      } finally {
+        access.mockRestore();
+      }
+    });
+
+    it('blocks a revoked binding before exposing a client-side tool request', async () => {
+      const access = vi.spyOn(ChannelIdentityService, 'resolveAccess').mockResolvedValue({
+        enforced: true,
+        allowed: false,
+        operatorUserId: undefined,
+      });
+      try {
+        const state = createMockState({
+          toolSourceMap: { 'client-tool': 'client' },
+          metadata: {
+            botContext: {
+              applicationId: 'app',
+              platform: 'qq',
+              senderExternalUserId: 'sender',
+              platformThreadId: 'qq:c2c:sender',
+              isOwner: true,
+            },
+          },
+        });
+        const executors = createRuntimeExecutors(ctx);
+        await executors.call_tool!(
+          {
+            type: 'call_tool',
+            payload: {
+              parentMessageId: 'parent',
+              toolCalling: {
+                apiName: 'write',
+                arguments: '{}',
+                id: 'client',
+                identifier: 'client-tool',
+                type: 'default',
+              },
+            },
+          },
+          state,
+        );
+        expect(mockToolExecutionService.executeTool).not.toHaveBeenCalled();
+        expect(mockStreamManager.publishStreamChunk).not.toHaveBeenCalled();
+      } finally {
+        access.mockRestore();
+      }
     });
 
     it('should pass parentId (parentMessageId) to messageModel.create for tool message', async () => {

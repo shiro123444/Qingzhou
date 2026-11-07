@@ -139,5 +139,6 @@
   "window.minimize": "最小化窗口",
   "window.pinToTop": "窗口置顶",
   "window.restore": "恢复窗口",
-  "window.unpinFromTop": "取消置顶"
+  "window.unpinFromTop": "取消置顶",
+  "navigation.channels": "渠道管理"
 }

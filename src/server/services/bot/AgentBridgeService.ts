@@ -770,10 +770,19 @@ export class AgentBridgeService {
     // For platforms without typing support (no triggerTyping on messenger), the
     // gateway typing is invisible, so we still send an ack message as user feedback.
     const gwClient = getMessageGatewayClient();
-    const platformSupportsTyping =
+    const receivedAt = userMessage.metadata?.dateSent ?? inboundExecution.getStore()?.receivedAt;
+    const receivedAtMs =
+      receivedAt instanceof Date && Number.isFinite(receivedAt.getTime())
+        ? receivedAt.getTime()
+        : undefined;
+    const platformMessenger =
       client && botContext?.platformThreadId
-        ? !!client.getMessenger(botContext.platformThreadId).triggerTyping
-        : true;
+        ? client.getMessenger(botContext.platformThreadId, {
+            replyToMessageId: userMessage.id,
+            replyToMessageReceivedAt: receivedAtMs,
+          })
+        : undefined;
+    const platformSupportsTyping = platformMessenger ? !!platformMessenger.triggerTyping : true;
     const useGatewayTyping = gwClient.isEnabled && platformSupportsTyping;
 
     let progressMessage: SentMessage | undefined;
@@ -826,6 +835,8 @@ export class AgentBridgeService {
           log('executeWithWebhooks: gateway provider lookup failed: %O', err);
         }
       }
+    } else if (platformMessenger?.createReplyCard || platformMessenger?.sendReplyStreamFrame) {
+      await safeSideEffect(() => thread.startTyping(), 'startTyping (native cards)');
     } else if (!supportsMessageEdit) {
       // Edit-incapable platform (QQ today): the user still wants immediate
       // feedback that we received their message, but every "edit" the
@@ -835,7 +846,13 @@ export class AgentBridgeService {
       // reply as its own message instead of editing.
       await safeSideEffect(() => thread.startTyping(), 'startTyping (executeWithWebhooks)');
       await safeSideEffect(
-        () => thread.post(renderStart(userMessage.text, { lng: replyLocale, timezone })),
+        () =>
+          thread.post(
+            renderStart(userMessage.text, { lng: replyLocale, timezone }) +
+              (['qq', 'wechat'].includes(botContext?.platformThreadId?.split(':')[0] ?? '')
+                ? '\n结果会保留在清舟，可发送 /result 取回。'
+                : ''),
+          ),
         'post ack (no-edit platform)',
       );
     } else {
@@ -860,7 +877,11 @@ export class AgentBridgeService {
     // Build webhook config for production mode
     const callbackUrl = '/api/agent/webhooks/bot-callback';
     const webhookBody = {
+      agentId,
       applicationId: botContext?.applicationId,
+      senderExternalUserId: botContext?.messengerInstallationKey
+        ? undefined
+        : botContext?.senderExternalUserId,
       // Forward the messenger discriminator (set by MessengerRouter for runs
       // originated by the shared Messenger bot). The callback uses this — not
       // the synthetic applicationId shape — to decide which credential source
@@ -886,6 +907,7 @@ export class AgentBridgeService {
       // alarm timeout instead of stopping at completion.
       userId: this.userId,
       userMessageId: userMessage.id,
+      userMessageReceivedAt: receivedAtMs,
     };
 
     log(

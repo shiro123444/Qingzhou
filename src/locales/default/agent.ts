@@ -1,4 +1,10 @@
 export default {
+  'channel.feishuNativeCards': 'Native Feishu cards',
+  'channel.feishuNativeCardsHint':
+    'Use cards for step updates, results and approval buttons. Subscribe to card.action.trigger callbacks.',
+  'channel.qqC2cStreaming': 'QQ C2C streaming replies',
+  'channel.qqC2cStreamingHint':
+    'Requires QQ C2C streaming access and Redis. Updates follow execution steps within Qingzhou’s five-minute reply budget. Group chats use regular replies.',
   'channel.applicationId': 'Application ID / Bot Username',
   'channel.applicationIdHint': 'Unique identifier for your bot application.',
   'channel.applicationIdPlaceholder': 'e.g. 1234567890',

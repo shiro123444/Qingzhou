@@ -250,6 +250,158 @@ describe('GatewayManager', () => {
     });
   });
 
+  describe('Cordis lifecycle concurrency', () => {
+    it('interrupts an acquiring transport during shutdown', async () => {
+      let releaseStart!: () => void;
+      let notifyStarting!: () => void;
+      const acquiring = new Promise<void>((resolve) => {
+        notifyStarting = resolve;
+      });
+      const bot = createMockBot();
+      vi.mocked(bot.start).mockImplementationOnce(async () => {
+        notifyStarting();
+        await new Promise<void>((resolve) => {
+          releaseStart = resolve;
+        });
+      });
+      mockAgentBotProviderModel.findEnabledByApplicationId.mockResolvedValue({
+        applicationId: 'app-1',
+        credentials: {},
+      });
+      const manager = new GatewayManager({
+        definitions: [createFakeDefinition('wechat', () => bot)],
+      });
+      const starting = manager.startClient('wechat', 'app-1', 'user-1');
+      const rejected = expect(starting).rejects.toThrow('startup interrupted');
+      await acquiring;
+      const stopping = manager.stop();
+      expect(bot.stop).not.toHaveBeenCalled();
+      releaseStart();
+      await Promise.all([rejected, stopping]);
+      expect(bot.stop).toHaveBeenCalled();
+      expect(manager.isRunning).toBe(false);
+    });
+
+    it('cleans a failed start before a subsequent replacement', async () => {
+      const failed = createMockBot();
+      vi.mocked(failed.start).mockRejectedValueOnce(new Error('start failed'));
+      const next = createMockBot();
+      const factory = vi.fn().mockReturnValueOnce(failed).mockReturnValueOnce(next);
+      mockAgentBotProviderModel.findEnabledByApplicationId.mockResolvedValue({
+        applicationId: 'app-1',
+        credentials: {},
+      });
+      const manager = new GatewayManager({
+        definitions: [createFakeDefinition('wechat', factory)],
+      });
+      await expect(manager.startClient('wechat', 'app-1', 'user-1')).rejects.toThrow(
+        'start failed',
+      );
+      expect(failed.stop).toHaveBeenCalledTimes(1);
+      await manager.startClient('wechat', 'app-1', 'user-1');
+      expect(next.start).toHaveBeenCalledTimes(1);
+      await manager.stop();
+    });
+
+    it('serializes two concurrent rotations of the same installation', async () => {
+      let releaseStart!: () => void;
+      let notifyStarting!: () => void;
+      const starting = new Promise<void>((resolve) => {
+        notifyStarting = resolve;
+      });
+      const first = createMockBot();
+      vi.mocked(first.start).mockImplementationOnce(async () => {
+        notifyStarting();
+        await new Promise<void>((resolve) => {
+          releaseStart = resolve;
+        });
+      });
+      const second = createMockBot();
+      vi.mocked(second.start).mockImplementationOnce(async () => {
+        expect(first.stop).toHaveBeenCalledTimes(1);
+      });
+      const factory = vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second);
+      mockAgentBotProviderModel.findEnabledByApplicationId.mockResolvedValue({
+        applicationId: 'app-1',
+        credentials: {},
+      });
+      const manager = new GatewayManager({ definitions: [createFakeDefinition('qq', factory)] });
+      const initial = manager.startClient('qq', 'app-1', 'user-1');
+      await starting;
+      const rotation = manager.startClient('qq', 'app-1', 'user-1');
+      expect(factory).toHaveBeenCalledTimes(1);
+      releaseStart();
+      await Promise.all([initial, rotation]);
+      expect(second.start).toHaveBeenCalledTimes(1);
+      await manager.stop();
+    });
+
+    it('does not mount a late database result after shutdown begins', async () => {
+      let resolveProvider!: (value: unknown) => void;
+      let notifyLookup!: () => void;
+      const lookup = new Promise<void>((resolve) => {
+        notifyLookup = resolve;
+      });
+      mockAgentBotProviderModel.findEnabledByApplicationId.mockImplementationOnce(() => {
+        notifyLookup();
+        return new Promise((resolve) => {
+          resolveProvider = resolve;
+        });
+      });
+      const factory = vi.fn().mockReturnValue(createMockBot());
+      const manager = new GatewayManager({
+        definitions: [createFakeDefinition('feishu', factory)],
+      });
+      const starting = manager.startClient('feishu', 'app-1', 'user-1');
+      const rejected = expect(starting).rejects.toThrow('stopping');
+      await lookup;
+      const stopping = manager.stop();
+      resolveProvider({ applicationId: 'app-1', credentials: {} });
+      await Promise.all([rejected, stopping]);
+      expect(factory).not.toHaveBeenCalled();
+      expect(manager.isRunning).toBe(false);
+    });
+
+    it('cleans other platforms when one teardown fails and retains the failed owner for retry', async () => {
+      const qq = createMockBot();
+      const feishu = createMockBot();
+      vi.mocked(qq.stop).mockRejectedValueOnce(new Error('QQ teardown failed'));
+      mockAgentBotProviderModel.findEnabledByApplicationId.mockResolvedValue({
+        applicationId: 'app-1',
+        credentials: {},
+      });
+      const manager = new GatewayManager({
+        definitions: [
+          createFakeDefinition('qq', () => qq),
+          createFakeDefinition('feishu', () => feishu),
+        ],
+      });
+      await manager.startClient('qq', 'app-1', 'user-1');
+      await manager.startClient('feishu', 'app-1', 'user-1');
+      await expect(manager.stop()).rejects.toThrow('Failed to stop 1');
+      expect(feishu.stop).toHaveBeenCalledTimes(1);
+      await manager.stop();
+      expect(qq.stop).toHaveBeenCalledTimes(2);
+      expect(feishu.stop).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps an active transport when the requesting user cannot resolve its installation', async () => {
+      const bot = createMockBot();
+      const factory = vi.fn().mockReturnValue(bot);
+      mockAgentBotProviderModel.findEnabledByApplicationId
+        .mockResolvedValueOnce({ applicationId: 'app-1', credentials: {} })
+        .mockResolvedValueOnce(null);
+      const manager = new GatewayManager({
+        definitions: [createFakeDefinition('wechat', factory)],
+      });
+      await manager.startClient('wechat', 'app-1', 'owner');
+      await manager.startClient('wechat', 'app-1', 'other-user');
+      expect(bot.stop).not.toHaveBeenCalled();
+      expect(factory).toHaveBeenCalledTimes(1);
+      await manager.stop();
+    });
+  });
+
   describe('stopClient', () => {
     it('should do nothing when bot is not found', async () => {
       const manager = new GatewayManager({ definitions: [] });

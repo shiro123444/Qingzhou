@@ -32,11 +32,17 @@ const imageIcon = getRouteById('image')?.icon;
 const pageIcon = getRouteById('page')?.icon;
 const settingsIcon = getRouteById('settings')?.icon;
 const tasksIcon = getRouteById('tasks')?.icon;
+const channelsIcon = getRouteById('channels')?.icon;
 
 /**
  * Route patterns ordered by specificity (most specific first)
  */
 const routePatterns: RoutePattern[] = [
+  {
+    icon: channelsIcon,
+    test: (p) => p.startsWith('/channels'),
+    titleKey: 'navigation.channels',
+  },
   // Settings routes
   {
     icon: settingsIcon,

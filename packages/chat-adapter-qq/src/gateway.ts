@@ -69,6 +69,9 @@ export class QQGatewayConnection {
   private sessionId: string | null = null;
   private seq: number | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private heartbeatJitterTimer: ReturnType<typeof setTimeout> | null = null;
+  private durationTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatAcked = true;
   private reconnectAttempts = 0;
   private gatewayUrl: string | null = null;
@@ -111,6 +114,10 @@ export class QQGatewayConnection {
    */
   close(): void {
     this.closed = true;
+    if (this.durationTimer) clearTimeout(this.durationTimer);
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.durationTimer = null;
+    this.reconnectTimer = null;
     this.stopHeartbeat();
     if (this.ws) {
       this.ws.close(1000, 'Client shutdown');
@@ -207,8 +214,8 @@ export class QQGatewayConnection {
       });
 
       // Auto-close after durationMs
-      if (this.durationMs) {
-        setTimeout(() => {
+      if (this.durationMs && !this.durationTimer) {
+        this.durationTimer = setTimeout(() => {
           if (!this.closed && !this.abortSignal?.aborted) {
             this.log('Duration elapsed (%dms), closing', this.durationMs);
             this.close();
@@ -393,7 +400,8 @@ export class QQGatewayConnection {
 
     // Send first heartbeat after a random jitter (as per spec)
     const jitter = Math.random() * intervalMs;
-    setTimeout(() => {
+    this.heartbeatJitterTimer = setTimeout(() => {
+      this.heartbeatJitterTimer = null;
       if (this.closed || this.abortSignal?.aborted) return;
       this.sendHeartbeat();
 
@@ -416,6 +424,10 @@ export class QQGatewayConnection {
   }
 
   private stopHeartbeat(): void {
+    if (this.heartbeatJitterTimer) {
+      clearTimeout(this.heartbeatJitterTimer);
+      this.heartbeatJitterTimer = null;
+    }
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
@@ -448,6 +460,7 @@ export class QQGatewayConnection {
   // ---------- Reconnection ----------
 
   private attemptReconnect(): void {
+    if (this.closed || this.abortSignal?.aborted || this.reconnectTimer) return;
     if (this.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
       this.log('Max reconnect attempts reached (%d), giving up', MAX_RECONNECT_ATTEMPTS);
       return;
@@ -466,7 +479,8 @@ export class QQGatewayConnection {
       MAX_RECONNECT_ATTEMPTS,
     );
 
-    setTimeout(() => {
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
       if (this.closed || this.abortSignal?.aborted) return;
 
       const canResume = !!this.sessionId;

@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import type {
   Adapter,
   AdapterPostableMessage,
@@ -19,6 +21,8 @@ import { LarkApiClient } from './api';
 import { LarkFormatConverter } from './format-converter';
 import type {
   LarkAdapterConfig,
+  LarkCardActionEvent,
+  LarkEventHeader,
   LarkMessageBody,
   LarkRawMessage,
   LarkThreadId,
@@ -88,6 +92,73 @@ export function decodeLarkThreadId(
   }
 
   return { chatId: rest, platform };
+}
+
+/** Normalize authenticated callbacks into the existing command and durable inbox path. */
+function normalizeCardAction(
+  body: LarkWebhookPayload,
+  platform: 'feishu' | 'lark',
+): LarkWebhookPayload | undefined {
+  const event = body.event as LarkCardActionEvent | undefined;
+  const value = event?.action?.value as Record<string, unknown> | undefined;
+  const sender = event?.operator?.open_id;
+  const chatId = event?.context?.open_chat_id;
+  const messageId = event?.context?.open_message_id;
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    Array.isArray(value) ||
+    (value.qingzhouAction !== 'confirm' && value.qingzhouAction !== 'reject') ||
+    typeof value.token !== 'string' ||
+    !/^[a-f\d]{12}$/iu.test(value.token) ||
+    typeof value.platformThreadId !== 'string' ||
+    value.platformThreadId.length > 1024 ||
+    !value.platformThreadId.startsWith(`${platform}:`) ||
+    typeof sender !== 'string' ||
+    !sender ||
+    typeof chatId !== 'string' ||
+    !chatId ||
+    typeof messageId !== 'string' ||
+    !messageId
+  )
+    return;
+  const thread = decodeLarkThreadId(value.platformThreadId, platform);
+  if (thread.chatId !== chatId || thread.platform !== platform) return;
+  const eventId = `card_action_${createHash('sha256')
+    .update(
+      JSON.stringify([
+        body.header?.event_id ?? event?.token ?? '',
+        sender,
+        chatId,
+        messageId,
+        value.qingzhouAction,
+        value.token,
+        value.platformThreadId,
+      ]),
+    )
+    .digest('hex')}`;
+  return {
+    header: {
+      app_id: body.header?.app_id ?? '',
+      create_time: body.header?.create_time ?? '',
+      event_id: eventId,
+      event_type: 'im.message.receive_v1',
+      tenant_key: body.header?.tenant_key ?? '',
+      token: '',
+    } as LarkEventHeader,
+    event: {
+      message: {
+        chat_id: chatId,
+        chat_type: thread.chatType,
+        content: JSON.stringify({ text: `/${value.qingzhouAction} ${value.token}` }),
+        // Retried callbacks must have identical payload hashes in the durable inbox.
+        create_time: body.header?.create_time || '0',
+        message_id: eventId,
+        message_type: 'text',
+      },
+      sender: { sender_id: { open_id: sender }, sender_type: 'user' },
+    },
+  };
 }
 
 /**
@@ -340,13 +411,19 @@ export class LarkAdapter implements Adapter<LarkThreadId, LarkRawMessage> {
     options?: WebhookOptions,
     persist = false,
   ): Promise<Response> {
-    // Only handle message events
+    const cardAction = body.header?.event_type === 'card.action.trigger';
+    if (cardAction) {
+      const normalized = normalizeCardAction(body, this.platform);
+      if (!normalized) return new Response('Invalid card action', { status: 400 });
+      body = normalized;
+    }
     const eventType = body.header?.event_type;
     if (eventType !== 'im.message.receive_v1') {
       return Response.json({ ok: true });
     }
 
     const event = body.event;
+    if (!event || !('message' in event)) return Response.json({ ok: true });
     const message = event?.message;
     const sender = event?.sender;
 
@@ -407,11 +484,34 @@ export class LarkAdapter implements Adapter<LarkThreadId, LarkRawMessage> {
     if (persist && this.webhookConfig.persistVerifiedWebhook) {
       const eventId = body.header?.event_id || message.message_id;
       if (!eventId) return new Response('Missing event ID', { status: 400 });
+      let receiptTimer: ReturnType<typeof setTimeout> | undefined;
       try {
-        await this.webhookConfig.persistVerifiedWebhook(body, eventId, threadId);
-        return Response.json({ accepted: true }, { status: 202 });
+        const receipt = this.webhookConfig.persistVerifiedWebhook(body, eventId, threadId);
+        if (cardAction) {
+          await Promise.race([
+            receipt,
+            new Promise<never>((_, reject) => {
+              receiptTimer = setTimeout(
+                () => reject(new Error('Card receipt deadline exceeded')),
+                2000,
+              );
+            }),
+          ]);
+        } else {
+          await receipt;
+        }
+        return cardAction
+          ? Response.json({
+              toast: {
+                type: 'info',
+                content: this.platform === 'lark' ? 'Request received' : '请求已收到',
+              },
+            })
+          : Response.json({ accepted: true }, { status: 202 });
       } catch {
         return new Response('Durable receipt unavailable', { status: 503 });
+      } finally {
+        clearTimeout(receiptTimer);
       }
     }
 

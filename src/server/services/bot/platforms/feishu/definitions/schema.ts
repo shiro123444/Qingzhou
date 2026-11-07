@@ -58,6 +58,13 @@ export const sharedSchema: FieldSchema[] = [
     properties: [
       makeUserIdField('feishu'),
       {
+        key: 'nativeCards',
+        default: false,
+        description: 'channel.feishuNativeCardsHint',
+        label: 'channel.feishuNativeCards',
+        type: 'boolean',
+      },
+      {
         key: 'connectionMode',
         default: DEFAULT_FEISHU_CONNECTION_MODE,
         description: 'channel.connectionModeHint',

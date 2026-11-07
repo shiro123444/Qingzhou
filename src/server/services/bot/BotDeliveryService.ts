@@ -175,9 +175,13 @@ export class BotDeliveryService {
       assertHeld();
       const ledger = new PostgresCallbackLedger(this.db, job.userId, lease, assertHeld);
       const service = new BotCallbackService(this.db, ledger);
-      await service.handleCallback(envelope.payload as unknown as BotCallbackBody);
+      const result = await service.handleCallback(envelope.payload as unknown as BotCallbackBody);
       assertHeld();
-      return (await boundedDeliveryIO(() => this.model.delivered(job))) ? 'delivered' : 'deferred';
+      return (await boundedDeliveryIO(() =>
+        this.model.delivered(job, result?.status === 'retained'),
+      ))
+        ? 'delivered'
+        : 'deferred';
     } catch (error) {
       const code =
         error instanceof CallbackDeliveryError

@@ -52,6 +52,13 @@ export const schema: FieldSchema[] = [
         type: 'string',
       },
       {
+        key: 'c2cStreaming',
+        default: false,
+        description: 'channel.qqC2cStreamingHint',
+        label: 'channel.qqC2cStreaming',
+        type: 'boolean',
+      },
+      {
         key: 'charLimit',
         default: 2000,
         description: 'channel.charLimitHint',

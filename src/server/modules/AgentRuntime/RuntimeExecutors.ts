@@ -49,6 +49,7 @@ import {
   isDeviceToolIdentifier,
   logDeviceToolAudit,
 } from '@/server/services/aiAgent/deviceToolAudit';
+import { assertChannelIdentityAccess } from '@/server/services/bot/channelIdentityAccess';
 import { FileService } from '@/server/services/file';
 import { MessageService } from '@/server/services/message';
 import { OnboardingService } from '@/server/services/onboarding';
@@ -317,8 +318,7 @@ export const createRuntimeExecutors = (
     // delta builder treats activeDeviceId as an independent activation
     // signal and only dedupes against already-enabled tools.
     const devicePolicy = state.metadata?.deviceAccessPolicy as
-      | { canUseDevice: boolean; reason: DeviceAccessReason }
-      | undefined;
+      { canUseDevice: boolean; reason: DeviceAccessReason } | undefined;
     const activeDeviceId =
       devicePolicy?.canUseDevice === false ? undefined : state.metadata?.activeDeviceId;
     const operationToolSet: OperationToolSet = state.operationToolSet ?? {
@@ -638,8 +638,7 @@ export const createRuntimeExecutors = (
         const lobehubSkillAgentId = state.metadata?.agentId;
         const lobehubSkillTopicId = state.metadata?.topicId;
         const lobehubSkillAgentMeta = state.metadata?.agentConfig as
-          | { description?: string | null; title?: string | null }
-          | undefined;
+          { description?: string | null; title?: string | null } | undefined;
 
         let lobehubSkillTopicTitle = '';
         if (lobehubSkillTopicId && ctx.serverDB && ctx.userId) {
@@ -708,14 +707,12 @@ export const createRuntimeExecutors = (
             assertStepActive(ctx);
             const userCreds = (credsResult as any)?.data ?? [];
             credsListStr = generateCredsList(
-              userCreds.map(
-                (cred: any): CredSummary => ({
-                  description: cred.description,
-                  key: cred.key,
-                  name: cred.name,
-                  type: cred.type,
-                }),
-              ),
+              userCreds.map((cred: any): CredSummary => ({
+                description: cred.description,
+                key: cred.key,
+                name: cred.name,
+                type: cred.type,
+              })),
             );
             log('Fetched %d creds for {{CREDS_LIST}} substitution', userCreds.length);
           } catch (error) {
@@ -1754,6 +1751,8 @@ export const createRuntimeExecutors = (
         state.toolSourceMap?.[chatToolPayload.identifier];
 
       if (toolSource === 'client') {
+        await assertChannelIdentityAccess(ctx.serverDB, ctx.userId, state.metadata?.botContext);
+        assertStepActive(ctx);
         log(`[${operationLogId}] Client function tool detected: ${toolName}, pausing for client`);
 
         // Publish tool call info so streaming can emit function_call events
@@ -1812,6 +1811,8 @@ export const createRuntimeExecutors = (
 
       let toolCallMocked = false;
       assertStepActive(ctx);
+      await assertChannelIdentityAccess(ctx.serverDB, ctx.userId, state.metadata?.botContext);
+      assertStepActive(ctx);
       const hookResult = ctx.hookDispatcher
         ? await (async () => {
             assertStepActive(ctx);
@@ -1858,8 +1859,7 @@ export const createRuntimeExecutors = (
         // true here; recording the policy reason inline lets an operator
         // distinguish first-party vs bot-owner runs without joining logs.
         const policy = state.metadata?.deviceAccessPolicy as
-          | { canUseDevice: boolean; reason: DeviceAccessReason }
-          | undefined;
+          { canUseDevice: boolean; reason: DeviceAccessReason } | undefined;
         assertStepActive(ctx);
         logDeviceToolAudit({
           apiName: chatToolPayload.apiName,
@@ -1889,6 +1889,8 @@ export const createRuntimeExecutors = (
           manifest: effectiveManifestMap[chatToolPayload.identifier],
         });
         assertStepActive(ctx);
+        await assertChannelIdentityAccess(ctx.serverDB, ctx.userId, state.metadata?.botContext);
+        assertStepActive(ctx);
         const dispatchResult = await dispatchClientTool(chatToolPayload, {
           assertStepLease: ctx.assertStepLease,
           signal: ctx.signal,
@@ -1909,8 +1911,10 @@ export const createRuntimeExecutors = (
         log(`[${operationLogId}] Executing tool ${toolName} ...`);
         assertStepActive(ctx);
         execution = await executeToolWithRetry(
-          () =>
-            toolExecutionService.executeTool(chatToolPayload, {
+          async () => {
+            await assertChannelIdentityAccess(ctx.serverDB, ctx.userId, state.metadata?.botContext);
+            assertStepActive(ctx);
+            return toolExecutionService.executeTool(chatToolPayload, {
               assertStepLease: ctx.assertStepLease,
               activeDeviceId: state.metadata?.activeDeviceId,
               agentId: state.metadata?.agentId,
@@ -1930,7 +1934,8 @@ export const createRuntimeExecutors = (
               toolResultMaxLength,
               topicId: ctx.topicId,
               userId: ctx.userId,
-            }),
+            });
+          },
           {
             assertStepLease: () => assertStepActive(ctx),
             isInterrupted: () => isOperationInterrupted(ctx),
@@ -2082,8 +2087,7 @@ export const createRuntimeExecutors = (
 
       // Persist ToolsActivator discovery results to state.activatedStepTools
       const discoveredTools = executionResult.state?.activatedTools as
-        | Array<{ identifier: string }>
-        | undefined;
+        Array<{ identifier: string }> | undefined;
       if (discoveredTools?.length) {
         const existingIds = new Set(
           (newState.activatedStepTools ?? []).map((t: { id: string }) => t.id),
@@ -2235,6 +2239,8 @@ export const createRuntimeExecutors = (
 
     // If all tools are client-side, pause immediately
     if (clientTools.length > 0 && serverTools.length === 0) {
+      await assertChannelIdentityAccess(ctx.serverDB, ctx.userId, state.metadata?.botContext);
+      assertStepActive(ctx);
       log(
         `[${operationLogId}][call_tools_batch] All ${clientTools.length} tools are client-side, pausing`,
       );
@@ -2325,6 +2331,8 @@ export const createRuntimeExecutors = (
 
           let batchToolCallMocked = false;
           assertStepActive(ctx);
+          await assertChannelIdentityAccess(ctx.serverDB, ctx.userId, state.metadata?.botContext);
+          assertStepActive(ctx);
           const batchHookResult = ctx.hookDispatcher
             ? await (async () => {
                 assertStepActive(ctx);
@@ -2363,8 +2371,7 @@ export const createRuntimeExecutors = (
 
           if (isDeviceToolIdentifier(chatToolPayload.identifier) && !batchHookResult?.isMocked) {
             const policy = state.metadata?.deviceAccessPolicy as
-              | { canUseDevice: boolean; reason: DeviceAccessReason }
-              | undefined;
+              { canUseDevice: boolean; reason: DeviceAccessReason } | undefined;
             assertStepActive(ctx);
             logDeviceToolAudit({
               apiName: chatToolPayload.apiName,
@@ -2395,6 +2402,8 @@ export const createRuntimeExecutors = (
               manifest: batchManifestMap[chatToolPayload.identifier],
             });
             assertStepActive(ctx);
+            await assertChannelIdentityAccess(ctx.serverDB, ctx.userId, state.metadata?.botContext);
+            assertStepActive(ctx);
             const dispatchResult = await dispatchClientTool(chatToolPayload, {
               assertStepLease: ctx.assertStepLease,
               signal: ctx.signal,
@@ -2416,8 +2425,14 @@ export const createRuntimeExecutors = (
 
             assertStepActive(ctx);
             execution = await executeToolWithRetry(
-              () =>
-                toolExecutionService.executeTool(chatToolPayload, {
+              async () => {
+                await assertChannelIdentityAccess(
+                  ctx.serverDB,
+                  ctx.userId,
+                  state.metadata?.botContext,
+                );
+                assertStepActive(ctx);
+                return toolExecutionService.executeTool(chatToolPayload, {
                   assertStepLease: ctx.assertStepLease,
                   activeDeviceId: state.metadata?.activeDeviceId,
                   agentId: state.metadata?.agentId,
@@ -2437,7 +2452,8 @@ export const createRuntimeExecutors = (
                   toolResultMaxLength: batchAgentConfig?.chatConfig?.toolResultMaxLength,
                   topicId: ctx.topicId,
                   userId: ctx.userId,
-                }),
+                });
+              },
               {
                 assertStepLease: () => assertStepActive(ctx),
                 isInterrupted: () => isOperationInterrupted(ctx),
@@ -2640,8 +2656,7 @@ export const createRuntimeExecutors = (
     );
     for (const result of toolResults) {
       const discovered = result.data?.state?.activatedTools as
-        | Array<{ identifier: string }>
-        | undefined;
+        Array<{ identifier: string }> | undefined;
       if (discovered?.length) {
         const newActivations = discovered
           .filter((t) => !existingActivationIds.has(t.identifier))
@@ -2695,6 +2710,8 @@ export const createRuntimeExecutors = (
 
     // If there are remaining client tools in a mixed batch, interrupt after server tools
     if (clientTools.length > 0) {
+      await assertChannelIdentityAccess(ctx.serverDB, ctx.userId, state.metadata?.botContext);
+      assertStepActive(ctx);
       log(
         `[${operationLogId}][call_tools_batch] Mixed batch: ${serverTools.length} server tools done, pausing for ${clientTools.length} client tools`,
       );

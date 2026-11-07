@@ -6,6 +6,12 @@ import { BotInboundModel } from '@/database/models/botInbound';
 import { BotInteractionService } from '../BotInteractionService';
 
 const resume = vi.hoisted(() => vi.fn().mockResolvedValue({ messageId: 'scheduled' }));
+const identityAccess = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({ enforced: false, allowed: true }),
+);
+vi.mock('../channelIdentity', () => ({
+  ChannelIdentityService: { resolveAccess: identityAccess },
+}));
 vi.mock('@/server/services/agentRuntime/AgentRuntimeService', () => ({
   AgentRuntimeService: class {
     processHumanIntervention = resume;
@@ -14,10 +20,18 @@ vi.mock('@/server/services/agentRuntime/AgentRuntimeService', () => ({
 afterEach(() => {
   vi.restoreAllMocks();
   resume.mockClear();
+  identityAccess.mockReset().mockResolvedValue({ enforced: false, allowed: true });
 });
 const scope = { platform: 'wechat', applicationId: 'bot', platformThreadId: 'wechat:sender' };
 
 describe('channel human interaction authorization', () => {
+  it('rejects a revoked binding before an old confirmation can resume a task', async () => {
+    const { service, update } = prepare();
+    identityAccess.mockResolvedValue({ enforced: true, allowed: false });
+    await expect(service.respond(scope, 'sender', 'answer', 'token A')).rejects.toThrow('已撤销');
+    expect(update).not.toHaveBeenCalled();
+    expect(resume).not.toHaveBeenCalled();
+  });
   function prepare(overrides: any = {}) {
     resume.mockResolvedValue({ messageId: 'scheduled' });
     const returning = vi.fn().mockResolvedValue([{ id: 'tool-msg' }]);
@@ -43,6 +57,39 @@ describe('channel human interaction authorization', () => {
     vi.spyOn(service, 'pending').mockResolvedValue(pending as any);
     return { service, update, returning, pending };
   }
+
+  it('builds approval buttons from the stored nonce and a redacted argument preview', async () => {
+    const { service } = prepare({
+      isQuestion: false,
+      token: '012345abcdef',
+      args: {
+        apiKey: 'private-key',
+        destination: 'https://example.com/result?token=private-token',
+      },
+    });
+    const card = await service.describeCard('op', scope.platformThreadId);
+    expect(card?.content).not.toContain('private-key');
+    expect(card?.content).not.toContain('private-token');
+    expect(card?.actions).toEqual([
+      {
+        action: 'confirm',
+        label: '允许',
+        platformThreadId: scope.platformThreadId,
+        token: '012345abcdef',
+      },
+      {
+        action: 'reject',
+        label: '拒绝',
+        platformThreadId: scope.platformThreadId,
+        token: '012345abcdef',
+      },
+    ]);
+  });
+
+  it('keeps free-form questions on their existing answer flow', async () => {
+    const { service } = prepare();
+    expect(await service.describeCard('op', scope.platformThreadId)).toBeUndefined();
+  });
   it.each([
     ['intruder', scope, 'token A'],
     ['sender', { ...scope, applicationId: 'other' }, 'token A'],

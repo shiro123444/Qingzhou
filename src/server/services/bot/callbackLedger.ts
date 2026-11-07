@@ -1,3 +1,4 @@
+import { ReplyUnavailableError } from './replyBudget';
 import { createHash, randomUUID } from 'node:crypto';
 
 import debug from 'debug';
@@ -63,6 +64,7 @@ export interface LedgerState {
     }
   >;
   highestStep?: number;
+  transportReceipts?: Record<string, unknown>;
 }
 
 const isProgressEffect = (id: string): boolean => /^step:\d+\/progress-edit$/.test(id);
@@ -368,16 +370,26 @@ export class CallbackDeliverySession {
     return Object.keys(this.state.effects).some((id) => id.startsWith(`${this.event}/`));
   }
 
+  frozenPlan<T>(): T | undefined {
+    if (!this.hasMessageEffects()) return undefined;
+    const event = this.state.events[this.event];
+    if (
+      !event.plan ||
+      event.renderedPlan === undefined ||
+      callbackHash(event.renderedPlan) !== event.plan
+    ) {
+      throw new CallbackDeliveryError('payload_conflict');
+    }
+    return structuredClone(event.renderedPlan) as T;
+  }
+
   async plan<T>(value: T): Promise<T> {
     const event = this.state.events[this.event];
     if (event.plan && this.hasMessageEffects()) {
       // Stable payload fields were verified in begin(). Reuse the original
       // rendered text/targets/statistics, never re-render a partially sent plan
       // using a new duration or changed platform formatting configuration.
-      if (event.renderedPlan === undefined || callbackHash(event.renderedPlan) !== event.plan) {
-        throw new CallbackDeliveryError('payload_conflict');
-      }
-      return structuredClone(event.renderedPlan) as T;
+      return this.frozenPlan<T>()!;
     }
     event.plan = callbackHash(value);
     event.renderedPlan = value;
@@ -385,7 +397,62 @@ export class CallbackDeliverySession {
     return value;
   }
 
+  transportReceiptEntries<T>(id?: string): Array<{ key: string; value: T }> {
+    const receipts = this.state.transportReceipts ?? {};
+    const suffix = id === undefined ? undefined : `/${id}`;
+    if (suffix !== undefined) {
+      for (const [key, status] of Object.entries(this.state.effects)) {
+        if (key.endsWith(suffix) && status === 'delivered' && !Object.hasOwn(receipts, key)) {
+          throw new CallbackDeliveryError('payload_conflict');
+        }
+      }
+    }
+    return Object.entries(receipts)
+      .filter(
+        ([key]) =>
+          this.state.effects[key] === 'delivered' && (suffix === undefined || key.endsWith(suffix)),
+      )
+      .map(([key, value]) => ({ key, value: structuredClone(value) as T }));
+  }
+
+  async effectWithReceipt<T>(id: string, send: () => Promise<T>): Promise<T> {
+    const key = `${this.event}/${id}`;
+    if (this.state.effects[key] === 'delivered') {
+      if (!Object.hasOwn(this.state.transportReceipts ?? {}, key)) {
+        throw new CallbackDeliveryError('payload_conflict');
+      }
+      return structuredClone(this.state.transportReceipts![key]) as T;
+    }
+    let confirmed = false;
+    try {
+      await this.deliverEffect(id, send, (receipt) => {
+        // Redis and SQL store JSON. An absent/non-serializable receipt cannot
+        // establish a durable continuation even when the platform acknowledged.
+        if (JSON.stringify(receipt) === undefined) throw new Error('Invalid transport receipt');
+        this.state.transportReceipts ??= {};
+        this.state.transportReceipts[key] = structuredClone(receipt);
+        confirmed = true;
+      });
+      return structuredClone(this.state.transportReceipts![key]) as T;
+    } catch (cause) {
+      if (!confirmed) throw cause;
+      // A confirmed transport response is usable only after its receipt and
+      // delivered marker have been acknowledged together by the owner-fenced store.
+      this.state.effects[key] = 'unknown_delivery';
+      delete this.state.transportReceipts![key];
+      throw new CallbackDeliveryError('unknown_delivery', { cause });
+    }
+  }
+
   async effect(id: string, send: () => Promise<unknown>): Promise<void> {
+    await this.deliverEffect(id, send);
+  }
+
+  private async deliverEffect<T>(
+    id: string,
+    send: () => Promise<T>,
+    recordReceipt?: (receipt: T) => void,
+  ): Promise<void> {
     const key = `${this.event}/${id}`;
     if (this.state.effects[key] === 'delivered') return;
     if (this.state.effects[key] === 'unknown_delivery') {
@@ -399,22 +466,38 @@ export class CallbackDeliverySession {
     this.assertLocalLease();
     try {
       // A timed-out send stays unknown even if its underlying transport ignores cancellation.
-      await bounded(() => {
+      const result = await bounded(() => {
         this.assertLocalLease();
         return send();
       }, 30_000);
+      recordReceipt?.(result);
     } catch (cause) {
+      if (cause instanceof ReplyUnavailableError) {
+        delete this.state.effects[key];
+        await this.save();
+        throw cause;
+      }
       throw new CallbackDeliveryError('unknown_delivery', { cause });
     }
     this.state.effects[key] = 'delivered';
     await this.save(); // an old worker can never overwrite a replacement owner
   }
 
-  async complete(): Promise<void> {
+  async complete(options?: { redactReceiptFields?: string[] }): Promise<void> {
     this.state.events[this.event].delivered = true;
     // Completed tombstones need only intent/plan hashes and delivery markers.
     // Keep rendered text exclusively for unresolved/partial message delivery.
     delete this.state.events[this.event].renderedPlan;
+    if (options?.redactReceiptFields?.length) {
+      const fields = new Set(options.redactReceiptFields);
+      for (const [key, value] of Object.entries(this.state.transportReceipts ?? {})) {
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+          this.state.transportReceipts![key] = Object.fromEntries(
+            Object.entries(value).filter(([field]) => !fields.has(field)),
+          );
+        }
+      }
+    }
     await this.save();
   }
 

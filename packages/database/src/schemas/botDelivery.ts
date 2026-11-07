@@ -5,6 +5,7 @@ import { createdAt, timestamptz, updatedAt } from './_helpers';
 import { users } from './user';
 
 export interface BotDeliveryLedgerState {
+  channelTask?: ChannelTask;
   completionStarted?: boolean;
   effects: Record<string, 'delivered' | 'unknown_delivery'>;
   events: Record<
@@ -12,6 +13,21 @@ export interface BotDeliveryLedgerState {
     { delivered?: boolean; fingerprint: string; plan?: string; renderedPlan?: unknown }
   >;
   highestStep?: number;
+}
+
+export interface ChannelTask {
+  agentId: string;
+  applicationId: string;
+  artifactIds: string[];
+  completed: boolean;
+  content: string;
+  delivery: 'pending' | 'submitted' | 'retained' | 'unknown';
+  operationId: string;
+  platform: string;
+  platformThreadId: string;
+  reason?: string;
+  senderExternalUserId: string;
+  topicId?: string;
 }
 
 export const botDeliveryJobs = pgTable(

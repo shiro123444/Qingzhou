@@ -33,6 +33,217 @@ afterEach(() => {
 });
 
 describe('callback delivery ledger', () => {
+  it('restores confirmed transport receipts without sending the same native effect twice', async () => {
+    const ledger = new InMemoryCallbackLedger();
+    const original = { streamId: 'stream-1', index: 0, final: false };
+    const send = vi.fn().mockResolvedValue(original);
+    const first = (await CallbackDeliverySession.begin(body, 'native', ledger))!;
+    const receipt = await first.effectWithReceipt<typeof original>('qq-stream', send);
+    receipt.index = 99;
+    original.streamId = 'mutated-by-caller';
+    await first.release();
+
+    const resumed = (await CallbackDeliverySession.begin(body, 'native', ledger))!;
+    expect(await resumed.effectWithReceipt('qq-stream', send)).toEqual({
+      streamId: 'stream-1',
+      index: 0,
+      final: false,
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+    const entries = resumed.transportReceiptEntries<typeof original>();
+    entries[0].value.index = 100;
+    expect(resumed.transportReceiptEntries<typeof original>()[0].value.index).toBe(0);
+    await resumed.release();
+  });
+
+  it('retains confirmed native transport state after completing one step and starting another', async () => {
+    const ledger = new InMemoryCallbackLedger();
+    const first = (await CallbackDeliverySession.begin(
+      { ...body, type: 'step' },
+      'step-1',
+      ledger,
+    ))!;
+    await first.plan({ mode: 'native', content: 'private text' });
+    await first.effectWithReceipt('qq-stream', async () => ({
+      streamId: 'stream-1',
+      index: 0,
+      final: false,
+    }));
+    await first.complete();
+    await first.release();
+
+    const next = (await CallbackDeliverySession.begin(
+      { ...body, type: 'step', stepIndex: 2 },
+      'step-2',
+      ledger,
+    ))!;
+    expect(next.transportReceiptEntries()).toEqual([
+      {
+        key: 'step:1/qq-stream',
+        value: { streamId: 'stream-1', index: 0, final: false },
+      },
+    ]);
+    const stored = next.transportReceiptEntries();
+    expect(JSON.stringify(stored)).not.toContain('private text');
+    await next.release();
+  });
+
+  it('keeps a live stream draft across steps and redacts its content at final completion', async () => {
+    const ledger = new InMemoryCallbackLedger();
+    const step = (await CallbackDeliverySession.begin({ ...body, type: 'step' }, 'step', ledger))!;
+    await step.effectWithReceipt('qq-stream', async () => ({
+      streamId: 'stream-1',
+      index: 0,
+      content: 'private draft',
+      final: false,
+    }));
+    await step.complete();
+    await step.release();
+    const final = (await CallbackDeliverySession.begin(body, 'final', ledger))!;
+    expect(final.transportReceiptEntries<{ content: string }>('qq-stream')[0].value.content).toBe(
+      'private draft',
+    );
+    await final.effectWithReceipt('qq-stream', async () => ({
+      streamId: 'stream-1',
+      index: 1,
+      content: 'private complete answer',
+      final: true,
+    }));
+    await final.complete({ redactReceiptFields: ['content'] });
+    expect(final.transportReceiptEntries('qq-stream')).toEqual([
+      { key: 'step:1/qq-stream', value: { streamId: 'stream-1', index: 0, final: false } },
+      { key: 'completion/qq-stream', value: { streamId: 'stream-1', index: 1, final: true } },
+    ]);
+    await final.release();
+    const stored = await ledger.acquire(callbackScopeKey(body), 'inspector');
+    expect(JSON.stringify(stored)).not.toContain('private');
+    expect(stored?.events.completion.delivered).toBe(true);
+    expect(stored?.transportReceipts?.['completion/qq-stream']).toMatchObject({
+      streamId: 'stream-1',
+      index: 1,
+    });
+    await ledger.release(callbackScopeKey(body), 'inspector');
+  });
+
+  it('rejects a missing earlier stream receipt after manual delivered reconciliation', async () => {
+    const ledger = new InMemoryCallbackLedger();
+    const step = (await CallbackDeliverySession.begin({ ...body, type: 'step' }, 'step', ledger))!;
+    await step.effect('qq-stream', async () => {});
+    await step.complete();
+    await step.release();
+    const next = (await CallbackDeliverySession.begin(
+      { ...body, type: 'step', stepIndex: 2 },
+      'next',
+      ledger,
+    ))!;
+    await next.effectWithReceipt('reply-card', async () => ({ cardId: 'card-1' }));
+    expect(next.transportReceiptEntries('reply-card')).toEqual([
+      { key: 'step:2/reply-card', value: { cardId: 'card-1' } },
+    ]);
+    expect(() => next.transportReceiptEntries('qq-stream')).toThrow('payload_conflict');
+    await next.release();
+  });
+
+  it('quarantines a native send when saving its acknowledged receipt fails', async () => {
+    const ledger = new InMemoryCallbackLedger();
+    const session = (await CallbackDeliverySession.begin(body, 'native', ledger))!;
+    const save = ledger.save.bind(ledger);
+    let saves = 0;
+    vi.spyOn(ledger, 'save').mockImplementation(async (...args) => {
+      saves++;
+      if (saves === 2) throw new Error('receipt confirmation unavailable');
+      await save(...args);
+    });
+    const send = vi.fn().mockResolvedValue({ streamId: 'stream-1', index: 0 });
+    await expect(session.effectWithReceipt('qq-stream', send)).rejects.toMatchObject({
+      status: 'unknown_delivery',
+    });
+    expect(session.transportReceiptEntries()).toEqual([]);
+    await expect(session.effectWithReceipt('qq-stream', send)).rejects.toMatchObject({
+      status: 'unknown_delivery',
+    });
+    await session.release();
+    await expect(CallbackDeliverySession.begin(body, 'native', ledger)).rejects.toMatchObject({
+      status: 'unknown_delivery',
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not reconstruct a missing receipt by resending an old delivered effect', async () => {
+    const ledger = new InMemoryCallbackLedger();
+    const session = (await CallbackDeliverySession.begin(body, 'native', ledger))!;
+    await session.effect('qq-stream', async () => {});
+    const send = vi.fn();
+    await expect(session.effectWithReceipt('qq-stream', send)).rejects.toMatchObject({
+      status: 'payload_conflict',
+    });
+    expect(send).not.toHaveBeenCalled();
+    await session.release();
+  });
+
+  it('keeps a platform acknowledgement without a JSON receipt uncertain', async () => {
+    const ledger = new InMemoryCallbackLedger();
+    const session = (await CallbackDeliverySession.begin(body, 'native', ledger))!;
+    await expect(
+      session.effectWithReceipt('qq-stream', async () => undefined),
+    ).rejects.toMatchObject({ status: 'unknown_delivery' });
+    expect(session.transportReceiptEntries()).toEqual([]);
+    await session.release();
+    await expect(CallbackDeliverySession.begin(body, 'native', ledger)).rejects.toMatchObject({
+      status: 'unknown_delivery',
+    });
+  });
+
+  it('does not expose a late receipt after a timed-out native send', async () => {
+    vi.useFakeTimers();
+    const ledger = new InMemoryCallbackLedger();
+    const session = (await CallbackDeliverySession.begin(body, 'native', ledger))!;
+    let finish!: (value: { streamId: string }) => void;
+    let entered!: () => void;
+    const sending = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const effect = session.effectWithReceipt('qq-stream', () => {
+      entered();
+      return new Promise<{ streamId: string }>((resolve) => {
+        finish = resolve;
+      });
+    });
+    const rejected = expect(effect).rejects.toMatchObject({ status: 'unknown_delivery' });
+    await sending;
+    await vi.advanceTimersByTimeAsync(30_001);
+    await rejected;
+    finish({ streamId: 'late-stream' });
+    await Promise.resolve();
+    expect(session.transportReceiptEntries()).toEqual([]);
+    await session.release();
+    await expect(CallbackDeliverySession.begin(body, 'native', ledger)).rejects.toMatchObject({
+      status: 'unknown_delivery',
+    });
+  });
+
+  it('peeks only the original frozen presentation after dispatch and rejects a missing plan', async () => {
+    const ledger = new InMemoryCallbackLedger();
+    const session = (await CallbackDeliverySession.begin(body, 'native', ledger))!;
+    expect(session.frozenPlan()).toBeUndefined();
+    await session.plan({ mode: 'native', content: 'first' });
+    expect(session.frozenPlan()).toBeUndefined();
+    await session.effect('qq-stream', async () => {});
+    const frozen = session.frozenPlan<{ mode: string; content: string }>()!;
+    frozen.content = 'changed';
+    expect(session.frozenPlan()).toEqual({ mode: 'native', content: 'first' });
+    await session.release();
+
+    const missing = (await CallbackDeliverySession.begin(
+      { ...body, operationId: 'legacy' },
+      'native',
+      ledger,
+    ))!;
+    await missing.effect('qq-stream', async () => {});
+    expect(() => missing.frozenPlan()).toThrow('payload_conflict');
+    await missing.release();
+  });
+
   it('isolates app/user/installation/platform and does not conflate installation and app', () => {
     const variants = [
       body,
@@ -284,22 +495,30 @@ describe('callback delivery ledger', () => {
     const ledger = new InMemoryCallbackLedger();
     const step = (await CallbackDeliverySession.begin({ ...body, type: 'step' }, 'p', ledger))!;
     let finish!: () => void;
+    let notifySending!: () => void;
+    const sending = new Promise<void>((resolve) => {
+      notifySending = resolve;
+    });
     const sent = step.effect(
       'edit',
       () =>
         new Promise<void>((resolve) => {
           finish = resolve;
+          notifySending();
         }),
     );
-    await Promise.resolve();
-    await Promise.resolve();
+    const rejected = expect(sent).rejects.toMatchObject({ status: 'unknown_delivery' });
+    await sending;
     vi.setSystemTime(Date.now() + CALLBACK_LEASE_MS + 1);
     await expect(CallbackDeliverySession.begin(body, 'completion', ledger)).rejects.toMatchObject({
       status: 'unknown_delivery',
     });
     finish();
-    await expect(sent).rejects.toMatchObject({ status: 'lease_lost' });
+    await rejected;
     await step.release();
+    const stored = await ledger.acquire(callbackScopeKey(body), 'inspector');
+    expect(stored?.effects['step:1/edit']).toBe('unknown_delivery');
+    await ledger.release(callbackScopeKey(body), 'inspector');
   });
 });
 

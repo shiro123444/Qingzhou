@@ -46,6 +46,7 @@ const ledgerStateSchema = z.object({
     }),
   ),
   highestStep: z.number().int().nonnegative().optional(),
+  transportReceipts: z.record(z.unknown()).optional(),
 });
 
 // Read-only migration: refuse to snapshot an installation while an old worker owns it.

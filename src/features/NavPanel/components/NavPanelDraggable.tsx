@@ -7,6 +7,7 @@ import { memo, Suspense, useMemo, useRef } from 'react';
 
 import { isDesktop } from '@/const/version';
 import { TOGGLE_BUTTON_ID } from '@/features/NavPanel/ToggleLeftPanelButton';
+import { useIsMobile } from '@/hooks/useIsMobile';
 import Footer from '@/routes/(main)/home/_layout/Footer';
 import { USER_DROPDOWN_ICON_ID } from '@/routes/(main)/home/_layout/Header/components/User';
 import { useGlobalStore } from '@/store/global';
@@ -106,6 +107,7 @@ const classNames = {
 };
 
 export const NavPanelDraggable = memo<NavPanelDraggableProps>(({ activeContent }) => {
+  const workspaceDrawerMode = useIsMobile() && activeContent.key === 'channels';
   const [expand, togglePanel, isStatusInit] = useGlobalStore((s) => [
     systemStatusSelectors.showLeftPanel(s),
     s.toggleLeftPanel,
@@ -140,7 +142,7 @@ export const NavPanelDraggable = memo<NavPanelDraggableProps>(({ activeContent }
       className={draggableStyles.panel}
       classNames={classNames}
       defaultSize={defaultSize}
-      expand={expand}
+      expand={expand && !workspaceDrawerMode}
       expandable={false}
       maxWidth={400}
       minWidth={240}

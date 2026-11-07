@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import debug from 'debug';
 
 import { getServerDB } from '@/database/core/db-adaptor';
@@ -11,15 +13,27 @@ import {
   type PlatformDefinition,
   resolveBotProviderConfig,
 } from '@/server/services/bot/platforms';
+import { createSerialQueue } from '@/server/services/messenger/platforms/cordis/registry';
+
+import { boundedGatewayIO, ConnectionLease } from './ConnectionLease';
+import { CordisConnection } from './CordisConnection';
+import { updateBotRuntimeStatus } from './runtimeStatus';
 
 const log = debug('lobe-server:bot-gateway');
 
 export interface GatewayManagerConfig {
   definitions: PlatformDefinition[];
+  persistentOnly?: boolean;
 }
 
 export class GatewayManager {
-  private clients = new Map<string, PlatformClient>();
+  private clients = new Map<string, CordisConnection>();
+  private revisions = new Map<string, string>();
+  private readonly operations = createSerialQueue();
+  private starting?: Promise<void>;
+  private stopping?: Promise<void>;
+  private syncing?: Promise<void>;
+  private syncTimer?: ReturnType<typeof setInterval>;
   private running = false;
   private config: GatewayManagerConfig;
 
@@ -34,11 +48,17 @@ export class GatewayManager {
     return this.running;
   }
 
+  hasClient(platform: string, applicationId: string): boolean {
+    return this.clients.get(buildRuntimeKey(platform, applicationId))?.isHeld ?? false;
+  }
+
   // ------------------------------------------------------------------
   // Lifecycle (call once)
   // ------------------------------------------------------------------
 
   async start(): Promise<void> {
+    if (this.stopping) await this.stopping;
+    if (this.starting) return this.starting;
     if (this.running) {
       log('GatewayManager already running, skipping');
       return;
@@ -46,73 +66,86 @@ export class GatewayManager {
 
     log('Starting GatewayManager');
 
-    await this.sync().catch((err) => {
-      console.error('[GatewayManager] Initial sync failed:', err);
+    this.starting = this.sync().then(() => {
+      this.running = true;
+      if (!this.stopping) {
+        this.syncTimer = setInterval(() => {
+          if (this.syncing || this.stopping) return;
+          this.syncing = this.sync().finally(() => {
+            this.syncing = undefined;
+          });
+          void this.syncing.catch(() => log('Channel reconciliation failed'));
+        }, 30_000);
+        this.syncTimer.unref?.();
+      }
+      log('GatewayManager started with %d clients', this.clients.size);
     });
-
-    this.running = true;
-    log('GatewayManager started with %d clients', this.clients.size);
+    try {
+      await this.starting;
+    } finally {
+      this.starting = undefined;
+    }
   }
 
   async stop(): Promise<void> {
-    if (!this.running) return;
-
-    log('Stopping GatewayManager');
-
-    for (const [key, client] of this.clients) {
-      log('Stopping client %s', key);
-      await client.stop();
+    if (this.stopping) return this.stopping;
+    this.stopping = (async () => {
+      clearInterval(this.syncTimer);
+      for (const connection of this.clients.values()) connection.prepareStop();
+      await this.starting;
+      await this.syncing;
+      await this.operations.settle();
+      const results = await Promise.allSettled(
+        [...this.clients.keys()].map((key) =>
+          this.operations.run(key, () => this.disposeClient(key)),
+        ),
+      );
+      this.running = false;
+      const failures = results.filter((result) => result.status === 'rejected');
+      if (failures.length) {
+        throw new Error(`Failed to stop ${failures.length} channel connection(s)`);
+      }
+      log('GatewayManager stopped');
+    })();
+    try {
+      await this.stopping;
+    } finally {
+      this.stopping = undefined;
     }
-    this.clients.clear();
-
-    this.running = false;
-    log('GatewayManager stopped');
   }
 
   // ------------------------------------------------------------------
   // Client operations (point-to-point)
   // ------------------------------------------------------------------
 
-  async startClient(platform: string, applicationId: string, userId: string): Promise<void> {
+  async startClient(
+    platform: string,
+    applicationId: string,
+    userId: string,
+  ): Promise<'started' | 'queued'> {
+    this.assertAcceptingConnections();
     const key = buildRuntimeKey(platform, applicationId);
-
-    // Stop existing if any
-    const existing = this.clients.get(key);
-    if (existing) {
-      log('Stopping existing client %s before restart', key);
-      await existing.stop();
-      this.clients.delete(key);
-    }
-
-    // Load from DB (user-scoped, single row)
-    const serverDB = await getServerDB();
-    const gateKeeper = await KeyVaultsGateKeeper.initWithEnvKey();
-    const model = new AgentBotProviderModel(serverDB, userId, gateKeeper);
-    const provider = await model.findEnabledByApplicationId(platform, applicationId);
-
-    if (!provider) {
-      log('No enabled provider found for %s', key);
-      return;
-    }
-
-    const client = this.createClient(platform, provider);
-    if (!client) {
-      log('Unsupported platform: %s', platform);
-      return;
-    }
-
-    await client.start();
-    this.clients.set(key, client);
-    log('Started client %s', key);
+    return this.operations.run(key, async () => {
+      this.assertAcceptingConnections();
+      // Resolve the caller's installation before touching an existing transport.
+      const provider = await boundedGatewayIO(async () => {
+        const serverDB = await getServerDB();
+        const gateKeeper = await KeyVaultsGateKeeper.initWithEnvKey();
+        return new AgentBotProviderModel(serverDB, userId, gateKeeper).findEnabledByApplicationId(
+          platform,
+          applicationId,
+        );
+      });
+      this.assertAcceptingConnections();
+      if (!provider) return 'queued';
+      await this.disposeClient(key);
+      return this.mountClient(key, platform, provider);
+    });
   }
 
   async stopClient(platform: string, applicationId: string): Promise<void> {
     const key = buildRuntimeKey(platform, applicationId);
-    const client = this.clients.get(key);
-    if (!client) return;
-
-    await client.stop();
-    this.clients.delete(key);
+    await this.operations.run(key, () => this.disposeClient(key));
     log('Stopped client %s', key);
   }
 
@@ -131,13 +164,11 @@ export class GatewayManager {
   }
 
   private async syncPlatform(platform: string): Promise<void> {
-    const serverDB = await getServerDB();
-    const gateKeeper = await KeyVaultsGateKeeper.initWithEnvKey();
-    const providers = await AgentBotProviderModel.findEnabledByPlatform(
-      serverDB,
-      platform,
-      gateKeeper,
-    );
+    const providers = await boundedGatewayIO(async () => {
+      const serverDB = await getServerDB();
+      const gateKeeper = await KeyVaultsGateKeeper.initWithEnvKey();
+      return AgentBotProviderModel.findEnabledByPlatform(serverDB, platform, gateKeeper);
+    });
 
     log('Sync: found %d enabled providers for %s', providers.length, platform);
 
@@ -150,41 +181,107 @@ export class GatewayManager {
 
       log('Sync: processing provider %s, hasCredentials=%s', key, !!credentials);
 
-      const existing = this.clients.get(key);
-      if (existing) {
-        log('Sync: client %s already running, skipping', key);
-        continue;
-      }
-
       try {
-        const client = this.createClient(platform, provider);
-        if (!client) {
-          log('Sync: createClient returned null for %s', key);
-          continue;
-        }
-
-        await client.start();
-        this.clients.set(key, client);
-        log('Sync: started client %s', key);
+        await this.operations.run(key, async () => {
+          if (this.stopping) return;
+          if (this.clients.get(key)?.isHeld && this.revisions.get(key) === this.revision(provider))
+            return;
+          await this.disposeClient(key);
+          await this.mountClient(key, platform, provider);
+        });
       } catch (err) {
         log('Sync: failed to start client %s: %O', key, err);
       }
     }
 
     // Stop clients that are no longer in DB
-    for (const [key, client] of this.clients) {
+    for (const key of this.clients.keys()) {
       if (!key.startsWith(`${platform}:`)) continue;
       if (activeKeys.has(key)) continue;
 
       log('Sync: client %s removed from DB, stopping', key);
-      await client.stop();
-      this.clients.delete(key);
+      await this.operations.run(key, () => this.disposeClient(key));
     }
   }
 
   // ------------------------------------------------------------------
   // Factory
   // ------------------------------------------------------------------
+
+  private assertAcceptingConnections(): void {
+    if (this.stopping) throw new Error('Channel gateway is stopping');
+  }
+
+  private async disposeClient(key: string): Promise<void> {
+    const connection = this.clients.get(key);
+    if (!connection) return;
+    await connection.dispose();
+    // Retain failed disposals so a replacement cannot overlap the old transport.
+    if (this.clients.get(key) === connection) {
+      this.clients.delete(key);
+      this.revisions.delete(key);
+    }
+  }
+
+  private revision(
+    provider: Parameters<GatewayManager['createClient']>[1] & { agentId?: string; userId?: string },
+  ): string {
+    const { channelIdentity: _identity, ...settings } = provider.settings ?? {};
+    // Binding revisions are checked at authorization time and do not alter the transport.
+    return createHash('sha256')
+      .update(
+        JSON.stringify({
+          agentId: provider.agentId,
+          applicationId: provider.applicationId,
+          credentials: provider.credentials,
+          settings,
+          userId: provider.userId,
+        }),
+      )
+      .digest('hex');
+  }
+
+  private async mountClient(
+    key: string,
+    platform: string,
+    provider: Parameters<GatewayManager['createClient']>[1],
+  ): Promise<'started' | 'queued'> {
+    const definition = this.definitionByPlatform.get(platform);
+    if (!definition) return 'queued';
+    const { connectionMode } = resolveBotProviderConfig(definition, provider);
+    if (this.config.persistentOnly && connectionMode === 'webhook') return 'queued';
+    let connection: CordisConnection | undefined;
+    const requiresLease =
+      connectionMode !== 'webhook' && ['wechat', 'qq', 'feishu', 'lark'].includes(platform);
+    const lease = !requiresLease
+      ? undefined
+      : await ConnectionLease.acquire(getAgentRuntimeRedisClient(), key, () => {
+          connection?.interrupt();
+          void this.operations
+            .run(key, async () => {
+              if (connection && this.clients.get(key) === connection) await this.disposeClient(key);
+            })
+            .catch(() => log('Failed to dispose revoked channel connection'));
+        });
+    if (requiresLease && !lease) return 'queued';
+    try {
+      this.assertAcceptingConnections();
+      const client = this.createClient(platform, provider, lease);
+      if (!client) {
+        await lease?.release();
+        return 'queued';
+      }
+      connection = new CordisConnection(client, lease);
+      this.clients.set(key, connection);
+      this.revisions.set(key, this.revision(provider));
+      await connection.ready;
+      return 'started';
+    } catch (error) {
+      if (connection) await this.disposeClient(key);
+      else await lease?.release();
+      throw error;
+    }
+  }
 
   private createClient(
     platform: string,
@@ -193,6 +290,7 @@ export class GatewayManager {
       credentials: Record<string, string>;
       settings?: Record<string, unknown> | null;
     },
+    lease?: ConnectionLease,
   ): PlatformClient | null {
     const def = this.definitionByPlatform.get(platform);
     if (!def) {
@@ -203,8 +301,16 @@ export class GatewayManager {
     const { config } = resolveBotProviderConfig(def, provider);
 
     const context: BotPlatformRuntimeContext = {
+      assertConnectionHeld: lease?.assertHeld,
       appUrl: process.env.APP_URL,
       redisClient: getAgentRuntimeRedisClient() as any,
+      updateRuntimeStatus: lease
+        ? (params, options) =>
+            updateBotRuntimeStatus(params, {
+              ...options,
+              connectionLease: lease,
+            })
+        : undefined,
       pollingCursorStore:
         platform === 'wechat'
           ? {

@@ -24,6 +24,12 @@ import AgentTopicNotebookDocPage from '@/routes/(main)/agent/[topicId]/page/[doc
 import AgentChannelPage from '@/routes/(main)/agent/channel';
 import AgentPageRedirectPage from '@/routes/(main)/agent/page';
 import AgentProfilePage from '@/routes/(main)/agent/profile';
+import ChannelOverview from '@/routes/(main)/channels';
+import ChannelsLayout from '@/routes/(main)/channels/_layout';
+import ChannelPlatformPage from '@/routes/(main)/channels/[platform]';
+import ChannelProviderRedirect from '@/routes/(main)/channels/[platform]/[providerId]';
+import ChannelProviderPage from '@/routes/(main)/channels/[platform]/[providerId]/[section]';
+import ChannelTaskPage from '@/routes/(main)/channels/[platform]/[providerId]/activity/tasks/[taskId]';
 import CommunityLayout from '@/routes/(main)/community/_layout';
 import CommunityDetailLayout from '@/routes/(main)/community/(detail)/_layout';
 import CommunityDetailAgentPage from '@/routes/(main)/community/(detail)/agent';
@@ -544,6 +550,30 @@ export const desktopRoutes: RouteObject[] = [
         ],
         errorElement: <ErrorBoundary />,
         path: 'presentation',
+      },
+
+      // Channel workspace
+      {
+        children: [
+          { element: <ChannelOverview />, index: true },
+          {
+            children: [
+              { element: <ChannelPlatformPage />, index: true },
+              {
+                children: [
+                  { element: <ChannelProviderRedirect />, index: true },
+                  { element: <ChannelProviderPage />, path: ':section' },
+                  { element: <ChannelTaskPage />, path: 'activity/tasks/:taskId' },
+                ],
+                path: ':providerId',
+              },
+            ],
+            path: ':platform',
+          },
+        ],
+        element: <ChannelsLayout />,
+        errorElement: <ErrorBoundary resetPath="/channels" />,
+        path: 'channels',
       },
 
       // Default route - home page (handled by persistent layout)

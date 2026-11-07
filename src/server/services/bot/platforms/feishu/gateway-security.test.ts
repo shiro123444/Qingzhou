@@ -22,6 +22,59 @@ afterEach(() => vi.restoreAllMocks());
 
 describe('Feishu/Lark WS gateway forwarding', () => {
   it.each(['feishu', 'lark'] as const)(
+    'persists a signed %s card decision with the verified actor and original thread',
+    async (platform) => {
+      const persist = vi.fn().mockResolvedValue(undefined);
+      const adapter = new LarkAdapter({
+        appId: 'cli_test',
+        appSecret: 'secret',
+        platform,
+        authenticateWebhook: createGatewayAuthenticator({
+          applicationId: 'cli_test',
+          platform,
+          secret: 'secret',
+          durableReceipt: true,
+        }),
+        persistVerifiedWebhook: persist,
+      });
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (target, init) =>
+        adapter.handleWebhook(new Request(String(target), init)),
+      );
+      const gateway = new FeishuWSConnection({
+        appId: 'cli_test',
+        appSecret: 'secret',
+        domain: platform,
+        webhookUrl: url,
+      });
+      await (gateway as any).forwardEvent('card.action.trigger', {
+        operator: { open_id: 'ou_actor' },
+        context: { open_chat_id: 'oc_chat', open_message_id: 'om_card' },
+        action: {
+          value: {
+            qingzhouAction: 'reject',
+            token: 'a123456789bc',
+            platformThreadId: `${platform}:group:oc_chat`,
+          },
+        },
+        token: 'sensitive-callback-token',
+      });
+      expect(persist).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: expect.objectContaining({
+            sender: { sender_id: { open_id: 'ou_actor' }, sender_type: 'user' },
+            message: expect.objectContaining({
+              content: JSON.stringify({ text: '/reject a123456789bc' }),
+            }),
+          }),
+        }),
+        expect.stringContaining('card_action_'),
+        `${platform}:group:oc_chat`,
+      );
+      expect(JSON.stringify(persist.mock.calls)).not.toContain('sensitive-callback-token');
+    },
+  );
+
+  it.each(['feishu', 'lark'] as const)(
     'delivers a signed %s internal event without native webhook secrets',
     async (platform) => {
       const claimReplay = vi.fn().mockResolvedValue(true);

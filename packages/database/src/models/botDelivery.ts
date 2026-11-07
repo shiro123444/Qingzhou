@@ -207,17 +207,17 @@ export class BotDeliveryModel {
     });
   }
 
-  async delivered(job: BotDeliveryJob): Promise<boolean> {
+  async delivered(job: BotDeliveryJob, retained = false): Promise<boolean> {
     return this.transaction(async (tx) => {
       const rows = await tx
         .update(botDeliveryJobs)
         .set({
-          deliveredAt: now,
-          errorCode: null,
+          deliveredAt: retained ? null : now,
+          errorCode: retained ? 'result_retained' : null,
           leaseExpiresAt: null,
           leaseOwner: null,
           payload: null,
-          status: 'delivered',
+          status: retained ? 'dead' : 'delivered',
           updatedAt: now,
         })
         .where(jobFence({ id: job.id, owner: job.leaseOwner! }))
@@ -225,7 +225,13 @@ export class BotDeliveryModel {
       if (!rows.length) return false;
       await tx
         .update(botDeliveryJobs)
-        .set({ deliveredAt: now, payload: null, status: 'delivered', updatedAt: now })
+        .set({
+          deliveredAt: retained ? null : now,
+          payload: null,
+          errorCode: retained ? 'result_retained' : null,
+          status: retained ? 'dead' : 'delivered',
+          updatedAt: now,
+        })
         .where(
           and(
             eq(botDeliveryJobs.id, `outbox:${job.eventKey}`),

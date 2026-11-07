@@ -3,18 +3,25 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockCreateWechatAdapter = vi.hoisted(() => vi.fn());
 const mockGetUpdates = vi.hoisted(() => vi.fn());
+const mockText = vi.hoisted(() => vi.fn());
+const mockUpload = vi.hoisted(() => vi.fn());
+const mockFile = vi.hoisted(() => vi.fn());
 const mockStartTyping = vi.hoisted(() => vi.fn());
 const mockDownloadMediaFromRawMessage = vi.hoisted(() => vi.fn());
 const MessageState = vi.hoisted(() => ({ FINISH: 2 }));
 const MessageType = vi.hoisted(() => ({ BOT: 2, USER: 1 }));
 
 vi.mock('@lobechat/chat-adapter-wechat', () => ({
+  WechatApiRejection: class extends Error {},
   createWechatAdapter: mockCreateWechatAdapter,
   downloadMediaFromRawMessage: mockDownloadMediaFromRawMessage,
   MessageState,
   MessageType,
   WechatApiClient: vi.fn().mockImplementation(() => ({
     getUpdates: mockGetUpdates,
+    sendTextChunk: mockText,
+    uploadFile: mockUpload,
+    sendFile: mockFile,
     startTyping: mockStartTyping,
   })),
 }));
@@ -95,6 +102,114 @@ describe('WechatGatewayClient', () => {
     await client.stop();
     resolveLoop?.({ get_updates_buf: 'cursor-1', msgs: [], ret: 0 });
     await Promise.all(backgroundTasks);
+  });
+
+  it('joins an in-flight forwarded batch before stop resolves', async () => {
+    let finishForward!: (response: Response) => void;
+    let notifyForward!: () => void;
+    const forwarding = new Promise<void>((resolve) => {
+      notifyForward = resolve;
+    });
+    mockGetUpdates.mockReset();
+    mockGetUpdates.mockResolvedValueOnce({ msgs: [] }).mockResolvedValueOnce({
+      get_updates_buf: 'committed-cursor',
+      msgs: [{ from_user_id: 'alice', message_id: 1, message_type: 1, item_list: [] }],
+    });
+    vi.mocked(fetch).mockImplementationOnce(() => {
+      notifyForward();
+      return new Promise<Response>((resolve) => {
+        finishForward = resolve;
+      });
+    });
+    const saveCursor = vi.fn().mockResolvedValue(undefined);
+    const client = new WechatClientFactory().createClient(
+      {
+        applicationId: 'wechat-app',
+        platform: 'wechat',
+        credentials: { botId: 'bot-id', botToken: 'bot-token' },
+        settings: {},
+      },
+      {
+        appUrl: 'https://example.com',
+        redisClient: runtimeRedis as any,
+        pollingCursorStore: { load: async () => undefined, save: saveCursor },
+      },
+    );
+    await client.start({ durationMs: 10_000 });
+    await forwarding;
+    let stopped = false;
+    const stopping = client.stop().then(() => {
+      stopped = true;
+    });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+    finishForward(new Response(null, { status: 202 }));
+    await stopping;
+    expect(saveCursor).toHaveBeenCalledWith('committed-cursor');
+    expect(mockGetUpdates).toHaveBeenCalledTimes(2);
+  });
+
+  it('waits for the previous poll generation before refreshing', async () => {
+    let finishOldPoll!: () => void;
+    mockGetUpdates.mockReset();
+    mockGetUpdates
+      .mockResolvedValueOnce({ msgs: [] })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishOldPoll = () => resolve({ msgs: [] });
+          }),
+      )
+      .mockResolvedValueOnce({ msgs: [] })
+      .mockImplementationOnce(
+        (_cursor: string, signal: AbortSignal) =>
+          new Promise((_resolve, reject) => {
+            signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+          }),
+      );
+    const client = new WechatClientFactory().createClient(
+      {
+        applicationId: 'wechat-app',
+        platform: 'wechat',
+        credentials: { botId: 'bot-id', botToken: 'bot-token' },
+        settings: {},
+      },
+      { appUrl: 'https://example.com', redisClient: runtimeRedis as any },
+    );
+    await client.start({ durationMs: 10_000 });
+    const refreshing = (client as any).refresh();
+    await Promise.resolve();
+    expect(mockGetUpdates).toHaveBeenCalledTimes(2);
+    finishOldPoll();
+    await refreshing;
+    expect(mockGetUpdates).toHaveBeenCalledTimes(4);
+    await client.stop();
+  });
+
+  it('removes completed backoff abort listeners and skips already-cancelled waits', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new WechatClientFactory().createClient(
+        {
+          applicationId: 'wechat-app',
+          platform: 'wechat',
+          credentials: { botId: 'bot-id', botToken: 'bot-token' },
+          settings: {},
+        },
+        {},
+      );
+      const abort = new AbortController();
+      const remove = vi.spyOn(abort.signal, 'removeEventListener');
+      const sleeping = (client as any).sleep(10, abort.signal);
+      await vi.advanceTimersByTimeAsync(10);
+      await sleeping;
+      expect(remove).toHaveBeenCalledWith('abort', expect.any(Function));
+      abort.abort();
+      await (client as any).sleep(10, abort.signal);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('forwards messages received during the readiness probe', async () => {
@@ -453,5 +568,48 @@ describe('WechatGatewayClient', () => {
         client.extractFiles!(makeMessage({ item_list: [{ image_item: {}, type: 1 }] })),
       ).rejects.toThrow('helper crashed');
     });
+  });
+});
+
+describe('WeChat result delivery context', () => {
+  const config = {
+    applicationId: 'app',
+    credentials: { botToken: 'test' },
+    platform: 'wechat',
+    settings: {},
+  };
+  it('reads fresh shared context for every text and after private file upload', async () => {
+    const get = vi
+      .fn()
+      .mockResolvedValueOnce('first')
+      .mockResolvedValueOnce('second')
+      .mockResolvedValueOnce('before-upload')
+      .mockResolvedValueOnce('after-upload');
+    mockUpload.mockResolvedValue({ type: 4 });
+    const messenger = new WechatClientFactory()
+      .createClient(config, { redisClient: { get } as any })
+      .getMessenger('wechat:dm:recipient');
+    await messenger.createMessage('one');
+    await messenger.createMessage('two');
+    const send = await messenger.prepareFile!({
+      bytes: Buffer.from('test'),
+      filename: 'test.txt',
+      mimeType: 'text/plain',
+      deliveryId: 'file',
+    });
+    await send();
+    expect(mockText.mock.calls.slice(-2)).toEqual([
+      ['recipient', 'one', 'first'],
+      ['recipient', 'two', 'second'],
+    ]);
+    expect(mockFile).toHaveBeenLastCalledWith('recipient', { type: 4 }, 'after-upload', 'file');
+  });
+  it('does not dispatch without a conversation token', async () => {
+    mockText.mockClear();
+    const messenger = new WechatClientFactory()
+      .createClient(config, { redisClient: { get: vi.fn().mockResolvedValue(null) } as any })
+      .getMessenger('wechat:dm:recipient');
+    await expect(messenger.createMessage('result')).rejects.toThrow('reply_context_missing');
+    expect(mockText).not.toHaveBeenCalled();
   });
 });

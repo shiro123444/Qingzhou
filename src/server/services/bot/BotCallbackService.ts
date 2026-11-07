@@ -1,3 +1,6 @@
+import { ChannelTaskModel } from '@/database/models/channelTask';
+import { ChannelTaskService } from './ChannelTaskService';
+import { ReplyUnavailableError } from './replyBudget';
 import debug from 'debug';
 
 import type { MessengerPlatform } from '@/config/messenger';
@@ -22,7 +25,10 @@ import { BotArtifactService } from './BotArtifactService';
 import { BotInteractionService } from './BotInteractionService';
 import type { LedgerBackend } from './callbackLedger';
 import { CallbackDeliveryError, CallbackDeliverySession, callbackHash } from './callbackLedger';
+import { supportsChannelIdentity } from './channelIdentity';
+import { assertChannelIdentityAccess, guardChannelMessenger } from './channelIdentityAccess';
 import { normalizeBotPausePayload } from './deliveryEnvelope';
+import { deliverNativeReply } from './nativeReply';
 import type { BotReplyLocale, PlatformClient, PlatformMessenger, UsageStats } from './platforms';
 import {
   getBotReplyLocale,
@@ -46,6 +52,7 @@ const log = debug('lobe-server:bot:callback');
 // --------------- Callback body types ---------------
 
 export interface BotCallbackBody {
+  agentId?: string;
   applicationId: string;
   content?: string;
   cost?: number;
@@ -75,6 +82,7 @@ export interface BotCallbackBody {
   progressMessageId?: string;
   reason?: string;
   reasoning?: string;
+  senderExternalUserId?: string;
   shouldContinue?: boolean;
   stepIndex?: number;
   steps?: number;
@@ -95,6 +103,7 @@ export interface BotCallbackBody {
   type: 'completion' | 'step';
   userId?: string;
   userMessageId?: string;
+  userMessageReceivedAt?: number;
   userPrompt?: string;
 }
 
@@ -110,13 +119,14 @@ export class BotCallbackService {
     this.db = db;
   }
 
-  async handleCallback(body: BotCallbackBody): Promise<{ status: 'delivered' | 'skipped' }> {
+  async handleCallback(
+    body: BotCallbackBody,
+  ): Promise<{ status: 'delivered' | 'skipped' | 'retained' }> {
     body = normalizeBotPausePayload(
       body as unknown as Record<string, unknown>,
     ) as unknown as BotCallbackBody;
-    // onComplete also signals a non-terminal human-approval pause. This bot
-    // receiver has no approval-card flow: afterStep owns progress, and the same
-    // operation must remain open for resumed steps and its eventual final reply.
+    // afterStep delivers the human-approval prompt. The matching onComplete
+    // pause must leave this operation open for resumed steps and its final reply.
     if (body.type === 'completion' && body.reason === 'waiting_for_human') {
       return { status: 'skipped' };
     }
@@ -131,14 +141,40 @@ export class BotCallbackService {
       (isQueueAgentRuntimeEnabled()
         ? new PostgresCallbackLedger(this.db, body.userId!)
         : undefined);
-    const delivery = await CallbackDeliverySession.begin(body, callbackHash(intent), backend);
-    if (!delivery) return { status: 'skipped' };
+    const taskId = await new ChannelTaskService(this.db).record(body);
+    let delivery: CallbackDeliverySession | null = null;
     try {
+      delivery = await CallbackDeliverySession.begin(body, callbackHash(intent), backend);
+      if (!delivery) return { status: 'skipped' };
       await this.deliverCallback(body, delivery);
-      await delivery.complete();
+      if (taskId && body.type === 'completion')
+        await new ChannelTaskModel(this.db, body.userId!).delivery(taskId, 'submitted');
+      await delivery.complete(
+        body.type === 'completion' || body.reason === 'waiting_for_human'
+          ? { redactReceiptFields: ['content'] }
+          : undefined,
+      );
       return { status: 'delivered' };
+    } catch (error) {
+      if (error instanceof ReplyUnavailableError && taskId && delivery) {
+        if (body.type === 'completion')
+          await new ChannelTaskModel(this.db, body.userId!).delivery(
+            taskId,
+            'retained',
+            error.reason,
+          );
+        await delivery.complete({ redactReceiptFields: ['content'] });
+        return { status: body.type === 'completion' ? 'retained' : 'skipped' };
+      }
+      if (taskId && error instanceof CallbackDeliveryError && error.status === 'unknown_delivery')
+        await new ChannelTaskModel(this.db, body.userId!).delivery(
+          taskId,
+          'unknown',
+          'unknown_delivery',
+        );
+      throw error;
     } finally {
-      await delivery.release();
+      await delivery?.release();
     }
   }
 
@@ -165,6 +201,9 @@ export class BotCallbackService {
       platformThreadId,
       userId,
       replyToMessageId: body.userMessageId,
+      replyToMessageReceivedAt: body.userMessageReceivedAt,
+      agentId: body.agentId,
+      senderExternalUserId: body.senderExternalUserId,
     });
 
     const entry = platformRegistry.getPlatform(platform);
@@ -172,17 +211,85 @@ export class BotCallbackService {
     const replyLocale = getBotReplyLocale(platform);
 
     if (type === 'step') {
-      if (body.reason === 'waiting_for_human' && body.userId && body.operationId) {
-        const notice = await new BotInteractionService(this.db, body.userId).describe(
-          body.operationId,
-        );
+      let nativeProgress = false;
+      if (delivery.frozenPlan<{ mode?: string }>()?.mode === 'native') {
+        // Replay before reading current capabilities or pending interactions.
+        // The helper restores the original payload and refuses a missing transport.
+        await deliverNativeReply({
+          content: body.content ?? '',
+          delivery,
+          final: body.reason === 'waiting_for_human',
+          pause: body.reason === 'waiting_for_human',
+          messenger,
+          title: '处理中',
+          deliveryId: callbackHash([body.operationId, body.stepIndex, 'progress']),
+        });
+        nativeProgress = true;
+        if (body.reason === 'waiting_for_human') return;
+      }
+      if (
+        !nativeProgress &&
+        body.reason === 'waiting_for_human' &&
+        body.userId &&
+        body.operationId
+      ) {
+        const interaction = new BotInteractionService(this.db, body.userId);
+        const card = messenger.createReplyCard
+          ? await interaction.describeCard(body.operationId, body.platformThreadId)
+          : undefined;
+        if (card) {
+          await deliverNativeReply({
+            ...card,
+            delivery,
+            final: false,
+            messenger,
+            deliveryId: callbackHash([body.operationId, body.stepIndex, 'interaction']),
+          });
+          return;
+        }
+        const notice = await interaction.describe(body.operationId);
         if (notice) {
+          if (
+            messenger.sendReplyStreamFrame &&
+            (await deliverNativeReply({
+              content: notice,
+              delivery,
+              final: true,
+              pause: true,
+              messenger,
+              title: '等待响应',
+              charLimit,
+              deliveryId: callbackHash([body.operationId, body.stepIndex, 'interaction']),
+            }))
+          )
+            return;
           const plan = await delivery.plan({ notice });
           await delivery.effect('interaction-notice', () => messenger.createMessage(plan.notice));
         }
         return;
       }
-      if (canEdit && progressMessageId && settings.displayToolCalls === true) {
+      if (
+        !nativeProgress &&
+        body.shouldContinue &&
+        (messenger.createReplyCard || messenger.sendReplyStreamFrame)
+      ) {
+        const content =
+          body.content?.trim() ||
+          (settings.displayToolCalls === true
+            ? `正在处理第 ${(body.stepIndex ?? 0) + 1} 步`
+            : undefined);
+        if (content)
+          nativeProgress = !!(await deliverNativeReply({
+            content,
+            delivery,
+            final: false,
+            messenger,
+            title: '处理中',
+            deliveryId: callbackHash([body.operationId, body.stepIndex, 'progress']),
+            charLimit,
+          }));
+      }
+      if (!nativeProgress && canEdit && progressMessageId && settings.displayToolCalls === true) {
         await this.handleStep(body, messenger, progressMessageId, client, replyLocale, delivery);
       }
       // Swap the user-message reaction to match the current step type (tool
@@ -237,6 +344,7 @@ export class BotCallbackService {
   }
 
   private async createMessenger(params: {
+    agentId?: string;
     applicationId: string;
     messengerInstallationKey?: string;
     messengerPlatformUserId?: string;
@@ -244,6 +352,8 @@ export class BotCallbackService {
     platformThreadId: string;
     userId?: string;
     replyToMessageId?: string;
+    replyToMessageReceivedAt?: number;
+    senderExternalUserId?: string;
   }): Promise<{
     charLimit?: number;
     connectionId: string;
@@ -284,6 +394,15 @@ export class BotCallbackService {
       throw new Error(`Bot provider not found for ${platform} appId=${applicationId}`);
     }
 
+    const identityContext = {
+      applicationId,
+      platform,
+      senderExternalUserId: params.senderExternalUserId ?? '',
+    };
+    const assertAccess = () =>
+      assertChannelIdentityAccess(this.db, userId, identityContext, params.agentId);
+    await assertAccess();
+
     const gateKeeper = await KeyVaultsGateKeeper.initWithEnvKey();
     let credentials: Record<string, string>;
     try {
@@ -302,13 +421,19 @@ export class BotCallbackService {
       credentials,
       settings: (row as any).settings as Record<string, unknown> | undefined,
     });
-    const charLimit = (settings.charLimit as number) || undefined;
+    const configuredLimit = (settings.charLimit as number) || undefined;
+    const charLimit =
+      platform === 'wechat' ? Math.min(configuredLimit || 2000, 2000) : configuredLimit;
 
     const client = entry.clientFactory.createClient(config, {
       replyToMessageId: params.replyToMessageId,
+      replyToMessageReceivedAt: params.replyToMessageReceivedAt,
       redisClient: getAgentRuntimeRedisClient() as any,
     });
-    const messenger = client.getMessenger(platformThreadId);
+    const rawMessenger = client.getMessenger(platformThreadId);
+    const messenger = supportsChannelIdentity(platform)
+      ? guardChannelMessenger(rawMessenger, assertAccess)
+      : rawMessenger;
 
     return { charLimit, connectionId: row.id, messenger, client, settings };
   }
@@ -462,6 +587,19 @@ export class BotCallbackService {
         errorMessage,
       );
       const errorBody = renderAgentError(errorType, errorMessage, operationId, replyLocale);
+      if (
+        await deliverNativeReply({
+          content: errorBody,
+          fallbackText: client.formatMarkdown?.(errorBody) ?? errorBody,
+          delivery,
+          final: true,
+          messenger,
+          title: '执行失败',
+          charLimit,
+          deliveryId: callbackHash([operationId, 'error']),
+        })
+      )
+        return;
       const errorText = client.formatMarkdown?.(errorBody) ?? errorBody;
       const plan = await delivery.plan({ canEdit, chunks: [errorText], progressMessageId });
       await this.deliverFirstChunk(
@@ -476,6 +614,19 @@ export class BotCallbackService {
 
     if (reason === 'interrupted') {
       const stoppedText = renderStopped(errorMessage, replyLocale);
+      if (
+        await deliverNativeReply({
+          content: stoppedText,
+          fallbackText: client.formatMarkdown?.(stoppedText) ?? stoppedText,
+          delivery,
+          final: true,
+          messenger,
+          title: '已停止',
+          charLimit,
+          deliveryId: callbackHash([operationId, 'interrupted']),
+        })
+      )
+        return;
       const plan = await delivery.plan({ chunks: [stoppedText], mode: 'create' });
       await delivery.effect('chunk:0', () => messenger.createMessage(plan.chunks[0]));
       return;
@@ -489,6 +640,15 @@ export class BotCallbackService {
         ? await new BotArtifactService(this.db, body.userId).list(body.operationId)
         : [];
     if (!lastAssistantContent?.trim() && !artifacts.length) {
+      await deliverNativeReply({
+        content: '处理完成',
+        delivery,
+        final: true,
+        messenger,
+        title: '已完成',
+        charLimit,
+        deliveryId: callbackHash([operationId, 'completion']),
+      });
       log('handleCompletion: no lastAssistantContent, skipping');
       return;
     }
@@ -507,6 +667,22 @@ export class BotCallbackService {
     const finalText = client.formatReply?.(formattedBody, stats) ?? formattedBody;
     const chunks = splitMessage(finalText, charLimit);
 
+    const native = await deliverNativeReply({
+      artifacts,
+      content: (client.formatReply?.(msgBody, stats) ?? msgBody).trim() || '处理完成',
+      fallbackText: finalText,
+      delivery,
+      final: true,
+      messenger,
+      title: '已完成',
+      charLimit,
+      deliveryId: callbackHash([operationId, 'completion']),
+    });
+    if (native) {
+      await this.deliverArtifacts(body, messenger, delivery, native.artifacts);
+      return;
+    }
+
     const plan = await delivery.plan({ canEdit, chunks, progressMessageId, artifacts });
     if (plan.chunks.length === 0 && !plan.artifacts?.length) {
       log('handleCompletion: all chunks empty after formatting, skipping send');
@@ -524,7 +700,16 @@ export class BotCallbackService {
     for (let i = 1; i < plan.chunks.length; i++) {
       await delivery.effect(`chunk:${i}`, () => messenger.createMessage(plan.chunks[i]));
     }
-    for (const fileId of plan.artifacts ?? []) {
+    await this.deliverArtifacts(body, messenger, delivery, plan.artifacts ?? []);
+  }
+
+  private async deliverArtifacts(
+    body: BotCallbackBody,
+    messenger: PlatformMessenger,
+    delivery: CallbackDeliverySession,
+    artifacts: string[],
+  ): Promise<void> {
+    for (const fileId of artifacts) {
       if (delivery.hasDeliveredEffect(`file:${fileId}`)) continue;
       if (!messenger.prepareFile || !body.userId)
         throw new Error('File reply transport unavailable');

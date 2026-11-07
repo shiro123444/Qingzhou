@@ -6,6 +6,7 @@ import {
   LibraryBigIcon,
   ListTodoIcon,
   Presentation,
+  Radio,
   Settings,
   ShapesIcon,
   Video,
@@ -37,6 +38,15 @@ export interface NavigationRoute {
  * Used by both Electron navigation and CommandMenu (CMDK)
  */
 export const NAVIGATION_ROUTES: NavigationRoute[] = [
+  {
+    cmdkKey: 'cmdk.channels',
+    electronKey: 'navigation.channels',
+    icon: Radio,
+    id: 'channels',
+    keywords: ['channels', 'wechat', 'qq', 'feishu', 'identity', 'bot'],
+    path: '/channels',
+    pathPrefix: '/channels',
+  },
   {
     cmdkKey: 'cmdk.community',
     electronKey: 'navigation.discover',
@@ -140,5 +150,14 @@ export const getRouteById = (id: string): NavigationRoute | undefined =>
  */
 export const getNavigableRoutes = (): NavigationRoute[] =>
   NAVIGATION_ROUTES.filter((r) =>
-    ['community', 'video', 'image', 'resource', 'page', 'presentation', 'memory'].includes(r.id),
+    [
+      'community',
+      'video',
+      'image',
+      'resource',
+      'page',
+      'presentation',
+      'memory',
+      'channels',
+    ].includes(r.id),
   );

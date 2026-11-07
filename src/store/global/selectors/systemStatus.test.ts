@@ -131,6 +131,7 @@ describe('systemStatusSelectors', () => {
         'recents',
         'pages',
         'presentation',
+        'channels',
         'tasks',
         'image',
         'community',
@@ -155,6 +156,7 @@ describe('systemStatusSelectors', () => {
       expect(items).toContain('community');
       expect(items).toContain('resource');
       expect(items).toContain('memory');
+      expect(items).toContain('channels');
     });
 
     it('should migrate legacy `sidebarSectionOrder` accordion order into the default layout', () => {
@@ -167,6 +169,7 @@ describe('systemStatusSelectors', () => {
         'tasks',
         'pages',
         'presentation',
+        'channels',
         'agent',
         'recents',
         'image',

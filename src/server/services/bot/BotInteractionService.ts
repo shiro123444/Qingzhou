@@ -7,6 +7,7 @@ import { AgentRuntimeCoordinator } from '@/server/modules/AgentRuntime/AgentRunt
 import { SystemCapabilityIdentifier } from '@/server/services/toolExecution/systemCapabilityManifest';
 
 import { callbackHash } from './callbackLedger';
+import { ChannelIdentityService } from './channelIdentity';
 import { botSessionKey } from './sessionScope';
 
 export interface BotInteractionScope {
@@ -115,6 +116,21 @@ export class BotInteractionService {
     return `需要确认工具：${pending.tool.identifier}.${pending.tool.apiName}\n参数预览：${JSON.stringify(approvalPreview(pending.args), null, 2).slice(0, 1000)}\n完整参数可在清舟执行详情中查看。\n\n允许：/confirm ${pending.token}\n拒绝：/reject ${pending.token}\n可用 /stop 取消。`;
   }
 
+  async describeCard(operationId: string, platformThreadId: string) {
+    const pending = await this.pending(operationId);
+    if (!pending || pending.isQuestion) return undefined;
+    return {
+      title: '需要确认',
+      content: `工具：${pending.tool.identifier}.${pending.tool.apiName}\n\n${JSON.stringify(approvalPreview(pending.args), null, 2).slice(0, 1000)}`,
+      actions: (['confirm', 'reject'] as const).map((action) => ({
+        action,
+        label: action === 'confirm' ? '允许' : '拒绝',
+        platformThreadId,
+        token: pending.token,
+      })),
+    };
+  }
+
   /** Only a message received after this pause can answer it; never infer tool approval. */
   async respondToMessage(
     scope: BotInteractionScope,
@@ -150,6 +166,15 @@ export class BotInteractionService {
     action: 'confirm' | 'reject' | 'answer',
     input: string,
   ) {
+    const identity = await ChannelIdentityService.resolveAccess(
+      this.db,
+      scope.platform,
+      scope.applicationId,
+      authorUserId,
+      { userId: this.userId },
+    );
+    if (identity.enforced && !identity.allowed)
+      throw new BotInteractionError('账号绑定已撤销，请重新绑定后响应。');
     const active = await new BotInboundModel(this.db).getSession(
       this.userId,
       botSessionKey(this.userId, scope),

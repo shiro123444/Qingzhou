@@ -5,7 +5,7 @@ export function isInboundStopCommand(platform: string, payload: unknown): boolea
   if (platform === 'qq') text = body?.d?.content;
   if (platform === 'wechat')
     text = body?.item_list?.find((item: any) => item.text_item)?.text_item?.text;
-  if (platform === 'feishu') {
+  if (platform === 'feishu' || platform === 'lark') {
     try {
       text = JSON.parse(body?.event?.message?.content ?? '{}').text;
     } catch {
@@ -14,7 +14,7 @@ export function isInboundStopCommand(platform: string, payload: unknown): boolea
   }
   return (
     typeof text === 'string' &&
-    /^\/(?:stop|status|confirm|reject|answer)(?:@[\w-]+)?(?:\s|$)/i.test(
+    /^\/(?:help|stop|status|result|confirm|reject|answer)(?:@[\w-]+)?(?:\s|$)/i.test(
       text.replaceAll(/<@[^>]+>/g, '').trim(),
     )
   );

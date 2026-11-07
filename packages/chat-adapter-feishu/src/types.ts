@@ -2,7 +2,6 @@
  * Lark/Feishu adapter configuration.
  */
 export interface LarkAdapterConfig {
-  persistVerifiedWebhook?: (payload: unknown, eventId: string, threadId: string) => Promise<void>;
   /** Lark app ID */
   appId: string;
   /** Lark app secret */
@@ -16,6 +15,7 @@ export interface LarkAdapterConfig {
   claimWebhookReplay?: (key: string, ttlSeconds: number) => Promise<boolean>;
   /** Required to authenticate external events; also decrypts AES-encrypted payloads. */
   encryptKey?: string;
+  persistVerifiedWebhook?: (payload: unknown, eventId: string, threadId: string) => Promise<void>;
   /** 'lark' (international) or 'feishu' (China) — determines API base URL */
   platform?: 'lark' | 'feishu';
   /** Bot display name override */
@@ -95,13 +95,20 @@ export interface LarkMessageEvent {
   sender: LarkSender;
 }
 
+export interface LarkCardActionEvent {
+  action?: { value?: unknown };
+  context?: { open_chat_id?: string; open_message_id?: string };
+  operator?: { open_id?: string };
+  token?: string;
+}
+
 /**
  * Full Lark webhook payload (Event Subscription v2).
  */
 export interface LarkWebhookPayload {
   challenge?: string;
   encrypt?: string;
-  event?: LarkMessageEvent;
+  event?: LarkMessageEvent | LarkCardActionEvent;
   header?: LarkEventHeader;
   /** Verification token — present at top level in url_verification events */
   token?: string;

@@ -24,6 +24,7 @@ const id = z
   .refine((value) => !value.includes('\0'));
 export const durableCallbackSchema = z
   .object({
+    agentId: id.optional(),
     applicationId: id,
     content: z.string().optional(),
     errorMessage: z.string().optional(),
@@ -38,9 +39,11 @@ export const durableCallbackSchema = z
       .refine((value) => !value.includes('\0')),
     progressMessageId: id.optional(),
     reason: z.string().max(64).optional(),
+    senderExternalUserId: id.optional(),
     stepIndex: z.number().int().nonnegative().safe().optional(),
     type: z.enum(['step', 'completion']),
     userId: id,
+    userMessageReceivedAt: z.number().finite().nonnegative().optional(),
   })
   .passthrough()
   .superRefine((body, ctx) => {

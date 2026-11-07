@@ -269,7 +269,9 @@ describe('QQAdapter', () => {
       ]) {
         mockChat.processMessage.mockClear();
         await adapter.handleWebhook(
-          makeRequest(makeWebhookPayload(QQ_EVENT_TYPES.GROUP_MESSAGE_CREATE, { mentions: [mention] })),
+          makeRequest(
+            makeWebhookPayload(QQ_EVENT_TYPES.GROUP_MESSAGE_CREATE, { mentions: [mention] }),
+          ),
         );
         const message = await vi.mocked(mockChat.processMessage).mock.calls[0]?.[2]?.();
         expect(message?.isMention).toBe(false);
@@ -524,7 +526,7 @@ describe('QQAdapter', () => {
 
   describe('fetchAttachmentData', () => {
     it('should fetch attachment data via fetchData callback', async () => {
-      const imageBytes = new Uint8Array([0x89, 0x50, 0x4E, 0x47]);
+      const imageBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
       vi.stubGlobal(
         'fetch',
         vi.fn().mockResolvedValueOnce(new Response(imageBytes, { status: 200 })),
@@ -577,5 +579,33 @@ describe('createQQAdapter', () => {
     const adapter = createQQAdapter({ appId: 'a', clientSecret: 's' });
     expect(adapter).toBeInstanceOf(QQAdapter);
     expect(adapter.name).toBe('qq');
+  });
+});
+
+describe('managed QQ reply allocation', () => {
+  it('passes the shared passive reply allocation to SDK command and acknowledgement sends', async () => {
+    const getReplyOptions = vi.fn().mockResolvedValue({ msgId: 'inbound', msgSeq: 3 });
+    const adapter = new QQAdapter({ appId: 'app', clientSecret: 'secret', getReplyOptions });
+    const send = vi
+      .spyOn((adapter as any).api, 'sendC2CMessage')
+      .mockResolvedValue({ id: 'out', timestamp: '2026-11-07T00:00:00Z' });
+    await adapter.postMessage('qq:c2c:sender', { markdown: 'result' });
+    expect(getReplyOptions).toHaveBeenCalledWith('qq:c2c:sender');
+    expect(send).toHaveBeenCalledWith('sender', expect.stringMatching(/^result\s*$/), {
+      msgId: 'inbound',
+      msgSeq: 3,
+    });
+  });
+  it('never dispatches when the shared budget refuses the SDK reply', async () => {
+    const adapter = new QQAdapter({
+      appId: 'app',
+      clientSecret: 'secret',
+      getReplyOptions: vi.fn().mockRejectedValue(new Error('quota exhausted')),
+    });
+    const send = vi.spyOn((adapter as any).api, 'sendC2CMessage');
+    await expect(adapter.postMessage('qq:c2c:sender', { markdown: 'result' })).rejects.toThrow(
+      'quota exhausted',
+    );
+    expect(send).not.toHaveBeenCalled();
   });
 });

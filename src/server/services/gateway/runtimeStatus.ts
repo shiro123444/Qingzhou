@@ -6,6 +6,7 @@ import {
   type BotRuntimeStatus,
   type BotRuntimeStatusSnapshot,
 } from '../../../types/botRuntimeStatus';
+import { boundedGatewayIO } from './ConnectionLease';
 
 const BOT_RUNTIME_STATUS_KEY_PREFIX = 'bot:runtime-status';
 const FALLBACK_STATUS_UPDATED_AT = 0;
@@ -21,6 +22,7 @@ interface UpdateBotRuntimeStatusParams {
 }
 
 interface UpdateBotRuntimeStatusOptions {
+  connectionLease?: { isHeld: boolean; key: string; owner: string };
   now?: number;
   redisClient?: ReturnType<typeof getAgentRuntimeRedisClient>;
   ttlMs?: number;
@@ -92,6 +94,26 @@ export async function updateBotRuntimeStatus(
 
   const key = getRuntimeStatusKey(params.platform, params.applicationId);
   const payload = JSON.stringify(snapshot);
+
+  if (options.connectionLease) {
+    const lease = options.connectionLease;
+    if (!lease.isHeld) return snapshot;
+    await boundedGatewayIO(() =>
+      redisClient.eval(
+        `if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+       redis.call('SET', KEYS[2], ARGV[2])
+       if tonumber(ARGV[3]) > 0 then redis.call('PEXPIRE', KEYS[2], ARGV[3]) end
+       return 1`,
+        2,
+        lease.key,
+        key,
+        lease.owner,
+        payload,
+        options.ttlMs ?? 0,
+      ),
+    );
+    return snapshot;
+  }
 
   if (options.ttlMs && options.ttlMs > 0) {
     await (redisClient as any).set(

@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+
 import { BotInboundModel } from '@/database/models/botInbound';
+
 import { inboundExecution } from '../BotInboundService';
 
 const mockGetUserSettings = vi.hoisted(() => vi.fn());
@@ -151,6 +153,44 @@ describe('AgentBridgeService', () => {
     ).rejects.toThrow('inbound_session_busy');
     expect(mockExecAgent).not.toHaveBeenCalled();
     expect(thread.post).not.toHaveBeenCalled();
+  });
+
+  it('avoids spending a plain reply before an enabled native stream', async () => {
+    mockGetPlatform.mockReturnValue({ id: 'qq', supportsMessageEdit: false });
+    mockExecAgent.mockResolvedValue({
+      success: true,
+      operationId: 'native-op',
+      topicId: 'topic-1',
+    });
+    const thread = createThread();
+    const client = createClient();
+    client.getMessenger.mockReturnValue({ sendReplyStreamFrame: vi.fn() } as any);
+    const dateSent = new Date();
+    await new AgentBridgeService(FAKE_DB, USER_ID).handleMention(
+      thread,
+      {
+        ...createMessage(),
+        metadata: { dateSent },
+      },
+      {
+        agentId: 'agent-1',
+        client: client as any,
+        botContext: {
+          platform: 'qq',
+          applicationId: 'app',
+          platformThreadId: THREAD_ID,
+          isOwner: true,
+          senderExternalUserId: 'sender',
+        },
+      },
+    );
+    expect(client.getMessenger).toHaveBeenCalledWith(THREAD_ID, {
+      replyToMessageId: MESSAGE_ID,
+      replyToMessageReceivedAt: dateSent.getTime(),
+    });
+    expect(thread.post).not.toHaveBeenCalled();
+    const options = mockExecAgent.mock.calls[0][0];
+    expect(options.hooks[0].webhook.body.userMessageReceivedAt).toBe(dateSent.getTime());
   });
 
   it('interrupts a started operation and surfaces uncertainty when session attachment fails', async () => {

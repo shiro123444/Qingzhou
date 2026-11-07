@@ -3,9 +3,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mockCreateLarkAdapter = vi.hoisted(() => vi.fn());
 const mockDownloadMediaFromRawMessage = vi.hoisted(() => vi.fn());
 const mockGetTenantAccessToken = vi.hoisted(() => vi.fn().mockResolvedValue('tok'));
+const mockInitialize = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+
+vi.mock('chat', () => ({
+  Chat: class {
+    initialize = mockInitialize;
+    shutdown = vi.fn().mockResolvedValue(undefined);
+  },
+  ConsoleLogger: class {},
+}));
 
 vi.mock('@lobechat/chat-adapter-feishu', () => ({
   createLarkAdapter: mockCreateLarkAdapter,
+  decodeLarkThreadId: (threadId: string) => ({ chatId: threadId.split(':').at(-1) }),
   downloadMediaFromRawMessage: mockDownloadMediaFromRawMessage,
   LarkApiClient: vi.fn().mockImplementation(() => ({
     getTenantAccessToken: mockGetTenantAccessToken,
@@ -31,6 +41,84 @@ vi.mock('./gateway', () => ({
 }));
 
 const { FeishuClientFactory } = await import('./client');
+
+describe('Feishu native card capability', () => {
+  afterEach(() => vi.clearAllMocks());
+
+  it.each(['webhook', 'websocket'])(
+    'exposes scoped card sending only when enabled in %s mode',
+    async (connectionMode) => {
+      const { LarkApiClient } = await import('@lobechat/chat-adapter-feishu');
+      const sendReplyCard = vi.fn().mockResolvedValue({ messageId: 'card' });
+      vi.mocked(LarkApiClient).mockImplementationOnce(() => ({ sendReplyCard }) as any);
+      const client = new FeishuClientFactory().createClient(
+        {
+          applicationId: 'cli_card',
+          credentials: { appSecret: 'secret' },
+          platform: 'feishu',
+          settings: { connectionMode, nativeCards: true },
+        },
+        {},
+      );
+      const card = { title: 'Done', content: 'result', deliveryId: 'delivery-1' };
+      await client.getMessenger('feishu:p2p:oc_chat').createReplyCard!(card);
+      expect(sendReplyCard).toHaveBeenCalledWith('oc_chat', card);
+    },
+  );
+
+  it('keeps legacy providers on their existing text capability', () => {
+    const client = new FeishuClientFactory().createClient(
+      {
+        applicationId: 'cli_text',
+        credentials: { appSecret: 'secret' },
+        platform: 'feishu',
+        settings: {},
+      },
+      {},
+    );
+    expect(client.getMessenger('feishu:p2p:oc_chat').createReplyCard).toBeUndefined();
+  });
+});
+
+describe('Feishu websocket lifecycle', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+  });
+
+  it('closes a refreshing transport without leaving a replacement refresh timer', async () => {
+    vi.useFakeTimers();
+    const client = new FeishuClientFactory().createClient(
+      {
+        applicationId: 'cli_test_app',
+        credentials: { appSecret: 'secret' },
+        platform: 'feishu',
+        settings: { connectionMode: 'websocket' },
+      },
+      { appUrl: 'https://example.com' },
+    );
+    await client.start();
+
+    let finishInitialize!: () => void;
+    mockInitialize.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishInitialize = resolve;
+        }),
+    );
+    await vi.advanceTimersToNextTimerAsync();
+    expect(mockInitialize).toHaveBeenCalledTimes(2);
+    const stopping = client.stop();
+    finishInitialize();
+    await stopping;
+
+    const { FeishuWSConnection } = await import('./gateway');
+    const transports = vi.mocked(FeishuWSConnection).mock.results;
+    expect(transports).toHaveLength(2);
+    expect(transports[1].value.close).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
 
 describe('FeishuWebhookClient.extractFiles', () => {
   // Verifies the post-Redis re-download path: when Feishu messages

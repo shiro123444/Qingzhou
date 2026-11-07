@@ -1,5 +1,6 @@
 export interface QQAdapterConfig {
   appId: string;
+  getReplyOptions?: (threadId: string) => Promise<{ msgId: string; msgSeq: number } | undefined>;
   /** Server-only internal gateway auth. A Response rejects; errors fail closed. No native fallback. */
   authenticateWebhook?: (request: Request) => Promise<Response | void>;
   /** Atomic replay claim shared across replicas. Without it, only bounded process-local protection. */
@@ -111,7 +112,21 @@ export interface QQSendMessageParams {
 
 export interface QQSendMessageResponse {
   id: string;
+  remain_msg_len?: number;
   timestamp: string;
+}
+
+/** Official C2C stream_messages wire payload. Each update carries the full text. */
+export interface QQStreamMessageRequest {
+  content_raw: string;
+  content_type: 'markdown';
+  event_id?: string;
+  index: number;
+  input_mode: 'replace';
+  input_state: 1 | 10;
+  msg_id?: string;
+  msg_seq: number;
+  stream_msg_id?: string;
 }
 
 export type QQMessageType = 'group' | 'guild' | 'c2c' | 'dms';

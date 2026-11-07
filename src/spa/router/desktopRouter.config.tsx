@@ -681,6 +681,64 @@ export const desktopRoutes: RouteObject[] = [
         path: 'presentation',
       },
 
+      // Channel workspace
+      {
+        children: [
+          {
+            element: dynamicElement(
+              () => import('@/routes/(main)/channels'),
+              'Desktop > Channels > Overview',
+            ),
+            index: true,
+          },
+          {
+            children: [
+              {
+                element: dynamicElement(
+                  () => import('@/routes/(main)/channels/[platform]'),
+                  'Desktop > Channels > Platform',
+                ),
+                index: true,
+              },
+              {
+                children: [
+                  {
+                    element: dynamicElement(
+                      () => import('@/routes/(main)/channels/[platform]/[providerId]'),
+                      'Desktop > Channels > Bot Redirect',
+                    ),
+                    index: true,
+                  },
+                  {
+                    element: dynamicElement(
+                      () => import('@/routes/(main)/channels/[platform]/[providerId]/[section]'),
+                      'Desktop > Channels > Bot',
+                    ),
+                    path: ':section',
+                  },
+                  {
+                    path: 'activity/tasks/:taskId',
+                    element: dynamicElement(
+                      () =>
+                        import('@/routes/(main)/channels/[platform]/[providerId]/activity/tasks/[taskId]'),
+                      'Desktop > Channels > Task',
+                    ),
+                  },
+                ],
+                path: ':providerId',
+              },
+            ],
+            path: ':platform',
+          },
+        ],
+        element: dynamicLayout(
+          () => import('@/routes/(main)/channels/_layout'),
+          'Desktop > Channels > Layout',
+        ),
+        errorElement: <ErrorBoundary resetPath="/channels" />,
+        path: 'channels',
+      },
+
       // Default route - home page (handled by persistent layout)
       {
         index: true,

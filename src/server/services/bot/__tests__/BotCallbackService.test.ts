@@ -1,3 +1,11 @@
+import { ChannelTaskModel } from '@/database/models/channelTask';
+import { ReplyUnavailableError } from '../replyBudget';
+const taskRecord = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock('../ChannelTaskService', () => ({
+  ChannelTaskService: class {
+    record = taskRecord;
+  },
+}));
 import { describe, expect, it, vi } from 'vitest';
 
 import { BotInboundModel } from '@/database/models/botInbound';
@@ -9,7 +17,13 @@ import { BotArtifactService } from '../BotArtifactService';
 import type { BotCallbackBody } from '../BotCallbackService';
 import { BotCallbackService } from '../BotCallbackService';
 import { BotInteractionService } from '../BotInteractionService';
-import { CALLBACK_LEASE_MS, CallbackDeliverySession } from '../callbackLedger';
+import {
+  CALLBACK_LEASE_MS,
+  CallbackDeliveryError,
+  CallbackDeliverySession,
+  InMemoryCallbackLedger,
+} from '../callbackLedger';
+import { ChannelIdentityService } from '../channelIdentity';
 
 // ==================== Hoisted mocks ====================
 
@@ -189,6 +203,7 @@ function setupCredentials(credentials = FAKE_CREDENTIALS, extra?: Record<string,
   // `settings` via `extra`.
   mockFindByPlatformAndAppId.mockResolvedValue({
     credentials,
+    enabled: true,
     userId: 'user-1',
     settings: { displayToolCalls: true },
     ...extra,
@@ -271,7 +286,463 @@ describe('BotCallbackService', () => {
     }));
   });
 
+  describe('current channel identity authorization', () => {
+    it('retains the full result after a known-unsent rejection and never replays that callback', async () => {
+      taskRecord.mockResolvedValueOnce('task');
+      const status = vi.spyOn(ChannelTaskModel.prototype, 'delivery').mockResolvedValue(undefined);
+      mockCreateMessage.mockRejectedValueOnce(new ReplyUnavailableError('reply_budget_exhausted'));
+      const body = makeBody({
+        type: 'completion',
+        userId: 'user-1',
+        platformThreadId: 'qq:c2c:sender',
+        lastAssistantContent: 'Complete answer',
+      });
+      await expect(service.handleCallback(body)).resolves.toEqual({ status: 'retained' });
+      expect(status).toHaveBeenCalledWith('task', 'retained', 'reply_budget_exhausted');
+      await expect(service.handleCallback(body)).resolves.toEqual({ status: 'skipped' });
+      expect(mockCreateMessage).toHaveBeenCalledTimes(1);
+      status.mockRestore();
+    });
+
+    it('saves a final result even when an earlier send has an uncertain outcome', async () => {
+      taskRecord.mockResolvedValueOnce('task');
+      const status = vi.spyOn(ChannelTaskModel.prototype, 'delivery').mockResolvedValue(undefined);
+      const begin = vi
+        .spyOn(CallbackDeliverySession, 'begin')
+        .mockRejectedValueOnce(new CallbackDeliveryError('unknown_delivery'));
+      const body = makeBody({
+        type: 'completion',
+        userId: 'user-1',
+        lastAssistantContent: 'Recoverable answer',
+      });
+      await expect(service.handleCallback(body)).rejects.toMatchObject({
+        status: 'unknown_delivery',
+      });
+      expect(taskRecord).toHaveBeenCalledWith(body);
+      expect(status).toHaveBeenCalledWith('task', 'unknown', 'unknown_delivery');
+      expect(mockCreateMessage).not.toHaveBeenCalled();
+      begin.mockRestore();
+      status.mockRestore();
+    });
+
+    it('does not dispatch a result if durable retention fails', async () => {
+      taskRecord.mockRejectedValueOnce(new Error('database unavailable'));
+      await expect(service.handleCallback(makeBody({ type: 'completion' }))).rejects.toThrow(
+        'database unavailable',
+      );
+      expect(mockCreateMessage).not.toHaveBeenCalled();
+    });
+
+    it('refuses a revoked dedicated bot identity before sending a result', async () => {
+      const access = vi.spyOn(ChannelIdentityService, 'resolveAccess').mockResolvedValue({
+        enforced: true,
+        allowed: false,
+        operatorUserId: undefined,
+      });
+      try {
+        await expect(
+          service.handleCallback(
+            makeBody({
+              agentId: 'bot-agent',
+              userId: 'user-1',
+              senderExternalUserId: 'sender',
+              platformThreadId: 'qq:c2c:sender',
+              type: 'completion',
+              lastAssistantContent: 'private result',
+            }),
+          ),
+        ).rejects.toThrow('no longer authorizes');
+        expect(access).toHaveBeenCalledWith(FAKE_DB, 'qq', 'app-123', 'sender', {
+          userId: 'user-1',
+          agentId: 'bot-agent',
+        });
+        expect(mockCreateMessage).not.toHaveBeenCalled();
+        expect(mockEditMessage).not.toHaveBeenCalled();
+      } finally {
+        access.mockRestore();
+      }
+    });
+
+    it('fails closed for a protected legacy callback without the original sender', async () => {
+      const access = vi.spyOn(ChannelIdentityService, 'resolveAccess').mockResolvedValue({
+        enforced: true,
+        allowed: true,
+        operatorUserId: 'sender',
+      });
+      try {
+        await expect(
+          service.handleCallback(
+            makeBody({
+              userId: 'user-1',
+              platformThreadId: 'wechat:sender',
+              type: 'completion',
+              lastAssistantContent: 'private result',
+            }),
+          ),
+        ).rejects.toThrow('no longer authorizes');
+        expect(mockCreateMessage).not.toHaveBeenCalled();
+      } finally {
+        access.mockRestore();
+      }
+    });
+
+    it('stops remaining chunks when binding is revoked after the first send', async () => {
+      const access = vi.spyOn(ChannelIdentityService, 'resolveAccess').mockResolvedValue({
+        enforced: true,
+        allowed: true,
+        operatorUserId: 'sender',
+      });
+      setupCredentials(FAKE_CREDENTIALS, { settings: { charLimit: 20 } });
+      mockCreateMessage.mockImplementationOnce(async () => {
+        access.mockResolvedValue({ enforced: true, allowed: false, operatorUserId: undefined });
+        return { id: 'first' };
+      });
+      try {
+        await expect(
+          service.handleCallback(
+            makeBody({
+              userId: 'user-1',
+              senderExternalUserId: 'sender',
+              platformThreadId: 'qq:c2c:sender',
+              progressMessageId: undefined,
+              type: 'completion',
+              lastAssistantContent: 'Private generated result. '.repeat(8),
+            }),
+          ),
+        ).rejects.toMatchObject({ status: 'unknown_delivery' });
+        expect(mockCreateMessage).toHaveBeenCalledTimes(1);
+      } finally {
+        access.mockRestore();
+      }
+    });
+  });
+
   // ==================== Platform detection ====================
+
+  describe('native platform delivery through the callback entry', () => {
+    afterEach(() => {
+      for (const method of [
+        BotArtifactService.prototype.list,
+        BotArtifactService.prototype.read,
+        BotInteractionService.prototype.describeCard,
+        BotInteractionService.prototype.describe,
+      ]) {
+        if (vi.isMockFunction(method)) method.mockRestore();
+      }
+    });
+
+    const withNativeMessenger = (capabilities: Record<string, unknown>) => {
+      mockGetMessenger.mockImplementation(() => ({
+        createMessage: mockCreateMessage,
+        editMessage: mockEditMessage,
+        removeReaction: mockRemoveReaction,
+        triggerTyping: mockTriggerTyping,
+        updateThreadName: mockUpdateThreadName,
+        ...capabilities,
+      }));
+    };
+
+    it.each([
+      { phase: 'progress', transport: 'card' },
+      { phase: 'progress', transport: 'stream' },
+      { phase: 'pause', transport: 'card' },
+      { phase: 'pause', transport: 'stream' },
+    ])(
+      'blocks a frozen native $transport $phase retry while its capability is unavailable',
+      async ({ phase, transport }) => {
+        const ledger = new InMemoryCallbackLedger();
+        const save = ledger.save.bind(ledger);
+        let interruptCompletion = true;
+        vi.spyOn(ledger, 'save').mockImplementation(async (key, owner, state) => {
+          if (interruptCompletion && Object.values(state.events).some((event) => event.delivered)) {
+            interruptCompletion = false;
+            throw new Error('Worker stopped before event completion');
+          }
+          await save(key, owner, state);
+        });
+        const callback = new BotCallbackService(FAKE_DB, ledger);
+        const sendNativeReply = vi.fn().mockResolvedValue({ streamId: 'confirmed-stream' });
+        const capabilities =
+          transport === 'card'
+            ? { createReplyCard: sendNativeReply }
+            : {
+                prepareReplyStream: vi
+                  .fn()
+                  .mockResolvedValue({ msgSeq: 1, replyMessageId: 'incoming' }),
+                sendReplyStreamFrame: sendNativeReply,
+              };
+        vi.spyOn(BotInteractionService.prototype, 'describeCard').mockResolvedValue({
+          actions: [],
+          content: 'Original approval preview',
+          title: '确认工具',
+        });
+        vi.spyOn(BotInteractionService.prototype, 'describe').mockResolvedValue(
+          'Original question',
+        );
+        withNativeMessenger(capabilities);
+        const body = makeBody({
+          content: 'Original progress',
+          platformThreadId: transport === 'card' ? 'feishu:p2p:chat' : 'qq:c2c:sender',
+          reason: phase === 'pause' ? 'waiting_for_human' : undefined,
+          shouldContinue: phase === 'progress',
+          userId: 'user-1',
+        });
+        await expect(callback.handleCallback(body)).rejects.toThrow(
+          'Worker stopped before event completion',
+        );
+        expect(sendNativeReply).toHaveBeenCalledTimes(1);
+
+        withNativeMessenger({});
+        await expect(callback.handleCallback(body)).rejects.toThrow('unavailable');
+        expect(mockCreateMessage).not.toHaveBeenCalled();
+        expect(mockEditMessage).not.toHaveBeenCalled();
+
+        withNativeMessenger(capabilities);
+        await expect(callback.handleCallback(body)).resolves.toEqual({ status: 'delivered' });
+        expect(sendNativeReply).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it('finishes a frozen approval card without rereading changed pending interactions', async () => {
+      let attemptedCards = 0;
+      const ledger = Object.assign(new InMemoryCallbackLedger(), {
+        beforeEffect: () => {
+          if (++attemptedCards === 2) throw new CallbackDeliveryError('budget_exhausted');
+        },
+      });
+      const callback = new BotCallbackService(FAKE_DB, ledger);
+      const createReplyCard = vi.fn().mockResolvedValue(undefined);
+      withNativeMessenger({ createReplyCard });
+      const actions = [
+        {
+          action: 'confirm' as const,
+          label: '允许',
+          platformThreadId: 'feishu:p2p:chat',
+          token: 'original-token',
+        },
+      ];
+      const describeCard = vi
+        .spyOn(BotInteractionService.prototype, 'describeCard')
+        .mockResolvedValueOnce({
+          actions,
+          content: 'Original safe tool preview '.repeat(200),
+          title: '确认工具',
+        })
+        .mockResolvedValue(undefined);
+      const describe = vi
+        .spyOn(BotInteractionService.prototype, 'describe')
+        .mockResolvedValue('A different pending request');
+      const pause = makeBody({
+        platformThreadId: 'feishu:p2p:chat',
+        reason: 'waiting_for_human',
+        userId: 'user-1',
+      });
+      await expect(callback.handleCallback(pause)).rejects.toMatchObject({
+        status: 'budget_exhausted',
+      });
+      expect(createReplyCard).toHaveBeenCalledTimes(1);
+
+      await expect(callback.handleCallback(pause)).resolves.toEqual({ status: 'delivered' });
+      expect(createReplyCard).toHaveBeenCalledTimes(2);
+      expect(createReplyCard.mock.calls[1][0]).toMatchObject({ actions });
+      expect(describeCard).toHaveBeenCalledTimes(1);
+      expect(describe).not.toHaveBeenCalled();
+      expect(mockCreateMessage).not.toHaveBeenCalled();
+      expect(mockEditMessage).not.toHaveBeenCalled();
+    });
+
+    it('closes a QQ stream at a human pause and uses a regular reply after resumption', async () => {
+      const prepareReplyStream = vi
+        .fn()
+        .mockResolvedValue({ msgSeq: 1, replyMessageId: 'incoming' });
+      const sendReplyStreamFrame = vi.fn().mockResolvedValue({ streamId: 'stream' });
+      withNativeMessenger({ prepareReplyStream, sendReplyStreamFrame });
+      vi.spyOn(BotInteractionService.prototype, 'describe').mockResolvedValue('请直接回答这个问题');
+      const body = makeBody({
+        platformThreadId: 'qq:c2c:sender',
+        progressMessageId: undefined,
+        userId: 'user-1',
+        content: 'Working',
+        shouldContinue: true,
+      });
+      await service.handleCallback(body);
+      await service.handleCallback({
+        ...body,
+        stepIndex: 1,
+        content: undefined,
+        reason: 'waiting_for_human',
+        shouldContinue: false,
+      });
+      await service.handleCallback({
+        ...body,
+        type: 'completion',
+        lastAssistantContent: 'Resumed final answer',
+      });
+      expect(sendReplyStreamFrame).toHaveBeenCalledTimes(2);
+      expect(sendReplyStreamFrame.mock.calls[1][0]).toMatchObject({
+        final: true,
+        streamId: 'stream',
+        index: 1,
+      });
+      expect(mockCreateMessage).toHaveBeenCalledExactlyOnceWith('Resumed final answer');
+    });
+
+    it('sends a Feishu progress card without also editing its old text placeholder', async () => {
+      const createReplyCard = vi.fn().mockResolvedValue(undefined);
+      withNativeMessenger({ createReplyCard });
+      await service.handleCallback(
+        makeBody({
+          content: 'Current safe progress',
+          platformThreadId: 'feishu:p2p:chat',
+          shouldContinue: true,
+          stepType: 'call_llm',
+          userId: 'user-1',
+        }),
+      );
+      expect(createReplyCard).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          content: 'Current safe progress',
+          title: '处理中',
+        }),
+      );
+      expect(mockEditMessage).not.toHaveBeenCalled();
+      expect(mockCreateMessage).not.toHaveBeenCalled();
+    });
+
+    it('delivers a paused approval as a native card carrying its scoped buttons', async () => {
+      const createReplyCard = vi.fn().mockResolvedValue(undefined);
+      withNativeMessenger({ createReplyCard });
+      const actions = [
+        {
+          action: 'confirm' as const,
+          label: '允许',
+          platformThreadId: 'feishu:p2p:chat',
+          token: '0123456789ab',
+        },
+        {
+          action: 'reject' as const,
+          label: '拒绝',
+          platformThreadId: 'feishu:p2p:chat',
+          token: '0123456789ab',
+        },
+      ];
+      const describe = vi.spyOn(BotInteractionService.prototype, 'describeCard').mockResolvedValue({
+        actions,
+        content: 'Safe tool preview',
+        title: '确认工具',
+      });
+      const pause = makeBody({
+        platformThreadId: 'feishu:p2p:chat',
+        reason: 'waiting_for_human',
+        userId: 'user-1',
+      });
+      await service.handleCallback(pause);
+      expect(describe).toHaveBeenCalledWith(pause.operationId, pause.platformThreadId);
+      expect(createReplyCard).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ actions, content: 'Safe tool preview' }),
+      );
+      expect(mockCreateMessage).not.toHaveBeenCalled();
+      expect(BotInboundModel.prototype.releaseSession).not.toHaveBeenCalled();
+    });
+
+    it.each(['done', 'error', 'interrupted', 'empty'] as const)(
+      'finishes an active QQ stream for the %s terminal callback',
+      async (reason) => {
+        const prepareReplyStream = vi
+          .fn()
+          .mockResolvedValue({ msgSeq: 4, replyMessageId: 'incoming-message' });
+        const sendReplyStreamFrame = vi.fn().mockResolvedValue({ streamId: 'stream-id' });
+        withNativeMessenger({ prepareReplyStream, sendReplyStreamFrame });
+        const receivedAt = Date.now();
+        const progress = makeBody({
+          content: 'Working',
+          platformThreadId: 'qq:c2c:sender',
+          progressMessageId: undefined,
+          shouldContinue: true,
+          stepType: 'call_llm',
+          userId: 'user-1',
+          userMessageId: 'incoming-message',
+          userMessageReceivedAt: receivedAt,
+        });
+        await service.handleCallback(progress);
+        await service.handleCallback({
+          ...progress,
+          errorMessage: reason === 'error' ? 'private provider error' : undefined,
+          lastAssistantContent: reason === 'empty' ? undefined : 'Final answer',
+          reason: reason === 'empty' ? 'done' : reason,
+          shouldContinue: false,
+          type: 'completion',
+        });
+        expect(prepareReplyStream).toHaveBeenCalledTimes(1);
+        expect(sendReplyStreamFrame).toHaveBeenCalledTimes(2);
+        expect(sendReplyStreamFrame.mock.calls[0][0]).toMatchObject({
+          final: false,
+          index: 0,
+          msgSeq: 4,
+        });
+        expect(sendReplyStreamFrame.mock.calls[1][0]).toMatchObject({
+          final: true,
+          index: 1,
+          msgSeq: 4,
+          replyMessageId: 'incoming-message',
+          streamId: 'stream-id',
+        });
+        expect(mockCreateBot).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({
+            replyToMessageId: 'incoming-message',
+            replyToMessageReceivedAt: receivedAt,
+          }),
+        );
+        if (reason === 'done')
+          expect(sendReplyStreamFrame.mock.calls[1][0].content).toContain('Final answer');
+        if (reason === 'error')
+          expect(sendReplyStreamFrame.mock.calls[1][0].content).not.toContain(
+            'private provider error',
+          );
+        expect(mockCreateMessage).not.toHaveBeenCalled();
+        expect(mockEditMessage).not.toHaveBeenCalled();
+      },
+    );
+
+    it('delivers native completion and its file through the existing independent delivery effects', async () => {
+      const calls: string[] = [];
+      const fileId = '6a73648c-79dd-4812-b203-f2cbb2ce69b0';
+      vi.spyOn(BotArtifactService.prototype, 'list').mockResolvedValue([fileId]);
+      vi.spyOn(BotArtifactService.prototype, 'read').mockResolvedValue({
+        bytes: Buffer.from('pdf'),
+        filename: 'result.pdf',
+        mimeType: 'application/pdf',
+      });
+      const sendFile = vi.fn(async () => {
+        calls.push('file');
+      });
+      const prepareFile = vi.fn(async () => {
+        calls.push('prepare');
+        return sendFile;
+      });
+      const createReplyCard = vi.fn(async () => {
+        calls.push('card');
+      });
+      withNativeMessenger({ createReplyCard, prepareFile });
+      const final = makeBody({
+        platformThreadId: 'feishu:p2p:chat',
+        userId: 'user-1',
+        reason: 'done',
+        type: 'completion',
+        lastAssistantContent: 'Created your file',
+      });
+      await service.handleCallback(final);
+      expect(calls).toEqual(['card', 'prepare', 'file']);
+      expect(prepareFile).toHaveBeenCalledWith(
+        expect.objectContaining({ filename: 'result.pdf', deliveryId: expect.any(String) }),
+      );
+      expect(await service.handleCallback(final)).toEqual({ status: 'skipped' });
+      expect(createReplyCard).toHaveBeenCalledTimes(1);
+      expect(sendFile).toHaveBeenCalledTimes(1);
+      expect(mockCreateMessage).not.toHaveBeenCalled();
+    });
+  });
 
   describe('attachments and resumable interactions', () => {
     afterEach(() => {

@@ -67,6 +67,10 @@ function createMessenger(
   return {
     addReaction: (messageId, emoji) => api.addReaction(messageId, emoji).then(() => {}),
     createMessage: (content) => api.sendMessage(chatId, content).then(() => {}),
+    createReplyCard:
+      config.settings.nativeCards === true
+        ? (card) => api.sendReplyCard(chatId, card).then(() => {})
+        : undefined,
     editMessage: (messageId, content) => api.editMessage(messageId, content).then(() => {}),
     // Feishu / Lark currently expose no authenticated removeReaction endpoint.
     // Callers should treat this as a best-effort no-op — step swaps will stack
@@ -255,6 +259,7 @@ class FeishuWSClientImpl implements PlatformClient {
   private gateway: FeishuWSConnection | null = null;
   private bot: ChatBot<any> | null = null;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private refreshTask?: Promise<void>;
   private stopped = false;
   /** Lazy-cached LarkApiClient — keeps the tenant token cache hot across calls. */
   private _api?: LarkApiClient;
@@ -284,7 +289,7 @@ class FeishuWSClientImpl implements PlatformClient {
     this.stopped = false;
     const durationMs = options?.durationMs ?? DEFAULT_DURATION_MS;
     const runtimeStatusTtlMs = durationMs + CONNECTED_STATUS_TTL_BUFFER_MS;
-    await updateBotRuntimeStatus(
+    await (this.context.updateRuntimeStatus ?? updateBotRuntimeStatus)(
       {
         applicationId: this.applicationId,
         platform: this.id,
@@ -329,10 +334,12 @@ class FeishuWSClientImpl implements PlatformClient {
       const bot = new Chat(chatConfig);
       this.bot = bot;
       await bot.initialize();
+      this.context.assertConnectionHeld?.();
 
       const webhookUrl = `${(this.context.appUrl || '').trim()}/api/agent/webhooks/${this.config.platform}/${this.applicationId}`;
 
       this.gateway = new FeishuWSConnection({
+        assertConnectionHeld: this.context.assertConnectionHeld,
         appId: this.config.applicationId,
         appSecret: this.config.credentials.appSecret,
         domain: this.domain,
@@ -340,8 +347,9 @@ class FeishuWSClientImpl implements PlatformClient {
       });
 
       await this.gateway.start();
+      this.context.assertConnectionHeld?.();
 
-      if (!options) {
+      if (!options && !this.stopped) {
         this.refreshTimer = setTimeout(() => {
           if (this.stopped) return;
 
@@ -350,14 +358,16 @@ class FeishuWSClientImpl implements PlatformClient {
             this.applicationId,
             durationMs / 3_600_000,
           );
-          this.gateway?.close();
-          this.start().catch((err) => {
+          this.refreshTask = (async () => {
+            await this.gateway?.close();
+            if (!this.stopped) await this.start();
+          })().catch((err) => {
             log('Failed to refresh FeishuClient appId=%s: %O', this.applicationId, err);
           });
         }, durationMs);
       }
 
-      await updateBotRuntimeStatus(
+      await (this.context.updateRuntimeStatus ?? updateBotRuntimeStatus)(
         {
           applicationId: this.applicationId,
           platform: this.id,
@@ -368,7 +378,7 @@ class FeishuWSClientImpl implements PlatformClient {
 
       log('FeishuClient (ws) appId=%s started', this.applicationId);
     } catch (error) {
-      await updateBotRuntimeStatus(
+      await (this.context.updateRuntimeStatus ?? updateBotRuntimeStatus)(
         {
           applicationId: this.applicationId,
           errorMessage: getRuntimeStatusErrorMessage(error),
@@ -388,13 +398,16 @@ class FeishuWSClientImpl implements PlatformClient {
       clearTimeout(this.refreshTimer);
       this.refreshTimer = null;
     }
-    this.gateway?.close();
+    await this.gateway?.close();
+    await this.refreshTask;
+    // A refresh already acquiring a replacement may have published a new socket.
+    await this.gateway?.close();
     this.gateway = null;
     if (this.bot) {
       await this.bot.shutdown().catch(() => {});
       this.bot = null;
     }
-    await updateBotRuntimeStatus(
+    await (this.context.updateRuntimeStatus ?? updateBotRuntimeStatus)(
       {
         applicationId: this.applicationId,
         platform: this.id,

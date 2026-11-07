@@ -14,6 +14,19 @@ const mockDeletePairingRequest = vi.hoisted(() => vi.fn());
 const mockReleasePairingClaim = vi.hoisted(() => vi.fn());
 const mockCreateOrGetPairingRequest = vi.hoisted(() => vi.fn());
 const mockGetAgentRuntimeRedisClient = vi.hoisted(() => vi.fn().mockReturnValue(null));
+const mockResolveIdentityAccess = vi.hoisted(() => vi.fn());
+const mockCompleteIdentityChallenge = vi.hoisted(() => vi.fn().mockResolvedValue({ ok: true }));
+
+vi.mock('../channelIdentity', () => ({
+  ChannelIdentityService: Object.assign(
+    vi.fn(() => ({ completeChallenge: mockCompleteIdentityChallenge })),
+    {
+      resolveAccess: mockResolveIdentityAccess,
+    },
+  ),
+  supportsChannelIdentity: (platform: string) =>
+    ['wechat', 'qq', 'feishu', 'lark'].includes(platform),
+}));
 
 vi.mock('@/database/core/db-adaptor', () => ({
   getServerDB: mockGetServerDB,
@@ -430,6 +443,8 @@ function makeProvider(overrides: Record<string, any> = {}) {
 describe('BotMessageRouter', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockResolveIdentityAccess.mockResolvedValue({ enforced: false, allowed: true });
+    mockCompleteIdentityChallenge.mockResolvedValue({ ok: true });
     mockGetServerDB.mockResolvedValue(FAKE_DB);
     mockInitWithEnvKey.mockResolvedValue(FAKE_GATEKEEPER);
     mockFindEnabledByPlatform.mockResolvedValue([]);
@@ -938,7 +953,87 @@ describe('BotMessageRouter', () => {
     });
   });
 
+  describe('verified channel binding commands', () => {
+    async function loadBindingHandler() {
+      mockFindEnabledByPlatform.mockResolvedValue([
+        makeProvider({
+          id: 'provider-1',
+          settings: { dmPolicy: 'disabled', allowFrom: ['configured-owner'] },
+        }),
+      ]);
+      const router = new BotMessageRouter();
+      await router.getWebhookHandler(
+        'wechat',
+        'app-123',
+      )(new Request('https://example.com/webhook', { method: 'POST', body: '{}' }));
+      const bind = mockOnSlashCommand.mock.calls.find((call) => call[0] === '/bind');
+      if (!bind) throw new Error('Binding command was not registered');
+      return bind[1] as (event: any) => Promise<void>;
+    }
+
+    it('accepts a private binding proof before the old allowlist and binding gate', async () => {
+      const handler = await loadBindingHandler();
+      mockResolveIdentityAccess.mockResolvedValue({ enforced: true, allowed: false });
+      const post = vi.fn();
+      await handler({
+        channel: { id: 'wechat:dm:sender', isDM: true, post },
+        user: { userId: 'sender' },
+        text: 'ABCD2345',
+      });
+      expect(mockCompleteIdentityChallenge).toHaveBeenCalledWith(
+        'provider-1',
+        'ABCD2345',
+        'sender',
+        undefined,
+      );
+      expect(mockResolveIdentityAccess).not.toHaveBeenCalled();
+      expect(post).toHaveBeenCalledWith(expect.stringContaining('已绑定'));
+    });
+
+    it('refuses to consume a code from a group conversation', async () => {
+      const handler = await loadBindingHandler();
+      const post = vi.fn();
+      await handler({
+        channel: { id: 'wechat:group:channel', isDM: false, post },
+        user: { userId: 'sender' },
+        text: 'ABCD2345',
+      });
+      expect(mockCompleteIdentityChallenge).not.toHaveBeenCalled();
+      expect(post).toHaveBeenCalledWith(expect.stringContaining('私聊'));
+    });
+  });
+
   describe('onNewMention DM policy', () => {
+    it('blocks a revoked identity before the legacy operator bypass', async () => {
+      const handler = await loadMentionHandler({ userId: 'former-owner', dmPolicy: 'open' });
+      mockResolveIdentityAccess.mockResolvedValue({ enforced: true, allowed: false });
+      const thread = { id: 'telegram:private', isDM: true, post: vi.fn() };
+      await handler(thread, { author: { userId: 'former-owner', isBot: false }, text: 'run tool' });
+      expect(mockHandleMention).not.toHaveBeenCalled();
+      expect(thread.post).toHaveBeenCalledWith(expect.stringContaining('已绑定'));
+    });
+
+    it('uses the verified identity for owner tools instead of a stale configured operator', async () => {
+      const handler = await loadMentionHandler({ userId: 'old-owner', dmPolicy: 'disabled' });
+      mockResolveIdentityAccess.mockResolvedValue({
+        enforced: true,
+        allowed: true,
+        operatorUserId: 'verified-owner',
+      });
+      const thread = { id: 'telegram:private', isDM: true, post: vi.fn() };
+      await handler(thread, { author: { userId: 'verified-owner', isBot: false }, text: 'hello' });
+      expect(mockHandleMention).toHaveBeenCalledWith(
+        thread,
+        expect.anything(),
+        expect.objectContaining({
+          botContext: expect.objectContaining({
+            isOwner: true,
+            senderExternalUserId: 'verified-owner',
+          }),
+        }),
+      );
+    });
+
     async function loadMentionHandler(settings?: Record<string, unknown>) {
       mockFindEnabledByPlatform.mockResolvedValue([
         makeProvider({
@@ -1926,6 +2021,44 @@ describe('BotMessageRouter', () => {
   });
 
   describe('command access gates (P1: /commands must respect allowFrom + DM/group policy)', () => {
+    it.each(['mention', 'subscribed', 'cmdRegexHandler'] as const)(
+      'answers /help through %s without invoking the model',
+      async (path) => {
+        const handlers = await loadAllHandlers({ allowFrom: 'alice-id' });
+        const thread = {
+          id: 'telegram:channel-1',
+          channelId: 'channel-1',
+          isDM: true,
+          post: vi.fn().mockResolvedValue(undefined),
+          setState: vi.fn().mockResolvedValue(undefined),
+        };
+        await handlers[path](thread, {
+          id: 'help-message',
+          text: '/help',
+          author: { isBot: false, userId: 'alice-id', userName: 'alice' },
+          isMention: true,
+        });
+        expect(thread.post).toHaveBeenCalledTimes(1);
+        expect(thread.post.mock.calls[0][0]).toContain('/result');
+        expect(mockHandleMention).not.toHaveBeenCalled();
+        expect(mockHandleSubscribedMessage).not.toHaveBeenCalled();
+      },
+    );
+
+    it('rejects a former operator’s stop command after binding revocation', async () => {
+      const { slashStop } = await loadAllHandlers({ userId: 'former-owner', dmPolicy: 'open' });
+      mockResolveIdentityAccess.mockResolvedValue({ enforced: true, allowed: false });
+      const channel = makeChannel({ isDM: true });
+      await slashStop({ channel, user: { userId: 'former-owner' }, text: '' });
+      expect(channel.post).toHaveBeenCalledWith(expect.stringContaining('已绑定'));
+      expect(mockResolveIdentityAccess).toHaveBeenCalledWith(
+        FAKE_DB,
+        'telegram',
+        'app-1',
+        'former-owner',
+        { userId: 'user-1', agentId: 'agent-1' },
+      );
+    });
     /**
      * Real-world risk: command dispatch (`/new`, `/stop`) historically ran
      * BEFORE the allowFrom / DM-policy / group-policy checks. A blocked
