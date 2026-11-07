@@ -7,6 +7,7 @@ import react from '@vitejs/plugin-react';
 import { createServer } from 'vite';
 import { expect, it } from 'vitest';
 
+import music from '@/locales/default/music';
 import { type MusicFile } from '@/server/runtime/music/contracts';
 import { handleMusicCommand, handleMusicStream } from '@/server/runtime/music/handler';
 import { musicByteRange, OwnedFileMusicProvider } from '@/server/runtime/music/owned-file-provider';
@@ -247,6 +248,56 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
         () => window.musicTest.engine.store.getState().status === 'playing',
       );
       expect(await page.evaluate(() => window.musicTest.audio!.duration)).toBeGreaterThan(7.9);
+      // Folding the global surface must never stop or recreate its audio engine.
+      await page.getByRole('button', { name: music.capsuleExpand, exact: true }).click();
+      const capsulePosition = await page.evaluate(() => window.musicTest.audio!.currentTime);
+      await page.getByRole('button', { name: music.capsuleCollapse, exact: true }).click();
+      await page.getByRole('link', { name: 'Chat', exact: true }).click();
+      await page.getByRole('link', { name: 'Presentation', exact: true }).click();
+      expect(
+        await page.locator('[data-testid="music-capsule"]').getAttribute('data-collapsed'),
+      ).toBe('true');
+      expect(
+        await page.evaluate(() => ({
+          count: window.musicTest.audioCount,
+          paused: window.musicTest.audio!.paused,
+        })),
+      ).toEqual({ count: 1, paused: false });
+      expect(await page.evaluate(() => window.musicTest.audio!.currentTime)).toBeGreaterThanOrEqual(
+        capsulePosition,
+      );
+      await page.getByRole('button', { name: music.capsuleExpand, exact: true }).click();
+      await mkdir('.data/music-m2-validation', { recursive: true });
+      await page.screenshot({
+        fullPage: true,
+        path: '.data/music-m2-validation/capsule-desktop.png',
+      });
+      await page.setViewportSize({ width: 390, height: 850 });
+      await page.getByRole('button', { name: music.capsuleMore, exact: true }).click();
+      expect(
+        await page.evaluate(() => {
+          const dock = document.querySelector('[data-testid="music-capsule"]');
+          if (!dock) return false;
+          const rect = dock.getBoundingClientRect();
+          return (
+            rect.left >= 0 &&
+            rect.top >= 0 &&
+            rect.right <= innerWidth &&
+            rect.bottom <= innerHeight
+          );
+        }),
+      ).toBe(true);
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+      ).toBe(true);
+      await page.screenshot({
+        fullPage: true,
+        path: '.data/music-m2-validation/capsule-mobile.png',
+      });
+      await page.getByRole('button', { name: music.capsuleMore, exact: true }).click();
+      await page.getByRole('button', { name: music.capsuleCollapse, exact: true }).click();
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      await page.getByRole('link', { name: 'Music', exact: true }).click();
       await page.getByRole('button', { name: 'Pause', exact: true }).click();
       await page.locator('input[type=file][accept=".lrc,text/plain"]').setInputFiles({
         buffer: Buffer.from('[00:00]Opening\n[00:02]Second line\n[00:05]Last line'),
@@ -328,7 +379,13 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       ).toEqual({ repeat: 'list', shuffle: true, volume: 0 });
       await mkdir('.data/music-m2-validation', { recursive: true });
       await page.screenshot({ fullPage: true, path: '.data/music-m2-validation/desktop.png' });
-      await page.setViewportSize({ width: 760, height: 900 });
+      await page.setViewportSize({ width: 390, height: 850 });
+      await page.evaluate(
+        () =>
+          new Promise<void>((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+          ),
+      );
       await page.screenshot({ fullPage: true, path: '.data/music-m2-validation/compact.png' });
       expect(
         await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
