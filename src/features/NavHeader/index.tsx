@@ -1,11 +1,20 @@
 import { type FlexboxProps } from '@lobehub/ui';
 import { Flexbox, TooltipGroup } from '@lobehub/ui';
+import { createStaticStyles, cx } from 'antd-style';
 import { type CSSProperties, type ReactNode } from 'react';
 import { memo } from 'react';
 
 import ToggleLeftPanelButton from '@/features/NavPanel/ToggleLeftPanelButton';
 import { useGlobalStore } from '@/store/global';
 import { systemStatusSelectors } from '@/store/global/selectors';
+
+const glassStyles = createStaticStyles(({ css, cssVar }) => ({
+  header: css`
+    background: var(--qz-glass-surface, ${cssVar.colorBgContainer});
+    backdrop-filter: var(--qz-glass-filter, none);
+    box-shadow: inset 0 1px 0 var(--qz-glass-highlight, transparent);
+  `,
+}));
 
 export interface NavHeaderProps extends Omit<FlexboxProps, 'children'> {
   children?: ReactNode;
@@ -27,6 +36,7 @@ export interface NavHeaderProps extends Omit<FlexboxProps, 'children'> {
 const NavHeader = memo<NavHeaderProps>(
   ({
     showTogglePanelButton = true,
+    className,
     style,
     children,
     left,
@@ -46,6 +56,8 @@ const NavHeader = memo<NavHeaderProps>(
         allowShrink
         horizontal
         align={'center'}
+        className={cx(glassStyles.header, className)}
+        data-qz-glass="header"
         flex={'none'}
         gap={4}
         height={44}

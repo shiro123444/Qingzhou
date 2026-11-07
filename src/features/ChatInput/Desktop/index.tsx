@@ -17,9 +17,11 @@ import { chatSelectors } from '@/store/chat/selectors';
 import { fileChatSelectors, useFileStore } from '@/store/file';
 import { useGlobalStore } from '@/store/global';
 import { systemStatusSelectors } from '@/store/global/selectors';
+import { liquidGlass } from '@/styles/liquidGlass';
 
 import { type ActionToolbarProps } from '../ActionBar';
 import ActionBar from '../ActionBar';
+import { glassComposer } from '../glass.style';
 import InputEditor from '../InputEditor';
 import { type PlaceholderVariant } from '../InputEditor/Placeholder';
 import RuntimeConfig from '../RuntimeConfig';
@@ -59,7 +61,8 @@ const styles = createStaticStyles(({ css, cssVar }) => ({
     height: 100%;
     margin-block-start: 0;
 
-    background: ${cssVar.colorBgContainer};
+    background: var(--qz-glass-strong, ${cssVar.colorBgContainer});
+    backdrop-filter: var(--qz-glass-filter, none);
   `,
   inputFullscreen: css`
     border: none;
@@ -155,7 +158,7 @@ const DesktopChatInput = memo<DesktopChatInputProps>(
 
     const content = (
       <Flexbox
-        className={cx(styles.container, expand && styles.fullscreen)}
+        className={cx(styles.container, liquidGlass, expand && styles.fullscreen)}
         data-music-player-avoid="composer"
         gap={8}
         paddingBlock={expand ? 0 : showFootnote ? '0 12px' : '0 8px'}
@@ -163,6 +166,7 @@ const DesktopChatInput = memo<DesktopChatInputProps>(
         <div className={cx(qingzhouStyles.composer, expand && styles.expandedFrame)}>
           {!expand && <QingzhouComposerOrnaments />}
           <ChatInput
+            data-qz-glass="composer"
             data-testid="chat-input"
             defaultHeight={chatInputHeight || 32}
             fullscreen={expand}
@@ -208,7 +212,11 @@ const DesktopChatInput = memo<DesktopChatInputProps>(
               updateSystemStatus({ chatInputHeight: height });
             }}
             {...inputContainerProps}
-            className={cx(expand && styles.inputFullscreen, inputContainerProps?.className)}
+            className={cx(
+              !expand && glassComposer,
+              expand && styles.inputFullscreen,
+              inputContainerProps?.className,
+            )}
           >
             <InputEditor placeholder={placeholder} placeholderVariant={placeholderVariant} />
           </ChatInput>

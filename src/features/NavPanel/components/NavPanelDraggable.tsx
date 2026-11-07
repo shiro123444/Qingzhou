@@ -1,18 +1,17 @@
 'use client';
 
 import { DraggablePanel } from '@lobehub/ui';
-import { createStaticStyles, cssVar } from 'antd-style';
+import { createStaticStyles, cx } from 'antd-style';
 import { type ReactNode } from 'react';
-import { memo, Suspense, useMemo, useRef } from 'react';
+import { memo, Suspense, useRef } from 'react';
 
-import { isDesktop } from '@/const/version';
 import { TOGGLE_BUTTON_ID } from '@/features/NavPanel/ToggleLeftPanelButton';
 import { useIsMobile } from '@/hooks/useIsMobile';
 import Footer from '@/routes/(main)/home/_layout/Footer';
 import { USER_DROPDOWN_ICON_ID } from '@/routes/(main)/home/_layout/Header/components/User';
 import { useGlobalStore } from '@/store/global';
 import { systemStatusSelectors } from '@/store/global/selectors';
-import { isMacOS } from '@/utils/platform';
+import { glassSurface } from '@/styles/liquidGlass';
 
 import { useNavPanelSizeChangeHandler } from '../hooks/useNavPanel';
 import { BACK_BUTTON_ID } from './BackButton';
@@ -54,9 +53,13 @@ const draggableStyles = createStaticStyles(({ css, cssVar }) => ({
   `,
   panel: css`
     user-select: none;
+
     height: 100%;
+    border-inline-end: 1px solid var(--qz-glass-border, ${cssVar.colorBorderSecondary});
+
     color: ${cssVar.colorTextSecondary};
-    background: ${isDesktop && isMacOS() ? 'transparent' : cssVar.colorBgLayout};
+
+    background: transparent;
 
     * {
       user-select: none;
@@ -122,14 +125,6 @@ export const NavPanelDraggable = memo<NavPanelDraggableProps>(({ activeContent }
     defaultWidthRef.current = systemStatusSelectors.leftPanelWidth(useGlobalStore.getState());
   }
 
-  const styles = useMemo(
-    () => ({
-      background: isDesktop && isMacOS() ? 'transparent' : cssVar.colorBgLayout,
-      zIndex: 11,
-    }),
-    [],
-  );
-
   if (defaultWidthRef.current === 0) {
     const pendingWidth = systemStatusSelectors.leftPanelWidth(useGlobalStore.getState());
     return <div aria-hidden style={{ flexShrink: 0, height: '100%', width: pendingWidth }} />;
@@ -139,8 +134,9 @@ export const NavPanelDraggable = memo<NavPanelDraggableProps>(({ activeContent }
 
   return (
     <DraggablePanel
-      className={draggableStyles.panel}
+      className={cx(draggableStyles.panel, glassSurface)}
       classNames={classNames}
+      data-qz-glass="sidebar"
       defaultSize={defaultSize}
       expand={expand && !workspaceDrawerMode}
       expandable={false}
@@ -148,7 +144,7 @@ export const NavPanelDraggable = memo<NavPanelDraggableProps>(({ activeContent }
       minWidth={240}
       placement="left"
       showBorder={false}
-      style={styles}
+      style={{ background: 'transparent', zIndex: 11 }}
       onExpandChange={togglePanel}
       onSizeDragging={handleSizeChange}
     >

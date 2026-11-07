@@ -17,7 +17,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     color: ${cssVar.colorText};
 
-    background: ${cssVar.colorBgContainer};
+    background: transparent;
 
     &[data-view='player'] {
       background:
@@ -31,7 +31,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
           color-mix(in srgb, #aabca1 6%, transparent),
           transparent 50%
         ),
-        ${cssVar.colorBgContainer};
+        transparent;
     }
 
     [hidden] {
@@ -124,7 +124,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     min-width: 0;
     min-height: 42px;
     padding-block-end: 12px;
-    border-block-end: 1px solid ${cssVar.colorBorderSecondary};
+    border-block-end: 1px solid var(--qz-glass-border, ${cssVar.colorBorderSecondary});
 
     @container (width <= 960px) {
       flex-wrap: wrap;
@@ -155,7 +155,8 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     color: var(--music-accent);
 
-    background: var(--music-accent-soft);
+    background: var(--qz-glass-surface);
+    box-shadow: inset 0 1px 0 var(--qz-glass-highlight);
   `,
   tabs: css`
     display: flex;
@@ -188,8 +189,8 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     min-height: 34px;
     padding-block: 6px;
     padding-inline: 12px;
-    border: 0;
-    border-radius: ${cssVar.borderRadius};
+    border: 1px solid transparent;
+    border-radius: 18px;
 
     font-size: 13px;
     font-weight: 500;
@@ -205,8 +206,12 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     }
 
     &[aria-selected='true'] {
+      border-color: var(--qz-glass-border);
       color: var(--music-accent);
-      background: var(--music-accent-soft);
+      background: var(--qz-glass-strong);
+      box-shadow:
+        inset 0 1px 0 var(--qz-glass-highlight),
+        0 3px 10px color-mix(in srgb, ${cssVar.colorText} 4%, transparent);
     }
 
     &:hover {
@@ -295,6 +300,10 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     margin-inline: auto;
   `,
   cover: css`
+    isolation: isolate;
+    position: relative;
+
+    overflow: hidden;
     display: grid;
     flex: none;
     place-items: center;
@@ -302,13 +311,37 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     aspect-ratio: 1;
     width: max(160px, min(360px, 33cqw, calc(100dvh - 340px)));
     max-width: 100%;
-    border: 1px solid color-mix(in srgb, var(--music-accent) 14%, transparent);
-    border-radius: ${cssVar.borderRadiusLG};
+    border: 1px solid var(--qz-glass-border);
+    border-radius: 30px;
 
     color: var(--music-cover-ink);
 
     background: var(--music-cover-bg);
-    box-shadow: 0 14px 36px color-mix(in srgb, var(--music-accent) 7%, transparent);
+    backdrop-filter: var(--qz-glass-filter);
+    box-shadow:
+      inset 0 1px 1px var(--qz-glass-highlight),
+      inset 0 -1px 1px color-mix(in srgb, var(--music-accent) 16%, transparent),
+      var(--qz-glass-shadow);
+
+    &::before {
+      pointer-events: none;
+      content: '';
+
+      position: absolute;
+      z-index: -1;
+      inset-block: 42% -30%;
+      inset-inline: -20% -35%;
+      transform: rotate(-18deg);
+
+      border-block-start: 1px solid var(--qz-glass-highlight);
+      border-radius: 50%;
+
+      background: linear-gradient(
+        175deg,
+        color-mix(in srgb, var(--music-accent) 18%, transparent),
+        transparent 70%
+      );
+    }
 
     @container (width <= 640px) {
       width: min(70cqw, 300px);
@@ -406,15 +439,20 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     width: 48px;
     height: 48px;
     padding: 0;
-    border: 0;
+    border: 1px solid var(--qz-glass-border);
     border-radius: 50%;
 
-    color: ${cssVar.colorBgContainer};
+    color: var(--music-accent);
 
-    background: ${cssVar.colorText};
+    background:
+      radial-gradient(ellipse at 18% 0%, var(--qz-glass-highlight), transparent 62%),
+      var(--qz-glass-strong);
+    box-shadow:
+      inset 0 1px 0 var(--qz-glass-highlight),
+      0 4px 12px color-mix(in srgb, ${cssVar.colorText} 8%, transparent);
 
     &:hover {
-      background: ${cssVar.colorTextSecondary};
+      background-color: var(--music-accent-soft);
     }
   `,
   repeatControl: css`
@@ -591,7 +629,10 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
   search: css`
     width: min(300px, 55%);
     border-color: ${cssVar.colorBorderSecondary};
-    background: ${cssVar.colorFillQuaternary};
+    border-radius: 18px;
+
+    background: var(--qz-glass-strong);
+    box-shadow: inset 0 1px 0 var(--qz-glass-highlight);
 
     @container (width <= 480px) {
       order: 2;

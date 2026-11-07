@@ -95,10 +95,11 @@ const styles = createStaticStyles(({ css }) => ({
 
     overflow: hidden;
 
-    border: 1px solid ${cssVar.colorBorderSecondary};
+    border: 1px solid var(--qz-glass-border, ${cssVar.colorBorderSecondary});
     border-radius: ${cssVar.borderRadiusLG};
 
-    background: ${cssVar.colorBgContainer};
+    background: var(--qz-glass-strong, ${cssVar.colorBgContainer});
+    box-shadow: inset 0 1px 0 var(--qz-glass-highlight, transparent);
 
     transition: all ${cssVar.motionDurationMid};
 

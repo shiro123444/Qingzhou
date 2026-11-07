@@ -116,10 +116,14 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
   plugin: css`
     margin-block-start: 24px;
     padding: 24px;
-    border: 1px solid ${cssVar.colorBorderSecondary};
-    border-radius: 16px;
+    border: 1px solid var(--qz-glass-border, ${cssVar.colorBorderSecondary});
+    border-radius: 24px;
 
-    background: color-mix(in srgb, ${cssVar.colorBgContainer} 88%, transparent);
+    background: var(--qz-glass-surface, ${cssVar.colorBgContainer});
+    backdrop-filter: var(--qz-glass-filter, none);
+    box-shadow:
+      inset 0 1px 0 var(--qz-glass-highlight),
+      var(--qz-glass-shadow);
 
     @container (width <= 600px) {
       padding: 18px;
@@ -146,7 +150,8 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     color: var(--music-accent);
 
-    background: var(--music-accent-soft);
+    background: var(--music-cover-bg);
+    box-shadow: inset 0 1px 0 var(--qz-glass-highlight);
   `,
   pluginInfo: css`
     flex: 1;

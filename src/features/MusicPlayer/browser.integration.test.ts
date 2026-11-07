@@ -1,9 +1,10 @@
 // @vitest-environment node
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
 import react from '@vitejs/plugin-react';
+import sharp from 'sharp';
 import { createServer } from 'vite';
 import { expect, it } from 'vitest';
 
@@ -44,7 +45,11 @@ interface BrowserPage {
   };
   on: (event: 'pageerror', handler: (error: Error) => void) => void;
   reload: () => Promise<unknown>;
-  screenshot: (options: { fullPage: boolean; path: string }) => Promise<unknown>;
+  screenshot: (options: {
+    clip?: { x: number; y: number; width: number; height: number };
+    fullPage?: boolean;
+    path?: string;
+  }) => Promise<Buffer>;
   setViewportSize: (size: { height: number; width: number }) => Promise<void>;
   waitForFunction: (
     fn: () => boolean,
@@ -129,13 +134,13 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
             vite.middlewares.use((req, res, next) => {
               const pathname = req.url?.split('?')[0] ?? '/';
               if (
-                !['/music', '/chat', '/presentation'].includes(pathname) &&
+                !['/music', '/chat', '/presentation', '/glass-lab'].includes(pathname) &&
                 !pathname.startsWith('/fixture/') &&
                 !pathname.startsWith('/api/runtime/music')
               )
                 return next();
               void (async () => {
-                if (['/music', '/chat', '/presentation'].includes(pathname)) {
+                if (['/music', '/chat', '/presentation', '/glass-lab'].includes(pathname)) {
                   const html = await vite.transformIndexHtml(
                     pathname,
                     '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{margin:0;font-family:system-ui}</style></head><body><div id="root"></div><script type="module" src="/tests/fixtures/musicM2.tsx"></script></body></html>',
@@ -247,6 +252,115 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       });
       page = await browser.newPage();
       page.on('pageerror', (error) => errors.push(error.message));
+      await page.goto(`${base}/glass-lab`, { waitUntil: 'commit' });
+      await page.waitForFunction(
+        () => document.querySelector('[data-glass-probe]')?.hasAttribute('data-qz-optics') === true,
+        undefined,
+        { timeout: 60_000 },
+      );
+      const capabilities = await page.evaluate(() => {
+        const canvas = document.createElement('canvas');
+        canvas.setAttribute('content', 'drawable');
+        const context = canvas.getContext('2d');
+        return {
+          userAgent: navigator.userAgent,
+          webgpu: 'gpu' in navigator,
+          htmlInCanvas: 'content' in canvas && canvas.content === 'drawable',
+          drawElementImage: !!context && 'drawElementImage' in context,
+          updateElementGeometry: 'updateElementGeometry' in canvas,
+        };
+      });
+      await mkdir('.data/music-m2-validation', { recursive: true });
+      await writeFile(
+        '.data/music-m2-validation/glass-capabilities.json',
+        JSON.stringify(capabilities, null, 2),
+      );
+      const probeBox = (await page.locator('[data-glass-probe]').boundingBox())!;
+      const refracted = await page.screenshot({ clip: probeBox });
+      // Disable only displacement: blur, light, tint and the same live backdrop remain unchanged.
+      await page.evaluate(async () => {
+        const probe = document.querySelector<HTMLElement>('[data-glass-probe]')!;
+        const filter = getComputedStyle(probe).backdropFilter;
+        const id = /#([^"')]+)/.exec(filter)![1];
+        const map = document.getElementById(id)!.querySelector('feDisplacementMap')!;
+        map.setAttribute('data-original-scale', map.getAttribute('scale')!);
+        map.setAttribute('scale', '0');
+        await new Promise(requestAnimationFrame);
+        await new Promise(requestAnimationFrame);
+      });
+      const flat = await page.screenshot({ clip: probeBox });
+      const a = await sharp(refracted).removeAlpha().raw().toBuffer();
+      const b = await sharp(flat).removeAlpha().raw().toBuffer();
+      const pixelDifference = (left: number, top: number, width: number, height: number) => {
+        let sum = 0;
+        for (let y = top; y < top + height; y++)
+          for (let x = left; x < left + width; x++)
+            for (let c = 0; c < 3; c++) {
+              const i = (y * 320 + x) * 3 + c;
+              sum += Math.abs(a[i] - b[i]);
+            }
+        return sum / (width * height * 3);
+      };
+      expect(pixelDifference(3, 45, 10, 10)).toBeGreaterThan(3);
+      expect(pixelDifference(70, 30, 180, 40)).toBeLessThan(1);
+      // Foreground belongs to the surface, so its pixels must not bend with its backdrop.
+      expect(pixelDifference(141, 4, 38, 4)).toBeLessThan(1);
+      await page.evaluate(async () => {
+        const probe = document.querySelector<HTMLElement>('[data-glass-probe]')!;
+        const id = /#([^"')]+)/.exec(getComputedStyle(probe).backdropFilter)![1];
+        const map = document.getElementById(id)!.querySelector('feDisplacementMap')!;
+        map.setAttribute('scale', map.getAttribute('data-original-scale')!);
+        document.querySelector<HTMLElement>('[data-glass-lab]')!.style.backgroundPositionX = '8px';
+        await new Promise(requestAnimationFrame);
+        await new Promise(requestAnimationFrame);
+      });
+      const moved = await page.screenshot({ clip: probeBox });
+      expect(Buffer.compare(moved, refracted)).not.toBe(0);
+      await writeFile('.data/music-m2-validation/glass-refracted.png', refracted);
+      await writeFile('.data/music-m2-validation/glass-flat.png', flat);
+      // Reusing a DOM surface at the same size must invalidate its geometry and material.
+      await page.evaluate(() => {
+        document.querySelector<HTMLElement>('[data-glass-probe]')!.style.borderBottomRightRadius =
+          '8px';
+      });
+      await page.waitForFunction(
+        () => !document.querySelector('[data-glass-probe]')?.hasAttribute('data-qz-optics'),
+      );
+      await page.evaluate(() => {
+        const probe = document.querySelector<HTMLElement>('[data-glass-probe]')!;
+        probe.style.borderRadius = '18px';
+        probe.dataset.qzGlass = 'control';
+      });
+      await page.waitForFunction(() => {
+        const probe = document.querySelector<HTMLElement>('[data-glass-probe]')!;
+        const id = /#([^"')]+)/.exec(getComputedStyle(probe).backdropFilter)?.[1];
+        return (
+          !!id &&
+          document
+            .getElementById(id)
+            ?.querySelector('feGaussianBlur')
+            ?.getAttribute('stdDeviation') === '0.5'
+        );
+      });
+      expect(
+        await page.evaluate(() => document.querySelectorAll('[data-qz-glass-definitions]').length),
+      ).toBe(1);
+      const preferences = await page.context().newCDPSession(page);
+      for (const name of ['prefers-reduced-transparency', 'prefers-contrast']) {
+        await preferences.send('Emulation.setEmulatedMedia', {
+          features: [{ name, value: name === 'prefers-contrast' ? 'more' : 'reduce' }],
+        });
+        await page.waitForFunction(
+          () => !document.querySelector('[data-glass-probe]')?.hasAttribute('data-qz-optics'),
+        );
+        expect(
+          await page.evaluate(
+            () => getComputedStyle(document.querySelector('[data-glass-probe]')!).backdropFilter,
+          ),
+        ).toBe('none');
+      }
+      await preferences.send('Emulation.setEmulatedMedia', { features: [] });
+      await preferences.detach();
       await page.goto(`${base}/music`, { waitUntil: 'commit' });
       await page.waitForFunction(
         () => !!window.musicTest?.engine.store.getState().userId,

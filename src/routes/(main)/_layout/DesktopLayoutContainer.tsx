@@ -1,5 +1,5 @@
 import { Flexbox } from '@lobehub/ui';
-import { cssVar } from 'antd-style';
+import { cssVar, cx } from 'antd-style';
 import { type FC, type PropsWithChildren } from 'react';
 import { useMemo, useRef } from 'react';
 
@@ -7,6 +7,7 @@ import { isDesktop } from '@/const/version';
 import { useIsDark } from '@/hooks/useIsDark';
 import { useGlobalStore } from '@/store/global';
 import { systemStatusSelectors } from '@/store/global/selectors';
+import { glassSurface } from '@/styles/liquidGlass';
 import { getDarwinMajorVersion, isMacOSWithLargeWindowBorders } from '@/utils/platform';
 
 import { LayoutContainerContext } from './DesktopLayoutContainer/LayoutContainerContext';
@@ -23,7 +24,7 @@ const DesktopLayoutContainer: FC<PropsWithChildren> = ({ children }) => {
       '--container-padding-left': expand ? '0px' : '8px',
       '--container-padding-top': isDesktop ? '0px' : '8px',
     }),
-    [expand, isDesktop],
+    [expand],
   );
 
   const innerCssVariables = useMemo<Record<string, string>>(() => {
@@ -49,7 +50,8 @@ const DesktopLayoutContainer: FC<PropsWithChildren> = ({ children }) => {
       width={'100%'}
     >
       <Flexbox
-        className={styles.innerContainer}
+        className={cx(styles.innerContainer, glassSurface)}
+        data-qz-glass="shell"
         height={'100%'}
         ref={innerContainerRef}
         style={innerCssVariables}

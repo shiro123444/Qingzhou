@@ -37,6 +37,7 @@ import { musicTheme } from '@/features/MusicPlayer/musicTheme';
 import { useMusicPluginState } from '@/features/MusicPlayer/plugins/context';
 import LyricsPanel from '@/features/MusicPlayer/plugins/LyricsPanel';
 import MusicPluginSettings from '@/features/MusicPlayer/plugins/MusicPluginSettings';
+import { liquidGlass } from '@/styles/liquidGlass';
 import { type MusicTrack } from '@/types/music';
 
 import { styles } from './style';
@@ -154,7 +155,11 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
   }
 
   return (
-    <main aria-label={t('player')} className={cx(styles.studio, musicTheme)} data-view={view}>
+    <main
+      aria-label={t('player')}
+      className={cx(styles.studio, musicTheme, liquidGlass)}
+      data-view={view}
+    >
       <div className={styles.inner}>
         <header className={styles.header}>
           <div className={styles.brand}>
@@ -305,6 +310,7 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
               <button
                 aria-label={t(playing ? 'pause' : 'play')}
                 className={styles.playButton}
+                data-qz-glass="control"
                 disabled={!s.queue.length}
                 onClick={() => (playing ? engine.pause() : engine.play())}
               >

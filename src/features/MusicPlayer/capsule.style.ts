@@ -1,6 +1,55 @@
 import { createStaticStyles } from 'antd-style';
 
 export const styles = createStaticStyles(({ css, cssVar }) => ({
+  glass: css`
+    border: 1px solid var(--qz-glass-border);
+    background:
+      linear-gradient(
+        145deg,
+        color-mix(in srgb, var(--qz-glass-highlight) 35%, transparent),
+        transparent 42%,
+        color-mix(in srgb, var(--music-accent) 7%, transparent)
+      ),
+      var(--qz-glass-strong);
+    backdrop-filter: var(--qz-glass-filter);
+    box-shadow:
+      inset 0 1px 1px var(--qz-glass-highlight),
+      inset 0 -1px 1px color-mix(in srgb, var(--music-accent) 18%, transparent),
+      var(--qz-glass-shadow);
+
+    &::before,
+    &::after {
+      pointer-events: none;
+      content: '';
+
+      position: absolute;
+      inset: 0;
+
+      border-radius: inherit;
+    }
+
+    &::before {
+      padding: 1px;
+      background: linear-gradient(
+        135deg,
+        var(--qz-glass-highlight),
+        transparent 38%,
+        transparent 68%,
+        color-mix(in srgb, var(--qz-glass-highlight) 65%, transparent)
+      );
+      mask:
+        linear-gradient(#fff 0 0) content-box,
+        linear-gradient(#fff 0 0);
+
+      mask-composite: exclude;
+    }
+
+    &::after {
+      inset: 3px;
+      border: 1px solid color-mix(in srgb, var(--qz-glass-highlight) 16%, transparent);
+      box-shadow: inset 0 2px 4px color-mix(in srgb, var(--qz-glass-highlight) 14%, transparent);
+    }
+  `,
   dock: css`
     pointer-events: none;
 
@@ -53,17 +102,10 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     width: 100%;
     height: 76px;
     padding-block: 12px;
-    padding-inline: 12px;
-    border: 1px solid ${cssVar.colorBorderSecondary};
-    border-radius: 16px;
+    padding-inline: 14px;
+    border-radius: 38px;
 
     color: ${cssVar.colorText};
-
-    background: color-mix(in srgb, ${cssVar.colorBgElevated} 88%, transparent);
-    backdrop-filter: blur(22px) saturate(1.2);
-    box-shadow:
-      0 12px 32px color-mix(in srgb, ${cssVar.colorText} 8%, transparent),
-      0 2px 6px color-mix(in srgb, ${cssVar.colorText} 4%, transparent);
 
     &:active {
       cursor: grabbing;
@@ -75,8 +117,8 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     }
 
     @media (width <= 390px) {
-      gap: 9px;
-      padding-inline: 10px;
+      gap: 8px;
+      padding-inline: 12px;
     }
   `,
   artworkLink: css`
@@ -88,7 +130,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     height: 48px;
     padding: 0;
     border: 0;
-    border-radius: 10px;
+    border-radius: 18px;
 
     background: transparent;
 
@@ -108,7 +150,21 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     color: var(--music-cover-ink);
 
-    background: var(--music-cover-bg);
+    background:
+      radial-gradient(
+        ellipse at 90% 6%,
+        color-mix(in srgb, #b7f0db 46%, transparent) 0,
+        transparent 58%
+      ),
+      radial-gradient(
+        ellipse at 10% 108%,
+        color-mix(in srgb, var(--music-accent) 28%, transparent) 0,
+        transparent 65%
+      ),
+      var(--music-cover-bg);
+    box-shadow:
+      inset 0 1px 1px var(--qz-glass-highlight),
+      inset 0 -1px 1px color-mix(in srgb, var(--music-accent) 18%, transparent);
   `,
   recordLabel: css`
     display: grid;
@@ -120,7 +176,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     display: flex;
     flex: 1;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
 
     min-width: 0;
 
@@ -131,7 +187,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       overflow: hidden;
 
       font-size: 14px;
-      font-weight: 500;
+      font-weight: 600;
       line-height: 1.4;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -140,15 +196,33 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     > span {
       overflow: hidden;
 
-      font-size: 12px;
+      font-size: 11px;
       line-height: 1.4;
-      color: ${cssVar.colorTextTertiary};
+      color: ${cssVar.colorTextSecondary};
       text-overflow: ellipsis;
       white-space: nowrap;
     }
 
     &:hover {
       color: ${cssVar.colorText};
+    }
+  `,
+  trackMeta: css`
+    display: flex;
+    gap: 8px;
+    align-items: center;
+
+    > span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    time {
+      flex: none;
+      font-size: 10px;
+      font-variant-numeric: tabular-nums;
+      opacity: 0.8;
     }
   `,
   transport: css`
@@ -169,7 +243,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     height: 30px;
     padding: 0;
     border: 0;
-    border-radius: 8px;
+    border-radius: 50%;
 
     color: ${cssVar.colorTextSecondary};
 
@@ -209,17 +283,27 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     width: 36px;
     height: 36px;
     padding: 0;
-    border: 0;
+    border: 1px solid color-mix(in srgb, var(--qz-glass-highlight) 65%, transparent);
     border-radius: 50%;
 
-    color: ${cssVar.colorBgContainer};
+    color: var(--music-accent);
 
-    background: ${cssVar.colorText};
+    background:
+      radial-gradient(ellipse at 28% 15%, var(--qz-glass-highlight), transparent 62%),
+      color-mix(in srgb, var(--qz-glass-surface) 80%, transparent);
+    box-shadow:
+      inset 0 1px 2px var(--qz-glass-highlight),
+      inset 0 -1px 2px color-mix(in srgb, var(--music-accent) 18%, transparent),
+      0 3px 10px color-mix(in srgb, var(--music-accent) 9%, transparent);
 
-    transition: transform 150ms;
+    transition:
+      background 150ms,
+      box-shadow 150ms;
 
     &:hover {
-      transform: scale(1.08);
+      background:
+        radial-gradient(ellipse at 28% 15%, var(--qz-glass-highlight), transparent 68%),
+        var(--qz-glass-strong);
     }
 
     &:focus-visible {
@@ -232,26 +316,25 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     display: flex;
     flex: none;
+    flex-direction: column;
     align-items: center;
+    justify-content: center;
 
-    height: 42px;
+    width: 24px;
+    height: 48px;
   `,
   collapseButton: css`
     cursor: pointer;
 
-    position: absolute;
-    inset-block-end: -8px;
-    inset-inline-end: 4px;
-
     display: grid;
     place-items: center;
 
-    width: 20px;
-    height: 16px;
+    width: 24px;
+    height: 18px;
     padding: 0;
     border: 0;
 
-    color: ${cssVar.colorTextTertiary};
+    color: ${cssVar.colorTextSecondary};
 
     background: transparent;
 
@@ -265,10 +348,11 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
   `,
   progress: css`
     position: absolute;
-    inset-block-end: 0;
-    inset-inline: 13px;
+    inset-block-end: 9px;
+    inset-inline: 76px 40px;
 
     height: 2px;
+    border-radius: 2px;
 
     background: linear-gradient(
       to right,
@@ -293,21 +377,22 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       &::-webkit-slider-thumb {
         width: 6px;
         height: 6px;
-        border-radius: 1px;
+        border: 1px solid var(--qz-glass-highlight);
+        border-radius: 50%;
 
         appearance: none;
-        opacity: 0;
-        background: var(--music-accent);
+        background: color-mix(in srgb, var(--music-accent) 24%, ${cssVar.colorBgContainer});
+        box-shadow: 0 1px 3px color-mix(in srgb, var(--music-accent) 24%, transparent);
       }
 
       &::-moz-range-thumb {
         width: 6px;
         height: 6px;
-        border: 0;
-        border-radius: 1px;
+        border: 1px solid var(--qz-glass-highlight);
+        border-radius: 50%;
 
-        opacity: 0;
-        background: var(--music-accent);
+        background: color-mix(in srgb, var(--music-accent) 24%, ${cssVar.colorBgContainer});
+        box-shadow: 0 1px 3px color-mix(in srgb, var(--music-accent) 24%, transparent);
       }
 
       &:hover::-webkit-slider-thumb,
@@ -337,12 +422,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     width: 60px;
     height: 60px;
     padding: 5px;
-    border: 1px solid ${cssVar.colorBorderSecondary};
-    border-radius: 16px;
-
-    background: color-mix(in srgb, ${cssVar.colorBgElevated} 88%, transparent);
-    backdrop-filter: blur(22px);
-    box-shadow: 0 8px 24px color-mix(in srgb, ${cssVar.colorText} 10%, transparent);
+    border-radius: 30px;
 
     > button {
       cursor: pointer;
@@ -351,7 +431,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       height: 100%;
       padding: 0;
       border: 0;
-      border-radius: 11px;
+      border-radius: 25px;
 
       background: transparent;
     }
@@ -367,12 +447,12 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
   `,
   orbIndicator: css`
     position: absolute;
-    inset-block-end: 3px;
-    inset-inline-end: 3px;
+    inset-block-end: 5px;
+    inset-inline-end: 5px;
 
     width: 9px;
     height: 9px;
-    border: 2px solid ${cssVar.colorBgContainer};
+    border: 2px solid var(--qz-glass-strong);
     border-radius: 50%;
 
     background: var(--music-accent);
@@ -388,14 +468,11 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     width: 100%;
     max-height: var(--music-panel-max-height, calc(100dvh - 120px));
     padding: 16px;
-    border: 1px solid ${cssVar.colorBorderSecondary};
-    border-radius: 16px;
+    border-radius: 24px;
 
     color: ${cssVar.colorText};
 
-    background: color-mix(in srgb, ${cssVar.colorBgElevated} 94%, transparent);
-    backdrop-filter: blur(24px);
-    box-shadow: 0 14px 42px color-mix(in srgb, ${cssVar.colorText} 12%, transparent);
+    background: var(--qz-glass-strong);
 
     [data-panel-side='below'] & {
       inset-block: calc(100% + 12px) auto;

@@ -35,7 +35,8 @@ const styles = createStaticStyles(({ css, cssVar }) => {
       width: 100%;
       height: 100%;
 
-      background-color: var(--editor-overlay-bg, ${cssVar.colorBgContainer});
+      background: var(--qz-glass-strong, var(--editor-overlay-bg, ${cssVar.colorBgContainer}));
+      backdrop-filter: var(--qz-glass-filter, none);
     `,
     pageEditorOverlay: css`
       position: absolute;
@@ -45,7 +46,8 @@ const styles = createStaticStyles(({ css, cssVar }) => {
       width: 100%;
       height: 100%;
 
-      background-color: ${cssVar.colorBgLayout};
+      background: var(--qz-glass-strong, ${cssVar.colorBgLayout});
+      backdrop-filter: var(--qz-glass-filter, none);
     `,
   };
 });
@@ -143,14 +145,14 @@ const ResourceManager = memo(() => {
 
           {/* Editor overlay */}
           {mode === 'editor' && (
-            <Flexbox className={styles.editorOverlay}>
+            <Flexbox className={styles.editorOverlay} data-qz-glass="editor">
               <FileEditor onBack={handleBack} />
             </Flexbox>
           )}
 
           {/* PageEditor overlay */}
           {mode === 'page' && (
-            <Flexbox className={styles.pageEditorOverlay}>
+            <Flexbox className={styles.pageEditorOverlay} data-qz-glass="editor">
               <PageEditor
                 emoji={currentDocument?.metadata?.emoji as string | undefined}
                 knowledgeBaseId={libraryId}

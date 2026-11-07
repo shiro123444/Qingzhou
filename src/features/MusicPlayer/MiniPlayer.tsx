@@ -24,6 +24,8 @@ import { type CSSProperties, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useLocation } from 'react-router-dom';
 
+import { liquidGlass } from '@/styles/liquidGlass';
+
 import { styles } from './capsule.style';
 import { useAudioEngine, useMusicPlayer } from './context';
 import { type RepeatMode } from './engine';
@@ -80,7 +82,7 @@ export default function MiniPlayer() {
     <section
       {...position.surfaceProps}
       aria-label={t('player')}
-      className={cx(styles.dock, musicTheme)}
+      className={cx(styles.dock, musicTheme, liquidGlass)}
       data-collapsed={collapsed}
       data-dragging={position.dragging}
       data-panel-side={position.panelSide}
@@ -90,7 +92,12 @@ export default function MiniPlayer() {
       style={position.style}
     >
       {!collapsed && details && (
-        <div data-music-panel aria-label={t('capsuleDetails')} className={styles.panel}>
+        <div
+          data-music-panel
+          aria-label={t('capsuleDetails')}
+          className={cx(styles.panel, styles.glass)}
+          data-qz-glass="panel"
+        >
           <div className={styles.panelHeading}>
             <span>
               <Icon aria-hidden icon={ListMusic} size={{ size: 18, strokeWidth: 1.75 }} />
@@ -203,7 +210,8 @@ export default function MiniPlayer() {
           data-capsule-body
           aria-description={t('capsuleDragHint')}
           aria-label={t('capsuleDrag')}
-          className={styles.orb}
+          className={cx(styles.orb, styles.glass)}
+          data-qz-glass="capsule"
           role="group"
           tabIndex={0}
         >
@@ -227,8 +235,9 @@ export default function MiniPlayer() {
           data-capsule-body
           aria-description={t('capsuleDragHint')}
           aria-label={t('capsuleDrag')}
-          className={styles.capsule}
+          className={cx(styles.capsule, styles.glass)}
           data-empty={!s.queue.length}
+          data-qz-glass="capsule"
           role="group"
           tabIndex={0}
         >
@@ -239,7 +248,10 @@ export default function MiniPlayer() {
           </Link>
           <Link className={styles.track} to="/music">
             <strong title={track?.name}>{track?.name ?? t('title')}</strong>
-            <span>{track ? t(s.status) : t('capsuleEmptyHint')}</span>
+            <span className={styles.trackMeta}>
+              <span>{track ? t(s.status) : t('capsuleEmptyHint')}</span>
+              {track && <time aria-hidden>{formatTime(s.positionMs)}</time>}
+            </span>
           </Link>
           {!!s.queue.length && (
             <div className={styles.transport}>

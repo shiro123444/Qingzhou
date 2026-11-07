@@ -79,11 +79,11 @@ const SideBarDrawer = memo<SideBarDrawerProps>(
           }}
           styles={{
             body: {
-              background: cssVar.colorBgLayout,
+              background: 'transparent',
               padding: 0,
             },
             header: {
-              background: cssVar.colorBgLayout,
+              background: 'transparent',
               borderBottom: 'none',
               padding: 0,
             },
@@ -92,6 +92,10 @@ const SideBarDrawer = memo<SideBarDrawerProps>(
               borderRight: `1px solid ${cssVar.colorBorderSecondary}`,
               boxShadow: `4px 0 8px -2px rgba(0,0,0,.04)`,
               zIndex: 0,
+            },
+            section: {
+              background: `var(--qz-glass-strong, ${cssVar.colorBgElevated})`,
+              backdropFilter: 'var(--qz-glass-filter, none)',
             },
           }}
           title={

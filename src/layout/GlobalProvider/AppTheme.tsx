@@ -16,6 +16,7 @@ import AntdStaticMethods from '@/components/AntdStaticMethods';
 import Link from '@/components/Link';
 import { LOBE_THEME_NEUTRAL_COLOR, LOBE_THEME_PRIMARY_COLOR } from '@/const/theme';
 import { isDesktop } from '@/const/version';
+import { LiquidGlass } from '@/features/LiquidGlass';
 import { useIsDark } from '@/hooks/useIsDark';
 import { getUILocaleAndResources } from '@/libs/getUILocaleAndResources';
 import Image from '@/libs/next/Image';
@@ -24,6 +25,7 @@ import { systemStatusSelectors } from '@/store/global/selectors';
 import { useUserStore } from '@/store/user';
 import { userGeneralSettingsSelectors } from '@/store/user/selectors';
 import { GlobalStyle } from '@/styles';
+import { liquidGlass, liquidGlassBackdrop, liquidGlassOverlays } from '@/styles/liquidGlass';
 import { setCookie } from '@/utils/client/cookie';
 
 const styles = createStaticStyles(({ css, cssVar }) => ({
@@ -153,9 +155,16 @@ const AppTheme = memo<AppThemeProps>(
       <AppConfigContext value={appConfig}>
         <ThemeProvider
           appearance={currentAppearence}
-          className={cx(styles.app, styles.scrollbar, styles.scrollbarPolyfill)}
           defaultAppearance={currentAppearence}
           defaultThemeMode={currentAppearence}
+          className={cx(
+            styles.app,
+            styles.scrollbar,
+            styles.scrollbarPolyfill,
+            liquidGlass,
+            liquidGlassBackdrop,
+            liquidGlassOverlays,
+          )}
           customTheme={{
             neutralColor: neutralColor ?? defaultNeutralColor,
             primaryColor: primaryColor ?? defaultPrimaryColor,
@@ -178,6 +187,7 @@ const AppTheme = memo<AppThemeProps>(
         >
           {!!customFontURL && <FontLoader url={customFontURL} />}
           <GlobalStyle />
+          <LiquidGlass />
           <AntdStaticMethods />
           <ConfigProvider
             locale={uiLocale}

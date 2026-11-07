@@ -1,7 +1,5 @@
 import { createStaticStyles } from 'antd-style';
 
-import { isDesktop } from '@/const/version';
-
 export const styles = createStaticStyles(({ css, cssVar }) => ({
   // Inner container
   innerContainer: css`
@@ -9,14 +7,14 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     overflow: hidden;
 
-    border: 1px solid var(--container-border-color, ${cssVar.colorBorder});
+    border: 1px solid var(--qz-glass-border, var(--container-border-color, ${cssVar.colorBorder}));
     border-radius: var(--container-border-radius, ${cssVar.borderRadius});
     border-end-end-radius: var(
       --container-border-bottom-right-radius,
       var(--container-border-radius, ${cssVar.borderRadius})
     );
 
-    background: ${cssVar.colorBgContainer};
+    background: transparent;
   `,
 
   // Outer container
@@ -28,6 +26,6 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     padding-block-start: var(--container-padding-top, 8px);
     padding-inline-start: var(--container-padding-left, 8px);
 
-    background: ${isDesktop ? 'transparent' : cssVar.colorBgLayout};
+    background: transparent;
   `,
 }));

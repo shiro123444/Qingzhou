@@ -26,7 +26,7 @@ export default function MusicPluginSettings() {
   return (
     <div className={styles.settings}>
       <h2 className={styles.heading}>{t('plugins')}</h2>
-      <article aria-label={t('lyricsPlugin')} className={styles.plugin}>
+      <article aria-label={t('lyricsPlugin')} className={styles.plugin} data-qz-glass="panel">
         <div className={styles.pluginOverview}>
           <span aria-hidden className={styles.pluginIcon}>
             <Icon icon={TextQuote} size={{ size: 22, strokeWidth: 1.75 }} />

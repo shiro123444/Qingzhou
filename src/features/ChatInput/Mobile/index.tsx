@@ -8,8 +8,10 @@ import { memo } from 'react';
 import { useChatInputStore } from '@/features/ChatInput/store';
 import { QingzhouComposerOrnaments, qingzhouStyles } from '@/features/QingzhouBrand';
 import dynamic from '@/libs/next/dynamic';
+import { liquidGlass } from '@/styles/liquidGlass';
 
 import ActionBar from '../ActionBar';
+import { glassComposer } from '../glass.style';
 import InputEditor from '../InputEditor';
 import SendArea from '../SendArea';
 
@@ -34,7 +36,8 @@ const styles = createStaticStyles(({ css }) => ({
     height: 100%;
     padding: 12px;
 
-    background: ${cssVar.colorBgLayout};
+    background: var(--qz-glass-strong, ${cssVar.colorBgLayout});
+    backdrop-filter: var(--qz-glass-filter, none);
   `,
 }));
 
@@ -48,13 +51,15 @@ const DesktopChatInput = memo(() => {
     <>
       {!expand && fileNode}
       <Flexbox
-        className={cx(styles.container, expand && styles.fullscreen)}
+        className={cx(styles.container, liquidGlass, expand && styles.fullscreen)}
         paddingBlock={'0 12px'}
         paddingInline={12}
       >
         <div className={cx(qingzhouStyles.composer, expand && styles.expandedFrame)}>
           {!expand && <QingzhouComposerOrnaments />}
           <ChatInput
+            className={cx(!expand && glassComposer)}
+            data-qz-glass="composer"
             fullscreen={expand}
             header={<ChatInputActionBar left={<ActionBar />} />}
             slashMenuRef={slashMenuRef}
