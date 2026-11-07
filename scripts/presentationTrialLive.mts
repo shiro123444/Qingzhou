@@ -28,6 +28,7 @@ import {
   type TrialSettings,
 } from '../src/server/runtime/presentation/trial-configuration';
 import { createRealTrialAdapters } from '../src/server/runtime/presentation/trial-real-adapters';
+import { FileTrialEvidenceStore } from '../src/server/runtime/presentation/trial-review';
 import type { TrialStageContext } from '../src/server/runtime/presentation/trial-runner';
 import {
   createTrialExecutionPlugin,
@@ -161,7 +162,11 @@ const runtime = new AtomicRuntime([
   },
   createTrialExecutionPlugin(backend),
 ]);
+const reviewEvidence = new FileTrialEvidenceStore(
+  process.env.TRIAL_REVIEW_DIR ?? path.join(root, 'trial-evidence'),
+);
 const runner = new RepresentativeTrialRunner({
+  publishEvidence: (scope, report) => reviewEvidence.publish(scope, report),
   runtime,
   repository: storage,
   artifacts: storage,

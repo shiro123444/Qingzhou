@@ -5,6 +5,9 @@ import { AgentSignalReviewContextModel } from '@/database/models/agentSignal/rev
 import { BriefModel } from '@/database/models/brief';
 import type { LobeChatDatabase } from '@/database/type';
 import { initModelRuntimeFromDB } from '@/server/modules/ModelRuntime';
+import { learningMutationAuthority } from '@/server/runtime/improvement/mutation-authority';
+import { executeBudgetedSignal } from '@/server/runtime/improvement/signal-budget';
+import { createSignalHarnessProposals } from '@/server/runtime/improvement/signal-proposal';
 import { AGENT_SIGNAL_DEFAULTS } from '@/server/services/agentSignal/constants';
 import { runMemoryActionAgent } from '@/server/services/agentSignal/policies/analyzeIntent/actions/userMemory';
 import {
@@ -17,7 +20,7 @@ import { SkillManagementDocumentService } from '@/server/services/skillManagemen
 
 import { persistAgentSignalReceipts } from '../../receiptService';
 import { createSelfReflectionService } from '../../selfReflection';
-import { executeSelfIteration } from '../execute';
+import type { executeSelfIteration } from '../execute';
 import { createSelfReviewProposalPreflightService } from '../review/proposalPreflight';
 import { createSelfReviewProposalSnapshotService } from '../review/proposalSnapshot';
 import type { CreateServerSelfIterationPolicyOptions } from '../server';
@@ -314,6 +317,15 @@ const createReflectionRuntimeTools = ({
   });
 
   return createToolSet({
+    harness: createSignalHarnessProposals({
+      scope: { userId, agentId },
+      sourceId,
+      evidence: async (evidenceIds) => {
+        const digest = createReflectionEvidenceDigest({ context, evidenceIds });
+        if (!digest.topics.length) throw new Error('HARNESS_INVALID_EVIDENCE');
+        return digest;
+      },
+    }),
     completeOperation: completeSelfReflectionOperation,
     completeReplaceSkillInput: async (input: ReplaceSkillContentCASInput) => {
       const baseSnapshot = await proposalSnapshot.captureActionSnapshot({
@@ -491,10 +503,12 @@ export class SelfReflectionServerRuntimeFactory implements SelfReflectionRuntime
       this.input.db,
       this.input.userId,
       DEFAULT_MINI_SYSTEM_AGENT_ITEM.provider,
+      process.env.QINGZHOU_HARNESS_LEARNING_ENABLED === '1' ? { singleDispatch: true } : undefined,
     );
 
     return {
-      executeSelfIteration,
+      executeSelfIteration: (input: Parameters<typeof executeSelfIteration>[0]) =>
+        executeBudgetedSignal(this.input.db, input),
       model: DEFAULT_MINI_SYSTEM_AGENT_ITEM.model,
       modelRuntime,
       tools: createReflectionRuntimeTools({
@@ -539,7 +553,12 @@ export const createServerSelfReflectionPolicyOptions = ({
 }: CreateServerSelfIterationPolicyOptions): CreateSelfReflectionSourceHandlerDependencies => {
   const reviewContextModel = new AgentSignalReviewContextModel(db, userId);
   const briefModel = new BriefModel(db, userId);
-  const skillDocumentService = new SkillManagementDocumentService(db, userId);
+  const skillDocumentService = new SkillManagementDocumentService(
+    db,
+    userId,
+    undefined,
+    learningMutationAuthority(userId),
+  );
   const targetAgentId = agentId ?? '';
 
   return {

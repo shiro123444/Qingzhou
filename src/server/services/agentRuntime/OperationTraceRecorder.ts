@@ -146,6 +146,7 @@ export class OperationTraceRecorder {
           typeof metadata?.externalRetryCount === 'number'
             ? metadata.externalRetryCount
             : undefined,
+        harnessBinding: metadata.harness?.binding ?? partial.harnessBinding,
         model: partial.model,
         operationId,
         provider: partial.provider,
@@ -208,6 +209,7 @@ export class OperationTraceRecorder {
   private initPartialHeader(partial: any, agentState: any): void {
     if (partial.startedAt) return;
     partial.startedAt = Date.now();
+    partial.harnessBinding = agentState?.metadata?.harness?.binding;
     partial.model =
       (agentState?.metadata as any)?.agentConfig?.model ?? agentState?.modelRuntimeConfig?.model;
     partial.provider =

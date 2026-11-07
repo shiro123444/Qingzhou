@@ -53,6 +53,7 @@ export const documents = pgTable(
     id: varchar('id', { length: 255 })
       .$defaultFn(() => idGenerator('documents', 16))
       .primaryKey(),
+    generation: integer('generation').notNull().default(0),
 
     // Basic information
     title: text('title'),

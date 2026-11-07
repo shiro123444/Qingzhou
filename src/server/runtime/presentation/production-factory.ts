@@ -88,6 +88,9 @@ import type { FilePresentationTemplateLibrary } from './templates';
 import type { PresentationAudioTranscriber } from './templates/audio-transcription';
 import { prepareFrameAperture } from './templates/frame-aperture';
 import { TemplateVisualLearning } from './templates/visual-learning';
+import type { FileTrialLearningStore } from './trial-learning';
+import type { PresentationTrialReview } from './trial-review';
+import type { PresentationTrialWorkspace } from './trial-workspace';
 import { createPresentationVisualCritic } from './visual-critic';
 import { createPresentationVisualStoryboardPlanner } from './visual-storyboard';
 import { InMemoryPresentationPlanWorker, type PresentationWorkerWorkspace } from './worker';
@@ -432,6 +435,9 @@ export interface ProductionPresentationGenerationCompositionOptions {
   readonly runnerFactory?: (provider: ProductionPresentationProvider) => PresentationRunner;
   readonly teachingMemory?: FileTeachingMemory;
   readonly templateLibrary?: FilePresentationTemplateLibrary;
+  readonly trialLearning?: FileTrialLearningStore;
+  readonly trialReview?: PresentationTrialReview;
+  readonly trialWorkspace?: PresentationTrialWorkspace;
   /** Optional dedicated pixel observer; the content planner retains the user's primary model. */
   readonly visionChatPort?: MultimodalChatPort;
   readonly worker?: Pick<InMemoryPresentationPlanWorker, 'run'>;
@@ -652,6 +658,9 @@ export const createProductionPresentationGenerationComposition = (
         teachingMemory: options.teachingMemory,
         teachingLearning,
         operations: [
+          ...(options.trialReview?.operations() ?? []),
+          ...(options.trialWorkspace?.operations() ?? []),
+          ...(options.trialLearning?.operations() ?? []),
           ...(templateVisualLearning?.operations() ?? []),
           ...(options.capabilityMemory
             ? capabilityMemoryOperations(options.capabilityMemory, options.jobRepository)

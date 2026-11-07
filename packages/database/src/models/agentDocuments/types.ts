@@ -24,6 +24,14 @@ export type { AgentDocumentPolicy, DocumentLoadRules } from '@lobechat/agent-tem
 
 export type AgentDocumentSourceType = 'file' | 'web' | 'api' | 'topic' | 'agent' | 'agent-signal';
 
+export interface AgentDocumentVersion {
+  agentId: string;
+  documentGeneration: number;
+  documentId: string;
+  generation: number;
+  id: string;
+}
+
 export interface AgentDocument {
   accessPublic: number;
   accessSelf: number;
@@ -36,10 +44,12 @@ export interface AgentDocument {
   deletedByUserId: string | null;
   deleteReason: string | null;
   description: string | null;
+  documentGeneration?: number;
   documentId: string;
   editorData: Record<string, any> | null;
   filename: string;
   fileType: string;
+  generation?: number;
   id: string;
   metadata: Record<string, any> | null;
   parentId: string | null;

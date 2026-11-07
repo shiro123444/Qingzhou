@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { userMutationAuthority } from '@/server/runtime/improvement/mutation-authority';
 import type { LobeChatDatabase } from '@lobechat/database';
 import { getTestDB } from '@lobechat/database/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -37,7 +38,12 @@ describe('runSkillManagementAction integration', () => {
   });
 
   const createManagedSkill = async (skillName: string, bodyMarkdown: string) => {
-    return new SkillManagementDocumentService(serverDB, userId).createSkill({
+    return new SkillManagementDocumentService(
+      serverDB,
+      userId,
+      undefined,
+      userMutationAuthority(userId),
+    ).createSkill({
       agentId,
       bodyMarkdown,
       description: `${skillName} description`,

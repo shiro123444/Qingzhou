@@ -54,12 +54,15 @@ export const representativeTrialSchema = z
     conditionFingerprint: digest,
     baseline: variantSchema.extend({ id: z.literal('baseline') }),
     candidates: z.array(variantSchema).max(2),
+    incumbentId: identifier.optional(),
     userChoice: identifier.optional(),
     rejectedCandidateIds: z.array(identifier).max(2).default([]),
   })
   .strict()
   .superRefine((trial, ctx) => {
     const ids = trial.candidates.map(({ id }) => id);
+    if (trial.incumbentId && !ids.includes(trial.incumbentId))
+      ctx.addIssue({ code: 'custom', message: 'Incumbent must name an existing candidate' });
     if (ids.includes('baseline') || new Set(ids).size !== ids.length)
       ctx.addIssue({
         code: 'custom',
@@ -92,7 +95,7 @@ const exclusionSchema = z.enum([
 type TrialExclusion = z.infer<typeof exclusionSchema>;
 export const representativeTrialSelectionSchema = z
   .object({
-    policyVersion: z.literal(1),
+    policyVersion: z.union([z.literal(1), z.literal(2)]),
     candidates: z
       .array(
         z
@@ -112,6 +115,8 @@ export const representativeTrialSelectionSchema = z
       'no-improvement',
       'ambiguous-improvement',
       'strict-improvement',
+      'incumbent-retained',
+      'incumbent-improved',
     ]),
     selectedId: identifier,
   })
@@ -153,7 +158,12 @@ export function selectRepresentativeTrial(
   const result = (
     reason: RepresentativeTrialSelection['reason'],
     selectedId = 'baseline',
-  ): RepresentativeTrialSelection => ({ policyVersion: 1, candidates, reason, selectedId });
+  ): RepresentativeTrialSelection => ({
+    policyVersion: trial.incumbentId ? 2 : 1,
+    candidates,
+    reason,
+    selectedId,
+  });
 
   if (trial.userChoice === 'baseline') return result('user-kept-baseline');
   if (baselineExclusion) return result('baseline-unverified');
@@ -167,6 +177,18 @@ export function selectRepresentativeTrial(
         id === candidate.id && !exclusion && improvesBaseline,
     ),
   );
+  if (trial.incumbentId) {
+    const incumbent = improvements.find((candidate) => candidate.id === trial.incumbentId);
+    if (incumbent) {
+      const replacement = improvements.find(
+        (candidate) =>
+          candidate.id !== incumbent.id && dominates(candidate.evaluation!, incumbent.evaluation!),
+      );
+      return replacement
+        ? result('incumbent-improved', replacement.id)
+        : result('incumbent-retained', incumbent.id);
+    }
+  }
   if (!improvements.length) return result('no-improvement');
   const winner = improvements.find((candidate) =>
     improvements.every(

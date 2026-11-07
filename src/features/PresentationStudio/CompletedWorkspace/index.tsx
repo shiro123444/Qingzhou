@@ -6,6 +6,7 @@ import { useTranslation } from 'react-i18next';
 
 import { ConversationPanel } from '../ConversationPanel';
 import SlideNavigator from '../SlideNavigator';
+import TrialComparison from '../TrialComparison';
 import ArchitectureDrawer from './ArchitectureDrawer';
 import CapsuleHeader from './CapsuleHeader';
 import PanoramaGrid from './PanoramaGrid';
@@ -30,6 +31,7 @@ export const CompletedWorkspace = memo<CompletedWorkspaceProps>(
     onSendMessage,
     onExport,
     onJobChanged,
+    onTrialVersionCreated,
     onNewPresentation,
     onRetryJob,
     onSelectArtifact,
@@ -169,6 +171,19 @@ export const CompletedWorkspace = memo<CompletedWorkspaceProps>(
                   );
             if (artifact) onExport(artifact.artifactId, format);
           }}
+        />
+
+        <TrialComparison
+          disabled={selectedJob.state !== 'completed'}
+          jobId={selectedJob.jobId}
+          key={`${selectedJob.jobId}:${selectedJob.versionId}:${selectedSlide?.metadata?.slideId}`}
+          versionId={selectedJob.versionId}
+          slideId={
+            typeof selectedSlide?.metadata?.slideId === 'string'
+              ? selectedSlide.metadata.slideId
+              : undefined
+          }
+          onCreated={onTrialVersionCreated}
         />
 
         {/* Main Body Layout: Collapsible Filmstrip + Stage + Architecture Drawer */}

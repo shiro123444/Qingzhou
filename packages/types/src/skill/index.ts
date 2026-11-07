@@ -1,5 +1,23 @@
 import { z } from 'zod';
 
+/** Immutable managed text material. Other skill sources keep their own resource identities. */
+export interface SkillRevisionRef {
+  bindingId: string;
+  bundleBindingId: string;
+  bundleDocumentGeneration: number;
+  bundleGeneration: number;
+  bundleResourceId: string;
+  contentDigest: string;
+  documentGeneration: number;
+  generation: number;
+  loading: 'progressive';
+  name: string;
+  resourceId: string;
+  revisionId: string;
+  scope: { agentId: string; userId: string };
+  sourceKind: 'managed-document';
+}
+
 // ===== Manifest Schema =====
 
 export const skillAuthorSchema = z.object({

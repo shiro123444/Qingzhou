@@ -1,7 +1,15 @@
 import type { LobeChatDatabase } from '@lobechat/database';
 import { sha256 } from 'js-sha256';
 
-import { AgentDocumentModel, PolicyLoad } from '@/database/models/agentDocuments';
+import {
+  AgentDocumentModel,
+  type AgentDocumentVersion,
+  PolicyLoad,
+} from '@/database/models/agentDocuments';
+import {
+  assertMutationAuthority,
+  type MutationAuthority,
+} from '@/server/runtime/improvement/mutation-authority';
 
 import type { AgentDocumentEditorSnapshot } from '../agentDocuments/headlessEditor';
 import { createMarkdownEditorSnapshot as createDefaultMarkdownEditorSnapshot } from '../agentDocuments/headlessEditor';
@@ -46,6 +54,8 @@ type SkillManagementAgentDocumentModel = Pick<
   | 'listByParentAndFilename'
   | 'update'
   | 'updateDocumentIdentity'
+  | 'assertVersions'
+  | 'lockAgent'
 >;
 
 /**
@@ -53,11 +63,11 @@ type SkillManagementAgentDocumentModel = Pick<
  */
 interface SkillManagementDocumentServiceDeps {
   /** Agent document persistence adapter. */
-  agentDocumentModel: SkillManagementAgentDocumentModel;
+  agentDocumentModel?: SkillManagementAgentDocumentModel;
   /** Markdown-to-editor snapshot projector. */
   createMarkdownEditorSnapshot?: (content: string) => Promise<AgentDocumentEditorSnapshot>;
   /** Document history service dependency. */
-  documentService: Pick<DocumentService, 'trySaveCurrentDocumentHistory'>;
+  documentService?: Pick<DocumentService, 'trySaveCurrentDocumentHistory'>;
 }
 
 const createEmptyEditorData = (): Record<string, unknown> => ({
@@ -94,17 +104,16 @@ const buildSkillMetadata = (
 export class SkillManagementDocumentService {
   private agentDocumentModel: SkillManagementAgentDocumentModel;
   private createMarkdownEditorSnapshot: (content: string) => Promise<AgentDocumentEditorSnapshot>;
-  private documentService: Pick<DocumentService, 'trySaveCurrentDocumentHistory'>;
 
   constructor(
     private db: LobeChatDatabase,
-    userId: string,
-    deps?: SkillManagementDocumentServiceDeps,
+    private readonly userId: string,
+    private readonly deps?: SkillManagementDocumentServiceDeps,
+    private readonly authority?: MutationAuthority,
   ) {
     this.agentDocumentModel = deps?.agentDocumentModel ?? new AgentDocumentModel(db, userId);
     this.createMarkdownEditorSnapshot =
       deps?.createMarkdownEditorSnapshot ?? createDefaultMarkdownEditorSnapshot;
-    this.documentService = deps?.documentService ?? new DocumentService(db, userId);
   }
 
   /**
@@ -122,6 +131,14 @@ export class SkillManagementDocumentService {
    * - The created skill detail with normalized frontmatter content.
    */
   async createSkill(input: CreateSkillInput): Promise<SkillDetail> {
+    assertMutationAuthority(this.authority, this.userId);
+    if (
+      this.authority.kind === 'automated-learning' &&
+      process.env.QINGZHOU_HARNESS_LEARNING_ENABLED === '1'
+    )
+      await (
+        await import('@/server/runtime/improvement/learning-write')
+      ).stageLearnedSkillWrite(this.userId, input.agentId, 'create', input);
     const name = validateSkillName(input.name);
     const normalizedContent = renderSkillIndexContent({
       bodyMarkdown: input.bodyMarkdown,
@@ -165,7 +182,18 @@ export class SkillManagementDocumentService {
     }
 
     const { bundle, index } = await this.db.transaction(async (trx) => {
-      const bundle = await this.agentDocumentModel.createWithTx(trx, input.agentId, name, '', {
+      const model =
+        this.deps?.agentDocumentModel ??
+        new AgentDocumentModel(trx as unknown as LobeChatDatabase, this.userId);
+      await model.lockAgent(input.agentId);
+      if (
+        (await model.listByParentAndFilename(input.agentId, null, name)).some(
+          (doc) => doc.fileType === SKILL_BUNDLE_FILE_TYPE,
+        )
+      )
+        throw new Error('Skill already exists');
+      if (sourceDocument) await model.assertVersions(this.versions(sourceDocument));
+      const bundle = await model.createWithTx(trx, input.agentId, name, '', {
         editorData: createEmptyEditorData(),
         fileType: SKILL_BUNDLE_FILE_TYPE,
         metadata,
@@ -177,7 +205,7 @@ export class SkillManagementDocumentService {
       });
 
       if (input.sourceAgentDocumentId) {
-        const index = await this.agentDocumentModel.convertAgentDocumentToSkillIndexWithTx(trx, {
+        const index = await model.convertAgentDocumentToSkillIndexWithTx(trx, {
           agentDocumentId: input.sourceAgentDocumentId,
           content: normalizedContent,
           editorData: indexEditorSnapshot.editorData,
@@ -196,7 +224,7 @@ export class SkillManagementDocumentService {
         return { bundle, index };
       }
 
-      const index = await this.agentDocumentModel.createWithTx(
+      const index = await model.createWithTx(
         trx,
         input.agentId,
         SKILL_INDEX_FILENAME,
@@ -337,10 +365,22 @@ export class SkillManagementDocumentService {
    * - Updated skill detail with index content included.
    */
   async replaceSkillIndex(input: ReplaceSkillIndexInput): Promise<SkillDetail | undefined> {
+    assertMutationAuthority(this.authority, this.userId);
+    if (
+      this.authority.kind === 'automated-learning' &&
+      process.env.QINGZHOU_HARNESS_LEARNING_ENABLED === '1'
+    )
+      await (
+        await import('@/server/runtime/improvement/learning-write')
+      ).stageLearnedSkillWrite(this.userId, input.agentId, 'replace', {
+        input,
+        source: await this.getSkill({ ...input, includeContent: true }),
+      });
     const resolved = await this.resolveBundle(input.agentId, input);
     if (!resolved) return undefined;
 
     const index = await this.getSingleIndex(input.agentId, resolved);
+    const versions = this.versions(resolved, index);
     const description = input.description ?? parseSkillFrontmatter(index.content).description;
     const normalizedContent = renderSkillIndexContent({
       bodyMarkdown: input.bodyMarkdown,
@@ -357,22 +397,20 @@ export class SkillManagementDocumentService {
     // Removal condition: only if document history can snapshot Markdown content directly.
     const editorSnapshot = await this.createMarkdownEditorSnapshot(normalizedContent);
 
-    await this.documentService.trySaveCurrentDocumentHistory(index.documentId, 'llm_call');
-    const updatedBundle =
-      (await this.agentDocumentModel.updateDocumentIdentity(resolved.id, {
+    return this.commitEdit(versions, async (model, history) => {
+      await history.trySaveCurrentDocumentHistory(index.documentId, 'llm_call');
+      const updatedBundle =
+        (await model.updateDocumentIdentity(resolved.id, { metadata })) ?? resolved;
+      await model.update(index.id, {
+        content: normalizedContent,
+        editorData: editorSnapshot.editorData,
         metadata,
-      })) ?? resolved;
-    await this.agentDocumentModel.update(index.id, {
-      content: normalizedContent,
-      editorData: editorSnapshot.editorData,
-      metadata,
-      policyLoad: PolicyLoad.DISABLED,
+        policyLoad: PolicyLoad.DISABLED,
+      });
+      const updated = await model.findById(index.id);
+      if (!updated) throw new Error(`Skill index disappeared during replace: ${index.id}`);
+      return this.toSkillDetail(updatedBundle, updated, { includeContent: true });
     });
-
-    const updated = await this.agentDocumentModel.findById(index.id);
-    if (!updated) throw new Error(`Skill index disappeared during replace: ${index.id}`);
-
-    return this.toSkillDetail(updatedBundle, updated, { includeContent: true });
   }
 
   /**
@@ -390,10 +428,22 @@ export class SkillManagementDocumentService {
    * - Updated skill detail with content included.
    */
   async renameSkill(input: RenameSkillInput): Promise<SkillDetail | undefined> {
+    assertMutationAuthority(this.authority, this.userId);
+    if (
+      this.authority.kind === 'automated-learning' &&
+      process.env.QINGZHOU_HARNESS_LEARNING_ENABLED === '1'
+    )
+      await (
+        await import('@/server/runtime/improvement/learning-write')
+      ).stageLearnedSkillWrite(this.userId, input.agentId, 'rename', {
+        input,
+        source: await this.getSkill({ ...input, includeContent: true }),
+      });
     const resolved = await this.resolveBundle(input.agentId, input);
     if (!resolved) return undefined;
 
     const index = await this.getSingleIndex(input.agentId, resolved);
+    const versions = this.versions(resolved, index);
     const name = input.newName ? validateSkillName(input.newName) : resolved.filename;
     const title = input.newTitle?.trim() || resolved.title;
     const normalizedContent = normalizeSkillIndexContent({
@@ -404,33 +454,66 @@ export class SkillManagementDocumentService {
     const metadata = buildSkillMetadata(frontmatter);
     const editorSnapshot = await this.createMarkdownEditorSnapshot(normalizedContent);
 
-    if (normalizedContent !== index.content) {
-      await this.documentService.trySaveCurrentDocumentHistory(index.documentId, 'llm_call');
-    }
+    return this.commitEdit(versions, async (model, history) => {
+      if (
+        (await model.listByParentAndFilename(input.agentId, null, name)).some(
+          (doc) => doc.fileType === SKILL_BUNDLE_FILE_TYPE && doc.id !== resolved.id,
+        )
+      )
+        throw new Error('Skill already exists');
+      if (normalizedContent !== index.content)
+        await history.trySaveCurrentDocumentHistory(index.documentId, 'llm_call');
+      const updatedBundle =
+        (await model.updateDocumentIdentity(resolved.id, {
+          filename: name,
+          metadata,
+          title,
+        })) ?? resolved;
 
-    const updatedBundle =
-      (await this.agentDocumentModel.updateDocumentIdentity(resolved.id, {
-        filename: name,
+      await model.updateDocumentIdentity(index.id, {
+        filename: SKILL_INDEX_FILENAME,
         metadata,
-        title,
-      })) ?? resolved;
+        title: SKILL_INDEX_FILENAME,
+      });
+      await model.update(index.id, {
+        content: normalizedContent,
+        editorData: editorSnapshot.editorData,
+        metadata,
+        policyLoad: PolicyLoad.DISABLED,
+      });
 
-    await this.agentDocumentModel.updateDocumentIdentity(index.id, {
-      filename: SKILL_INDEX_FILENAME,
-      metadata,
-      title: SKILL_INDEX_FILENAME,
+      const updatedIndex = await model.findById(index.id);
+      if (!updatedIndex) throw new Error(`Skill index disappeared during rename: ${index.id}`);
+
+      return this.toSkillDetail(updatedBundle, updatedIndex, { includeContent: true });
     });
-    await this.agentDocumentModel.update(index.id, {
-      content: normalizedContent,
-      editorData: editorSnapshot.editorData,
-      metadata,
-      policyLoad: PolicyLoad.DISABLED,
+  }
+
+  private versions(...docs: SkillAgentDocument[]): AgentDocumentVersion[] {
+    return docs.map((doc) => ({
+      id: doc.id,
+      agentId: doc.agentId,
+      documentId: doc.documentId,
+      generation: doc.generation ?? 0,
+      documentGeneration: doc.documentGeneration ?? 0,
+    }));
+  }
+
+  private commitEdit<T>(
+    versions: AgentDocumentVersion[],
+    run: (
+      model: SkillManagementAgentDocumentModel,
+      history: Pick<DocumentService, 'trySaveCurrentDocumentHistory'>,
+    ) => Promise<T>,
+  ): Promise<T> {
+    return this.db.transaction(async (tx) => {
+      assertMutationAuthority(this.authority, this.userId);
+      const db = tx as unknown as LobeChatDatabase;
+      const model = this.deps?.agentDocumentModel ?? new AgentDocumentModel(db, this.userId);
+      await model.lockAgent(versions[0].agentId);
+      await model.assertVersions(versions);
+      return run(model, this.deps?.documentService ?? new DocumentService(db, this.userId));
     });
-
-    const updatedIndex = await this.agentDocumentModel.findById(index.id);
-    if (!updatedIndex) throw new Error(`Skill index disappeared during rename: ${index.id}`);
-
-    return this.toSkillDetail(updatedBundle, updatedIndex, { includeContent: true });
   }
 
   private async resolveBundle(

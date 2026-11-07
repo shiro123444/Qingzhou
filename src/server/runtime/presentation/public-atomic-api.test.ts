@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,6 +19,10 @@ import type { MultimodalChatPort } from './multimodal-chat-provider';
 import { PresentationGenerationPipelineImpl } from './pipeline';
 import { FileTeachingMemory, TeachingLearning } from './teaching-memory';
 import { FilePresentationTemplateLibrary } from './templates/library';
+import { FileTrialLearningStore } from './trial-learning';
+import { FileTrialEvidenceStore, PresentationTrialReview } from './trial-review';
+import { PresentationTrialValidation } from './trial-validation';
+import { PresentationTrialWorkspace } from './trial-workspace';
 import { InMemoryPresentationPlanWorker } from './worker';
 
 const owner: RuntimeScope = { sessionId: 'owner-session', userId: 'owner' };
@@ -48,8 +53,50 @@ const createHarness = async () => {
     new FilePresentationTemplateLibrary({ root: join(root, 'templates') }),
     {} as MultimodalChatPort,
   );
+  const evidence = new FileTrialEvidenceStore(join(root, 'evidence'));
+  const learning = new FileTrialLearningStore({ root: join(root, 'learning'), evidence, storage });
+  const workspace = new PresentationTrialWorkspace({
+    companion: new PresentationTrialValidation({
+      root: join(root, 'validation'),
+      workerRoot: join(root, 'trial-tasks'),
+      storage,
+      evidence,
+      learning,
+      createSession: async () => {
+        throw new Error('No paid validation in HTTP seam tests');
+      },
+    }),
+    learning,
+    root: join(root, 'trial-tasks'),
+    storage,
+    evidence: new FileTrialEvidenceStore(join(root, 'evidence')),
+    createRunner: async () => ({
+      runner: {
+        drain: async () => {},
+        run: async () => ({
+          schemaVersion: 1,
+          runId: randomUUID(),
+          status: 'budget-exceeded',
+          originalRetained: true,
+          selectedId: 'baseline',
+          calls: [],
+          charged: { tokens: 0, costMicros: 0 },
+          variants: [],
+        }),
+      },
+      dispose: async () => {},
+    }),
+  });
   const runtime = createPresentationAtomicRuntime({
     teachingLearning: teaching,
+    operations: [
+      ...new PresentationTrialReview(
+        new FileTrialEvidenceStore(join(root, 'evidence')),
+        storage,
+      ).operations(),
+      ...workspace.operations(),
+      ...learning.operations(),
+    ],
     artifactStore: storage,
     planner,
     worker: new InMemoryPresentationPlanWorker(),
@@ -96,6 +143,7 @@ const createHarness = async () => {
   };
   cleanups.push(async () => {
     await Promise.all([...ports.values()].map((port) => port.dispose()));
+    await workspace.drain();
     await runtime.dispose();
     await rm(root, { recursive: true, force: true });
   });
@@ -137,10 +185,143 @@ const createHarness = async () => {
   });
   const initial = await terminal();
   expect(initial).toMatchObject({ state: 'completed', versionId: expect.any(String) });
-  return { call, initial, planner, port: portFor(owner), runtime, terminal };
+  return { call, initial, learning, planner, port: portFor(owner), runtime, terminal, workspace };
 };
 
 describe('public presentation atomic tools', () => {
+  it('routes held-out operations through the public allowlist with strict inputs and no promotion operation', async () => {
+    const h = await createHarness();
+    const validationId = `validation-${'a'.repeat(64)}`;
+    expect(await h.call('presentation.validation.status', { validationId })).toMatchObject({
+      status: 404,
+      body: { error: { code: 'PRESENTATION_NOT_FOUND' } },
+    });
+    expect(
+      (
+        await h.call('presentation.validation.start', {
+          validationId,
+          confirmed: true,
+          maxTokens: 999999,
+        })
+      ).status,
+    ).toBe(400);
+    expect((await h.call('presentation.validation.promote', { validationId })).status).toBe(404);
+    const catalog = await h.runtime.catalog();
+    expect(
+      catalog
+        .filter((entry) => entry.name.startsWith('presentation.validation.'))
+        .every((entry) => entry.agent === undefined),
+    ).toBe(true);
+  });
+  it('runs explicit start/status/cancel through native Cordis with authenticated ownership and strict policy', async () => {
+    const h = await createHarness();
+    const input = {
+      jobId: 'owned-job',
+      expectedVersionId: h.initial.versionId,
+      slideId: 'detail',
+      requestId: randomUUID(),
+      confirmed: true,
+    };
+    expect((await h.call('presentation.trial.start', { ...input, maxTokens: 999999 })).status).toBe(
+      400,
+    );
+    expect((await h.call('presentation.trial.start', { ...input, confirmed: false })).status).toBe(
+      400,
+    );
+    const started = await h.call('presentation.trial.start', input);
+    expect(started.status).toBe(200);
+    const body = started.body as { execution: { executionId: string } };
+    await h.workspace.drain();
+    expect(
+      (await h.call('presentation.trial.status', { jobId: 'owned-job', slideId: 'detail' })).body,
+    ).toMatchObject({ execution: { state: 'budget-exceeded' } });
+    expect(
+      (await h.call('presentation.trial.cancel', { executionId: body.execution.executionId }))
+        .status,
+    ).toBe(200);
+    expect(
+      (
+        await h.call(
+          'presentation.trial.cancel',
+          { executionId: body.execution.executionId },
+          { userId: 'other', sessionId: 'owner-session' },
+        )
+      ).status,
+    ).toBe(404);
+    expect(h.workspace.operations().every((op) => op.agent === undefined)).toBe(true);
+  });
+
+  it('reads pending experience through owned native operations and rejects promotion fields', async () => {
+    const h = await createHarness();
+    await h.call('presentation.trial.start', {
+      jobId: 'owned-job',
+      expectedVersionId: h.initial.versionId,
+      slideId: 'detail',
+      requestId: randomUUID(),
+      confirmed: true,
+    });
+    await h.workspace.drain();
+    const list = await h.call('presentation.learning.list', {
+      jobId: 'owned-job',
+      slideId: 'detail',
+    });
+    expect(list.status).toBe(200);
+    const { episodes } = list.body as { episodes: { episodeId: string }[] };
+    expect(episodes).toHaveLength(1);
+    const protocol = await h.learning.readProtocol(owner, episodes[0].episodeId);
+    expect(protocol?.episode).toMatchObject({
+      schemaVersion: 2,
+      id: episodes[0].episodeId,
+      domain: 'presentation',
+      validation: 'pending',
+      applicability: 'source-page-only',
+    });
+    expect(protocol?.configurations.map((revision) => revision.id)).toEqual(
+      protocol?.episode.configurationRefs,
+    );
+    const read = await h.call('presentation.learning.read', { episodeId: episodes[0].episodeId });
+    expect(read).toMatchObject({
+      status: 200,
+      body: { status: 'pending-validation', kind: 'attempt' },
+    });
+    expect(
+      (
+        await h.call(
+          'presentation.learning.read',
+          { episodeId: episodes[0].episodeId },
+          { userId: 'other', sessionId: 'owner-session' },
+        )
+      ).status,
+    ).toBe(404);
+    expect(
+      (
+        await h.call('presentation.learning.read', {
+          episodeId: episodes[0].episodeId,
+          status: 'active',
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (await h.call('presentation.learning.promote', { episodeId: episodes[0].episodeId })).status,
+    ).toBe(404);
+  });
+  it('dispatches owned trial review operations through the authenticated public allowlist', async () => {
+    const { call } = await createHarness();
+    expect(
+      await call('presentation.trial.list', { jobId: 'owned-job', slideId: 'detail' }),
+    ).toMatchObject({ status: 200, body: { trials: [] } });
+    expect(
+      (
+        await call(
+          'presentation.trial.list',
+          { jobId: 'owned-job', slideId: 'detail' },
+          { userId: 'other', sessionId: 'owner-session' },
+        )
+      ).status,
+    ).toBe(404);
+    expect((await call('presentation.trial.read', { runId: 'missing' })).status).toBe(404);
+  });
+
   it('exposes teaching retrieval/composition but never an approval tool', async () => {
     const { call, runtime } = await createHarness();
     const catalog = JSON.stringify((await call(undefined)).body);

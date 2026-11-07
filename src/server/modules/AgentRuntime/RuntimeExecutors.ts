@@ -40,8 +40,10 @@ import { type LobeChatDatabase } from '@/database/type';
 import { serverMessagesEngine } from '@/server/modules/Mecha/ContextEngineering';
 import { type EvalContext } from '@/server/modules/Mecha/ContextEngineering/types';
 import { initModelRuntimeFromDB } from '@/server/modules/ModelRuntime';
+import type { SkillMaterialLease } from '@/server/runtime/improvement/skill-material';
 import { AgentDocumentsService } from '@/server/services/agentDocuments';
 import type { HookDispatcher } from '@/server/services/agentRuntime/hooks/HookDispatcher';
+import { assertManagedSkillAccess } from '@/server/services/agentRuntime/managedSkills';
 import {
   type DeviceAccessReason,
   isDeviceToolIdentifier,
@@ -283,6 +285,8 @@ export interface RuntimeExecutorContext {
   streamManager: IStreamEventManager;
   toolExecutionService: ToolExecutionService;
   topicId?: string;
+  transformSkills?: SkillMaterialLease['apply'];
+  transformSystemRole?: (text: string) => string;
   userId?: string;
   userTimezone?: string;
 }
@@ -354,13 +358,32 @@ export const createRuntimeExecutors = (
     // Resolve skills via SkillResolver (unified skill injection)
     const skillResolver = new SkillResolver();
     const stepSkillDelta = buildStepSkillDelta();
-    const resolvedSkills = state.metadata?.operationSkillSet
+    let resolvedSkills = state.metadata?.operationSkillSet
       ? skillResolver.resolve(
           state.metadata.operationSkillSet,
           stepSkillDelta,
           state.activatedStepSkills ?? [],
         )
       : undefined;
+    await Promise.all(
+      (resolvedSkills?.enabledSkills ?? [])
+        .filter((skill) => skill.activated && skill.revision)
+        .map((skill) =>
+          assertManagedSkillAccess(
+            ctx.serverDB,
+            { userId: ctx.userId, agentId: state.metadata?.agentId },
+            skill.revision!,
+          ),
+        ),
+    );
+    assertStepActive(ctx);
+    if (resolvedSkills && ctx.transformSkills) {
+      const transformed = await ctx.transformSkills(resolvedSkills.enabledSkills, ctx.signal);
+      resolvedSkills = { enabledSkills: transformed.skills };
+      state.metadata ??= {};
+      state.metadata.skillMaterialReceipt = transformed.receipt;
+      assertStepActive(ctx);
+    }
 
     if (!model || !provider) {
       throw new Error('Model and provider are required for call_llm instruction');
@@ -493,14 +516,17 @@ export const createRuntimeExecutors = (
         // Fetch agent documents for context injection
         let agentDocuments: AgentContextDocument[] | undefined;
         const agentId = state.metadata?.agentId;
-        if (agentId && ctx.serverDB && ctx.userId) {
+        if (state.metadata?.pinnedAgentDocuments || (agentId && ctx.serverDB && ctx.userId)) {
           try {
-            const agentDocService = new AgentDocumentsService(ctx.serverDB, ctx.userId);
             assertStepActive(ctx);
-            const docs = await agentDocService.getAgentDocuments(agentId);
+            const docs =
+              state.metadata?.pinnedAgentDocuments ??
+              (await new AgentDocumentsService(ctx.serverDB, ctx.userId!).getAgentDocuments(
+                agentId,
+              ));
             assertStepActive(ctx);
             if (docs.length > 0) {
-              agentDocuments = docs.map((doc) => ({
+              agentDocuments = docs.map((doc: any) => ({
                 content: doc.content,
                 description: doc.description ?? undefined,
                 filename: doc.filename,
@@ -514,7 +540,7 @@ export const createRuntimeExecutors = (
                 policyLoadFormat: doc.policy?.context?.policyLoadFormat || doc.policyLoadFormat,
                 title: doc.title,
               }));
-              log('Resolved %d agent documents for agent %s', agentDocuments.length, agentId);
+              log('Resolved %d agent documents for agent %s', docs.length, agentId);
             }
           } catch (error) {
             assertStepActive(ctx);
@@ -762,7 +788,9 @@ export const createRuntimeExecutors = (
           messages: llmPayload.messages as UIChatMessage[],
           model,
           provider,
-          systemRole: agentConfig.systemRole ?? undefined,
+          systemRole: ctx.transformSystemRole
+            ? ctx.transformSystemRole(agentConfig.systemRole ?? '')
+            : (agentConfig.systemRole ?? undefined),
           toolDiscoveryConfig,
           toolsConfig: {
             manifests: Object.values(resolved.manifestMap),
@@ -1891,6 +1919,7 @@ export const createRuntimeExecutors = (
               memoryToolPermission: agentConfig?.chatConfig?.memory?.toolPermission,
               messageId: state.metadata?.sourceMessageId,
               operationId,
+              operationSkillSet: state.metadata?.operationSkillSet,
               scope: state.metadata?.scope,
               serverDB: ctx.serverDB,
               signal: ctx.signal,
@@ -2397,6 +2426,7 @@ export const createRuntimeExecutors = (
                   memoryToolPermission: batchAgentConfig?.chatConfig?.memory?.toolPermission,
                   messageId: state.metadata?.sourceMessageId,
                   operationId,
+                  operationSkillSet: state.metadata?.operationSkillSet,
                   scope: state.metadata?.scope,
                   serverDB: ctx.serverDB,
                   signal: ctx.signal,

@@ -18,6 +18,7 @@ import {
   type TrialSettings,
 } from './trial-configuration';
 import type { AnonymousTrialContext, AnonymousTrialScores } from './trial-evaluation';
+import type { TrialProposalContext } from './trial-proposal';
 import {
   createTrialExecutionPlugin,
   RepresentativeTrialRunner,
@@ -117,6 +118,14 @@ async function fixture() {
   const writes = vi.spyOn(storage, 'saveJob');
   const backend = {
     version: 'executor-v1',
+    propose: vi.fn(async (_context: TrialProposalContext) => ({
+      proposal: {
+        patch: { layoutStrategy: 'grouped' },
+        rationale: 'Group existing paragraphs; preserve all facts',
+        experienceIds: [] as string[],
+      },
+      usage: { tokens: 3, costMicros: 2 },
+    })),
     async probe(ctx: TrialStageContext) {
       await writeFile(path.join(ctx.workspace, 'probe.txt'), ctx.configurationFingerprint);
       return { page: { svg: svg('Alternative') }, usage: { tokens: 4, costMicros: 1 } };
@@ -228,7 +237,11 @@ describe('Cordis representative trial execution', () => {
       sourceInput: h.source.input,
       sourcePlan: h.source.plan,
       plugins: expect.arrayContaining([
-        { id: 'trials', version: 'executor-v1', tools: ['trials.probe', 'trials.render'] },
+        {
+          id: 'trials',
+          version: 'executor-v1',
+          tools: ['trials.probe', 'trials.propose', 'trials.render'],
+        },
       ]),
     });
     expect(trialDigest(baseline)).toBe(result.variants[0].configurationFingerprint);
@@ -328,7 +341,10 @@ describe('Cordis representative trial execution', () => {
     await h.memory.recordOutcome(scope, {
       jobId: 'old',
       plan: h.source.plan!,
-      capsuleIds: h.request.candidates[0].patch.layoutCapsuleIds!,
+      capsuleIds:
+        'layoutCapsuleIds' in h.request.candidates[0].patch
+          ? h.request.candidates[0].patch.layoutCapsuleIds!
+          : [],
       result: 'rejected',
     });
     const probe = vi.spyOn(h.backend, 'probe');
@@ -586,12 +602,14 @@ describe('Cordis representative trial execution', () => {
 
   it('accepts no untrusted stage parameters or implicit execution context', async () => {
     const h = await fixture();
-    await expect(
-      h.runtime.invoke('trials.probe', { workspace: '/original' }, { scope }),
-    ).rejects.toThrow();
-    await expect(h.runtime.invoke('trials.probe', {}, { scope })).rejects.toMatchObject({
-      code: 'TRIAL_CONTEXT_REQUIRED',
-    });
+    for (const operation of ['trials.probe', 'trials.propose']) {
+      await expect(
+        h.runtime.invoke(operation, { workspace: '/original' }, { scope }),
+      ).rejects.toThrow();
+      await expect(h.runtime.invoke(operation, {}, { scope })).rejects.toMatchObject({
+        code: 'TRIAL_CONTEXT_REQUIRED',
+      });
+    }
     const catalog = await h.runtime.catalog();
     expect(
       catalog
@@ -705,5 +723,205 @@ describe('anonymous evaluation through Cordis', () => {
     expect(
       JSON.parse(await readFile(path.join(report.directory!, 'report.json'), 'utf8')).selectedId,
     ).toBe('baseline');
+  });
+});
+
+describe('bounded configuration proposals in the trial ledger', () => {
+  async function proposalFixture() {
+    const h = await fixture();
+    h.settings.proposal = {
+      version: 'single-dimension-v1',
+      allowance: { tokens: 10, costMicros: 5 },
+    };
+    h.budget.maxProposals = 1;
+    h.request.candidates = [{ id: 'candidate', patch: {} }];
+    return h;
+  }
+  it('snapshots the source before proposing and changes exactly one configuration dimension', async () => {
+    const h = await proposalFixture();
+    const result = await h.runner.run(h.request, { scope });
+    expect(result.status).toBe('completed');
+    expect(h.backend.propose).toHaveBeenCalledOnce();
+    expect(result.proposal).toMatchObject({
+      status: 'accepted',
+      result: { patch: { layoutStrategy: 'grouped' } },
+    });
+    const before = JSON.parse(
+      await readFile(path.join(result.directory!, 'configuration-0.json'), 'utf8'),
+    );
+    const after = JSON.parse(
+      await readFile(path.join(result.directory!, 'configuration-1.json'), 'utf8'),
+    );
+    expect(before).not.toHaveProperty('policy');
+    expect(after.policy).toEqual({ layoutStrategy: 'grouped' });
+    delete after.policy;
+    expect(after).toEqual(before);
+    expect(result.calls.filter((call) => call.operation === 'trials.propose')).toMatchObject([
+      {
+        reserved: { tokens: 10, costMicros: 5 },
+        actual: { tokens: 3, costMicros: 2 },
+        status: 'completed',
+      },
+    ]);
+    expect(h.writes).not.toHaveBeenCalled();
+    expect(await h.storage.getJob(scope, 'source')).toEqual(h.source);
+  });
+  it.each([
+    {
+      patch: { layoutStrategy: 'grouped', textSpacing: 'compact' },
+      rationale: 'two',
+      experienceIds: [],
+    },
+    { patch: {}, rationale: 'empty', experienceIds: [] },
+    { patch: { layoutStrategy: 'unknown' }, rationale: 'unknown', experienceIds: [] },
+    {
+      patch: { layoutStrategy: 'grouped' },
+      model: 'override',
+      rationale: 'extra',
+      experienceIds: [],
+    },
+    { patch: { recipe: 'execute this script' }, rationale: 'free text', experienceIds: [] },
+    {
+      patch: { layoutStrategy: 'grouped' },
+      rationale: 'made-up evidence',
+      experienceIds: ['foreign'],
+    },
+  ])(
+    'rejects invalid/overreaching proposals with no probe, render or retries: %j',
+    async (proposal) => {
+      const h = await proposalFixture();
+      h.backend.propose.mockResolvedValue({
+        proposal: proposal as never,
+        usage: { tokens: 3, costMicros: 2 },
+      });
+      const report = await h.runner.run(h.request, { scope });
+      expect(report).toMatchObject({
+        status: 'failed',
+        errorCode: 'TRIAL_PROPOSAL_INVALID_OUTPUT',
+        selectedId: 'baseline',
+        charged: { tokens: 3, costMicros: 2 },
+        proposal: { status: 'rejected' },
+      });
+      expect(report.calls.filter((item) => item.operation.startsWith('trials.'))).toHaveLength(1);
+      expect(h.backend.propose).toHaveBeenCalledOnce();
+      expect(report.calls.at(-1)?.status).toBe('failed');
+      expect(report.proposal?.output).toEqual(proposal);
+      expect(h.writes).not.toHaveBeenCalled();
+    },
+  );
+  it('binds valid experience references to an immutable input snapshot', async () => {
+    const h = await proposalFixture();
+    const experience = {
+      episodeId: 'episode',
+      outcome: 'baseline-kept',
+      status: 'pending-validation' as const,
+      applicability: 'source-page-only' as const,
+      reason: 'Original grouping was clearer',
+    };
+    const runner = new RepresentativeTrialRunner({
+      ...h.options,
+      proposalExperiences: async () => [experience],
+    });
+    h.backend.propose.mockResolvedValue({
+      proposal: {
+        patch: { layoutStrategy: 'grouped' },
+        rationale: 'Try grouping while retaining all facts',
+        experienceIds: ['episode'],
+      },
+      usage: { tokens: 3, costMicros: 2 },
+    });
+    const report = await runner.run(h.request, { scope });
+    expect(report.proposal).toMatchObject({
+      status: 'accepted',
+      experiences: [experience],
+      result: { experienceIds: ['episode'] },
+    });
+    expect(Object.isFrozen(h.backend.propose.mock.calls[0][0].experiences[0])).toBe(true);
+    expect(
+      JSON.parse(await readFile(path.join(report.directory!, 'proposal-input.json'), 'utf8'))
+        .experiences,
+    ).toEqual([experience]);
+    await runner.drain();
+  });
+  it('stops at the deadline during an uncooperative proposal without launching a candidate', async () => {
+    const h = await proposalFixture(),
+      started = latch(),
+      finish = latch();
+    h.budget.maxDurationMs = 200;
+    h.backend.propose.mockImplementation(async () => {
+      started.resolve();
+      await finish.promise;
+      return {
+        proposal: { patch: { layoutStrategy: 'grouped' }, rationale: 'test', experienceIds: [] },
+        usage: { tokens: 3, costMicros: 2 },
+      };
+    });
+    const running = h.runner.run(h.request, { scope });
+    await started.promise;
+    const report = await running;
+    expect(report).toMatchObject({
+      status: 'deadline-exceeded',
+      selectedId: 'baseline',
+      charged: { tokens: 10, costMicros: 5 },
+    });
+    expect(report.calls.filter((item) => item.operation.startsWith('trials.'))).toHaveLength(1);
+    finish.resolve();
+    await h.runner.drain();
+  });
+  it('rejects an explicit patch override before any proposer call', async () => {
+    const h = await proposalFixture();
+    h.request.candidates[0].patch = { textSpacing: 'compact' };
+    const report = await h.runner.run(h.request, { scope });
+    expect(report.errorCode).toBe('TRIAL_PROPOSAL_CONFIGURATION');
+    expect(h.backend.propose).not.toHaveBeenCalled();
+  });
+  it('preflights the combined stage allowances before spending', async () => {
+    const h = await proposalFixture();
+    h.budget.maxTokens = 19;
+    const report = await h.runner.run(h.request, { scope });
+    expect(report.status).toBe('budget-exceeded');
+    expect(report.charged.tokens).toBe(0);
+    expect(h.backend.propose).not.toHaveBeenCalled();
+  });
+  it('stops after excessive proposer usage and retains the measured charge', async () => {
+    const h = await proposalFixture();
+    h.backend.propose.mockResolvedValue({
+      proposal: { patch: { layoutStrategy: 'grouped' }, rationale: 'test', experienceIds: [] },
+      usage: { tokens: 11, costMicros: 2 },
+    });
+    const report = await h.runner.run(h.request, { scope });
+    expect(report).toMatchObject({
+      status: 'budget-exceeded',
+      selectedId: 'baseline',
+      charged: { tokens: 11, costMicros: 2 },
+    });
+    expect(report.calls.filter((item) => item.operation.startsWith('trials.'))).toHaveLength(1);
+  });
+  it('cancels the proposer without launching downstream work and retains unknown usage reservation', async () => {
+    const h = await proposalFixture(),
+      started = latch(),
+      finish = latch(),
+      controller = new AbortController();
+    h.backend.propose.mockImplementation(async () => {
+      started.resolve();
+      await finish.promise;
+      return {
+        proposal: { patch: { layoutStrategy: 'grouped' }, rationale: 'test', experienceIds: [] },
+        usage: { tokens: 3, costMicros: 2 },
+      };
+    });
+    const running = h.runner.run(h.request, { scope, signal: controller.signal });
+    await started.promise;
+    controller.abort();
+    const report = await running;
+    expect(report).toMatchObject({
+      status: 'cancelled',
+      selectedId: 'baseline',
+      charged: { tokens: 10, costMicros: 5 },
+    });
+    expect(report.calls.at(-1)?.status).toBe('cancelled');
+    expect(report.calls.filter((item) => item.operation.startsWith('trials.'))).toHaveLength(1);
+    finish.resolve();
+    await h.runner.drain();
   });
 });

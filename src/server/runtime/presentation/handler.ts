@@ -402,7 +402,9 @@ export const handlePresentationRequest = async (
           ),
         );
       if (match.operation === 'tool')
-        return successResponse(await extended.executeOperation(requiredId(match.id, 'name'), body));
+        return successResponse(
+          await extended.executeOperation(requiredId(match.id, 'name'), body, request.signal),
+        );
     }
     if (match.operation === 'create') {
       const input = (await readJsonObject(request)) as unknown as PresentationJobInput;

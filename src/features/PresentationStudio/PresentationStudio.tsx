@@ -824,6 +824,11 @@ export const PresentationStudio = memo<PresentationStudioProps>(
                   onSelectArtifact={selectArtifact}
                   onSelectJob={selectJob}
                   onSendMessage={store.getState().sendMessage}
+                  onTrialVersionCreated={async (jobId) => {
+                    await store.getState().refreshJob(jobId);
+                    if (!store.getState().jobs[jobId]) throw new Error('Version refresh failed');
+                    selectJob(jobId);
+                  }}
                 />
 
                 <div className={styles.srOnly}>

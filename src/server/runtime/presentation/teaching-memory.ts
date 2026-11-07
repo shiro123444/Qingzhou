@@ -1,3 +1,4 @@
+import { ownedLearningDirectory, withAccountData } from '../learning-lifecycle/files';
 import { createHash, randomUUID } from 'node:crypto';
 import { link, mkdir, readdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -87,7 +88,7 @@ export class FileTeachingMemory {
   private directory(scope: RuntimeScope) {
     if (!scope.userId?.trim() || !scope.sessionId?.trim())
       throw invalid('Authenticated teaching scope required');
-    return path.join(this.root, hash(scope.userId));
+    return ownedLearningDirectory(scope.userId, this.root, hash(scope.userId));
   }
   private path(scope: RuntimeScope, id: string) {
     if (!/^teaching-[a-f\d]{40}$/u.test(id)) throw invalid('Invalid teaching pattern id');
@@ -133,6 +134,16 @@ export class FileTeachingMemory {
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
   async propose(
+    scope: RuntimeScope,
+    source: TeachingRecord['source'],
+    patterns: TeachingPattern[],
+    pages: TeachingPageObservation[],
+  ) {
+    return withAccountData(this.directory(scope), () =>
+      this.proposeOwned(scope, source, patterns, pages),
+    );
+  }
+  private async proposeOwned(
     scope: RuntimeScope,
     source: TeachingRecord['source'],
     patterns: TeachingPattern[],

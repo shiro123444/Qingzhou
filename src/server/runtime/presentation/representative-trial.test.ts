@@ -206,3 +206,40 @@ describe('representative page selection', () => {
     expect(() => selectRepresentativeTrial(input)).toThrow();
   });
 });
+
+describe('serial incumbent selection', () => {
+  it.each([
+    [3, 3, 3, 3],
+    [2, 2, 2, 2],
+    [4, 2, 3, 3],
+  ])('retains the incumbent on equal, worse or tradeoff refinement %j', (...scores) => {
+    const input = {
+      ...trial([variant('incumbent', [3, 3, 3, 3]), variant('new', scores)]),
+      incumbentId: 'incumbent',
+    };
+    expect(selectRepresentativeTrial(input)).toMatchObject({
+      policyVersion: 2,
+      selectedId: 'incumbent',
+      reason: 'incumbent-retained',
+    });
+  });
+  it('replaces the incumbent only on strict improvement within the same anonymous evaluation', () => {
+    const input = {
+      ...trial([variant('incumbent', [3, 3, 3, 3]), variant('new', [4, 3, 3, 3])]),
+      incumbentId: 'incumbent',
+    };
+    expect(selectRepresentativeTrial(input)).toMatchObject({
+      policyVersion: 2,
+      selectedId: 'new',
+      reason: 'incumbent-improved',
+    });
+    input.candidates[1].evaluation!.gates.visual.status = 'failed';
+    expect(selectRepresentativeTrial(input).selectedId).toBe('incumbent');
+    input.candidates[0].evaluation!.gates.visual.status = 'failed';
+    expect(selectRepresentativeTrial(input).selectedId).toBe('baseline');
+  });
+  it('keeps older comparisons on policy version 1 and rejects fabricated incumbent identities', () => {
+    expect(selectRepresentativeTrial(trial()).policyVersion).toBe(1);
+    expect(() => selectRepresentativeTrial({ ...trial(), incumbentId: 'unknown' })).toThrow();
+  });
+});

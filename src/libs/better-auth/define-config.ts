@@ -1,3 +1,6 @@
+import { hasLearningErasureRequest } from '@/server/runtime/learning-lifecycle/files';
+import { registerLegacyLearningFiles } from '@/server/runtime/learning-lifecycle/legacy';
+import { withLearningMaintenance } from '@/server/runtime/improvement/production';
 import { expo } from '@better-auth/expo';
 import { passkey } from '@better-auth/passkey';
 import { BRANDING_NAME, ENABLE_BUSINESS_FEATURES } from '@lobechat/business-const';
@@ -208,6 +211,20 @@ export function defineConfig(customOptions: CustomBetterAuthOptions) {
      */
     databaseHooks: {
       user: {
+        delete: {
+          before: async (user) => {
+            if (!hasLearningErasureRequest(user.id)) await registerLegacyLearningFiles(user.id);
+            await withLearningMaintenance(serverDB, (maintenance) =>
+              maintenance.requestErasure(user.id),
+            );
+          },
+          after: async () => {
+            // The durable queue survives a crash between the DB deletion and this best-effort tick.
+            await withLearningMaintenance(serverDB, (maintenance) => maintenance.tick()).catch(
+              () => undefined,
+            );
+          },
+        },
         create: {
           after: async (user) => {
             const userService = new UserService(serverDB);
@@ -223,6 +240,7 @@ export function defineConfig(customOptions: CustomBetterAuthOptions) {
       },
     },
     user: {
+      deleteUser: { enabled: !!process.env.QINGZHOU_LEARNING_LIFECYCLE_ROOT },
       changeEmail: {
         enabled: true,
       },

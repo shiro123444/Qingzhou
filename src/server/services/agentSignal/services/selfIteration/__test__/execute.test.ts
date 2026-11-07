@@ -143,6 +143,63 @@ describe('executeSelfIteration', () => {
     vi.clearAllMocks();
   });
 
+  it('offers source-bound harness proposals in the existing reflection loop without applying them', async () => {
+    const tools = createMockTools();
+    tools.harness = {
+      readSource: vi.fn(async () => ({ baselineId: 'source-revision', systemRole: 'original' })),
+      propose: vi.fn(async () => ({ id: 'proposal', status: 'proposed' as const })),
+    };
+    const { modelRuntime, chat } = createMockModelRuntime([
+      {
+        content: 'Read frozen instructions',
+        toolCalls: [
+          {
+            id: 'read',
+            type: 'function',
+            function: { name: 'agent-signal-self-iteration____readHarnessSource', arguments: '{}' },
+          },
+        ],
+      },
+      {
+        content: 'Propose for review',
+        toolCalls: [
+          {
+            id: 'propose',
+            type: 'function',
+            function: {
+              name: 'agent-signal-self-iteration____proposeHarnessInstruction',
+              arguments: JSON.stringify({
+                baselineId: 'source-revision',
+                systemRole: 'original\nUse evidence.',
+                rationale: 'Repeated gap',
+                evidenceIds: ['topic'],
+              }),
+            },
+          },
+        ],
+      },
+      { content: 'Pending independent comparison and explicit approval' },
+    ]);
+    const result = await executeSelfIteration({
+      agentId: 'agent-1',
+      userId: 'user-1',
+      context: reviewContext,
+      sourceId: 'source',
+      mode: 'reflection',
+      maxSteps: 10,
+      model: 'model',
+      modelRuntime,
+      tools,
+    });
+    expect(tools.harness.readSource).toHaveBeenCalledOnce();
+    expect(tools.harness.propose).toHaveBeenCalledWith(
+      expect.objectContaining({ baselineId: 'source-revision', evidenceIds: ['topic'] }),
+    );
+    expect(result.writeOutcomes).toEqual([]);
+    expect(tools.replaceSkillContentCAS).not.toHaveBeenCalled();
+    expect(JSON.stringify(chat.mock.calls[0][0].tools)).toContain('proposeHarnessInstruction');
+  });
+
   /**
    * @example
    * expect(tools.createSkillIfAbsent).toHaveBeenCalledWith(expect.objectContaining({ userId: 'user-1' }));

@@ -41,6 +41,11 @@ describe('skillManagementRuntime', () => {
     });
 
     expect(runtime).toBeInstanceOf(SkillMaintainerExecutionRuntime);
-    expect(SkillManagementDocumentService).toHaveBeenCalledWith({}, 'user-1');
+    expect(SkillManagementDocumentService).toHaveBeenCalledWith(
+      {},
+      'user-1',
+      undefined,
+      expect.objectContaining({ userId: 'user-1', kind: 'automated-learning' }),
+    );
   });
 });

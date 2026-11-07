@@ -5,7 +5,6 @@ import {
   type ActivatorRuntimeService,
   type ToolManifestInfo,
 } from '@lobechat/builtin-tool-activator/executionRuntime';
-import { SkillsExecutionRuntime } from '@lobechat/builtin-tool-skills/executionRuntime';
 
 import { AgentSkillModel } from '@/database/models/agentSkill';
 import { filterBuiltinSkills } from '@/helpers/skillFilters';
@@ -15,6 +14,7 @@ import {
 } from '@/server/services/agentSignal/procedure';
 import { redisPolicyStateStore } from '@/server/services/agentSignal/store/adapters/redis/policyStateStore';
 
+import { PinnedSkillsExecutionRuntime } from '../pinnedSkills';
 import { type ServerRuntimeRegistration } from './types';
 
 /**
@@ -65,20 +65,23 @@ export const activatorRuntime: ServerRuntimeRegistration = {
     };
 
     // Create SkillsExecutionRuntime for activateSkill delegation
-    let skillsRuntime: SkillsExecutionRuntime | undefined;
+    let skillsRuntime: PinnedSkillsExecutionRuntime | undefined;
     if (context.serverDB && context.userId) {
       const skillModel = new AgentSkillModel(context.serverDB, context.userId);
-      skillsRuntime = new SkillsExecutionRuntime({
-        builtinSkills: filterBuiltinSkills(builtinSkills),
-        service: {
-          findAll: () => skillModel.findAll(),
-          findById: (id) => skillModel.findById(id),
-          findByName: (name) => skillModel.findByName(name),
-          readResource: async () => {
-            throw new Error('readResource not available in tools runtime');
+      skillsRuntime = new PinnedSkillsExecutionRuntime(
+        {
+          builtinSkills: filterBuiltinSkills(builtinSkills),
+          service: {
+            findAll: () => skillModel.findAll(),
+            findById: (id) => skillModel.findById(id),
+            findByName: (name) => skillModel.findByName(name),
+            readResource: async () => {
+              throw new Error('readResource not available in tools runtime');
+            },
           },
         },
-      });
+        context,
+      );
     }
 
     const service: ActivatorRuntimeService = {

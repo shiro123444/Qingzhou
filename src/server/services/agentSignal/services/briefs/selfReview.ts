@@ -2,6 +2,7 @@ import { AgentSignalReviewContextModel } from '@/database/models/agentSignal/rev
 import { BriefModel } from '@/database/models/brief';
 import type { BriefItem } from '@/database/schemas';
 import type { LobeChatDatabase } from '@/database/type';
+import { learningMutationAuthority } from '@/server/runtime/improvement/mutation-authority';
 import { AGENT_SIGNAL_DEFAULTS } from '@/server/services/agentSignal/constants';
 import { isAgentSignalEnabledForUser } from '@/server/services/agentSignal/featureGate';
 import { persistAgentSignalReceipts } from '@/server/services/agentSignal/services/receiptService';
@@ -211,7 +212,12 @@ export class AgentSignalSelfReviewBriefService {
       typeof metadata?.sourceId === 'string'
         ? metadata.sourceId
         : `self-review-proposal-approve:${brief.id}`;
-    const skillDocumentService = new SkillManagementDocumentService(this.db, this.userId);
+    const skillDocumentService = new SkillManagementDocumentService(
+      this.db,
+      this.userId,
+      undefined,
+      learningMutationAuthority(this.userId),
+    );
     const preflight = createSelfReviewProposalPreflightService({
       isSkillNameAvailable: async ({ name }) => {
         const skill = await skillDocumentService.getSkill({

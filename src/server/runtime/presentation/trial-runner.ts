@@ -1,11 +1,14 @@
+import { acquireAccountDataLease, ownedLearningDirectory } from '../learning-lifecycle/files';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
+import type { LearningBudgetRef } from '@lobechat/agent-runtime';
 import { z } from 'zod';
 
 import type { PresentationPlan, RuntimeScope } from '../../../../packages/runtime-contracts/src';
 import { type AtomicInvocation, type AtomicPlugin, type AtomicRuntime } from '../atomic-runtime';
+import type { LearningBudgetBinding } from '../improvement/budget';
 import type { PresentationArtifactStore } from './artifact-store';
 import type { CapabilityCapsule } from './capability-memory';
 import type { PresentationJobRepository, StoredPresentationJob } from './file-storage';
@@ -36,6 +39,13 @@ import {
   anonymousTrialScoresSchema,
   trialEditableTexts,
 } from './trial-evaluation';
+import { TRIAL_POLICY_VERSION, type TrialPolicy, trialPolicySchema } from './trial-policy';
+import {
+  type TrialProposalContext,
+  type TrialProposalExperience,
+  trialProposalExperiencesSchema,
+  trialProposalSchema,
+} from './trial-proposal';
 
 const invalid = (code: string) => Object.assign(new Error(code), { code });
 const pageSchema = z
@@ -59,6 +69,7 @@ export interface TrialConfigurationSnapshot {
   budget: TrialBudget;
   capsules: CapabilityCapsule[];
   plugins: { id: string; version: string; tools: string[] }[];
+  policy?: TrialPolicy;
   schemaVersion: 1;
   settings: TrialSettings;
   source: { jobId: string; versionId: string; slideId: string };
@@ -88,6 +99,7 @@ export function createTrialExecutionPlugin(backend: {
   probe: (context: TrialStageContext) => Promise<z.infer<typeof probeResultSchema>>;
   render: (context: TrialStageContext) => Promise<z.infer<typeof renderResultSchema>>;
   evaluate?: (context: AnonymousTrialContext) => Promise<AnonymousTrialScores>;
+  propose?: (context: TrialProposalContext) => Promise<{ proposal: unknown; usage: TrialUsage }>;
 }): AtomicPlugin {
   const operation = (stage: 'probe' | 'render') => ({
     name: `trials.${stage}`,
@@ -114,6 +126,28 @@ export function createTrialExecutionPlugin(backend: {
     operations: [
       operation('probe'),
       operation('render'),
+      ...(backend.propose
+        ? [
+            {
+              name: 'trials.propose',
+              description: 'Propose one bounded configuration dimension in trusted trial context.',
+              input: z.object({}).strict(),
+              execute: (_: unknown, invocation: AtomicInvocation) => {
+                const context = invocation.services?.representativeTrialProposal as
+                  | TrialProposalContext
+                  | undefined;
+                if (!context || !invocation.signal) throw invalid('TRIAL_CONTEXT_REQUIRED');
+                return backend.propose!(
+                  Object.freeze({
+                    ...context,
+                    scope: Object.freeze({ ...invocation.scope }),
+                    signal: invocation.signal,
+                  }),
+                );
+              },
+            },
+          ]
+        : []),
       ...(backend.evaluate
         ? [
             {
@@ -142,6 +176,7 @@ export function createTrialExecutionPlugin(backend: {
 }
 
 export interface TrialRunReport {
+  budgetRef?: LearningBudgetRef;
   calls: {
     operation: string;
     variantId?: string;
@@ -155,7 +190,31 @@ export interface TrialRunReport {
   conditionFingerprint?: string;
   directory?: string;
   errorCode?: string;
+  improvement?: {
+    budget: {
+      maxTokens: number;
+      maxCostMicros: number;
+      maxDurationMs: number;
+      maxProposals: number;
+      maxProbes: number;
+      maxRenders: number;
+      maxEvaluations: number;
+    };
+    charged: TrialUsage;
+    protocol: 'bounded-serial-v1';
+    rounds: TrialRunReport[];
+    selectedRound: 1 | 2;
+  };
   originalRetained: true;
+  proposal?: {
+    incumbent?: { policy: TrialPolicy; page: z.infer<typeof pageSchema> };
+    priorAttempt?: TrialProposalContext['priorAttempt'];
+    version: string;
+    status: 'started' | 'accepted' | 'rejected';
+    experiences: TrialProposalExperience[];
+    output?: unknown;
+    result?: z.infer<typeof trialProposalSchema>;
+  };
   runId: string;
   schemaVersion: 1;
   selectedId: string;
@@ -171,6 +230,7 @@ export interface TrialRunReport {
     id: string;
     status: 'not-started' | 'completed' | 'failed' | 'cancelled';
     configurationFingerprint?: string;
+    planSha256?: string;
     preview?: { file: string; sha256: string };
   }[];
 }
@@ -185,10 +245,19 @@ export class RepresentativeTrialRunner {
       artifacts: Pick<PresentationArtifactStore, 'get'>;
       root: string;
       budget: TrialBudget;
+      learningBudget?: LearningBudgetBinding;
+      publishEvidence?: (scope: RuntimeScope, report: TrialRunReport) => Promise<void>;
       settings: (
         scope: RuntimeScope,
         source: StoredPresentationJob,
       ) => TrialSettings | Promise<TrialSettings>;
+      proposalExperiences?: (
+        scope: RuntimeScope,
+        source: StoredPresentationJob,
+        slideId: string,
+      ) => Promise<TrialProposalExperience[]>;
+      incumbent?: { policy: TrialPolicy; page: z.infer<typeof pageSchema> };
+      priorAttempt?: TrialProposalContext['priorAttempt'];
     },
   ) {}
 
@@ -201,8 +270,29 @@ export class RepresentativeTrialRunner {
     input: TrialRequest,
     invocation: Pick<AtomicInvocation, 'scope' | 'signal' | 'onEvent'>,
   ): Promise<TrialRunReport> {
+    const directory = ownedLearningDirectory(
+      invocation.scope.userId,
+      path.join(this.options.root, 'runs'),
+      trialDigest(invocation.scope.userId),
+    );
+    const lease = await acquireAccountDataLease(directory, invocation.signal);
+    try {
+      return await this.runOwned(input, invocation);
+    } finally {
+      void this.drain().then(
+        () => lease?.release(),
+        () => lease?.release(),
+      );
+    }
+  }
+
+  private async runOwned(
+    input: TrialRequest,
+    invocation: Pick<AtomicInvocation, 'scope' | 'signal' | 'onEvent'>,
+  ): Promise<TrialRunReport> {
     const request = trialRequestSchema.parse(input);
     const budget = trialBudgetSchema.parse(this.options.budget);
+    let paidAttempt = 0;
     const scope = z
       .object({ userId: z.string().trim().min(1), sessionId: z.string().trim().min(1) })
       .strict()
@@ -226,6 +316,7 @@ export class RepresentativeTrialRunner {
       selectedId: 'baseline',
       calls: [],
       charged: { tokens: 0, costMicros: 0 },
+      ...(this.options.learningBudget ? { budgetRef: this.options.learningBudget.ref } : {}),
       variants: ['baseline', ...request.candidates.map(({ id }) => id)].map((id) => ({
         id,
         status: 'not-started',
@@ -292,19 +383,52 @@ export class RepresentativeTrialRunner {
       report.calls.push(entry);
       const started = performance.now();
       try {
-        const result = await guarded(() =>
+        const dispatch = (dispatchSignal: AbortSignal) =>
           this.options.runtime.invoke<T>(operation, args, {
             scope,
-            signal,
+            signal: dispatchSignal,
             services,
             jobId: report.runId,
             onEvent: invocation.onEvent,
-          }),
+          });
+        const shared = this.options.learningBudget;
+        const paid = ['trials.propose', 'trials.probe', 'trials.evaluate'].includes(operation);
+        const result = await guarded(() =>
+          shared && paid
+            ? shared.perform(
+                {
+                  id: `${paidAttempt++}:${operation}:${variantId ?? ''}`,
+                  request: args,
+                  reserved: {
+                    calls: 1,
+                    tokens: allowance.tokens,
+                    costMicros: allowance.costMicros,
+                  },
+                  signal,
+                  measure: (value) => {
+                    const usage = (value as { usage?: TrialUsage })?.usage;
+                    return usage
+                      ? {
+                          tokens: usage.tokens,
+                          ...(usage.costBasis === 'provider-reported'
+                            ? { costMicros: usage.costMicros }
+                            : {}),
+                        }
+                      : undefined;
+                  },
+                },
+                dispatch,
+              )
+            : dispatch(signal),
         );
         active();
         entry.status = 'completed';
         return result;
       } catch (error) {
+        if (error instanceof Error && error.message === 'LEARNING_BUDGET_CANCELLED')
+          controller.abort(invalid('TRIAL_CANCELLED'));
+        if (error instanceof Error && error.message === 'LEARNING_BUDGET_EXCEEDED')
+          throw invalid('TRIAL_BUDGET');
         entry.status = signal.aborted ? 'cancelled' : 'failed';
         throw error;
       } finally {
@@ -323,7 +447,7 @@ export class RepresentativeTrialRunner {
     try {
       active();
       if (
-        request.candidates.length > budget.maxProbes ||
+        request.candidates.length - (this.options.incumbent ? 1 : 0) > budget.maxProbes ||
         request.candidates.length + 1 > budget.maxRenders
       )
         throw invalid('TRIAL_BUDGET');
@@ -365,8 +489,42 @@ export class RepresentativeTrialRunner {
       const settings = trialSettingsSchema.parse(
         await guarded(async () => this.options.settings(scope, source)),
       );
+      const incumbent =
+        this.options.incumbent &&
+        freezeTrialValue({
+          policy: trialPolicySchema.parse(this.options.incumbent.policy),
+          page: pageSchema.parse(this.options.incumbent.page),
+        });
+      if (
+        incumbent &&
+        (!settings.proposal ||
+          request.candidates.length !== 2 ||
+          request.candidates[0].id !== 'incumbent' ||
+          request.candidates.some((item) => Object.keys(item.patch).length))
+      )
+        throw invalid('TRIAL_PROPOSAL_CONFIGURATION');
       if (settings.models.planner.maxOutputTokens > settings.probeAllowance.tokens)
         throw invalid('TRIAL_BUDGET');
+      if (settings.proposal) {
+        if (
+          settings.proposal.version !== TRIAL_POLICY_VERSION ||
+          budget.maxProposals !== 1 ||
+          !plugins.some(({ tools }) => tools.includes('trials.propose')) ||
+          request.candidates.length !== (incumbent ? 2 : 1) ||
+          request.candidates.some((item) => Object.keys(item.patch).length !== 0)
+        )
+          throw invalid('TRIAL_PROPOSAL_CONFIGURATION');
+        const allowances = [
+          settings.proposal.allowance,
+          settings.probeAllowance,
+          settings.evaluation?.allowance ?? zero,
+        ];
+        if (
+          allowances.reduce((sum, item) => sum + item.tokens, 0) > budget.maxTokens ||
+          allowances.reduce((sum, item) => sum + item.costMicros, 0) > budget.maxCostMicros
+        )
+          throw invalid('TRIAL_BUDGET');
+      }
       if (plugins.find(({ id }) => id === 'trials')?.version !== settings.executorVersion)
         throw invalid('TRIAL_EXECUTOR_MISMATCH');
       if (
@@ -397,7 +555,10 @@ export class RepresentativeTrialRunner {
       const baselineCapsules = await resolve(settings.baselineCapsuleIds);
       const compositions = [baselineCapsules];
       for (const candidate of request.candidates) {
-        if (candidate.patch.layoutCapsuleIds === undefined) {
+        if (
+          !('layoutCapsuleIds' in candidate.patch) ||
+          candidate.patch.layoutCapsuleIds === undefined
+        ) {
           compositions.push(baselineCapsules);
           continue;
         }
@@ -448,11 +609,105 @@ export class RepresentativeTrialRunner {
         plugins,
       };
       report.conditionFingerprint = trialDigest(condition);
-      const configurations = compositions.map((capsules) =>
-        freezeTrialValue(
-          JSON.parse(trialJson({ ...condition, capsules })) as TrialConfigurationSnapshot,
-        ),
+      const baselineConfiguration = freezeTrialValue(
+        JSON.parse(
+          trialJson({ ...condition, capsules: baselineCapsules }),
+        ) as TrialConfigurationSnapshot,
       );
+      const accountRoot = ownedLearningDirectory(
+        scope.userId,
+        path.join(this.options.root, 'runs'),
+        trialDigest(scope.userId),
+      );
+      await guarded(() => mkdir(accountRoot, { recursive: true, mode: 0o700 }));
+      report.directory = await guarded(() => mkdtemp(path.join(accountRoot, 'trial-')));
+      await write(path.join(report.directory, 'request.json'), request);
+      report.variants[0].configurationFingerprint = trialDigest(baselineConfiguration);
+      await write(path.join(report.directory, 'configuration-0.json'), baselineConfiguration);
+      let proposedPolicy: TrialPolicy | undefined;
+      if (settings.proposal) {
+        const experiences = freezeTrialValue(
+          trialProposalExperiencesSchema.parse(
+            await guarded(
+              async () => this.options.proposalExperiences?.(scope, source, request.slideId) ?? [],
+            ),
+          ),
+        );
+        report.proposal = {
+          version: settings.proposal.version,
+          status: 'started',
+          experiences,
+          ...(incumbent ? { incumbent } : {}),
+          ...(this.options.priorAttempt
+            ? { priorAttempt: structuredClone(this.options.priorAttempt) }
+            : {}),
+        };
+        await write(path.join(report.directory, 'proposal-input.json'), report.proposal);
+        const workspace = path.join(report.directory, 'scratch-proposal');
+        await guarded(() => mkdir(workspace, { mode: 0o700 }));
+        const result = z
+          .object({ proposal: z.unknown(), usage: trialUsageSchema })
+          .strict()
+          .parse(
+            await invoke('trials.propose', {}, settings.proposal.allowance, {
+              representativeTrialProposal: {
+                allowance: Object.freeze({ ...settings.proposal.allowance }),
+                configuration: baselineConfiguration,
+                configurationFingerprint: report.variants[0].configurationFingerprint,
+                plan: freezeTrialValue({
+                  ...structuredClone(sourcePlan),
+                  slides: [{ ...structuredClone(sourceSlide), ...incumbent?.page }],
+                }),
+                scope,
+                signal,
+                workspace,
+                experiences,
+                ...(incumbent ? { incumbentPolicy: incumbent.policy } : {}),
+                ...(this.options.priorAttempt
+                  ? { priorAttempt: freezeTrialValue(structuredClone(this.options.priorAttempt)) }
+                  : {}),
+              } satisfies TrialProposalContext,
+            }),
+          );
+        settleUsage(result.usage, settings.proposal.allowance);
+        // Keep the actual parsed reply, including rejected proposals, as private data.
+        // It is never executed, projected to the UI or fed back wholesale as instructions.
+        await write(path.join(report.directory, 'proposal-output.json'), result.proposal);
+        report.proposal.output = JSON.parse(trialJson(result.proposal));
+        const parsed = trialProposalSchema.safeParse(result.proposal);
+        if (
+          !parsed.success ||
+          parsed.data.experienceIds.some((id) => !experiences.some((item) => item.episodeId === id))
+        )
+          throw invalid('TRIAL_PROPOSAL_INVALID_OUTPUT');
+        report.proposal.result = parsed.data;
+        const priorPolicy = incumbent?.policy ?? this.options.priorAttempt?.policy;
+        if (priorPolicy && Object.keys(parsed.data.patch)[0] !== Object.keys(priorPolicy)[0])
+          throw invalid('TRIAL_PROPOSAL_DIMENSION');
+        if (priorPolicy && trialDigest(parsed.data.patch) === trialDigest(priorPolicy))
+          throw invalid('TRIAL_PROPOSAL_NO_CHANGE');
+        report.proposal.status = 'accepted';
+        proposedPolicy = parsed.data.patch;
+        await write(path.join(report.directory, 'proposal-result.json'), report.proposal);
+      }
+      const configurations = compositions.map((capsules, index) => {
+        if (index === 0) return baselineConfiguration;
+        const patch = request.candidates[index - 1].patch;
+        const policy =
+          (incumbent && index === 1 ? incumbent.policy : proposedPolicy) ??
+          ('layoutCapsuleIds' in patch || Object.keys(patch).length === 0
+            ? undefined
+            : trialPolicySchema.parse(patch));
+        return freezeTrialValue(
+          JSON.parse(
+            trialJson({
+              ...condition,
+              capsules,
+              ...(policy ? { policy } : {}),
+            }),
+          ) as TrialConfigurationSnapshot,
+        );
+      });
       // Validate all snapshots and patches before any probe/render effect.
       if (
         configurations.some(
@@ -460,11 +715,8 @@ export class RepresentativeTrialRunner {
         )
       )
         throw invalid('TRIAL_SNAPSHOT_TOO_LARGE');
-      const accountRoot = path.join(this.options.root, 'runs', trialDigest(scope.userId));
-      await guarded(() => mkdir(accountRoot, { recursive: true, mode: 0o700 }));
-      report.directory = await guarded(() => mkdtemp(path.join(accountRoot, 'trial-')));
-      await write(path.join(report.directory, 'request.json'), request);
       for (const [index, configuration] of configurations.entries()) {
+        if (index === 0) continue;
         report.variants[index].configurationFingerprint = trialDigest(configuration);
         await write(path.join(report.directory, `configuration-${index}.json`), configuration);
       }
@@ -485,7 +737,15 @@ export class RepresentativeTrialRunner {
           aspectRatio: sourcePlan.aspectRatio,
           sourceVersionIds: [...sourcePlan.sourceVersionIds],
           designSpec,
-          slides: [{ ...structuredClone(sourceSlide), metadata, order: 1, slideId: 'trial-page' }],
+          slides: [
+            {
+              ...structuredClone(sourceSlide),
+              ...(index > 0 && incumbent ? incumbent.page : {}),
+              metadata,
+              order: 1,
+              slideId: 'trial-page',
+            },
+          ],
         };
         const context = (allowance: TrialUsage): AtomicInvocation['services'] => ({
           representativeTrialStage: {
@@ -500,7 +760,7 @@ export class RepresentativeTrialRunner {
         });
         const callOffset = report.calls.length;
         try {
-          if (index > 0) {
+          if (index > 0 && !(incumbent && index === 1)) {
             const result = probeResultSchema.parse(
               await invoke(
                 'trials.probe',
@@ -525,6 +785,7 @@ export class RepresentativeTrialRunner {
             throw invalid('TRIAL_INVALID_PREVIEW');
           active();
           await write(path.join(report.directory, `plan-${index}.json`), plan);
+          variant.planSha256 = trialDigest(plan);
           const file = path.join(report.directory, `preview-${index}.png`);
           await guarded(() => writeFile(file, previewBytes, { flag: 'wx', mode: 0o600 }));
           active();
@@ -625,6 +886,7 @@ export class RepresentativeTrialRunner {
           conditionFingerprint: report.conditionFingerprint!,
           baseline: { ...variants[0], id: 'baseline' },
           candidates: variants.slice(1),
+          ...(incumbent ? { incumbentId: 'incumbent' } : {}),
           rejectedCandidateIds: [],
         };
         report.selection = selectRepresentativeTrial(comparison);
@@ -636,11 +898,13 @@ export class RepresentativeTrialRunner {
         });
       }
     } catch (error) {
+      if (report.proposal?.status === 'started') report.proposal.status = 'rejected';
       report.selectedId = 'baseline';
       delete report.selection;
       delete report.comparison;
       if (
-        report.calls.at(-1)?.operation === 'trials.evaluate' &&
+        (report.calls.at(-1)?.operation === 'trials.evaluate' ||
+          report.proposal?.status === 'rejected') &&
         report.calls.at(-1)?.status === 'completed'
       )
         report.calls.at(-1)!.status = signal.aborted ? 'cancelled' : 'failed';
@@ -669,6 +933,8 @@ export class RepresentativeTrialRunner {
         flag: 'wx',
         mode: 0o600,
       });
+    if (result.status === 'completed' && result.comparison)
+      await this.options.publishEvidence?.(scope, result);
     return result;
   }
 }

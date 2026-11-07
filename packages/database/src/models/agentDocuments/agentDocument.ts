@@ -1,7 +1,7 @@
 import { and, asc, desc, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 
 import type { DocumentItem, NewAgentDocument, NewDocument } from '../../schemas';
-import { agentDocuments, documents } from '../../schemas';
+import { agentDocuments, agents, documents } from '../../schemas';
 import type { LobeChatDatabase, Transaction } from '../../type';
 import { buildDocumentFilename } from './filename';
 import {
@@ -16,6 +16,7 @@ import type {
   AgentDocument,
   AgentDocumentPolicy,
   AgentDocumentSourceType,
+  AgentDocumentVersion,
   AgentDocumentWithRules,
   DocumentLoadRules,
   ToolUpdateLoadRule,
@@ -75,6 +76,50 @@ export class AgentDocumentModel {
     this.db = db;
   }
 
+  /** Serialize managed mutations of one owned agent, inside their short transaction. */
+  async lockAgent(agentId: string): Promise<void> {
+    const [agent] = await this.db
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.userId, this.userId)))
+      .for('update');
+    if (!agent) throw new Error('RESOURCE_SCOPE_NOT_FOUND');
+  }
+
+  /** Call inside the same transaction as a multi-document mutation. */
+  async assertVersions(versions: AgentDocumentVersion[]): Promise<void> {
+    const rows = await this.db
+      .select({ doc: documents, settings: agentDocuments })
+      .from(agentDocuments)
+      .innerJoin(documents, eq(agentDocuments.documentId, documents.id))
+      .where(
+        and(
+          eq(agentDocuments.userId, this.userId),
+          eq(documents.userId, this.userId),
+          inArray(
+            agentDocuments.id,
+            versions.map((version) => version.id),
+          ),
+        ),
+      )
+      .orderBy(asc(agentDocuments.id))
+      .for('update');
+    if (rows.length !== versions.length) throw new Error('RESOURCE_CAS_CONFLICT');
+    for (const version of versions) {
+      const row = rows.find(({ settings }) => settings.id === version.id);
+      if (
+        !row ||
+        row.settings.agentId !== version.agentId ||
+        row.settings.documentId !== version.documentId ||
+        row.settings.deletedAt ||
+        !(row.settings.accessSelf & AgentAccess.WRITE) ||
+        row.settings.generation !== version.generation ||
+        row.doc.generation !== version.documentGeneration
+      )
+        throw new Error('RESOURCE_CAS_CONFLICT');
+    }
+  }
+
   private getDocumentStats(content: string) {
     if (!content) return { totalCharCount: 0, totalLineCount: 0 };
 
@@ -123,10 +168,12 @@ export class AgentDocumentModel {
       deletedByUserId: settings.deletedByUserId,
       description: doc.description ?? null,
       documentId: settings.documentId,
+      documentGeneration: doc.generation,
       editorData: doc.editorData ?? null,
       fileType: doc.fileType,
       filename: doc.filename ?? '',
       id: settings.id,
+      generation: settings.generation,
       metadata: (doc.metadata as Record<string, any> | null) ?? null,
       parentId: doc.parentId ?? null,
       policy,

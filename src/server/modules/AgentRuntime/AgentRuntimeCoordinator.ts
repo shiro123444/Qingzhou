@@ -1,4 +1,4 @@
-import { type AgentState } from '@lobechat/agent-runtime';
+import type { AgentState, HarnessRunBinding } from '@lobechat/agent-runtime';
 import debug from 'debug';
 
 import { type AgentOperationMetadata, type StepResult } from './AgentStateManager';
@@ -71,6 +71,7 @@ export class AgentRuntimeCoordinator {
   async createAgentOperation(
     operationId: string,
     data: {
+      harnessBinding?: HarnessRunBinding;
       agentConfig?: any;
       modelRuntimeConfig?: any;
       userId?: string;

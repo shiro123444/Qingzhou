@@ -1,4 +1,5 @@
 import { type SkillItem, skillsPrompts } from '@lobechat/prompts';
+import type { SkillRevisionRef } from '@lobechat/types';
 import debug from 'debug';
 
 import { BaseSystemRoleProvider } from '../base/BaseSystemRoleProvider';
@@ -34,6 +35,8 @@ export interface SkillMeta {
   identifier: string;
   location?: string;
   name: string;
+  /** Host-resolved immutable material; dynamic activation cannot replace its body. */
+  revision?: SkillRevisionRef;
 }
 
 /**

@@ -15,6 +15,8 @@ import {
 import type { ChatToolPayload, MessageToolCall, ModelUsage } from '@lobechat/types';
 import { RequestTrigger } from '@lobechat/types';
 
+import type { LearningBudgetBinding } from '@/server/runtime/improvement/budget';
+
 import type { NightlyReviewContext } from './review/collect';
 import type { SelfReviewIdea, SelfReviewProposalBaseSnapshot } from './review/proposal';
 import type {
@@ -63,6 +65,8 @@ export type WriteToolName =
 
 /** Artifact-only tools that update runtime ideas or intents without direct resource mutation. */
 export type ArtifactToolName =
+  | 'proposeHarnessInstruction'
+  | 'readHarnessSource'
   | 'recordReflectionIdea'
   | 'recordSelfFeedbackIntent'
   | 'recordSelfReviewIdea';
@@ -112,6 +116,7 @@ export interface ExecuteSelfIterationInput {
   agentId: string;
   /** Bounded nightly review context collected before the run. */
   context: ExecuteSelfIterationContext;
+  learningBudget?: LearningBudgetBinding;
   /** Maximum AgentRuntime steps allowed for the LLM/tool loop. */
   maxSteps: number;
   /**
@@ -156,6 +161,8 @@ export interface ExecuteSelfIterationResult {
   ideas: SelfReviewIdea[];
   /** Immediate self-feedback intents captured by reflection/intent modes. */
   intents: SelfFeedbackIntent[];
+  /** Private dispatch material, populated only by the trusted budgeted server path. */
+  learningRequests?: Record<string, unknown>[];
   /** Aggregate runtime status before sink-specific projection. */
   status: ReviewRunStatus;
   /** AgentRuntime steps consumed before stopping. */
@@ -257,7 +264,7 @@ const intentSchema = createObjectSchema(
 /**
  * Tool manifest used to expose current safe read/write tools to the model.
  */
-const createToolManifest = (mode: IterationMode): LobeToolManifest => {
+const createToolManifest = (mode: IterationMode, harnessEnabled = false): LobeToolManifest => {
   const resourceTools = [
     {
       description: 'List managed skills visible in the reviewed agent scope.',
@@ -423,7 +430,34 @@ const createToolManifest = (mode: IterationMode): LobeToolManifest => {
   ];
 
   return {
-    api: [...resourceTools, ...(mode === 'review' ? reviewTools : reflectionTools)],
+    api: [
+      ...resourceTools,
+      ...(mode === 'review' ? reviewTools : reflectionTools),
+      ...(harnessEnabled
+        ? [
+            {
+              name: 'readHarnessSource',
+              description:
+                'Read the frozen source instructions before proposing a bounded improvement. No evaluation results or heldout tasks are available.',
+              parameters: createObjectSchema({}),
+            },
+            {
+              name: 'proposeHarnessInstruction',
+              description:
+                'Record complete candidate instructions and supporting visible evidence for user review. This does not run an experiment or change behavior. Preserve existing task requirements; use readHarnessSource first.',
+              parameters: createObjectSchema(
+                {
+                  baselineId: stringSchema,
+                  systemRole: stringSchema,
+                  rationale: stringSchema,
+                  evidenceIds: stringArraySchema,
+                },
+                ['baselineId', 'systemRole', 'rationale', 'evidenceIds'],
+              ),
+            },
+          ]
+        : []),
+    ],
     identifier: selfIterationToolIdentifier,
     meta: {
       description: 'Read evidence and apply safe resource operations.',
@@ -756,6 +790,29 @@ const executeRuntimeTool = async (
     };
   }
 
+  if (apiName === 'readHarnessSource' || apiName === 'proposeHarnessInstruction') {
+    if (!input.tools.harness) return createToolError('Harness proposals are unavailable');
+    if (apiName === 'readHarnessSource')
+      return { data: await input.tools.harness.readSource(), isWrite: false, success: true };
+    const baselineId = toNullableString(args.baselineId),
+      systemRole = toNullableString(args.systemRole),
+      rationale = toNullableString(args.rationale);
+    if (!baselineId || !systemRole || !rationale)
+      return createToolError(
+        'Complete instructions, source version and evidence rationale are required',
+      );
+    return {
+      data: await input.tools.harness.propose({
+        baselineId,
+        systemRole,
+        rationale,
+        evidenceIds: toStringArray(args.evidenceIds),
+      }),
+      isWrite: false,
+      success: true,
+    };
+  }
+
   if (apiName === 'listSelfReviewProposals') {
     return {
       data: await input.tools.listSelfReviewProposals({
@@ -1052,7 +1109,7 @@ export const executeSelfIteration = async (
     async (runSpan) => {
       const maxSteps = Math.max(1, input.maxSteps);
       const toolNameResolver = new ToolNameResolver();
-      const manifest = createToolManifest(getIterationMode(input));
+      const manifest = createToolManifest(getIterationMode(input), Boolean(input.tools.harness));
       const manifestMap = {
         [selfIterationToolIdentifier]: manifest,
       };
@@ -1063,6 +1120,8 @@ export const executeSelfIteration = async (
       const intents: SelfFeedbackIntent[] = [];
       const toolCalls: ChatToolPayload[] = [];
       const usage: ModelUsage[] = [];
+      const learningRequests: Record<string, unknown>[] = [];
+      let paidAttempt = 0;
       const writeOutcomes: RuntimeWriteOutcome[] = [];
       const runtime = new AgentRuntime(
         new GeneralChatAgent({
@@ -1084,29 +1143,66 @@ export const executeSelfIteration = async (
               let modelUsage: ModelUsage | undefined;
               let rawToolCalls: MessageToolCall[] = [];
 
-              const response = await input.modelRuntime.chat(
-                {
+              const send = async (signal?: AbortSignal) => {
+                const response = await input.modelRuntime.chat(
+                  {
+                    messages: payload.messages,
+                    model: input.model,
+                    stream: true,
+                    ...(input.learningBudget ? { max_tokens: 512 } : {}),
+                    tools: state.forceFinish ? [] : runtimeTools,
+                  },
+                  {
+                    ...(signal ? { signal } : {}),
+                    callback: {
+                      onCompletion: (data) => {
+                        modelUsage = data.usage;
+                      },
+                      onText: (text) => {
+                        content += text;
+                      },
+                      onToolsCalling: ({ toolsCalling }) => {
+                        rawToolCalls = toolsCalling;
+                      },
+                    },
+                    metadata: { trigger: RequestTrigger.AgentSignal },
+                  },
+                );
+                await consumeStreamUntilDone(response);
+                return { modelUsage };
+              };
+              if (input.learningBudget) {
+                const request = {
                   messages: payload.messages,
                   model: input.model,
-                  stream: true,
                   tools: state.forceFinish ? [] : runtimeTools,
-                },
-                {
-                  callback: {
-                    onCompletion: (data) => {
-                      modelUsage = data.usage;
-                    },
-                    onText: (text) => {
-                      content += text;
-                    },
-                    onToolsCalling: ({ toolsCalling }) => {
-                      rawToolCalls = toolsCalling;
-                    },
+                  max_tokens: 512,
+                };
+                if (new TextEncoder().encode(JSON.stringify(request)).length > 131072)
+                  throw new Error('LEARNING_BUDGET_INPUT_LIMIT');
+                learningRequests.push(request);
+                await input.learningBudget.perform(
+                  {
+                    id: `call:${paidAttempt++}`,
+                    request,
+                    reserved: { calls: 1, tokens: 132608, costMicros: 50000 },
+                    measure: (value) => ({
+                      ...(value.modelUsage?.totalInputTokens !== undefined &&
+                      value.modelUsage?.totalOutputTokens !== undefined
+                        ? {
+                            tokens:
+                              value.modelUsage.totalInputTokens +
+                              value.modelUsage.totalOutputTokens,
+                          }
+                        : {}),
+                      ...(value.modelUsage?.cost !== undefined
+                        ? { costMicros: Math.ceil(value.modelUsage.cost * 1000000) }
+                        : {}),
+                    }),
                   },
-                  metadata: { trigger: RequestTrigger.AgentSignal },
-                },
-              );
-              await consumeStreamUntilDone(response);
+                  send,
+                );
+              } else await send();
 
               if (content) contentParts.push(content);
               if (modelUsage) usage.push(modelUsage);
@@ -1155,6 +1251,7 @@ export const executeSelfIteration = async (
               };
             },
             call_tool: async (instruction, state) => {
+              await input.learningBudget?.assertActive();
               const payload = (
                 instruction as {
                   payload: {
@@ -1258,6 +1355,7 @@ export const executeSelfIteration = async (
             break;
           }
 
+          await input.learningBudget?.assertActive();
           const result = await tracer.startActiveSpan(
             'agent_signal.self_iteration_agent.step',
             {
@@ -1312,6 +1410,7 @@ export const executeSelfIteration = async (
 
         return {
           actions: writeOutcomes,
+          ...(input.learningBudget ? { learningRequests } : {}),
           content: contentParts.join(''),
           ideas,
           intents,

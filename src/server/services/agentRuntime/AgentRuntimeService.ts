@@ -25,7 +25,17 @@ import {
   StepLeaseLostError,
 } from '@/server/modules/AgentRuntime/stepLease';
 import { type IStreamEventManager } from '@/server/modules/AgentRuntime/types';
+import {
+  contextStrategyComposition,
+  type PromptStrategy,
+} from '@/server/runtime/improvement/context-strategy';
+import { selectActiveHarness } from '@/server/runtime/improvement/production';
+import { skillMaterialBinding } from '@/server/runtime/improvement/skill-material';
 import { emitAgentSignalSourceEvent } from '@/server/services/agentSignal';
+import {
+  isAgentSignalEnabledForUser,
+  isLobeAiAgentSlug,
+} from '@/server/services/agentSignal/featureGate';
 import { toAgentSignalTraceEvents } from '@/server/services/agentSignal/observability/traceEvents';
 import { mcpService } from '@/server/services/mcp';
 import { QueueService } from '@/server/services/queue';
@@ -36,6 +46,7 @@ import { BuiltinToolsExecutor } from '@/server/services/toolExecution/builtin';
 
 import { isAbortError, throwIfAborted } from './abort';
 import { CompletionLifecycle } from './CompletionLifecycle';
+import { bindOperationBehavior, captureOperationHarness, restoreOperationHarness } from './harness';
 import { hookDispatcher } from './hooks';
 import type { HookDispatchFailure } from './hooks/HookDispatcher';
 import { collectBotCallbackIntents } from './hooks/payload';
@@ -291,6 +302,22 @@ export class AgentRuntimeService {
       initialStepCount = 0,
     } = params;
 
+    throwIfAborted(signal, 'Agent execution aborted before configuration capture');
+    let harness = await captureOperationHarness(
+      { ...params, userId: this.userId },
+      !this.agentFactory,
+    );
+    const learningEnabled =
+      process.env.QINGZHOU_HARNESS_LEARNING_ENABLED === '1' &&
+      (isLobeAiAgentSlug(agentConfig?.slug) ||
+        agentConfig?.chatConfig?.selfIteration?.enabled === true) &&
+      (await isAgentSignalEnabledForUser(this.serverDB, this.userId));
+    if (harness.revision.schemaVersion === 2 && harness.revision.material.configurationComplete) {
+      const selection = await selectActiveHarness(harness.revision, learningEnabled, this.serverDB);
+      harness = await bindOperationBehavior(harness, selection.revision, selection.publicationRef);
+    }
+    throwIfAborted(signal, 'Agent execution aborted during configuration capture');
+
     // Persist initial agent_operations row. CompletionLifecycle owns both
     // ends of the persistence lifecycle (start row here, terminal update
     // in dispatchHooks) and swallows DB errors so runtime startup is never
@@ -348,6 +375,8 @@ export class AgentRuntimeService {
         // Use the passed initial messages
         messages: initialMessages,
         metadata: {
+          harness,
+          harnessRevisionId: harness.revision.id,
           activeDeviceId,
           agentConfig,
           botContext,
@@ -385,9 +414,11 @@ export class AgentRuntimeService {
       } as Partial<AgentState>;
 
       // Use coordinator to create operation, automatically sends initialization event
+      await restoreOperationHarness(initialState, operationId, this.userId);
       await this.coordinator.createAgentOperation(operationId, {
-        agentConfig,
-        modelRuntimeConfig,
+        harnessBinding: harness.binding,
+        agentConfig: initialState.metadata?.agentConfig,
+        modelRuntimeConfig: initialState.metadata?.modelRuntimeConfig,
         userId,
       });
       operationCreated = true;
@@ -671,6 +702,7 @@ export class AgentRuntimeService {
       }
 
       // Create Agent and Runtime instances
+      await restoreOperationHarness(agentState, operationId, this.userId);
       // Use agentState.metadata which contains the full app context (topicId, agentId, etc.)
       // operationMetadata only contains basic fields (agentConfig, modelRuntimeConfig, userId)
       const { runtime } = await this.createAgentRuntime({
@@ -1500,6 +1532,11 @@ export class AgentRuntimeService {
     signal?: AbortSignal;
     assertStepLease?: () => void;
   }) {
+    if (
+      metadata?.harness?.revision?.material?.implementation === 'custom-agent-unverified' &&
+      !this.agentFactory
+    )
+      throw new Error('HARNESS_RUNTIME_IMPLEMENTATION_MISSING');
     const contextWindowTokens =
       metadata?.modelRuntimeConfig?.model && metadata?.modelRuntimeConfig?.provider
         ? await getModelPropertyWithFallback<number | undefined>(
@@ -1550,8 +1587,18 @@ export class AgentRuntimeService {
 
     // Create Agent Runtime instance
     const runtime = new AgentRuntime(agent as any, {
+      composition: contextStrategyComposition(
+        (metadata?.harness?.revision?.material?.contextPolicy?.promptStrategy ??
+          'standard') as PromptStrategy,
+        false,
+        skillMaterialBinding(metadata?.harness?.revision?.material?.contextPolicy),
+      ),
       executors: createRuntimeExecutors(executorContext),
     });
+    executorContext.transformSystemRole = (text) =>
+      runtime.cordis.native.get('qingzhou.context.instructions')!(text);
+    executorContext.transformSkills = (skills, signal) =>
+      runtime.cordis.native.get('qingzhou.context.skill-material')!(skills, signal);
 
     return { agent, runtime };
   }
@@ -1605,7 +1652,8 @@ export class AgentRuntimeService {
               activeDeviceId,
               devicePlatform: msg.pluginState?.metadata?.devicePlatform as string | undefined,
               deviceSystemInfo: msg.pluginState?.metadata?.deviceSystemInfo as
-                Record<string, string> | undefined,
+                | Record<string, string>
+                | undefined,
             };
           }
         },

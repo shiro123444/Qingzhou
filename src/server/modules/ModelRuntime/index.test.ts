@@ -30,6 +30,7 @@ import {
   buildPayloadFromKeyVaults,
   initModelRuntimeWithUserPayload,
   resolveRuntimeProvider,
+  singleDispatchOptions,
 } from './index';
 
 // 模拟依赖项
@@ -69,6 +70,15 @@ vi.mock('@/envs/llm', () => ({
  * with user payload. Test case below will test both the methods
  */
 describe('initModelRuntimeWithUserPayload method', () => {
+  it('requires an audited single-dispatch transport and disables SDK retries', () => {
+    const options = singleDispatchOptions(ModelProvider.OpenAI);
+    const runtime = new LobeOpenAI({ apiKey: 'fixture-key', ...options });
+    expect(runtime.client.maxRetries).toBe(0);
+    expect(singleDispatchOptions(ModelProvider.DeepSeek)).toEqual({ maxRetries: 0 });
+    expect(() => singleDispatchOptions(ModelProvider.Google)).toThrow(
+      'HARNESS_PROVIDER_SINGLE_DISPATCH_UNSUPPORTED',
+    );
+  });
   it('preserves Nexus user credentials and model despite unrelated chat environment values', async () => {
     vi.stubEnv('ANTHROPIC_AUTH_TOKEN', 'deployment-chat-key');
     vi.stubEnv('ANTHROPIC_BASE_URL', 'https://deployment.example.test');
