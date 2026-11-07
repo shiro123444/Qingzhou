@@ -661,6 +661,11 @@ export const desktopRoutes: RouteObject[] = [
         path: 'runtime',
       },
 
+      // Music workspace
+      {
+        element: dynamicElement(() => import('@/routes/(main)/music'), 'Desktop > Music'),
+        path: 'music',
+      },
       // PresentationStudio routes
       {
         children: [

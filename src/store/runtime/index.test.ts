@@ -14,7 +14,6 @@ describe('RuntimeStore', () => {
   const createMockClient = (overrides: Partial<RuntimeClient> = {}): RuntimeClient => ({
     answerPresentationDecision: vi.fn().mockResolvedValue({} as any),
     listPresentationJobs: vi.fn().mockResolvedValue([]),
-    updatePresentationPresence: vi.fn().mockResolvedValue({} as any),
     sendPresentationMessage: vi.fn().mockResolvedValue({} as any),
     cancelPresentationJob: vi.fn().mockResolvedValue({} as any),
     cancelRun: vi.fn().mockResolvedValue(undefined),
@@ -54,6 +53,7 @@ describe('RuntimeStore', () => {
       yield;
     }),
     unmountPlugin: vi.fn().mockResolvedValue('disabled'),
+    updatePresentationPresence: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   });
 

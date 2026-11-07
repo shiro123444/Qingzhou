@@ -38,6 +38,47 @@ afterEach(async () => {
 });
 
 describe('FileModel', () => {
+  describe('queryAudio', () => {
+    it('bounds the audio catalog and excludes other accounts and documents', async () => {
+      await serverDB.insert(files).values([
+        { id: 'music-a', userId, name: 'Rain A', fileType: 'audio/mpeg', size: 10, url: 'a' },
+        { id: 'music-b', userId, name: 'Rain B', fileType: 'audio/wav', size: 10, url: 'b' },
+        {
+          id: 'music-other',
+          userId: 'user2',
+          name: 'Rain private',
+          fileType: 'audio/mpeg',
+          size: 10,
+          url: 'c',
+        },
+        { id: 'music-doc', userId, name: 'Rain doc', fileType: 'text/plain', size: 10, url: 'd' },
+      ]);
+      expect(await fileModel.queryAudio({ query: 'rain', limit: 50 })).toHaveLength(2);
+      expect(await fileModel.queryAudio({ query: '', limit: 1 })).toHaveLength(1);
+    });
+    it('treats percent, underscore and backslash as literal search characters', async () => {
+      await serverDB.insert(files).values([
+        {
+          id: 'music-literal',
+          userId,
+          name: '50%_\\Rain',
+          fileType: 'audio/mpeg',
+          size: 10,
+          url: 'a',
+        },
+        {
+          id: 'music-wildcard',
+          userId,
+          name: '50xxxxRain',
+          fileType: 'audio/mpeg',
+          size: 10,
+          url: 'b',
+        },
+      ]);
+      const matches = await fileModel.queryAudio({ query: '%_\\', limit: 50 });
+      expect(matches.map((item) => item.id)).toEqual(['music-literal']);
+    });
+  });
   describe('create', () => {
     it('should create a new file', async () => {
       const params = {

@@ -346,6 +346,23 @@ export class FileModel {
     return query.where(whereClause).orderBy(orderByClause);
   };
 
+  /** Bounded account-owned audio catalog; search text is literal, not an ILIKE pattern. */
+  queryAudio = async ({ query, limit }: { query: string; limit: number }) => {
+    const escaped = query.replace(/[\\%_]/gu, '\\$&');
+    return this.db
+      .select()
+      .from(files)
+      .where(
+        and(
+          eq(files.userId, this.userId),
+          ilike(files.fileType, 'audio/%'),
+          query ? ilike(files.name, `%${escaped}%`) : undefined,
+        ),
+      )
+      .orderBy(desc(files.createdAt), asc(files.id))
+      .limit(limit);
+  };
+
   findByIds = async (ids: string[]) => {
     return this.db.query.files.findMany({
       where: and(inArray(files.id, ids), eq(files.userId, this.userId)),
