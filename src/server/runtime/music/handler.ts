@@ -105,3 +105,15 @@ export async function handleMusicStream(request: Request, id: string, provider: 
     return musicErrorResponse(error, request);
   }
 }
+
+export async function handleMusicCover(request: Request, id: string, provider: MusicProvider) {
+  try {
+    if (request.headers.get('sec-fetch-site') === 'cross-site')
+      throw new MusicError('MUSIC_FORBIDDEN', 403);
+    z.string().min(1).max(200).parse(id);
+    if (!provider.cover) throw new MusicError('MUSIC_TRACK_UNAVAILABLE', 404);
+    return await provider.cover(id, request);
+  } catch (error) {
+    return musicErrorResponse(error, request);
+  }
+}

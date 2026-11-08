@@ -138,6 +138,29 @@ describe('bounded 3D glass ray tree', () => {
     expect(direct.origin[0]).toBeCloseTo(exitX - 10 * Math.tan(exitAngle), 3);
   });
 
+  it('preserves the real background through three to eight stacked panes without spending reflection work on the direct ray', () => {
+    for (const count of [3, 8]) {
+      const volumes = Array.from({ length: count }, (_, index) => ({
+        ...glass,
+        center: [0, 0, 12 + index * 18] as const,
+        id: `pane-${index}`,
+      }));
+      const result = traceGlassScene(orthographicRay(0, 0, 200), {
+        planes: [background],
+        volumes,
+      });
+      const direct = result.samples.find(
+        (sample) => sample.kind === 'plane' && sample.reflections === 0,
+      )!;
+      expect(direct.sourceId).toBe('background');
+      expect(direct.interfaces).toBe(count * 2);
+      expect(direct.weight[0]).toBeCloseTo(0.96 ** (count * 2), 10);
+      expect(direct.approximate).toBe(false);
+      expect(result.stats.maxReflections).toBeLessThanOrEqual(2);
+      for (const channel of [0, 1, 2]) expect(totalWeight(result, channel)).toBeCloseTo(1, 10);
+    }
+  });
+
   it('reflects a registered plane above the glass, and terminates at closer opaque occluders', () => {
     const upperPlane = { ...background, center: [0, 0, 50] as const, id: 'upper-content' };
     const result = traceGlassScene(

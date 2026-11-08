@@ -38,6 +38,7 @@ interface DockGeometry {
   panelMaxHeight: number;
   panelSide: 'above' | 'below';
   point: DockPoint;
+  rootHeight: number;
   rootWidth: number;
   rtl: boolean;
   size: DockSize;
@@ -116,6 +117,8 @@ export function useCapsulePosition({
     anchor: null,
   });
   const drag = useRef<DragSession | null>(null);
+  const morphAnchor = useRef<DockAnchor | null>(null);
+  const previousShape = useRef({ collapsed, userId });
   const suppressClick = useRef(false);
   const blockedRange = useRef<HTMLInputElement | null>(null);
   const latestPointer = useRef<DockPoint>({ x: 0, y: 0 });
@@ -138,7 +141,14 @@ export function useCapsulePosition({
     const size = { width: rect.width, height: rect.height };
     const viewport = readViewport();
     const obstacles = avoidRects(viewport);
-    const anchor = drag.current?.anchor ?? preferred.current.anchor;
+    if (previousShape.current.collapsed !== collapsed && previousShape.current.userId === userId) {
+      const previous = geometry.current;
+      if (previous)
+        morphAnchor.current = dockPointToAnchor(previous.point, previous.size, previous.viewport);
+    }
+    previousShape.current = { collapsed, userId };
+    // An untouched default still grows from its current corner instead of jumping to a new dock.
+    const anchor = drag.current?.anchor ?? preferred.current.anchor ?? morphAnchor.current;
     const wanted = anchor
       ? dockAnchorToPoint(anchor, size, viewport)
       : defaultDockPoint(size, viewport, collapsed);
@@ -150,6 +160,7 @@ export function useCapsulePosition({
       viewport,
       offsetX: rect.left - rootRect.left,
       offsetY: rect.top - rootRect.top,
+      rootHeight: rootRect.height,
       rootWidth: rootRect.width,
       rtl: getComputedStyle(root).direction === 'rtl',
       panelSide: panel.side,
@@ -185,6 +196,8 @@ export function useCapsulePosition({
         setStorageWarning(true);
       }
     preferred.current = { userId, anchor };
+    morphAnchor.current = null;
+    previousShape.current = { collapsed, userId };
     measureRef.current();
   }, [userId]);
 
@@ -244,6 +257,7 @@ export function useCapsulePosition({
   const save = (anchor: DockAnchor | null) => {
     if (!userId || preferred.current.userId !== userId) return;
     preferred.current = { userId, anchor };
+    morphAnchor.current = null;
     try {
       if (anchor) localStorage.setItem(dockPositionKey(userId), serializeDockPosition(anchor));
       else localStorage.removeItem(dockPositionKey(userId));
@@ -465,13 +479,15 @@ export function useCapsulePosition({
   };
 
   const left = layout ? layout.point.x - layout.offsetX : 0;
-  const top = layout ? layout.point.y - layout.offsetY : 0;
+  const bottom = layout
+    ? window.innerHeight - (layout.point.y - layout.offsetY + layout.rootHeight)
+    : 0;
   const style: CSSProperties | undefined = layout
     ? ({
         'insetInlineStart': layout.rtl ? window.innerWidth - left - layout.rootWidth : left,
         'insetInlineEnd': 'auto',
-        'insetBlockStart': top,
-        'insetBlockEnd': 'auto',
+        'insetBlockStart': 'auto',
+        'insetBlockEnd': bottom,
         '--music-panel-max-height': `${layout.panelMaxHeight}px`,
       } as CSSProperties)
     : undefined;

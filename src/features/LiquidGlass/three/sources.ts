@@ -347,6 +347,17 @@ export function isLocalGlassResource(source: string, baseURI: string) {
   }
 }
 
+// The music atmosphere is a small raster generated from an already decoded, same-origin
+// cover. Inline only this self-contained form; external URLs and SVG resources stay excluded.
+export function isEmbeddedGlassBackground(value: string) {
+  if (/image-set\s*\(|paint\s*\(|image\s*\(/i.test(value)) return false;
+  const rest = value.replaceAll(
+    /url\((["']?)data:image\/(?:png|jpe?g|webp);base64,[a-z\d+/=]+\1\)/gi,
+    '',
+  );
+  return !/url\s*\(/i.test(rest);
+}
+
 function inlineLoadedImage(source: Element) {
   const document = source.ownerDocument;
   const view = document.defaultView;
@@ -439,7 +450,7 @@ export function serializeGlassWallpaper(source: HTMLElement, bounds: GlassSource
     'background-size',
   ]) {
     const value = style.getPropertyValue(property);
-    if (value && !/url\s*\(|image-set\s*\(|paint\s*\(|image\s*\(/i.test(value)) {
+    if (value && isEmbeddedGlassBackground(value)) {
       paint.style.setProperty(property, value);
     }
   }

@@ -105,6 +105,68 @@ afterEach(() => {
 });
 
 describe('shared AudioEngine', () => {
+  it('replays a restored finished preview from the start on the first Play click', async () => {
+    const { audio, client, engine, state, storage } = setup();
+    const preview: MusicTrack = {
+      ...track('a'),
+      source: 'kugou',
+      playbackKind: 'preview',
+      durationMs: 60000,
+    };
+    vi.mocked(client.track).mockResolvedValue(preview);
+    vi.mocked(client.resolve).mockResolvedValue({ ...playback('a'), track: preview });
+    storage.set(
+      'qingzhou:music:v1:alice',
+      JSON.stringify({
+        activeId: 'a',
+        ids: ['a'],
+        positionMs: 60000,
+        lyrics: {},
+        repeat: 'sequence',
+        shuffle: false,
+        volume: 0.8,
+      }),
+    );
+    await engine.setAccount('alice');
+    expect(state()).toMatchObject({ activeId: 'a', status: 'paused', positionMs: 60000 });
+    expect(audio.play).not.toHaveBeenCalled();
+    engine.play();
+    await settle();
+    audio.duration = 269;
+    audio.metadata();
+    expect(state()).toMatchObject({ status: 'playing', positionMs: 0, durationMs: 60000 });
+    expect(audio.currentTime).toBe(0);
+    expect(audio.play).toHaveBeenCalledTimes(1);
+  });
+  it('uses the granted preview duration when the MP3 retains a full-song header', async () => {
+    const { audio, client, engine, state } = setup();
+    await engine.setAccount('alice');
+    const preview: MusicTrack = {
+      ...track('a'),
+      source: 'kugou',
+      playbackKind: 'preview',
+      durationMs: 60000,
+      artist: 'Artist',
+      coverUrl: '/api/runtime/music/tracks/a/cover',
+    };
+    vi.mocked(client.resolve).mockResolvedValue({ ...playback('a'), track: preview });
+    engine.playTrack({ ...preview, durationMs: 269000 });
+    await settle();
+    audio.duration = 269;
+    audio.metadata();
+    expect(state().durationMs).toBe(60000);
+    expect(state().queue[0]).toEqual(preview);
+    engine.seek(240000);
+    expect(audio.currentTime).toBe(60);
+    audio.currentTime = 60.1;
+    audio.emit('timeupdate');
+    expect(state().positionMs).toBe(60000);
+    expect(state().status).toBe('ended');
+    expect(audio.paused).toBe(true);
+    // Real media dispatches pause asynchronously after the preview was finished.
+    audio.emit('pause');
+    expect(state().status).toBe('ended');
+  });
   it('bounds the queue and rejects invalid lyrics without replacing existing lines', async () => {
     const { engine, state } = setup();
     await engine.setAccount('alice');

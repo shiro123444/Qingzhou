@@ -8,13 +8,13 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
         145deg,
         color-mix(in srgb, var(--qz-glass-highlight) 35%, transparent),
         transparent 42%,
-        color-mix(in srgb, var(--music-accent) 7%, transparent)
+        rgb(255 255 255 / 2%)
       ),
       var(--qz-glass-strong);
     backdrop-filter: var(--qz-glass-filter);
     box-shadow:
       inset 0 1px 1px var(--qz-glass-highlight),
-      inset 0 -1px 1px color-mix(in srgb, var(--music-accent) 18%, transparent),
+      inset 0 -1px 1px rgb(0 0 0 / 8%),
       var(--qz-glass-shadow);
 
     &::before,
@@ -51,6 +51,24 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     }
   `,
   dock: css`
+    --music-dock-width: min(380px, calc(100vw - 48px));
+    --music-spring-duration: 520ms;
+    --music-spring-ease: linear(
+      0,
+      0.09,
+      0.29,
+      0.52,
+      0.73,
+      0.88,
+      0.97,
+      1.015,
+      1.025,
+      1.018,
+      1.009,
+      1.003,
+      1
+    );
+
     pointer-events: none;
 
     position: fixed;
@@ -63,7 +81,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     gap: 12px;
     align-items: flex-end;
 
-    width: min(380px, calc(100vw - 48px));
+    width: var(--music-dock-width);
 
     > * {
       pointer-events: auto;
@@ -77,10 +95,21 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       inset-block-end: max(108px, calc(env(safe-area-inset-bottom) + 96px));
     }
 
+    @media (prefers-reduced-motion: reduce) {
+      --music-spring-duration: 0ms;
+
+      &,
+      & * {
+        transition-delay: 0ms !important;
+        transition-duration: 0ms !important;
+      }
+    }
+
     @media (width <= 600px) {
+      --music-dock-width: min(350px, calc(100vw - 24px));
+
       inset-block-end: max(12px, env(safe-area-inset-bottom));
       inset-inline-end: 12px;
-      width: min(350px, calc(100vw - 24px));
 
       &[data-collapsed='false'] {
         inset-block-end: max(104px, calc(env(safe-area-inset-bottom) + 88px));
@@ -94,18 +123,26 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     position: relative;
 
-    display: flex;
-    gap: 12px;
-    align-items: center;
+    overflow: hidden;
 
     box-sizing: border-box;
     width: 100%;
+    max-width: calc(100vw - 24px);
     height: 76px;
-    padding-block: 12px;
-    padding-inline: 14px;
     border-radius: 38px;
 
     color: ${cssVar.colorText};
+
+    transition:
+      width var(--music-spring-duration) var(--music-spring-ease),
+      height var(--music-spring-duration) var(--music-spring-ease),
+      border-radius var(--music-spring-duration) var(--music-spring-ease);
+
+    [data-collapsed='true'] & {
+      width: 60px;
+      height: 60px;
+      border-radius: 30px;
+    }
 
     &:active {
       cursor: grabbing;
@@ -114,6 +151,47 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     &:focus-visible {
       outline: 2px solid ${cssVar.colorPrimary};
       outline-offset: 3px;
+    }
+  `,
+  expanded: css`
+    position: absolute;
+    inset-block: 0;
+    inset-inline-start: 0;
+    transform-origin: left center;
+    transform: scale(1);
+
+    display: flex;
+    gap: 12px;
+    align-items: center;
+
+    box-sizing: border-box;
+    width: var(--music-dock-width);
+    padding-block: 12px;
+    padding-inline: 14px;
+
+    opacity: 1;
+
+    transition:
+      opacity 180ms ease,
+      transform var(--music-spring-duration) var(--music-spring-ease),
+      visibility 0s;
+
+    [dir='rtl'] & {
+      transform-origin: right center;
+    }
+
+    [data-collapsed='true'] & {
+      pointer-events: none;
+
+      transform: scale(0.94);
+
+      visibility: hidden;
+      opacity: 0;
+
+      transition:
+        opacity 120ms ease,
+        transform var(--music-spring-duration) var(--music-spring-ease),
+        visibility 0s 120ms;
     }
 
     @media (width <= 390px) {
@@ -150,21 +228,15 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     color: var(--music-cover-ink);
 
-    background:
-      radial-gradient(
-        ellipse at 90% 6%,
-        color-mix(in srgb, #b7f0db 46%, transparent) 0,
-        transparent 58%
-      ),
-      radial-gradient(
-        ellipse at 10% 108%,
-        color-mix(in srgb, var(--music-accent) 28%, transparent) 0,
-        transparent 65%
-      ),
-      var(--music-cover-bg);
-    box-shadow:
-      inset 0 1px 1px var(--qz-glass-highlight),
-      inset 0 -1px 1px color-mix(in srgb, var(--music-accent) 18%, transparent);
+    background: color-mix(in srgb, ${cssVar.colorText} 5%, var(--qz-glass-surface));
+    box-shadow: inset 0 1px 1px var(--qz-glass-highlight);
+
+    img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
   `,
   recordLabel: css`
     display: grid;
@@ -286,15 +358,15 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     border: 1px solid color-mix(in srgb, var(--qz-glass-highlight) 65%, transparent);
     border-radius: 50%;
 
-    color: var(--music-accent);
+    color: ${cssVar.colorText};
 
     background:
       radial-gradient(ellipse at 28% 15%, var(--qz-glass-highlight), transparent 62%),
       color-mix(in srgb, var(--qz-glass-surface) 80%, transparent);
     box-shadow:
       inset 0 1px 2px var(--qz-glass-highlight),
-      inset 0 -1px 2px color-mix(in srgb, var(--music-accent) 18%, transparent),
-      0 3px 10px color-mix(in srgb, var(--music-accent) 9%, transparent);
+      inset 0 -1px 2px rgb(0 0 0 / 8%),
+      0 3px 10px rgb(0 0 0 / 6%);
 
     transition:
       background 150ms,
@@ -412,37 +484,42 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     }
   `,
   orb: css`
-    touch-action: none;
-    cursor: grab;
-    user-select: none;
+    pointer-events: none;
 
-    position: relative;
+    position: absolute;
+    inset: 0;
+    transform: scale(0.86);
 
-    box-sizing: border-box;
-    width: 60px;
-    height: 60px;
-    padding: 5px;
-    border-radius: 30px;
+    display: grid;
+    place-items: center;
+
+    visibility: hidden;
+    opacity: 0;
+
+    transition:
+      opacity 140ms ease,
+      transform var(--music-spring-duration) var(--music-spring-ease),
+      visibility 0s 140ms;
+
+    [data-collapsed='true'] & {
+      pointer-events: auto;
+
+      transform: scale(1);
+
+      visibility: visible;
+      opacity: 1;
+
+      transition:
+        opacity 180ms ease 70ms,
+        transform var(--music-spring-duration) var(--music-spring-ease),
+        visibility 0s;
+    }
 
     > button {
       cursor: pointer;
-
-      width: 100%;
-      height: 100%;
-      padding: 0;
-      border: 0;
-      border-radius: 25px;
-
-      background: transparent;
-    }
-
-    &:active {
-      cursor: grabbing;
-    }
-
-    &:focus-visible {
-      outline: 2px solid ${cssVar.colorPrimary};
-      outline-offset: 3px;
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
     }
   `,
   orbIndicator: css`
@@ -458,13 +535,20 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     background: var(--music-accent);
   `,
   panel: css`
+    --music-panel-shift: 10px;
+
+    pointer-events: none;
+
     position: absolute;
     inset-block-end: calc(100% + 12px);
     inset-inline-end: 0;
+    transform-origin: bottom right;
+    transform: translateY(var(--music-panel-shift)) scale(0.9);
 
     overflow: auto;
     overscroll-behavior: contain;
 
+    box-sizing: border-box;
     width: 100%;
     max-height: var(--music-panel-max-height, calc(100dvh - 120px));
     padding: 16px;
@@ -472,10 +556,42 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     color: ${cssVar.colorText};
 
+    visibility: hidden;
+    opacity: 0;
     background: var(--qz-glass-strong);
 
+    transition:
+      opacity 180ms ease,
+      transform var(--music-spring-duration) var(--music-spring-ease),
+      visibility 0s var(--music-spring-duration);
+
+    &[data-open='true'] {
+      pointer-events: auto;
+
+      transform: translateY(0) scale(1);
+
+      visibility: visible;
+      opacity: 1;
+
+      transition:
+        opacity 180ms ease,
+        transform var(--music-spring-duration) var(--music-spring-ease),
+        visibility 0s;
+    }
+
+    [dir='rtl'] & {
+      transform-origin: bottom left;
+    }
+
     [data-panel-side='below'] & {
+      --music-panel-shift: -10px;
+
       inset-block: calc(100% + 12px) auto;
+      transform-origin: top right;
+
+      [dir='rtl'] & {
+        transform-origin: top left;
+      }
     }
   `,
   panelHeading: css`

@@ -37,7 +37,7 @@ export interface GlassScene {
 export interface TraceOptions {
   epsilon?: number;
   maxDistance?: number;
-  /** Bounded reference path, at most four boundary interactions per branch. */
+  /** Override the direct-path limit (default: two interfaces per registered volume, at least four). */
   maxInterfaces?: number;
   maxReflectionBounces?: number;
   /** Drop branches whose maximum RGB weight is below this threshold. */
@@ -212,7 +212,10 @@ export const traceGlassScene = (
   const epsilon = options.epsilon ?? RAY_EPSILON;
   const maxDistance = options.maxDistance ?? 100_000;
   const minWeight = options.minWeight ?? 0.01;
-  const maxInterfaces = Math.min(4, Math.max(0, Math.floor(options.maxInterfaces ?? 4)));
+  const maxInterfaces = Math.min(
+    16,
+    Math.max(0, Math.floor(options.maxInterfaces ?? Math.max(4, scene.volumes.length * 2))),
+  );
   const maxReflections = Math.min(2, Math.max(0, Math.floor(options.maxReflectionBounces ?? 2)));
   if (
     ![epsilon, maxDistance, minWeight, maxInterfaces, maxReflections].every(Number.isFinite) ||
@@ -370,7 +373,7 @@ export const traceGlassScene = (
     if (!glassHit) continue;
     const { hit, volume } = glassHit;
     const atSurface: Path = { ...travelled, ray: { ...path.ray, origin: hit.point } };
-    if (path.interfaces >= maxInterfaces) {
+    if (path.interfaces >= (path.reflections === 0 ? maxInterfaces : Math.min(4, maxInterfaces))) {
       environment(atSurface, 'interface-budget');
       continue;
     }

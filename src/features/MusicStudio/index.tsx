@@ -57,6 +57,7 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
   });
   const tracks = library.userId === s.userId ? library.tracks : [];
   const [query, setQuery] = useState('');
+  const [source, setSource] = useState<'library' | 'kugou'>('kugou');
   const [view, setView] = useState<StudioView>('player');
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -91,7 +92,7 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
     const timer = setTimeout(() => {
       setLoading(true);
       void engine.client
-        .search(query, 50, controller.signal)
+        .search(query, 50, controller.signal, source)
         .then((result) => {
           if (isCurrent()) {
             setLibrary({ tracks: result, userId: s.userId });
@@ -109,7 +110,7 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
       clearTimeout(timer);
       controller.abort();
     };
-  }, [engine, query, revision, s.userId]);
+  }, [engine, query, revision, s.userId, source]);
 
   async function uploadAudio(file?: File) {
     const controller = lifetime.current;
@@ -122,6 +123,7 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
       await engine.client.uploadAudio(file, controller.signal);
       if (isCurrent()) {
         setQuery('');
+        setSource('library');
         setView('library');
         setRevision((value) => value + 1);
       }
@@ -261,15 +263,28 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
         >
           <section aria-label={t('nowPlaying')} className={styles.player}>
             <div aria-hidden className={styles.cover}>
-              <Icon icon={Music2} size={{ size: 88, strokeWidth: 1.25 }} />
+              {active?.coverUrl ? (
+                <img alt="" decoding="async" key={active.coverUrl} src={active.coverUrl} />
+              ) : (
+                <Icon icon={Music2} size={{ size: 88, strokeWidth: 1.25 }} />
+              )}
             </div>
             <div className={styles.trackInfo}>
               <h2 className={styles.trackTitle} title={active?.name}>
                 {active?.name ?? t('chooseTrack')}
               </h2>
               <p className={styles.trackDescription}>
-                {active ? audioFormat(active) + ' · ' + audioSize(active) : t('fromLibrary')}
+                {active?.source === 'kugou'
+                  ? [active.artist, active.album].filter(Boolean).join(' · ')
+                  : active
+                    ? audioFormat(active) + ' · ' + audioSize(active)
+                    : t('fromLibrary')}
               </p>
+              {active?.source === 'kugou' && (
+                <p className={styles.sourceNote}>
+                  {t(active.playbackKind === 'preview' ? 'kugouPreview' : 'kugouSource')}
+                </p>
+              )}
             </div>
             <div className={styles.timeline}>
               <span>{formatTime(s.positionMs)}</span>
@@ -408,6 +423,22 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
             <h2>{t(view === 'queue' ? 'queue' : 'library')}</h2>
             <span>{displayedTracks.length}</span>
           </div>
+          {view === 'library' && (
+            <div aria-label={t('musicSource')} className={styles.sourceSelector} role="group">
+              {(['kugou', 'library'] as const).map((item) => (
+                <button
+                  aria-pressed={source === item}
+                  key={item}
+                  onClick={() => {
+                    setSource(item);
+                    setQuery('');
+                  }}
+                >
+                  {t(item === 'kugou' ? 'kugou' : 'localLibrary')}
+                </button>
+              ))}
+            </div>
+          )}
           <div className={styles.collectionToolbar}>
             <Button
               disabled={!displayedTracks.length}
@@ -422,10 +453,10 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
             {view !== 'queue' && (
               <Input
                 allowClear
-                aria-label={t('search')}
+                aria-label={t(source === 'kugou' ? 'searchKugou' : 'search')}
                 className={styles.search}
                 maxLength={200}
-                placeholder={t('search')}
+                placeholder={t(source === 'kugou' ? 'searchKugou' : 'search')}
                 prefix={<Icon aria-hidden icon={Search} size={16} />}
                 type="search"
                 value={query}
@@ -450,10 +481,18 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
                   ? t('emptyQueue')
                   : query
                     ? t('noSearchResults')
-                    : t('emptyLibrary')}
+                    : t(source === 'kugou' ? 'kugouSearchHint' : 'emptyLibrary')}
               </h3>
-              <p>{query ? t('noSearchResultsHint') : t('chooseTrackHint')}</p>
-              {view !== 'queue' && !query && (
+              <p>
+                {query
+                  ? t('noSearchResultsHint')
+                  : t(
+                      source === 'kugou' && view === 'library'
+                        ? 'kugouAvailability'
+                        : 'chooseTrackHint',
+                    )}
+              </p>
+              {view !== 'queue' && source === 'library' && !query && (
                 <Button
                   disabled={!s.userId}
                   icon={Upload}
@@ -472,15 +511,23 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
                   {String(index + 1).padStart(2, '0')}
                 </span>
                 <span aria-hidden className={styles.trackArt}>
-                  <Icon icon={Music2} size={20} />
+                  {track.coverUrl ? (
+                    <img alt="" decoding="async" loading="lazy" src={track.coverUrl} />
+                  ) : (
+                    <Icon icon={Music2} size={20} />
+                  )}
                 </span>
                 <div className={styles.rowInfo}>
                   <span className={styles.name} title={track.name}>
                     {track.name}
                   </span>
-                  <span className={styles.fileMeta}>{audioFormat(track)}</span>
+                  <span className={styles.fileMeta}>{track.artist || audioFormat(track)}</span>
                 </div>
-                <span className={styles.fileSize}>{audioSize(track)}</span>
+                <span className={styles.fileSize}>
+                  {track.source === 'kugou'
+                    ? `${formatTime(track.durationMs ?? 0)}${track.playbackKind === 'preview' ? ' · ' + t('preview') : ''}`
+                    : audioSize(track)}
+                </span>
                 <div className={styles.rowActions}>
                   <Button
                     aria-label={t('play') + ' ' + track.name}
@@ -507,14 +554,20 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
                   {String(index + 1).padStart(2, '0')}
                 </span>
                 <span aria-hidden className={styles.trackArt}>
-                  <Icon icon={Music2} size={20} />
+                  {track.coverUrl ? (
+                    <img alt="" decoding="async" loading="lazy" src={track.coverUrl} />
+                  ) : (
+                    <Icon icon={Music2} size={20} />
+                  )}
                 </span>
                 <div className={styles.rowInfo}>
                   <span className={styles.name} title={track.name}>
                     {track.name}
                   </span>
                   <span className={styles.fileMeta}>
-                    {audioFormat(track)} · {audioSize(track)}
+                    {track.source === 'kugou'
+                      ? track.artist
+                      : audioFormat(track) + ' · ' + audioSize(track)}
                   </span>
                 </div>
                 <div className={styles.rowActions}>

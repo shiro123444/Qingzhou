@@ -80,7 +80,6 @@ function start() {
   let capturePending = false;
   let sourceDirty = true;
   let sourceInvalid = false;
-  let layoutEpoch = 0;
   let controller: AbortController | undefined;
   let serial = 0;
   let drawSignature = '';
@@ -181,7 +180,7 @@ function start() {
           radius: Math.min(radius, rect.width / 2, rect.height / 2),
           bevel: Math.min(thickness / 2, 6, radius),
           ior: 1.45,
-          absorption: [0.0015, 0.0005, 0.0007],
+          absorption: [0.00045, 0.00045, 0.00045],
         },
       });
     }
@@ -223,8 +222,8 @@ function start() {
       ? channels.reduce((a, b) => a + b, 0) > 384
       : matchMedia('(prefers-color-scheme: dark)').matches;
     return dark
-      ? { top: [0.48, 0.56, 0.57], bottom: [0.025, 0.035, 0.04] }
-      : { top: [0.94, 0.98, 0.98], bottom: [0.84, 0.91, 0.92] };
+      ? { top: [0.43, 0.44, 0.46], bottom: [0.025, 0.027, 0.03] }
+      : { top: [0.97, 0.97, 0.98], bottom: [0.87, 0.88, 0.9] };
   };
 
   const draw = (now: number) => {
@@ -275,6 +274,7 @@ function start() {
       planes,
       source: source!.canvas,
       sourceBlur: item.kind === 'capsule' ? 5 : item.kind === 'shell' ? 0 : 3,
+      chromaticAberration: item.kind === 'capsule' ? 0.025 : 0.01,
       sourceVersion,
       viewport: { width: innerWidth, height: innerHeight },
       pixelRatio: Math.min(
@@ -390,7 +390,6 @@ function start() {
       .map(({ target }) => ({ id: target.id, element: target.element }));
     controller = new AbortController();
     const signal = controller.signal;
-    const epoch = layoutEpoch;
     const dirty = allSourcesDirty ? undefined : dirtySources;
     allSourcesDirty = false;
     dirtySources = new Set();
@@ -404,7 +403,7 @@ function start() {
         previous: source,
         dirtyIds: dirty,
       });
-      if (stopped || signal.aborted || !preferenceAllows() || epoch !== layoutEpoch) {
+      if (stopped || signal.aborted || !preferenceAllows()) {
         next.dispose();
         return;
       }
@@ -418,10 +417,12 @@ function start() {
       requestDraw();
     } catch (error) {
       if (!signal.aborted) {
-        sourceInvalid = true;
+        // A failed replacement must not tear down a valid frame across the whole app.
+        // Native foreground remains live; the next content event can retry this atlas.
+        sourceInvalid = !source;
         allSourcesDirty = true;
-        deactivateAll();
-        root.dataset.qzGlassStatus = 'fallback';
+        if (!source) deactivateAll();
+        root.dataset.qzGlassStatus = source ? 'ready' : 'fallback';
         root.dataset.qzGlassError =
           error instanceof Error ? error.message : 'Source capture unavailable';
       }
@@ -445,6 +446,8 @@ function start() {
     frame = requestAnimationFrame((now) => {
       frame = 0;
       draw(now);
+      // CSS spring transforms do not emit resize/mutation events on every intermediate frame.
+      if (document.querySelector('[data-qz-glass-morphing="true"]')) requestDraw();
     });
   };
   function invalidate(content: boolean, element?: Element) {
@@ -479,10 +482,8 @@ function start() {
   }
 
   const invalidateLayout = () => {
-    layoutEpoch++;
-    sourceInvalid = true;
-    controller?.abort();
-    deactivateAll();
+    // Keep the displayed atlas/canvases while its replacement is captured. Removing every
+    // pane here made a small player resize flash the entire page back to its SVG fallback.
     invalidate(true);
   };
   function makeCanvas() {
@@ -492,7 +493,9 @@ function start() {
     canvas.setAttribute('aria-hidden', 'true');
     return canvas;
   }
-  const resize = new ResizeObserver(invalidateLayout);
+  const resize = new ResizeObserver((entries) => {
+    for (const entry of entries) invalidate(true, entry.target);
+  });
   const register = (element: Element) => {
     if (
       !(element instanceof HTMLElement) ||
@@ -526,6 +529,11 @@ function start() {
       const element =
         record.target instanceof Element ? record.target : record.target.parentElement;
       if (!element || element.closest(OUTPUT)) continue;
+      if (record.attributeName === 'data-qz-glass-morphing') {
+        geometry = true;
+        if (element.getAttribute('data-qz-glass-morphing') !== 'true') changed.add(element);
+        continue;
+      }
       if (record.type === 'attributes' && element.matches(SELECTOR)) register(element);
       if (record.type === 'childList') {
         for (const node of record.addedNodes) if (node instanceof Element) scan(node);
@@ -564,7 +572,7 @@ function start() {
       }
     }
     if (structure || targets.size !== beforeTargets) invalidateLayout();
-    else if (content) changed.forEach((element) => invalidate(true, element));
+    else if (content || changed.size) changed.forEach((element) => invalidate(true, element));
     else if (geometry) invalidate(false);
   });
   mutations.observe(document.body, {
@@ -584,6 +592,8 @@ function start() {
       'data-qz-glass-backend',
       'data-side',
       'data-open',
+      'data-collapsed',
+      'data-qz-glass-morphing',
       'role',
     ],
   });

@@ -17,6 +17,8 @@ export interface GlassRenderPlane extends ScenePlane {
 
 export interface GlassRenderRequest {
   activeVolumeId: string;
+  /** First-order RGB separation along the traced displacement, bounded to 1.5 CSS px. */
+  chromaticAberration?: number;
   environmentBottom?: Vec3;
   environmentTop?: Vec3;
   pixelRatio?: number;
@@ -202,6 +204,7 @@ export function createGlassRenderer(options: GlassRendererOptions = {}): GlassRe
   const uniforms = {
     active: location('uActiveVolume'),
     cameraZ: location('uCameraZ'),
+    chromaticAberration: location('uChromaticAberration'),
     environmentBottom: location('uEnvironmentBottom'),
     environmentTop: location('uEnvironmentTop'),
     far: location('uFar'),
@@ -358,6 +361,12 @@ export function createGlassRenderer(options: GlassRendererOptions = {}): GlassRe
     const activeIndex = volumes.findIndex(({ id }) => id === request.activeVolumeId);
     const active = volumes[activeIndex];
     const bottom = canvas.height - tile.y - tile.height;
+    gl.uniform1f(
+      uniforms.chromaticAberration,
+      Number.isFinite(request.chromaticAberration)
+        ? Math.max(0, Math.min(request.chromaticAberration!, 0.08))
+        : 0,
+    );
     gl.uniform1f(
       uniforms.sourceBlur,
       Number.isFinite(request.sourceBlur) ? Math.max(0, Math.min(request.sourceBlur!, 32)) : 0,

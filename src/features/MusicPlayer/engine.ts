@@ -237,7 +237,18 @@ export class AudioEngine {
     try {
       const playback = await this.client.resolve(id, controller.signal);
       if (generation !== this.generation) return;
+      this.update({
+        queue: this.store
+          .getState()
+          .queue.map((track) => (track.id === id ? playback.track : track)),
+      });
       const audio = (this.audio ??= this.options.createAudio?.() ?? new Audio());
+      // A provider preview can retain the full recording's MP3/Xing duration header.
+      // The granted clip length is the transport's upper bound for playback and seek.
+      const previewMs =
+        playback.track.playbackKind === 'preview'
+          ? bounded(playback.track.durationMs, Number.MAX_SAFE_INTEGER)
+          : 0;
       audio.preload = 'metadata';
       audio.volume = this.store.getState().volume;
       const handlers: [string, EventListener][] = [];
@@ -249,15 +260,33 @@ export class AudioEngine {
         audio.addEventListener(name, listener);
       };
       let ended = false;
+      const finish = () => {
+        if (ended) return;
+        ended = true;
+        this.wantsPlay = false;
+        this.update({ status: 'ended' });
+        this.advance(true);
+      };
       on('loadedmetadata', () => {
-        const durationMs = Number.isFinite(audio.duration) ? audio.duration * 1000 : 0;
+        const mediaDuration = Number.isFinite(audio.duration) ? audio.duration * 1000 : 0;
+        const durationMs = previewMs
+          ? Math.min(mediaDuration || previewMs, previewMs)
+          : mediaDuration;
         this.update({ durationMs });
-        this.seek(this.pendingSeek);
+        this.seek(
+          this.wantsPlay && durationMs > 0 && this.pendingSeek >= durationMs ? 0 : this.pendingSeek,
+        );
         if (!this.wantsPlay) this.update({ status: 'paused' });
       });
       on('timeupdate', () => {
-        if (audio.readyState > 0 && Number.isFinite(audio.currentTime))
-          this.update({ positionMs: audio.currentTime * 1000 });
+        if (audio.readyState > 0 && Number.isFinite(audio.currentTime)) {
+          const positionMs = audio.currentTime * 1000;
+          this.update({ positionMs: previewMs ? Math.min(positionMs, previewMs) : positionMs });
+          if (previewMs && positionMs >= previewMs && !ended) {
+            audio.pause();
+            finish();
+          }
+        }
       });
       on('playing', () => {
         if (this.wantsPlay && !audio.paused && !audio.ended)
@@ -266,7 +295,7 @@ export class AudioEngine {
       });
       on('pause', () => {
         // Native controls or the OS can pause media without a controller command.
-        if (audio.paused && !audio.ended) {
+        if (!ended && audio.paused && !audio.ended) {
           this.wantsPlay = false;
           this.playIntent++;
           this.update({ status: 'paused' });
@@ -280,11 +309,7 @@ export class AudioEngine {
         this.update({ error: true, status: 'error' });
       });
       on('ended', () => {
-        if (ended || !audio.ended) return;
-        ended = true;
-        this.wantsPlay = false;
-        this.update({ status: 'ended' });
-        this.advance(true);
+        if (audio.ended) finish();
       });
       this.removeListeners = () =>
         handlers.forEach(([name, listener]) => audio.removeEventListener(name, listener));

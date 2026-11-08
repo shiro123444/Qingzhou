@@ -72,6 +72,13 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE)(
       expect(await page.evaluate(() => window.glass3dTest.supported)).toBe(true);
       expect(await page.evaluate(() => window.glass3dTest.errors)).toEqual([]);
       expect(await page.evaluate(() => window.glass3dTest.pixel(0, 0)[3])).toBe(0);
+      expect(
+        await page.evaluate(() =>
+          window.glass3dTest
+            .frame()
+            .some((value, index) => index % 4 === 3 && value > 0 && value < 255),
+        ),
+      ).toBe(true);
       await mkdir('.data/music-m2-validation', { recursive: true });
       await page.screenshot({ path: '.data/music-m2-validation/glass-3d-double-grid.png' });
 
@@ -127,6 +134,59 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE)(
           ).toBeLessThan(5);
         }
       }
+
+      const deepLayers = await page.evaluate(() => {
+        const test = window.glass3dTest;
+        return [3, 8].map((layers) => {
+          test.render({ layers, source: 'solid' });
+          return { actual: test.pixel(160, 50), expected: test.oracle(160, 50), layers };
+        });
+      });
+      for (const sample of deepLayers) {
+        expect(sample.actual[3]).toBe(255);
+        for (let channel = 0; channel < 3; channel++) {
+          expect(
+            Math.abs(sample.actual[channel] - sample.expected[channel]),
+            JSON.stringify(sample),
+          ).toBeLessThan(5);
+        }
+      }
+
+      const dispersion = await page.evaluate(() => {
+        const test = window.glass3dTest;
+        test.render({ source: 'gray-grid' });
+        const neutral = test.frame();
+        test.render({ chromaticAberration: 0.035, source: 'gray-grid' });
+        const spectral = test.frame();
+        let edgeDifferences = 0;
+        let interiorDifferences = 0;
+        for (let y = 0; y < 100; y++) {
+          for (let x = 60; x < 260; x++) {
+            const offset = (y * 320 + x) * 4;
+            if (!neutral[offset + 3]) continue;
+            const difference =
+              Math.abs(neutral[offset] - spectral[offset]) +
+              Math.abs(neutral[offset + 2] - spectral[offset + 2]);
+            if (y < 6 || y >= 94) edgeDifferences += difference;
+            else interiorDifferences += difference;
+          }
+        }
+        test.render({ boundedSources: true, chromaticAberration: 0, source: 'solid' });
+        const bounded = test.frame();
+        test.render({ boundedSources: true, chromaticAberration: 0.08, source: 'solid' });
+        const boundedSpectral = test.frame();
+        return {
+          edgeDifferences,
+          interiorDifferences,
+          boundedDifference: bounded.reduce(
+            (maximum, value, index) => Math.max(maximum, Math.abs(value - boundedSpectral[index])),
+            0,
+          ),
+        };
+      });
+      expect(dispersion.edgeDifferences).toBeGreaterThan(100);
+      expect(dispersion.interiorDifferences).toBe(0);
+      expect(dispersion.boundedDifference).toBeLessThanOrEqual(1);
 
       const layering = await page.evaluate(() => {
         const test = window.glass3dTest;

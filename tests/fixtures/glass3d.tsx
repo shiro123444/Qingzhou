@@ -12,11 +12,13 @@ export interface Glass3dOptions {
   absorption?: boolean;
   blur?: number;
   boundedSources?: boolean;
+  chromaticAberration?: number;
   double?: boolean;
   environmentOnly?: boolean;
+  layers?: number;
   overlay?: 'half' | 'none' | 'opaque' | 'transparent';
   ownForeground?: boolean;
-  source?: 'grid' | 'solid';
+  source?: 'gray-grid' | 'grid' | 'solid';
   upper?: 'blue' | 'orange';
 }
 
@@ -78,7 +80,14 @@ function prepare(options: Glass3dOptions) {
   context.fillRect(0, 0, 512, 320);
   if (options.source !== 'solid') {
     for (let x = 0; x < 512; x += 16) {
-      context.fillStyle = x % 32 ? '#f07361' : '#1ab8cf';
+      context.fillStyle =
+        options.source === 'gray-grid'
+          ? x % 32
+            ? '#eeeeee'
+            : '#222222'
+          : x % 32
+            ? '#f07361'
+            : '#1ab8cf';
       context.fillRect(x, 0, 16, 320);
     }
     context.fillStyle = '#e9f5e2';
@@ -118,19 +127,20 @@ function prepare(options: Glass3dOptions) {
       size: [320, 100, 12],
     },
   ];
-  if (options.double)
+  const layerCount = options.layers ?? (options.double ? 2 : 1);
+  for (let index = 1; index < layerCount; index++)
     volumes.push({
       absorption: [0.002, 0.001, 0.002],
       bevel: 5,
-      center: [240, 130, 12],
-      id: 'lower',
+      center: [240, 130, 36 - index * 24],
+      id: `lower-${index}`,
       ior: 1.7,
       radius: 50,
       size: [340, 116, 12],
     });
   const planes: GlassRenderPlane[] = [
     {
-      center: [256, 160, -16],
+      center: [256, 160, -16 - Math.max(0, layerCount - 2) * 24],
       id: 'background',
       opaque: true,
       size: [512, 320],
@@ -175,6 +185,7 @@ function prepare(options: Glass3dOptions) {
   }
   request = {
     activeVolumeId: 'capsule',
+    chromaticAberration: options.chromaticAberration,
     environmentBottom: environment,
     environmentTop: environment,
     planes: options.environmentOnly ? [] : planes,

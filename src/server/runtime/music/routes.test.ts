@@ -2,6 +2,7 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { POST } from '@/app/(backend)/api/runtime/music/route';
+import { GET as COVER } from '@/app/(backend)/api/runtime/music/tracks/[id]/cover/route';
 import { GET, HEAD } from '@/app/(backend)/api/runtime/music/tracks/[id]/stream/route';
 
 import type { MusicProvider } from './contracts';
@@ -25,6 +26,9 @@ let provider: MusicProvider;
 beforeEach(() => {
   provider = {
     userId: 'alice',
+    cover: vi
+      .fn()
+      .mockResolvedValue(new Response('image', { headers: { 'Content-Type': 'image/jpeg' } })),
     search: vi.fn().mockResolvedValue([]),
     track: vi.fn(),
     resolve: vi.fn(),
@@ -57,6 +61,11 @@ describe('authenticated music routes', () => {
         .status,
     ).toBe(401);
     expect(createMusicProvider).not.toHaveBeenCalled();
+    expect(
+      (await COVER(new Request('https://app.test'), { params: Promise.resolve({ id: 'one' }) }))
+        .status,
+    ).toBe(401);
+    expect(createMusicProvider).not.toHaveBeenCalled();
   });
   it('injects the authenticated account into the real music runtime', async () => {
     const response = await POST(
@@ -69,7 +78,24 @@ describe('authenticated music routes', () => {
     );
     expect(response.status).toBe(200);
     expect(createMusicProvider).toHaveBeenCalledWith({}, 'alice');
-    expect(provider.search).toHaveBeenCalledWith('', 20, expect.any(AbortSignal));
+    expect(provider.search).toHaveBeenCalledWith('', 20, expect.any(AbortSignal), 'library');
+  });
+  it('authenticates covers and rejects cross-site embedding', async () => {
+    const params = { params: Promise.resolve({ id: 'kugou:test' }) };
+    const request = new Request('https://app.test', { headers: { authorization: 'test-alice' } });
+    expect((await COVER(request, params)).status).toBe(200);
+    expect(provider.cover).toHaveBeenCalledWith('kugou:test', request);
+    expect(
+      (
+        await COVER(
+          new Request('https://app.test', {
+            headers: { 'authorization': 'test-alice', 'sec-fetch-site': 'cross-site' },
+          }),
+          params,
+        )
+      ).status,
+    ).toBe(403);
+    expect(provider.cover).toHaveBeenCalledTimes(1);
   });
   it('reads promised route params and preserves HEAD and Range', async () => {
     const request = new Request('https://app.test/api/runtime/music/tracks/one/stream', {

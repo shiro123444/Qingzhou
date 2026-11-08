@@ -343,6 +343,12 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       );
     }
 
+    img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
     @container (width <= 640px) {
       width: min(70cqw, 300px);
     }
@@ -626,6 +632,47 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       gap: 14px;
     }
   `,
+  sourceSelector: css`
+    display: inline-flex;
+    gap: 4px;
+
+    padding: 4px;
+    border: 1px solid var(--qz-glass-border);
+    border-radius: 20px;
+
+    background: var(--qz-glass-strong);
+
+    button {
+      cursor: pointer;
+
+      padding-block: 8px;
+      padding-inline: 18px;
+      border: 0;
+      border-radius: 16px;
+
+      color: ${cssVar.colorTextSecondary};
+
+      background: transparent;
+
+      transition:
+        background 180ms,
+        color 180ms;
+    }
+
+    button[aria-pressed='true'] {
+      color: ${cssVar.colorText};
+      background: var(--music-range-track);
+    }
+  `,
+  sourceNote: css`
+    max-width: 340px;
+    margin-block: 10px 0;
+
+    font-size: 12px;
+    line-height: 1.6;
+    color: ${cssVar.colorTextTertiary};
+    text-align: center;
+  `,
   search: css`
     width: min(300px, 55%);
     border-color: ${cssVar.colorBorderSecondary};
@@ -727,6 +774,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     }
   `,
   trackArt: css`
+    overflow: hidden;
     display: grid;
     flex: none;
     place-items: center;
@@ -738,6 +786,12 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     color: var(--music-cover-ink);
 
     background: var(--music-cover-bg);
+
+    img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
   `,
   rowInfo: css`
     display: flex;

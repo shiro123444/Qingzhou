@@ -51,8 +51,13 @@ export class MusicClient {
     return data.result as unknown;
   }
 
-  async search(query = '', limit = 20, signal?: AbortSignal) {
-    const result = (await this.invoke('music.search', { query, limit }, signal)) as {
+  async search(
+    query = '',
+    limit = 20,
+    signal?: AbortSignal,
+    source: 'library' | 'kugou' = 'library',
+  ) {
+    const result = (await this.invoke('music.search', { query, limit, source }, signal)) as {
       tracks: unknown[];
     };
     return result.tracks.map((track) => musicTrackSchema.parse(track));

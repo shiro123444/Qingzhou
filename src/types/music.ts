@@ -2,11 +2,19 @@ import { z } from 'zod';
 
 export const musicTrackSchema = z
   .object({
+    album: z.string().max(500).optional(),
+    artist: z.string().max(500).optional(),
+    coverUrl: z
+      .string()
+      .regex(/^\/api\/runtime\/music\/tracks\/[^/?#]+\/cover$/u)
+      .optional(),
+    durationMs: z.number().int().nonnegative().optional(),
     id: z.string().min(1),
     mimeType: z.string().startsWith('audio/'),
     name: z.string(),
     size: z.number().int().nonnegative(),
-    source: z.literal('library'),
+    playbackKind: z.enum(['full', 'preview']).optional(),
+    source: z.enum(['library', 'kugou']),
     version: z.string(),
   })
   .strict();

@@ -107,3 +107,54 @@ it('lets the lyrics plugin be disabled and enabled without changing playback', a
   expect(play).not.toHaveBeenCalled();
   expect(pause).not.toHaveBeenCalled();
 });
+
+it('searches Kugou separately from local files and shows real artwork and preview access', async () => {
+  i18n.addResourceBundle('zh-CN', 'music', music);
+  const track: MusicTrack = {
+    id: 'kugou:' + 'a'.repeat(32) + ':12:34',
+    name: 'Real catalog song',
+    artist: 'Recording artist',
+    album: 'Real album',
+    coverUrl: '/api/runtime/music/tracks/kugou%3Atest/cover',
+    durationMs: 60000,
+    mimeType: 'audio/mpeg',
+    playbackKind: 'preview',
+    size: 960000,
+    source: 'kugou',
+    version: '1',
+  };
+  const search = vi.fn().mockResolvedValue([track]);
+  const engine = new AudioEngine({
+    client: { search, track: vi.fn(), resolve: vi.fn(), uploadAudio: vi.fn() },
+    storage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+  });
+  const play = vi.spyOn(engine, 'playTrack').mockImplementation((selected) => {
+    engine.store.setState({ activeId: selected.id, queue: [selected], status: 'paused' });
+  });
+  const page = render(
+    <MemoryRouter>
+      <I18nextProvider i18n={i18n}>
+        <MusicPlayerProvider engine={engine} userId="kugou-ui">
+          <MusicStudio />
+        </MusicPlayerProvider>
+      </I18nextProvider>
+    </MemoryRouter>,
+  );
+  fireEvent.click(screen.getByRole('tab', { name: music.library }));
+  expect(screen.getByRole('button', { name: music.kugou })).toHaveAttribute('aria-pressed', 'true');
+  fireEvent.change(screen.getByRole('searchbox', { name: music.searchKugou }), {
+    target: { value: 'Real song' },
+  });
+  await waitFor(() =>
+    expect(search).toHaveBeenLastCalledWith('Real song', 50, expect.any(AbortSignal), 'kugou'),
+  );
+  fireEvent.click(await screen.findByRole('button', { name: music.play + ' Real catalog song' }));
+  expect(play).toHaveBeenCalledWith(track);
+  expect(screen.getByText(music.kugouPreview)).toBeVisible();
+  expect(page.container.querySelector('img[src="' + track.coverUrl + '"]')).toBeVisible();
+  fireEvent.click(screen.getByRole('tab', { name: music.library }));
+  fireEvent.click(screen.getByRole('button', { name: music.localLibrary }));
+  await waitFor(() =>
+    expect(search).toHaveBeenLastCalledWith('', 50, expect.any(AbortSignal), 'library'),
+  );
+});

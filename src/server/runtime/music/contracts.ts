@@ -30,8 +30,14 @@ export interface MusicStorage {
 }
 
 export interface MusicProvider {
+  cover?: (id: string, request: Request) => Promise<Response>;
   resolve: (id: string, signal?: AbortSignal) => Promise<MusicPlayback>;
-  search: (query: string, limit: number, signal?: AbortSignal) => Promise<MusicTrack[]>;
+  search: (
+    query: string,
+    limit: number,
+    signal?: AbortSignal,
+    source?: 'library' | 'kugou',
+  ) => Promise<MusicTrack[]>;
   stream: (id: string, request: Request) => Promise<Response>;
   track: (id: string, signal?: AbortSignal) => Promise<MusicTrack>;
   readonly userId: string;

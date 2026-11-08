@@ -21,12 +21,14 @@ await audio.play();
 
 `POST /api/runtime/music` 接收 `{ operation, input }`，仅允许：
 
-- `music.search`：`{ query?: string, limit?: number }`，最多 50 首，数据库查询直接限制数量，按当前账户与 audio MIME 过滤；搜索中的 `%`、`_` 和反斜杠按字面处理。
+- `music.search`：`{ query?: string, limit?: number, source?: "library" | "kugou" }`，最多 50 首，数据库查询直接限制数量，按当前账户与 audio MIME 过滤；搜索中的 `%`、`_` 和反斜杠按字面处理。
 - `music.track.get`：`{ trackId }`，返回无存储位置的曲目 DTO。
 - `music.playback.resolve`：`{ trackId }`，返回曲目及新的同源 stream 地址。不会进入 skills 模型目录。
 - `skills.catalog`：发现可组合的搜索、曲目读取操作。本期未开放公开 skills.run/autorun 请求入口。
 
 输入严格校验，JSON 请求体上限 16 KiB，对无 Content-Length 的请求同样逐块计数。接口拒绝跨源写入和伪造用户/服务字段。服务对象按认证请求创建，共享 runtime 不缓存用户身份。
+
+`source` 缺省保持账户音频库；显式 `kugou` 使用 [酷狗曲库适配器](./kugou-music.md)，同样经 Cordis 和账户鉴权，不经过文件模型。
 
 ## 媒体代理与过期恢复
 

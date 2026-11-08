@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   captureGlassSources,
+  isEmbeddedGlassBackground,
   isLocalGlassResource,
   planGlassAtlas,
   serializeGlassSource,
@@ -16,6 +17,18 @@ afterEach(() => {
 });
 
 describe('glass source resource boundary', () => {
+  it('allows decoded album rasters in wallpaper without allowing resource fetches', () => {
+    expect(
+      isEmbeddedGlassBackground('linear-gradient(red, blue), url("data:image/png;base64,AAAA")'),
+    ).toBe(true);
+    for (const value of [
+      'url("https://external.test/cover.png")',
+      'url("data:image/svg+xml;base64,AAAA")',
+      'image-set(url("data:image/png;base64,AAAA") 1x)',
+      'url("data:image/png;base64,AAAA"), url("https://external.test/cover.png")',
+    ])
+      expect(isEmbeddedGlassBackground(value)).toBe(false);
+  });
   it('does not instantiate custom elements while cloning', async () => {
     let constructions = 0;
     class CaptureFixtureElement extends HTMLElement {

@@ -31,7 +31,17 @@ import { useAudioEngine, useMusicPlayer } from './context';
 import { type RepeatMode } from './engine';
 import { formatTime } from './lyrics';
 import { musicTheme } from './musicTheme';
+import { useCapsuleMotion } from './useCapsuleMotion';
 import { useCapsulePosition } from './useCapsulePosition';
+
+function TrackArtwork({ coverUrl }: { coverUrl?: string }) {
+  const [failed, setFailed] = useState(false);
+  return coverUrl && !failed ? (
+    <img alt="" draggable={false} src={coverUrl} onError={() => setFailed(true)} />
+  ) : (
+    <Icon aria-hidden icon={Music2} size={{ size: 24, strokeWidth: 1.75 }} />
+  );
+}
 
 export default function MiniPlayer() {
   const { t } = useTranslation('music');
@@ -43,6 +53,8 @@ export default function MiniPlayer() {
   const [details, setDetails] = useState(false);
   const dock = useRef<HTMLElement>(null);
   const collapsed = collapsedPreference ?? pathname === '/music';
+  const panelOpen = details && !collapsed;
+  const morphing = useCapsuleMotion(collapsed, panelOpen, dock);
   const position = useCapsulePosition({
     collapsed,
     details,
@@ -60,7 +72,11 @@ export default function MiniPlayer() {
       if (event.target instanceof Node && !dock.current?.contains(event.target)) setDetails(false);
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setDetails(false);
+      if (event.key === 'Escape') {
+        if (dock.current?.querySelector('[data-music-panel]')?.contains(document.activeElement))
+          dock.current.querySelector<HTMLButtonElement>('[data-capsule-more]')?.focus();
+        setDetails(false);
+      }
     };
     document.addEventListener('pointerdown', closeOutside);
     document.addEventListener('keydown', closeOnEscape);
@@ -73,6 +89,7 @@ export default function MiniPlayer() {
   if (!s.userId) return null;
 
   const collapse = () => {
+    dock.current?.querySelector<HTMLElement>('[data-capsule-body]')?.focus({ preventScroll: true });
     setCollapsedPreference(true);
     setDetails(false);
   };
@@ -88,169 +105,162 @@ export default function MiniPlayer() {
       data-dragging={position.dragging}
       data-panel-side={position.panelSide}
       data-positioned={position.ready}
+      data-qz-glass-morphing={morphing}
       data-testid="music-capsule"
       ref={dock}
       style={position.style}
     >
-      {!collapsed && details && (
-        <div
-          data-music-panel
-          aria-label={t('capsuleDetails')}
-          className={cx(styles.panel, styles.glass)}
-          data-qz-glass="panel"
-        >
-          <div className={styles.panelHeading}>
-            <span>
-              <Icon aria-hidden icon={ListMusic} size={{ size: 18, strokeWidth: 1.75 }} />
-              {t('queue')} <small>{s.queue.length}</small>
-            </span>
-            <span className={styles.transport}>
-              <button
-                aria-label={t('capsuleResetPosition')}
-                className={styles.iconButton}
-                title={t('capsuleResetPosition')}
-                onClick={position.reset}
-              >
-                <Icon aria-hidden icon={RotateCcw} size={{ size: 18, strokeWidth: 1.75 }} />
-              </button>
-              <Link aria-label={t('openStudio')} to="/music" onClick={() => setDetails(false)}>
-                <Icon aria-hidden icon={ExternalLink} size={{ size: 18, strokeWidth: 1.75 }} />
-              </Link>
-            </span>
-          </div>
-          {s.queue.length ? (
-            <ol aria-label={t('capsuleQueue')} className={styles.queue}>
-              {s.queue.map((item, index) => (
-                <li key={item.id}>
-                  <button
-                    aria-current={s.activeId === item.id}
-                    aria-label={`${t('capsulePlay')} ${item.name}`}
-                    className={styles.queueTrack}
-                    onClick={() => engine.playTrack(item)}
-                  >
-                    <span className={styles.queueNumber}>
-                      {s.activeId === item.id ? (
-                        <Icon
-                          aria-hidden
-                          icon={AudioLines}
-                          size={{ size: 18, strokeWidth: 1.75 }}
-                        />
-                      ) : (
-                        String(index + 1).padStart(2, '0')
-                      )}
-                    </span>
-                    <span>{item.name}</span>
-                    {s.activeId === item.id && <span className={styles.activeDot} />}
-                  </button>
-                </li>
-              ))}
-            </ol>
-          ) : (
-            <p className={styles.empty}>{t('emptyQueue')}</p>
-          )}
-          <div className={styles.settings}>
+      <div
+        data-music-panel
+        aria-hidden={!panelOpen}
+        aria-label={t('capsuleDetails')}
+        className={cx(styles.panel, styles.glass)}
+        data-open={panelOpen}
+        data-qz-glass="panel"
+        inert={!panelOpen}
+      >
+        <div className={styles.panelHeading}>
+          <span>
+            <Icon aria-hidden icon={ListMusic} size={{ size: 18, strokeWidth: 1.75 }} />
+            {t('queue')} <small>{s.queue.length}</small>
+          </span>
+          <span className={styles.transport}>
             <button
-              aria-label={t('capsuleShuffle')}
-              aria-pressed={s.shuffle}
+              aria-label={t('capsuleResetPosition')}
               className={styles.iconButton}
-              title={t('shuffle')}
-              onClick={() => engine.setShuffle(!s.shuffle)}
+              title={t('capsuleResetPosition')}
+              onClick={position.reset}
             >
-              <Icon aria-hidden icon={Shuffle} size={{ size: 18, strokeWidth: 1.75 }} />
+              <Icon aria-hidden icon={RotateCcw} size={{ size: 18, strokeWidth: 1.75 }} />
             </button>
-            <button
-              aria-label={t('capsuleRepeat')}
-              aria-pressed={s.repeat !== 'sequence'}
-              className={styles.iconButton}
-              title={t(s.repeat)}
-              onClick={() =>
-                engine.setRepeat(
-                  repeatModes[(repeatModes.indexOf(s.repeat) + 1) % repeatModes.length],
-                )
-              }
-            >
-              {s.repeat === 'single' ? (
-                <Icon aria-hidden icon={Repeat1} size={{ size: 18, strokeWidth: 1.75 }} />
-              ) : (
-                <Icon aria-hidden icon={Repeat} size={{ size: 18, strokeWidth: 1.75 }} />
-              )}
-            </button>
-            <label className={styles.volume}>
-              <Icon aria-hidden icon={Volume2} size={{ size: 18, strokeWidth: 1.75 }} />
-              <input
-                aria-label={t('capsuleVolume')}
-                data-capsule-range="volume"
-                max={1}
-                min={0}
-                step={0.01}
-                type="range"
-                value={position.rangeValue('volume', s.volume)}
-                onChange={(event) =>
-                  position.changeRange(event, (value) => engine.setVolume(value))
-                }
-              />
-            </label>
-          </div>
-          {(s.error || s.storageWarning || s.restoring || position.storageWarning) && (
-            <p className={styles.notice} role="status">
-              {t(
-                s.restoring
-                  ? 'restoring'
-                  : s.error
-                    ? s.status
-                    : position.storageWarning
-                      ? 'capsulePositionWarning'
-                      : 'storageWarning',
-              )}
-            </p>
-          )}
+            <Link aria-label={t('openStudio')} to="/music" onClick={() => setDetails(false)}>
+              <Icon aria-hidden icon={ExternalLink} size={{ size: 18, strokeWidth: 1.75 }} />
+            </Link>
+          </span>
         </div>
-      )}
-      {collapsed ? (
-        <div
-          data-capsule-body
-          aria-description={t('capsuleDragHint')}
-          aria-label={t('capsuleDrag')}
-          className={cx(styles.orb, styles.glass)}
-          data-qz-glass="capsule"
-          role="group"
-          tabIndex={0}
-        >
+        {s.queue.length ? (
+          <ol aria-label={t('capsuleQueue')} className={styles.queue}>
+            {s.queue.map((item, index) => (
+              <li key={item.id}>
+                <button
+                  aria-current={s.activeId === item.id}
+                  aria-label={`${t('capsulePlay')} ${item.name}`}
+                  className={styles.queueTrack}
+                  onClick={() => engine.playTrack(item)}
+                >
+                  <span className={styles.queueNumber}>
+                    {s.activeId === item.id ? (
+                      <Icon aria-hidden icon={AudioLines} size={{ size: 18, strokeWidth: 1.75 }} />
+                    ) : (
+                      String(index + 1).padStart(2, '0')
+                    )}
+                  </span>
+                  <span>{item.name}</span>
+                  {s.activeId === item.id && <span className={styles.activeDot} />}
+                </button>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p className={styles.empty}>{t('emptyQueue')}</p>
+        )}
+        <div className={styles.settings}>
           <button
+            aria-label={t('capsuleShuffle')}
+            aria-pressed={s.shuffle}
+            className={styles.iconButton}
+            title={t('shuffle')}
+            onClick={() => engine.setShuffle(!s.shuffle)}
+          >
+            <Icon aria-hidden icon={Shuffle} size={{ size: 18, strokeWidth: 1.75 }} />
+          </button>
+          <button
+            aria-label={t('capsuleRepeat')}
+            aria-pressed={s.repeat !== 'sequence'}
+            className={styles.iconButton}
+            title={t(s.repeat)}
+            onClick={() =>
+              engine.setRepeat(
+                repeatModes[(repeatModes.indexOf(s.repeat) + 1) % repeatModes.length],
+              )
+            }
+          >
+            {s.repeat === 'single' ? (
+              <Icon aria-hidden icon={Repeat1} size={{ size: 18, strokeWidth: 1.75 }} />
+            ) : (
+              <Icon aria-hidden icon={Repeat} size={{ size: 18, strokeWidth: 1.75 }} />
+            )}
+          </button>
+          <label className={styles.volume}>
+            <Icon aria-hidden icon={Volume2} size={{ size: 18, strokeWidth: 1.75 }} />
+            <input
+              aria-label={t('capsuleVolume')}
+              data-capsule-range="volume"
+              max={1}
+              min={0}
+              step={0.01}
+              type="range"
+              value={position.rangeValue('volume', s.volume)}
+              onChange={(event) => position.changeRange(event, (value) => engine.setVolume(value))}
+            />
+          </label>
+        </div>
+        {(s.error || s.storageWarning || s.restoring || position.storageWarning) && (
+          <p className={styles.notice} role="status">
+            {t(
+              s.restoring
+                ? 'restoring'
+                : s.error
+                  ? s.status
+                  : position.storageWarning
+                    ? 'capsulePositionWarning'
+                    : 'storageWarning',
+            )}
+          </p>
+        )}
+      </div>
+      <div
+        data-capsule-body
+        aria-description={t('capsuleDragHint')}
+        aria-label={t('capsuleDrag')}
+        className={cx(styles.capsule, styles.glass)}
+        data-empty={!s.queue.length}
+        data-qz-glass="capsule"
+        role="group"
+        tabIndex={0}
+      >
+        <div aria-hidden={!collapsed} className={styles.orb} inert={!collapsed}>
+          <button
+            data-capsule-expand
             aria-expanded={false}
             aria-label={t('capsuleExpand')}
             className={styles.artworkLink}
             title={`${track?.name ?? t('title')} · ${t('capsuleDragHint')}`}
             onClick={(event) => {
-              if (!event.defaultPrevented) setCollapsedPreference(false);
+              if (!event.defaultPrevented) {
+                dock.current
+                  ?.querySelector<HTMLElement>('[data-capsule-body]')
+                  ?.focus({ preventScroll: true });
+                setCollapsedPreference(false);
+              }
             }}
           >
             <span aria-hidden className={styles.record} data-playing={s.status === 'playing'}>
-              <Icon aria-hidden icon={Music2} size={{ size: 24, strokeWidth: 1.75 }} />
+              <TrackArtwork coverUrl={track?.coverUrl} key={track?.coverUrl ?? 'empty'} />
             </span>
             {s.status === 'playing' && <span className={styles.orbIndicator} />}
           </button>
         </div>
-      ) : (
-        <div
-          data-capsule-body
-          aria-description={t('capsuleDragHint')}
-          aria-label={t('capsuleDrag')}
-          className={cx(styles.capsule, styles.glass)}
-          data-empty={!s.queue.length}
-          data-qz-glass="capsule"
-          role="group"
-          tabIndex={0}
-        >
+        <div aria-hidden={collapsed} className={styles.expanded} inert={collapsed}>
           <Link aria-label={t('openStudio')} className={styles.artworkLink} to="/music">
             <span aria-hidden className={styles.record} data-playing={s.status === 'playing'}>
-              <Icon aria-hidden icon={Music2} size={{ size: 24, strokeWidth: 1.75 }} />
+              <TrackArtwork coverUrl={track?.coverUrl} key={track?.coverUrl ?? 'empty'} />
             </span>
           </Link>
           <Link className={styles.track} to="/music">
             <strong title={track?.name}>{track?.name ?? t('title')}</strong>
             <span className={styles.trackMeta}>
-              <span>{track ? t(s.status) : t('capsuleEmptyHint')}</span>
+              <span>{track?.artist ?? (track ? t(s.status) : t('capsuleEmptyHint'))}</span>
               {track && <time aria-hidden>{formatTime(s.positionMs)}</time>}
             </span>
           </Link>
@@ -285,6 +295,7 @@ export default function MiniPlayer() {
           )}
           <div className={styles.utilities}>
             <button
+              data-capsule-more
               aria-expanded={details}
               aria-label={t('capsuleMore')}
               className={styles.iconButton}
@@ -297,6 +308,7 @@ export default function MiniPlayer() {
               )}
             </button>
             <button
+              data-capsule-collapse
               aria-label={t('capsuleCollapse')}
               className={styles.collapseButton}
               title={t('capsuleCollapse')}
@@ -325,7 +337,7 @@ export default function MiniPlayer() {
             </div>
           )}
         </div>
-      )}
+      </div>
     </section>
   );
 }

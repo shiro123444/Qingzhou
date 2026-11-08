@@ -19,17 +19,18 @@ export function createMusicPlugin(): AtomicPlugin {
     operations: [
       {
         name: 'music.search',
-        description: 'Search the authenticated account audio library by filename.',
+        description: 'Search the account audio library or the Kugou music catalog.',
         agent: { contexts: ['skills'], maxCalls: 5 },
         input: z
           .object({
             query: z.string().trim().max(200).default(''),
             limit: z.number().int().min(1).max(50).default(20),
+            source: z.enum(['library', 'kugou']).default('library'),
           })
           .strict(),
         output: z.object({ tracks: z.array(musicTrackSchema).max(50) }).strict(),
-        execute: async ({ query, limit }, ctx) => ({
-          tracks: await provider(ctx).search(query, limit, ctx.signal),
+        execute: async ({ query, limit, source }, ctx) => ({
+          tracks: await provider(ctx).search(query, limit, ctx.signal, source),
         }),
       },
       {

@@ -42,6 +42,20 @@ interface SourceMotionResult {
   uploadIncrease: number;
 }
 
+interface TopologyContinuityResult {
+  audioAdvance: number;
+  audioCount: number;
+  audioPaused: boolean;
+  duration: number;
+  finalCanvasCount: number;
+  initialCanvasCount: number;
+  interruptions: Array<{ frame: number; kind: string }>;
+  panelAdded: boolean;
+  panelRemoved: boolean;
+  panelRendered: boolean;
+  samples: number;
+}
+
 declare global {
   interface Window {
     glassPerformance: {
@@ -51,6 +65,8 @@ declare global {
       run: (duration?: number) => Promise<GlassPerformanceResult>;
       startAudio: () => Promise<void>;
       verifySourceMotion: () => Promise<SourceMotionResult>;
+      verifyTopologyContinuity: () => Promise<TopologyContinuityResult>;
+      verifyWallpaperSource: () => Promise<SourceMotionResult>;
     };
   }
 }
@@ -244,6 +260,87 @@ window.glassPerformance = {
     await engine.setAccount('performance-fixture');
     engine.playTrack(track);
   },
+  verifyTopologyContinuity: async () => {
+    await waitUntil(() => window.glassPerformance.ready());
+    const originals = ['shell', 'sidebar', 'capsule'].map((kind) => {
+      const host = scene.querySelector<HTMLElement>(`[data-qz-glass="${kind}"]`)!;
+      const canvas = host.querySelector<HTMLCanvasElement>(':scope > [data-qz-glass-canvas]');
+      if (!canvas || host.dataset.qzRenderer !== 'webgl2')
+        throw new Error(`Missing initial ${kind} glass canvas`);
+      return { canvas, host, kind };
+    });
+    const panel = document.createElement('section');
+    panel.dataset.qzGlass = 'panel';
+    panel.textContent = 'Playback queue — a newly registered glass layer';
+    panel.style.cssText =
+      'left:480px;top:210px;width:280px;height:110px;padding:18px;border-radius:24px;z-index:90';
+    const initialCanvasCount = scene.querySelectorAll('[data-qz-glass-canvas]').length;
+    const originalWidth = capsule.style.width;
+    const audioStart = audio?.currentTime ?? 0;
+    const start = performance.now();
+    const interruptions: TopologyContinuityResult['interruptions'] = [];
+    let samples = 0;
+    let panelAdded = false;
+    let panelRemoved = false;
+    let panelRendered = false;
+    const sample = () => {
+      samples++;
+      for (const { canvas, host, kind } of originals) {
+        if (
+          !canvas.isConnected ||
+          canvas.parentElement !== host ||
+          host.dataset.qzRenderer !== 'webgl2' ||
+          host.querySelector(':scope > [data-qz-glass-canvas]') !== canvas ||
+          canvas.width === 0 ||
+          canvas.height === 0
+        )
+          interruptions.push({ frame: samples, kind });
+      }
+      panelRendered ||= panel.dataset.qzRenderer === 'webgl2';
+    };
+    try {
+      await new Promise<void>((resolve) => {
+        const step = (now: number) => {
+          sample();
+          const progress = Math.min(1, (now - start) / 500);
+          if (progress >= 0.2 && !panelAdded) {
+            scene.append(panel);
+            panelAdded = true;
+          }
+          if (progress >= 0.75 && !panelRemoved) {
+            panel.remove();
+            panelRemoved = true;
+          }
+          // Exercise a continuous expanded → compact → expanded geometry change.
+          capsule.style.width = `${76 + 304 * Math.abs(Math.cos(progress * Math.PI))}px`;
+          if (progress >= 1) resolve();
+          else requestAnimationFrame(step);
+        };
+        requestAnimationFrame(step);
+      });
+      capsule.style.width = originalWidth;
+      await waitUntil(() => {
+        sample();
+        return window.glassPerformance.ready();
+      });
+      return {
+        audioAdvance: (audio?.currentTime ?? 0) - audioStart,
+        audioCount,
+        audioPaused: audio?.paused ?? true,
+        duration: performance.now() - start,
+        finalCanvasCount: scene.querySelectorAll('[data-qz-glass-canvas]').length,
+        initialCanvasCount,
+        interruptions,
+        panelAdded,
+        panelRemoved,
+        panelRendered,
+        samples,
+      };
+    } finally {
+      panel.remove();
+      capsule.style.width = originalWidth;
+    }
+  },
   verifySourceMotion: async () => {
     engine.pause();
     unsubscribe();
@@ -274,6 +371,51 @@ window.glassPerformance = {
       };
     } finally {
       sourceProbe = undefined;
+    }
+  },
+  verifyWallpaperSource: async () => {
+    engine.pause();
+    unsubscribe();
+    const poster = document.createElement('canvas');
+    poster.width = 16;
+    poster.height = 16;
+    const context = poster.getContext('2d')!;
+    const makeWallpaper = (color: string) => {
+      context.fillStyle = color;
+      context.fillRect(0, 0, 16, 16);
+      context.fillStyle = '#fff';
+      context.fillRect(0, 0, 8, 8);
+      return `url("${poster.toDataURL('image/png')}")`;
+    };
+    const originalBackground = scene.style.backgroundImage;
+    const probe = { fingerprints: [] as string[], lastUpload: performance.now() };
+    sourceProbe = probe;
+    try {
+      scene.style.backgroundImage = makeWallpaper('#e83446');
+      await waitUntil(
+        () =>
+          probe.fingerprints.length > 0 &&
+          scene.dataset.qzGlassStatus === 'ready' &&
+          performance.now() - probe.lastUpload > 200,
+      );
+      const before = probe.fingerprints.at(-1)!;
+      const uploads = probe.fingerprints.length;
+      const start = performance.now();
+      // Only the decoded inline raster wallpaper changes; no network or remote artwork.
+      scene.style.backgroundImage = makeWallpaper('#346de8');
+      await waitUntil(() => probe.fingerprints.length > uploads);
+      return {
+        after: probe.fingerprints.at(-1)!,
+        audioPaused: audio?.paused ?? true,
+        before,
+        duration: performance.now() - start,
+        uploadIncrease: probe.fingerprints.length - uploads,
+      };
+    } finally {
+      sourceProbe = undefined;
+      scene.style.backgroundImage = originalBackground;
+      poster.width = 0;
+      poster.height = 0;
     }
   },
   run: async (duration = 4000) => {

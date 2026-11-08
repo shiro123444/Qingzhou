@@ -124,9 +124,15 @@ it.runIf(
       const text = 'typing stays responsive while glass moves';
       await page.keyboard.type(text, { delay: 70 });
       const concurrent = await typing;
+      const topology = baseline
+        ? undefined
+        : await page.evaluate(() => window.glassPerformance.verifyTopologyContinuity());
       const sourceMotion = baseline
         ? undefined
         : await page.evaluate(() => window.glassPerformance.verifySourceMotion());
+      const wallpaper = baseline
+        ? undefined
+        : await page.evaluate(() => window.glassPerformance.verifyWallpaperSource());
       await mkdir(root, { recursive: true });
       const report = {
         baseline,
@@ -134,6 +140,8 @@ it.runIf(
         drag,
         label,
         sourceMotion,
+        topology,
+        wallpaper,
         note: 'Headless Chrome benchmark. Actual glass draw submissions/copies are counted; FPS is diagnostic, not a cross-device guarantee.',
         timestamp: new Date().toISOString(),
       };
@@ -156,6 +164,21 @@ it.runIf(
         expect(sourceMotion.audioPaused).toBe(true);
         expect(sourceMotion.uploadIncrease).toBeGreaterThan(0);
         expect(sourceMotion.after).not.toBe(sourceMotion.before);
+      }
+      if (topology) {
+        expect(topology.samples).toBeGreaterThan(5);
+        expect(topology.interruptions).toEqual([]);
+        expect(topology.panelAdded).toBe(true);
+        expect(topology.panelRemoved).toBe(true);
+        expect(topology.finalCanvasCount).toBe(topology.initialCanvasCount);
+        expect(topology.audioCount).toBe(1);
+        expect(topology.audioPaused).toBe(false);
+        expect(topology.audioAdvance).toBeGreaterThan((topology.duration / 1000) * 0.5);
+      }
+      if (wallpaper) {
+        expect(wallpaper.audioPaused).toBe(true);
+        expect(wallpaper.uploadIncrease).toBeGreaterThan(0);
+        expect(wallpaper.after).not.toBe(wallpaper.before);
       }
       expect(await page.evaluate(() => window.glassPerformance.cleanup())).toBe(0);
       expect(errors).toEqual([]);

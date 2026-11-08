@@ -8,18 +8,18 @@ export const { liquidGlass, liquidGlassBackdrop, liquidGlassOverlays, glassSurfa
       --qz-glass-strong: color-mix(in srgb, ${cssVar.colorBgElevated} 66%, transparent);
       --qz-glass-border: color-mix(in srgb, ${cssVar.colorText} 12%, transparent);
       --qz-glass-highlight: rgb(255 255 255 / 42%);
-      --qz-glass-filter: blur(24px) saturate(1.35);
-      --qz-glass-tint: color-mix(in srgb, #4da9a4 72%, ${cssVar.colorText});
+      --qz-glass-filter: blur(18px) saturate(1.08);
+      --qz-glass-tint: color-mix(in srgb, #729b97 52%, ${cssVar.colorText});
       --qz-glass-sheen: linear-gradient(
         135deg,
         rgb(255 255 255 / 14%),
         transparent 34%,
         transparent 70%,
-        rgb(15 45 52 / 3%)
+        rgb(20 22 28 / 3%)
       );
       --qz-glass-shadow:
-        inset 0 1px 0 var(--qz-glass-highlight), inset 0 -1px 0 rgb(15 45 52 / 5%),
-        0 12px 32px rgb(16 42 49 / 8%);
+        inset 0 1px 0 var(--qz-glass-highlight), inset 0 -1px 0 rgb(20 22 28 / 5%),
+        0 12px 32px rgb(20 22 28 / 8%);
 
       @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
         --qz-glass-surface: ${cssVar.colorBgContainer};
@@ -60,19 +60,24 @@ export const { liquidGlass, liquidGlassBackdrop, liquidGlassOverlays, glassSurfa
       background:
         radial-gradient(
           ellipse at 4% 12%,
-          color-mix(in srgb, #77c7bd 22%, transparent),
+          color-mix(in srgb, #91aaa5 5%, transparent),
           transparent 48%
         ),
         radial-gradient(
           ellipse at 92% 25%,
-          color-mix(in srgb, #85a8c4 18%, transparent),
+          color-mix(in srgb, #a2adbf 6%, transparent),
           transparent 48%
         ),
         radial-gradient(
           ellipse at 55% 100%,
-          color-mix(in srgb, #bbcab1 14%, transparent),
+          color-mix(in srgb, #b8afa6 4%, transparent),
           transparent 52%
         ),
+        linear-gradient(
+          color-mix(in srgb, ${cssVar.colorBgLayout} 76%, transparent),
+          color-mix(in srgb, ${cssVar.colorBgLayout} 88%, transparent)
+        ),
+        var(--qz-music-artwork, none) center / cover no-repeat,
         ${cssVar.colorBgLayout};
 
       @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {

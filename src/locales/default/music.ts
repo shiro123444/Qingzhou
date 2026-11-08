@@ -1,4 +1,14 @@
 export default {
+  kugou: 'Kugou',
+  localLibrary: 'Your audio',
+  musicSource: 'Music source',
+  searchKugou: 'Search songs, artists or albums',
+  kugouSearchHint: 'Find your next song',
+  kugouAvailability: 'Search Kugou’s catalog. Free tracks and available previews play here.',
+  kugouPreview: 'Kugou preview · Full playback requires access through Kugou.',
+  kugouSource: 'Kugou · Standard quality',
+  preview: 'Preview',
+
   disableLyricsPlugin: 'Disable lyrics plugin',
   enableLyricsPlugin: 'Enable lyrics plugin',
   lyricsPlugin: 'Lyrics plugin',
@@ -57,7 +67,7 @@ export default {
   error: 'Playback failed',
   idle: 'Ready',
   importLrc: 'Import LRC',
-  library: 'Your audio',
+  library: 'Music library',
   list: 'Repeat queue',
   loading: 'Loading',
   login: 'Sign in to upload and play your audio.',

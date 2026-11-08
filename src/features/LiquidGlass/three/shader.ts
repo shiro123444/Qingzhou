@@ -22,6 +22,7 @@ const float INFINITY_DISTANCE = 1.0e8;
 
 uniform sampler2D uSource;
 uniform float uSourceBlur;
+uniform float uChromaticAberration;
 uniform vec2 uViewport;
 uniform vec2 uResolution;
 uniform vec2 uOutputOrigin;
@@ -193,11 +194,45 @@ float mediumIor(Path path) {
   return path.mediumCount > 0 ? uVolumeCenterIor[path.media[path.mediumCount - 1]].w : 1.0;
 }
 
+// Bounded first-order dispersion around the actual green-ray hit, following the
+// offset-scaled RGB sampling approach used by Liquid Glass Studio. This is not
+// three spectral ray trees: reflection geometry and the medium stack stay shared.
+vec4 dispersedPlaneColor(int index, vec3 point, vec2 cameraXY, Path path) {
+  vec4 center = planeColor(index, point);
+  if (uChromaticAberration <= 0.0 || path.reflections != 0 || path.interfaces == 0) return center;
+  vec2 separation = (point.xy - cameraXY) * uChromaticAberration;
+  float amount = length(separation);
+  if (amount < 0.01) return center;
+  separation *= min(1.0, 1.5 / amount);
+  vec4 red = planeColor(index, point - vec3(separation, 0.0));
+  vec4 blue = planeColor(index, point + vec3(separation, 0.0));
+  // Transparent content keeps its original coverage. Mix in premultiplied space
+  // so an empty neighbouring glyph texel cannot become a dark/coloured fringe.
+  float redCoverage = min(red.a, center.a);
+  float blueCoverage = min(blue.a, center.a);
+  if (center.a > 0.0) {
+    center.r = mix(center.r, red.r, redCoverage / center.a);
+    center.b = mix(center.b, blue.b, blueCoverage / center.a);
+  }
+  return center;
+}
+
 void main() {
   vec2 pixel = gl_FragCoord.xy - uOutputOrigin;
   vec2 local = vec2(pixel.x / uResolution.x, 1.0 - pixel.y / uResolution.y);
   Path first;
   first.origin = vec3(uRegion.xy + local * uRegion.zw, uCameraZ);
+  // Coverage is evaluated at the actual render footprint, so adaptive resolution
+  // cannot turn the curved rim into a hard staircase. The native DOM is untouched.
+  vec2 halfXY = uVolumeSizeRadius[uActiveVolume].xy * 0.5;
+  float outerRadius = min(uVolumeSizeRadius[uActiveVolume].w, min(halfXY.x, halfXY.y));
+  vec2 outlineQ = abs(first.origin.xy - uVolumeCenterIor[uActiveVolume].xy) - halfXY + outerRadius;
+  float outlineDistance = length(max(outlineQ, vec2(0.0))) + min(max(outlineQ.x, outlineQ.y), 0.0) - outerRadius;
+  vec2 outlineCorner = max(outlineQ, vec2(0.0));
+  vec2 outlineNormal = length(outlineCorner) > 0.0 ? normalize(outlineCorner) :
+    (outlineQ.x > outlineQ.y ? vec2(1.0, 0.0) : vec2(0.0, 1.0));
+  float footprint = max(dot(outlineNormal, uRegion.zw / uResolution), 0.001);
+  float coverage = clamp(-outlineDistance / footprint, 0.0, 1.0);
   first.direction = vec3(0.0, 0.0, -1.0);
   first.weight = vec3(1.0);
   first.interfaces = 0;
@@ -240,14 +275,19 @@ void main() {
     }
     vec3 point = path.origin + path.direction * distance;
     if (plane >= 0) {
-      vec4 color = planeColor(plane, point);
+      vec4 color = dispersedPlaneColor(plane, point, first.origin.xy, path);
       radiance += path.weight * color.rgb * color.a;
       path.weight *= 1.0 - color.a;
       path.origin = point + path.direction * (EPSILON * 4.0);
       if (max(path.weight.r, max(path.weight.g, path.weight.b)) > 0.0001) pending[pendingCount++] = path;
       continue;
     }
-    if (path.interfaces >= 4) {
+    // A capsule above a panel and shell already needs six interfaces. Stopping
+    // the direct ray after four replaces real content with a flat environment
+    // patch. Keep every registered layer in transmission, while reflected paths
+    // retain their small independent budget.
+    int interfaceBudget = path.reflections == 0 ? max(4, uVolumeCount * 2) : 4;
+    if (path.interfaces >= interfaceBudget) {
       radiance += path.weight * environment(path.direction);
       continue;
     }
@@ -292,7 +332,9 @@ void main() {
     if (reflected.mediumCount > 0) reflected.weight *= exp(-uVolumeBevelAbsorption[reflected.media[reflected.mediumCount - 1]].yzw * (EPSILON * 4.0));
     reflected.interfaces++;
     reflected.reflections++;
-    if (reflected.reflections <= 2 && pendingCount < MAX_PENDING) pending[pendingCount++] = reflected;
+    // Reserve a stack slot for transmission; a deep stack must not drop the
+    // high-energy direct path merely because reflected branches are pending.
+    if (reflected.reflections <= 2 && pendingCount < MAX_PENDING - 1) pending[pendingCount++] = reflected;
     else radiance += reflected.weight * environment(reflected.direction);
 
     if (!totalInternalReflection) {
@@ -308,5 +350,5 @@ void main() {
   for (int index = 0; index < MAX_PENDING; index++) {
     if (index < pendingCount) radiance += pending[index].weight * environment(pending[index].direction);
   }
-  outputColor = vec4(displayColor(radiance), 1.0);
+  outputColor = vec4(displayColor(radiance), coverage);
 }`;

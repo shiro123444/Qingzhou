@@ -440,7 +440,7 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       await page.waitForFunction(
         () =>
           document
-            .querySelector('ul[aria-label="Your audio"]')
+            .querySelector('ul[aria-label="Music library"]')
             ?.textContent?.includes('Rain.mp3') === true,
       );
       await page.getByRole('button', { name: 'Play Rain.mp3', exact: true }).click();
@@ -519,6 +519,64 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       expect((await capsuleBounds()).left).toBeGreaterThan(dragged.left + 40);
       expect(await page.evaluate(() => window.musicTest.audio!.paused)).toBe(false);
       await page.getByRole('button', { name: music.capsulePause, exact: true }).click();
+      // Real CSS interpolation must preserve both the moving lens and unrelated page optics.
+      const morphReport = await page.evaluate(async () => {
+        const body = document.querySelector<HTMLElement>('[data-capsule-body]')!;
+        const shell = document.querySelector<HTMLElement>('[data-qz-glass="shell"]')!;
+        const capsuleCanvas = body.querySelector(':scope > [data-qz-glass-canvas]');
+        const shellCanvas = shell.querySelector(':scope > [data-qz-glass-canvas]');
+        const dock = document.querySelector<HTMLElement>('[data-testid="music-capsule"]')!;
+        const origin = body.getBoundingClientRect();
+        const report = {
+          anchorDrift: 0,
+          canvasReplacements: 0,
+          fallbackFrames: 0,
+          frames: 0,
+          hiddenFocus: false,
+          intermediateWidths: 0,
+          missingInitialCanvas: !capsuleCanvas || !shellCanvas,
+        };
+        const sample = async (button: HTMLButtonElement) => {
+          button.focus();
+          button.click();
+          const started = performance.now();
+          do {
+            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+            const rect = body.getBoundingClientRect();
+            report.frames++;
+            if (rect.width > 65 && rect.width < origin.width - 5) report.intermediateWidths++;
+            report.anchorDrift = Math.max(
+              report.anchorDrift,
+              Math.abs(rect.right - origin.right),
+              Math.abs(rect.bottom - origin.bottom),
+            );
+            if (body.dataset.qzRenderer !== 'webgl2' || shell.dataset.qzRenderer !== 'webgl2')
+              report.fallbackFrames++;
+            if (
+              body !== document.querySelector('[data-capsule-body]') ||
+              capsuleCanvas !== body.querySelector(':scope > [data-qz-glass-canvas]') ||
+              shellCanvas !== shell.querySelector(':scope > [data-qz-glass-canvas]')
+            )
+              report.canvasReplacements++;
+            report.hiddenFocus ||= !!document.activeElement?.closest('[inert]');
+          } while (performance.now() - started < 560 || dock.dataset.qzGlassMorphing === 'true');
+        };
+        for (let cycle = 0; cycle < 2; cycle++) {
+          await sample(body.querySelector<HTMLButtonElement>('[data-capsule-collapse]')!);
+          await sample(body.querySelector<HTMLButtonElement>('[data-capsule-expand]')!);
+          await sample(body.querySelector<HTMLButtonElement>('[data-capsule-more]')!);
+          await sample(body.querySelector<HTMLButtonElement>('[data-capsule-more]')!);
+        }
+        return report;
+      });
+      expect(morphReport.missingInitialCanvas).toBe(false);
+      expect(morphReport.frames).toBeGreaterThan(30);
+      expect(morphReport.intermediateWidths).toBeGreaterThan(10);
+      expect(morphReport.canvasReplacements).toBe(0);
+      expect(morphReport.fallbackFrames).toBe(0);
+      expect(morphReport.anchorDrift).toBeLessThan(2);
+      expect(morphReport.hiddenFocus).toBe(false);
+
       await page.waitForFunction(() => window.musicTest.audio!.paused);
       await waitForCapsuleGlass();
       const presentationGlass = await glassCanvases();
@@ -596,6 +654,11 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       expect(keyboardMoved.left).toBeGreaterThan(dragged.left);
       const capsulePosition = await page.evaluate(() => window.musicTest.audio!.currentTime);
       await page.getByRole('button', { name: music.capsuleCollapse, exact: true }).click();
+      await page.waitForFunction(
+        () =>
+          document.querySelector<HTMLElement>('[data-testid="music-capsule"]')?.dataset
+            .qzGlassMorphing === 'false',
+      );
       const folded = await capsuleBounds();
       expect(Math.abs(folded.right - keyboardMoved.right)).toBeLessThan(2);
       expect(Math.abs(folded.bottom - keyboardMoved.bottom)).toBeLessThan(2);
@@ -646,6 +709,11 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
         capsulePosition,
       );
       await page.getByRole('button', { name: music.capsuleExpand, exact: true }).click();
+      await page.waitForFunction(
+        () =>
+          document.querySelector<HTMLElement>('[data-testid="music-capsule"]')?.dataset
+            .qzGlassMorphing === 'false',
+      );
       // Temporary composer avoidance must not overwrite the user's saved anchor.
       await page.locator('[data-capsule-body]').press('Home');
       const reset = await capsuleBounds();
@@ -772,12 +840,12 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       await page.waitForFunction(
         () =>
           document
-            .querySelector('ul[aria-label="Your audio"]')
+            .querySelector('ul[aria-label="Music library"]')
             ?.textContent?.includes('Wind.mp3') === true,
       );
       await page.getByRole('searchbox', { name: 'Search audio by name', exact: true }).fill('Wind');
       await page.waitForFunction(() => {
-        const list = document.querySelector('ul[aria-label="Your audio"]');
+        const list = document.querySelector('ul[aria-label="Music library"]');
         return (
           list?.textContent?.includes('Wind.mp3') === true && !list.textContent.includes('Rain.mp3')
         );
@@ -786,7 +854,7 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       await page.waitForFunction(
         () =>
           document
-            .querySelector('ul[aria-label="Your audio"]')
+            .querySelector('ul[aria-label="Music library"]')
             ?.textContent?.includes('Rain.mp3') === true,
       );
       await page.getByRole('button', { name: 'Add to queue Wind.mp3', exact: true }).click();
