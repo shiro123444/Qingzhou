@@ -1,4 +1,13 @@
 export default {
+  lyricsResumeFollowing: 'Back to current lyrics',
+  queuePlaylistHint: 'The whole playlist plays continuously; upcoming songs load as needed.',
+  queueLoadedCount: '{{loaded}} loaded · {{total}} songs',
+  queueLoadingNext: 'Loading upcoming songs…',
+  queueLoadFailed: 'Could not load upcoming songs. Retry to continue.',
+  queueLoadMore: 'Load upcoming songs',
+  queueAddedAfterPlaylist: 'Added {{count}} songs to play after this playlist.',
+  queueAfterPlaylist: '{{count}} songs queued after this playlist',
+
   kugouDiscover: 'Discover / search',
   kugouLiked: 'Liked songs',
   kugouCreatedPlaylists: 'My playlists',
@@ -15,8 +24,6 @@ export default {
   kugouLibraryRefresh: 'Refresh library',
   kugouLibraryBack: 'Back to playlists',
   kugouLoadMore: 'Load more',
-  kugouPlayLoaded: 'Play loaded songs',
-  kugouPlayFirst: 'Play first {{count}} songs',
   queueAdded: 'Added {{count}} songs to the queue.',
   queueAlreadyAdded: 'Already in the playback queue.',
   queueFull: 'The playback queue is full. You can play this song directly.',

@@ -1,6 +1,10 @@
 import { createStaticStyles } from 'antd-style';
 
 export const styles = createStaticStyles(({ css, cssVar }) => ({
+  lyricFrame: css`
+    position: absolute;
+    inset: 0;
+  `,
   lyrics: css`
     scrollbar-width: none;
 
@@ -12,7 +16,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     overscroll-behavior: contain;
 
     box-sizing: border-box;
-    padding-block: 100px 180px;
+    padding-block: var(--lyrics-center-padding, 180px);
     padding-inline: 16px;
 
     text-align: center;
@@ -30,6 +34,9 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     }
 
     p {
+      --lyric-sung-color: ${cssVar.colorTextSecondary};
+      --lyric-unsung-color: ${cssVar.colorTextTertiary};
+
       scroll-margin-block: 100px;
 
       margin-block: 0 34px;
@@ -41,10 +48,17 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       color: ${cssVar.colorTextSecondary};
       overflow-wrap: anywhere;
 
-      transition: color 0.3s ease;
+      transition:
+        color 240ms ease,
+        opacity 240ms ease,
+        transform 360ms cubic-bezier(0.2, 0.8, 0.25, 1);
 
       &[aria-current='true'] {
-        color: var(--music-accent);
+        --lyric-sung-color: var(--music-accent);
+        --lyric-unsung-color: ${cssVar.colorTextSecondary};
+
+        transform: scale(1.025);
+        color: ${cssVar.colorText};
       }
     }
 
@@ -66,7 +80,6 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     }
 
     @container (width <= 680px) {
-      padding-block: 70px 100px;
       padding-inline: 0;
 
       p {
@@ -77,9 +90,42 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     @media (prefers-reduced-motion: reduce) {
       p {
+        transform: none !important;
         transition: none;
       }
     }
+  `,
+  word: css`
+    color: transparent;
+    white-space: pre-wrap;
+    background: linear-gradient(
+      90deg,
+      var(--lyric-sung-color) var(--lyric-progress, 0%),
+      var(--lyric-unsung-color) var(--lyric-progress, 0%)
+    );
+    background-clip: text;
+  `,
+  resumeFollowing: css`
+    cursor: pointer;
+
+    position: absolute;
+    z-index: 2;
+    inset-block-end: 18px;
+    inset-inline-start: 50%;
+    transform: translateX(-50%);
+
+    padding-block: 9px;
+    padding-inline: 16px;
+    border: 1px solid var(--qz-glass-border);
+    border-radius: 20px;
+
+    font-size: 12px;
+    color: ${cssVar.colorText};
+    white-space: nowrap;
+
+    background: var(--qz-glass-strong);
+    backdrop-filter: var(--qz-glass-filter);
+    box-shadow: inset 0 1px 0 var(--qz-glass-highlight);
   `,
   emptyLyrics: css`
     max-width: 340px;

@@ -1,7 +1,7 @@
 import { type MusicTrack } from '@/types/music';
 
 import { type AudioEngine, type PlaybackStatus, type PlayerState, type RepeatMode } from './engine';
-import { activeLyric, type LyricLine } from './lyrics';
+import { activeLyric, freezeLyricLines, type LyricLine } from './lyrics';
 
 export type MusicPlayerCommand =
   { type: 'play' | 'pause' | 'previous' | 'next' } | { type: 'seek' | 'setVolume'; value: number };
@@ -32,6 +32,7 @@ export type MusicPlayerListener = (snapshot: MusicPlayerSnapshot) => void;
 /** The plugin boundary deliberately has no engine, media URL, queue or mutable store. */
 export interface MusicPlayerPort {
   command: (input: unknown) => void;
+  getPositionMs: () => number;
   getSnapshot: () => MusicPlayerSnapshot;
   subscribe: (listener: MusicPlayerListener) => () => void;
 }
@@ -75,11 +76,20 @@ function snapshotFrom(state: PlayerState, previous?: MusicPlayerSnapshot): Music
     sourceLines.every(
       (line, index) =>
         previous.lyrics.lines[index].text === line.text &&
-        previous.lyrics.lines[index].timeMs === line.timeMs,
+        previous.lyrics.lines[index].timeMs === line.timeMs &&
+        previous.lyrics.lines[index].durationMs === line.durationMs &&
+        previous.lyrics.lines[index].words?.length === line.words?.length &&
+        (!line.words ||
+          line.words.every((word, wordIndex) => {
+            const prior = previous.lyrics.lines[index].words?.[wordIndex];
+            return (
+              prior?.text === word.text &&
+              prior.timeMs === word.timeMs &&
+              prior.durationMs === word.durationMs
+            );
+          })),
     );
-  const lines = sameLines
-    ? previous.lyrics.lines
-    : Object.freeze(sourceLines.map(({ text, timeMs }) => Object.freeze({ text, timeMs })));
+  const lines = sameLines ? previous.lyrics.lines : freezeLyricLines(sourceLines);
   const currentLine = activeLyric(sourceLines, state.positionMs);
   const lyrics =
     sameLines && previous.lyrics.currentLine === currentLine
@@ -208,6 +218,10 @@ export function createMusicPlayerPort(engine: AudioEngine): MusicPlayerSession {
     getSnapshot() {
       assertActive();
       return snapshot;
+    },
+    getPositionMs() {
+      assertActive();
+      return engine.readPositionMs();
     },
     subscribe(listener) {
       assertActive();

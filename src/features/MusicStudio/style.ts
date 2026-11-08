@@ -734,6 +734,26 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       line-height: 1.7;
     }
   `,
+  playlistQueueInfo: css`
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 18px;
+    align-items: center;
+
+    margin-block: 16px 24px;
+
+    font-size: 13px;
+    color: ${cssVar.colorTextSecondary};
+
+    strong {
+      color: ${cssVar.colorText};
+    }
+
+    p {
+      flex-basis: 100%;
+      margin: 0;
+    }
+  `,
   list: css`
     margin: 0;
     padding: 0;

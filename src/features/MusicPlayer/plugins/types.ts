@@ -1,11 +1,14 @@
 import { type MusicLyrics } from '@/types/music';
 
+import { type PlaybackStatus } from '../engine';
 import { type LyricLine } from '../lyrics';
 
 export interface LyricsPluginView {
   readonly currentLine: number;
   readonly durationMs: number;
+  readonly getPositionMs: () => number;
   readonly lines: readonly Readonly<LyricLine>[];
+  readonly playbackStatus: PlaybackStatus;
   readonly positionMs: number;
   readonly retry: () => void;
   readonly seekLine: (index: number) => void;

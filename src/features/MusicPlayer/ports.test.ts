@@ -130,7 +130,12 @@ describe('account-bound MusicPlayerPort', () => {
       userId: 'alice',
       volume: 0.8,
     });
-    expect(Object.keys(port).sort()).toEqual(['command', 'getSnapshot', 'subscribe']);
+    expect(Object.keys(port).sort()).toEqual([
+      'command',
+      'getPositionMs',
+      'getSnapshot',
+      'subscribe',
+    ]);
     expect(JSON.stringify(snapshot)).not.toMatch(/stream|private-version|private-queue-item/);
     expect(Object.isFrozen(port)).toBe(true);
     for (const value of [
@@ -177,6 +182,24 @@ describe('account-bound MusicPlayerPort', () => {
     await settle();
     expect(port.getSnapshot().track?.id).toBe('a');
     expect(createAudio).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads the precise media clock without publishing store updates and revokes it with the session', async () => {
+    const { audio, engine, port, dispose } = await setup();
+    engine.enqueue([track('clock')]);
+    port.command({ type: 'play' });
+    await settle();
+    audio.metadata();
+    const listener = vi.fn();
+    port.subscribe(listener);
+    const calls = listener.mock.calls.length;
+    for (let frame = 0; frame < 60; frame++) {
+      audio.currentTime = 1 + frame / 60;
+      expect(port.getPositionMs()).toBeCloseTo(audio.currentTime * 1000);
+    }
+    expect(listener).toHaveBeenCalledTimes(calls);
+    dispose();
+    expect(() => port.getPositionMs()).toThrow('MUSIC_PLAYER_PORT_REVOKED');
   });
 
   it('strictly rejects unknown commands, extra keys and invalid values before invoking the engine', async () => {

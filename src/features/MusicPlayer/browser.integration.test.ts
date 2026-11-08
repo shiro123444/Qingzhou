@@ -65,6 +65,7 @@ declare global {
       audio?: HTMLAudioElement;
       audioCount: number;
       engine: AudioEngine;
+      inputLatencyMs?: number;
       plugins: MusicPluginHost;
     };
   }
@@ -115,13 +116,31 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       id: 'collected-fixture',
       name: 'Collected fixture',
     };
-    const catalog = new Map([online, liked, collected].map((track) => [track.id, track]));
+    const likedTracks = Array.from({ length: 669 }, (_, index) =>
+      index === 0
+        ? liked
+        : {
+            ...liked,
+            id: `liked-fixture-${index + 1}`,
+            name: `Liked fixture ${index + 1}`,
+          },
+    );
+    const wordLyrics = [
+      '[1000,3000]<0,600,0>Bright <600,1200,0>river <1800,1200,0>flows',
+      '[5000,4000]<0,1400,0>Across <1400,2600,0>night',
+      ...Array.from(
+        { length: 60 },
+        (_, index) => `[${10000 + index * 300},280]<0,100,0>Line <100,180,0>${index + 1}`,
+      ),
+    ].join('\n');
+    const catalog = new Map([online, ...likedTracks, collected].map((track) => [track.id, track]));
     const playlists: MusicLibraryPlaylist[] = [
-      { id: '101', name: 'Liked songs fixture', kind: 'liked', trackCount: 1 },
+      { id: '101', name: 'Liked songs fixture', kind: 'liked', trackCount: 669 },
       { id: '102', name: 'Collected playlist fixture', kind: 'collected', trackCount: 1 },
     ];
     const accountRevision = '55d73ef1-8f31-4e90-abf7-2d3e663d988e';
-    const libraryRequests: { operation: string; playlistId?: string }[] = [];
+    const libraryRequests: { operation: string; page?: number; playlistId?: string }[] = [];
+    const resolvedTracks: string[] = [];
     const provider: MusicProvider = {
       userId: 'alice',
       track: (id, signal) =>
@@ -130,24 +149,28 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
         source === 'kugou' && query === 'automatic'
           ? Promise.resolve([online])
           : library.search(query, limit, signal),
-      resolve: (id, signal) =>
-        catalog.has(id)
+      resolve: (id, signal) => {
+        resolvedTracks.push(id);
+        return catalog.has(id)
           ? Promise.resolve({
               src: `/api/runtime/music/tracks/${id}/stream`,
               track: catalog.get(id)!,
               offsetMs: id === online.id ? 10000 : 0,
             })
-          : library.resolve(id, signal),
+          : library.resolve(id, signal);
+      },
       stream: (id, request) => library.stream(catalog.has(id) ? 'track-1' : id, request),
       lyrics: async (trackId) => {
         lyricRequests++;
         return {
           trackId,
-          format: 'lrc',
+          format: trackId === liked.id ? 'krc' : 'lrc',
           text:
             trackId === online.id
               ? '[00:09]Clip begins\n[00:12]Inside online clip\n[00:35]Outside available clip'
-              : `[00:01]${catalog.get(trackId)!.name} lyric`,
+              : trackId === liked.id
+                ? wordLyrics
+                : `[00:01]${catalog.get(trackId)!.name} lyric`,
         };
       },
     };
@@ -220,17 +243,20 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
                     libraryRequests.push({ operation: input.operation });
                     result = { revision: accountRevision, playlists, page: 1, hasMore: false };
                   } else if (input.operation === 'playlist') {
+                    const page = input.page ?? 1;
+                    const entries = input.playlistId === '101' ? likedTracks : [collected];
                     libraryRequests.push({
                       operation: input.operation,
+                      page,
                       playlistId: input.playlistId,
                     });
                     result = {
                       revision: accountRevision,
                       playlist: playlists.find((playlist) => playlist.id === input.playlistId),
-                      tracks: input.playlistId === '101' ? [liked] : [collected],
-                      page: 1,
-                      hasMore: false,
-                      total: 1,
+                      tracks: entries.slice((page - 1) * 100, page * 100),
+                      page,
+                      hasMore: page * 100 < entries.length,
+                      total: entries.length,
                     };
                   } else {
                     result = {
@@ -1105,7 +1131,16 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       // Personal collections use the signed-in account API, then the same player and Cordis host.
       await page.getByRole('tab', { name: music.library, exact: true }).click();
       await page.getByRole('button', { name: music.kugouLiked, exact: true }).click();
-      await page.getByRole('button', { name: 'Play Liked fixture', exact: true }).click();
+      await page.waitForFunction(
+        () => !!document.querySelector('ul[aria-label="Liked songs fixture"] li'),
+      );
+      const libraryDomRows = await page.evaluate(
+        () => document.querySelectorAll('ul[aria-label="Liked songs fixture"] li').length,
+      );
+      expect(libraryDomRows).toBeGreaterThan(0);
+      expect(libraryDomRows).toBeLessThan(40);
+      const resolvesBeforePlaylist = resolvedTracks.length;
+      await page.getByRole('button', { name: music.playAll, exact: true }).click();
       await page.waitForFunction(() => {
         const state = window.musicTest.engine.store.getState();
         const lyrics = window.musicTest.plugins.store.getState().lyrics;
@@ -1113,10 +1148,165 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
           state.activeId === 'liked-fixture' &&
           state.status === 'playing' &&
           lyrics?.status === 'ready' &&
-          lyrics.lines[0]?.text === 'Liked fixture lyric'
+          lyrics.lines[0]?.text === 'Bright river flows'
         );
       });
       expect(lyricRequests).toBe(2);
+      expect(resolvedTracks.slice(resolvesBeforePlaylist)).toEqual(['liked-fixture']);
+      expect([
+        ...new Set(
+          libraryRequests
+            .filter((request) => request.playlistId === '101')
+            .map((request) => request.page),
+        ),
+      ]).toEqual([1]);
+      expect(
+        await page.evaluate(() => ({
+          total: window.musicTest.engine.store.getState().playlist?.total,
+          loaded: window.musicTest.engine.store.getState().queue.length,
+          count: window.musicTest.audioCount,
+        })),
+      ).toEqual({ total: 669, loaded: 100, count: 1 });
+      await page.getByRole('tab', { name: music.queue, exact: true }).click();
+      await page.waitForFunction(
+        () => !!document.querySelector('ul[aria-label="Queue"] li[aria-setsize="669"]'),
+      );
+      const queueDomRows = await page.evaluate(
+        () => document.querySelectorAll('ul[aria-label="Queue"] li').length,
+      );
+      expect(queueDomRows).toBeLessThan(40);
+      expect(
+        await page.evaluate(() => document.body.textContent?.includes('100 loaded · 669 songs')),
+      ).toBe(true);
+      await page.getByRole('tab', { name: music.nowPlaying, exact: true }).click();
+      // The animation follows the real media clock, including pause and backward seek.
+      await page.evaluate(() => window.musicTest.engine.seek(1700));
+      await page.waitForFunction(
+        () =>
+          document
+            .querySelector('[data-lyric-line="0"] [data-lyric-word="1"]')
+            ?.getAttribute('data-state') === 'current',
+      );
+      const wordFrames = await page.evaluate(async () => {
+        const frames: { audio: number; progress: number; interval: number }[] = [];
+        let previous = performance.now();
+        for (let index = 0; index < 24; index++) {
+          await new Promise(requestAnimationFrame);
+          const now = performance.now();
+          const word = document.querySelector<HTMLElement>(
+            '[data-lyric-line="0"] [data-lyric-word="1"]',
+          )!;
+          frames.push({
+            audio: window.musicTest.audio!.currentTime,
+            progress: Number.parseFloat(word.style.getPropertyValue('--lyric-progress')),
+            interval: now - previous,
+          });
+          previous = now;
+        }
+        return frames;
+      });
+      expect(wordFrames.at(-1)!.audio).toBeGreaterThan(wordFrames[0].audio);
+      expect(wordFrames.at(-1)!.progress).toBeGreaterThan(wordFrames[0].progress);
+      for (const frame of wordFrames) {
+        const expectedProgress = Math.min(
+          100,
+          Math.max(0, ((frame.audio * 1000 - 1600) / 1200) * 100),
+        );
+        expect(Math.abs(frame.progress - expectedProgress)).toBeLessThan(15);
+      }
+      await page.getByRole('button', { name: 'Pause', exact: true }).click();
+      await page.evaluate(() => window.musicTest.engine.seek(2200));
+      await page.waitForFunction(() => {
+        const word = document.querySelector<HTMLElement>(
+          '[data-lyric-line="0"] [data-lyric-word="1"]',
+        );
+        return (
+          !!word &&
+          Math.abs(Number.parseFloat(word.style.getPropertyValue('--lyric-progress')) - 50) < 2
+        );
+      });
+      const pausedFrames = await page.evaluate(async () => {
+        const word = document.querySelector<HTMLElement>(
+          '[data-lyric-line="0"] [data-lyric-word="1"]',
+        )!;
+        const before = {
+          time: window.musicTest.audio!.currentTime,
+          progress: word.style.getPropertyValue('--lyric-progress'),
+        };
+        for (let index = 0; index < 8; index++) await new Promise(requestAnimationFrame);
+        return {
+          before,
+          after: {
+            time: window.musicTest.audio!.currentTime,
+            progress: word.style.getPropertyValue('--lyric-progress'),
+          },
+        };
+      });
+      expect(pausedFrames.after).toEqual(pausedFrames.before);
+      await page.evaluate(() => window.musicTest.engine.seek(1100));
+      await page.waitForFunction(
+        () =>
+          document
+            .querySelector('[data-lyric-line="0"] [data-lyric-word="0"]')
+            ?.getAttribute('data-state') === 'current',
+      );
+      expect(
+        await page
+          .locator('[data-lyric-line="0"] [data-lyric-word="1"]')
+          .getAttribute('data-state'),
+      ).toBe('future');
+      const scrollFrames = await page.evaluate(async () => {
+        const container = document.querySelector<HTMLElement>('[aria-label="Lyrics"]')!;
+        const positions = [container.scrollTop];
+        window.musicTest.engine.seek(15400);
+        for (let index = 0; index < 40; index++) {
+          await new Promise(requestAnimationFrame);
+          positions.push(container.scrollTop);
+        }
+        return positions;
+      });
+      expect(scrollFrames.at(-1)!).toBeGreaterThan(scrollFrames[0] + 100);
+      expect(new Set(scrollFrames.map(Math.round)).size).toBeGreaterThan(5);
+      await page.waitForFunction(
+        () =>
+          document.querySelector('[data-lyric-line="20"]')?.getAttribute('aria-current') === 'true',
+      );
+      // Measure a real control input-to-next-frame while audio and word animation run.
+      await page.evaluate(() => {
+        window.musicTest.engine.seek(1700);
+        const volume = document.querySelector('input[aria-label="Volume"]')!;
+        volume.addEventListener(
+          'input',
+          () => {
+            const start = performance.now();
+            requestAnimationFrame(() => {
+              window.musicTest.inputLatencyMs = performance.now() - start;
+            });
+          },
+          { once: true },
+        );
+      });
+      await page.getByRole('button', { name: 'Play', exact: true }).click();
+      await page.getByRole('slider', { name: 'Volume', exact: true }).press('ArrowRight');
+      await page.waitForFunction(() => typeof window.musicTest.inputLatencyMs === 'number');
+      await writeFile(
+        '.data/music-m2-validation/word-lyrics-browser.json',
+        JSON.stringify(
+          {
+            libraryTotal: 669,
+            loadedMetadata: 100,
+            libraryDomRows,
+            queueDomRows,
+            frameIntervalsMs: wordFrames.map((frame) => frame.interval),
+            audioAdvancedMs: (wordFrames.at(-1)!.audio - wordFrames[0].audio) * 1000,
+            inputLatencyMs: await page.evaluate(() => window.musicTest.inputLatencyMs),
+            smoothScrollPositions: scrollFrames,
+            audioInstances: await page.evaluate(() => window.musicTest.audioCount),
+          },
+          null,
+          2,
+        ),
+      );
       await page.getByRole('tab', { name: music.library, exact: true }).click();
       await page.getByRole('button', { name: music.kugouCollectedPlaylists, exact: true }).click();
       await page.getByRole('button', { name: 'Collected playlist fixture', exact: true }).click();
@@ -1128,7 +1318,7 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
           const state = window.musicTest.engine.store.getState();
           return {
             activeId: state.activeId,
-            queued: state.queue.some((track) => track.id === 'collected-fixture'),
+            queued: state.playlist?.appendedCount === 1,
             playing: !window.musicTest.audio!.paused,
             count: window.musicTest.audioCount,
           };
@@ -1156,10 +1346,56 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       expect(libraryRequests).toEqual(
         expect.arrayContaining([
           { operation: 'library' },
-          { operation: 'playlist', playlistId: '101' },
-          { operation: 'playlist', playlistId: '102' },
+          { operation: 'playlist', playlistId: '101', page: 1 },
+          { operation: 'playlist', playlistId: '102', page: 1 },
         ]),
       );
+      // Crossing the loaded page fetches metadata once, then resolves only the chosen songs.
+      await page.getByRole('tab', { name: music.library, exact: true }).click();
+      await page.getByRole('button', { name: music.kugouLiked, exact: true }).click();
+      await page.getByRole('button', { name: music.playAll, exact: true }).click();
+      await page.waitForFunction(
+        () =>
+          window.musicTest.engine.store.getState().activeId === 'liked-fixture' &&
+          window.musicTest.engine.store.getState().status === 'playing',
+      );
+      const beforeBoundary = resolvedTracks.length;
+      await page.evaluate(() => {
+        window.musicTest.engine.setShuffle(false);
+        window.musicTest.engine.playQueuedTrack('liked-fixture-100');
+      });
+      await page.waitForFunction(() => {
+        const state = window.musicTest.engine.store.getState();
+        return (
+          state.activeId === 'liked-fixture-100' &&
+          state.status === 'playing' &&
+          state.queue.length === 200
+        );
+      });
+      await page.getByRole('button', { name: 'Next track', exact: true }).click();
+      await page.waitForFunction(() => {
+        const state = window.musicTest.engine.store.getState();
+        return (
+          state.activeId === 'liked-fixture-101' &&
+          state.status === 'playing' &&
+          state.playlist?.currentIndex === 100
+        );
+      });
+      expect(resolvedTracks.slice(beforeBoundary)).toEqual([
+        'liked-fixture-100',
+        'liked-fixture-101',
+      ]);
+      expect(
+        libraryRequests.filter((request) => request.playlistId === '101' && request.page === 2),
+      ).toHaveLength(1);
+      expect(libraryRequests.some((request) => (request.page ?? 1) > 2)).toBe(false);
+      expect(
+        await page.evaluate(() => ({
+          total: window.musicTest.engine.store.getState().playlist?.total,
+          loaded: window.musicTest.engine.store.getState().queue.length,
+          count: window.musicTest.audioCount,
+        })),
+      ).toEqual({ total: 669, loaded: 200, count: 1 });
       await page.getByRole('button', { name: 'Sign out', exact: true }).click();
       expect(
         await page.evaluate(() => ({

@@ -12,7 +12,7 @@ const command = z.discriminatedUnion('operation', [
   z
     .object({
       operation: z.literal('playlist'),
-      page: z.number().int().min(1).max(50).default(1),
+      page: z.number().int().positive().safe().default(1),
       playlistId: z.string().regex(/^\d{1,20}$/u),
     })
     .strict(),

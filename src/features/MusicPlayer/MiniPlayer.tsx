@@ -31,6 +31,7 @@ import { useAudioEngine, useMusicPlayer } from './context';
 import { type RepeatMode } from './engine';
 import { formatTime } from './lyrics';
 import { musicTheme } from './musicTheme';
+import MusicTrackList from './MusicTrackList';
 import { useCapsuleMotion } from './useCapsuleMotion';
 import { useCapsulePosition } from './useCapsulePosition';
 
@@ -122,7 +123,7 @@ export default function MiniPlayer() {
         <div className={styles.panelHeading}>
           <span>
             <Icon aria-hidden icon={ListMusic} size={{ size: 18, strokeWidth: 1.75 }} />
-            {t('queue')} <small>{s.queue.length}</small>
+            {t('queue')} <small>{s.playlist?.total ?? s.queue.length}</small>
           </span>
           <span className={styles.transport}>
             <button
@@ -138,32 +139,42 @@ export default function MiniPlayer() {
             </Link>
           </span>
         </div>
-        {s.queue.length ? (
-          <ol aria-label={t('capsuleQueue')} className={styles.queue}>
-            {s.queue.map((item, index) => (
+        {s.playlist?.error && <button onClick={() => engine.retryPlaylist()}>{t('retry')}</button>}
+        {panelOpen && s.queue.length ? (
+          <MusicTrackList
+            className={styles.queue}
+            height="min(250px, calc(100dvh - 310px))"
+            initialIndex={s.queue.findIndex((item) => item.id === s.activeId)}
+            items={s.queue}
+            key={s.playlist?.startIndex ?? 'manual'}
+            label={t('capsuleQueue')}
+            offset={s.playlist?.startIndex ?? 0}
+            rowHeight={40}
+            total={s.playlist?.total ?? s.queue.length}
+            renderItem={(item, index) => (
               <li key={item.id}>
                 <button
                   aria-current={s.activeId === item.id}
                   aria-label={`${t('capsulePlay')} ${item.name}`}
                   className={styles.queueTrack}
-                  onClick={() => engine.playTrack(item)}
+                  onClick={() => engine.playQueuedTrack(item.id)}
                 >
                   <span className={styles.queueNumber}>
                     {s.activeId === item.id ? (
                       <Icon aria-hidden icon={AudioLines} size={{ size: 18, strokeWidth: 1.75 }} />
                     ) : (
-                      String(index + 1).padStart(2, '0')
+                      String((s.playlist?.startIndex ?? 0) + index + 1).padStart(2, '0')
                     )}
                   </span>
                   <span>{item.name}</span>
                   {s.activeId === item.id && <span className={styles.activeDot} />}
                 </button>
               </li>
-            ))}
-          </ol>
-        ) : (
+            )}
+          />
+        ) : !s.queue.length ? (
           <p className={styles.empty}>{t('emptyQueue')}</p>
-        )}
+        ) : null}
         <div className={styles.settings}>
           <button
             aria-label={t('capsuleShuffle')}

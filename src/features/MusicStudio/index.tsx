@@ -36,11 +36,13 @@ import { useAudioEngine, useMusicPlayer } from '@/features/MusicPlayer/context';
 import { MAX_MUSIC_QUEUE_LENGTH, type RepeatMode } from '@/features/MusicPlayer/engine';
 import { formatTime, MAX_LRC_BYTES } from '@/features/MusicPlayer/lyrics';
 import { musicTheme } from '@/features/MusicPlayer/musicTheme';
+import MusicTrackList from '@/features/MusicPlayer/MusicTrackList';
 import { useMusicPluginState } from '@/features/MusicPlayer/plugins/context';
 import LyricsPanel from '@/features/MusicPlayer/plugins/LyricsPanel';
 import MusicPluginSettings from '@/features/MusicPlayer/plugins/MusicPluginSettings';
 import { liquidGlass } from '@/styles/liquidGlass';
 import { type MusicTrack } from '@/types/music';
+import { type MusicPlaylistTracks } from '@/types/music-account';
 
 import KugouAccount, { type KugouAccountHandle } from './KugouAccount';
 import KugouLibrary, { type KugouLibrarySection, librarySectionLabels } from './KugouLibrary';
@@ -79,7 +81,12 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
   const [revision, setRevision] = useState(0);
   const [queueNotice, setQueueNotice] = useState<{
     count: number;
-    key: 'queueAdded' | 'queueAlreadyAdded' | 'queueFull' | 'queuePartiallyAdded';
+    key:
+      | 'queueAdded'
+      | 'queueAlreadyAdded'
+      | 'queueFull'
+      | 'queuePartiallyAdded'
+      | 'queueAddedAfterPlaylist';
   } | null>(null);
   const upload = useRef<HTMLInputElement>(null);
   const lyricInput = useRef<HTMLInputElement>(null);
@@ -88,6 +95,8 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
   const active = s.queue.find((item) => item.id === s.activeId);
   const playing = ['playing', 'buffering', 'loading'].includes(s.status);
   const activeIndex = s.queue.findIndex((track) => track.id === s.activeId);
+  const queueTotal = s.playlist?.total ?? s.queue.length;
+  const queueIndex = s.playlist?.currentIndex ?? activeIndex;
   const displayedTracks = view === 'library' ? tracks : s.queue;
   const personalLibrary = view === 'library' && source === 'kugou' && kugouSection !== 'discover';
   const audioFormat = (track: MusicTrack) =>
@@ -185,8 +194,34 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
     setView('player');
   }
 
+  function playPlaylist(page: MusicPlaylistTracks, activeId?: string) {
+    setQueueNotice(null);
+    engine.playPlaylist(page, activeId);
+    setView('player');
+  }
+
   function enqueueTracks(items: MusicTrack[]) {
-    const queue = engine.store.getState().queue;
+    const before = engine.store.getState();
+    if (before.playlist) {
+      engine.enqueue(items);
+      const total = engine.store.getState().playlist?.appendedCount ?? 0;
+      const added = total - before.playlist.appendedCount;
+      setQueueNotice({
+        count: added,
+        key:
+          before.playlist.appendedCount >= MAX_MUSIC_QUEUE_LENGTH
+            ? 'queueFull'
+            : added &&
+                total >= MAX_MUSIC_QUEUE_LENGTH &&
+                new Set(items.map((item) => item.id)).size > added
+              ? 'queuePartiallyAdded'
+              : added
+                ? 'queueAddedAfterPlaylist'
+                : 'queueAlreadyAdded',
+      });
+      return;
+    }
+    const queue = before.queue;
     const incoming = [...new Map(items.map((track) => [track.id, track])).values()].filter(
       (track) => !queue.some((item) => item.id === track.id),
     );
@@ -422,7 +457,7 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
                 onClick={() => setView('queue')}
               >
                 <Icon aria-hidden icon={ListMusic} size={16} />
-                {activeIndex >= 0 ? activeIndex + 1 : '—'} / {s.queue.length}
+                {queueIndex >= 0 ? queueIndex + 1 : '—'} / {queueTotal}
               </button>
               <span className={styles.status}>{t(s.status)}</span>
               <label className={styles.volume}>
@@ -481,7 +516,9 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
         >
           <div className={styles.collectionHeading}>
             <h2>{t(view === 'queue' ? 'queue' : 'library')}</h2>
-            {!personalLibrary && <span>{displayedTracks.length}</span>}
+            {!personalLibrary && (
+              <span>{view === 'queue' ? queueTotal : displayedTracks.length}</span>
+            )}
           </div>
           {view === 'library' && (
             <div className={styles.sourceRow}>
@@ -534,19 +571,49 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
               section={kugouSection}
               userId={s.userId}
               onEnqueue={enqueueTracks}
-              onPlay={playTrack}
-              onPlayAll={playTracks}
+              onPlayPlaylist={playPlaylist}
               onSignIn={() => kugouAccount.current?.show()}
             />
           )}
           <div hidden={personalLibrary}>
+            {view === 'queue' && s.playlist && (
+              <div className={styles.playlistQueueInfo}>
+                <strong>{s.playlist.name}</strong>
+                <p>{t('queuePlaylistHint')}</p>
+                <span>
+                  {t('queueLoadedCount', { loaded: s.queue.length, total: s.playlist.total })}
+                </span>
+                {s.playlist.appendedCount > 0 && (
+                  <span>{t('queueAfterPlaylist', { count: s.playlist.appendedCount })}</span>
+                )}
+                {s.playlist.loading && <p role="status">{t('queueLoadingNext')}</p>}
+                {s.playlist.error && <p role="alert">{t('queueLoadFailed')}</p>}
+                {(s.playlist.error || s.playlist.hasMore) && (
+                  <Button
+                    loading={s.playlist.loading}
+                    size="small"
+                    onClick={() =>
+                      s.playlist?.error ? engine.retryPlaylist() : void engine.loadMorePlaylist()
+                    }
+                  >
+                    {t(s.playlist.error ? 'retry' : 'queueLoadMore')}
+                  </Button>
+                )}
+              </div>
+            )}
             <div className={styles.collectionToolbar}>
               <Button
                 disabled={!displayedTracks.length}
-                icon={Play}
-                onClick={() => playTracks(displayedTracks)}
+                icon={view === 'queue' && s.playlist && playing ? Pause : Play}
+                onClick={() =>
+                  view === 'queue' && s.playlist
+                    ? playing
+                      ? engine.pause()
+                      : engine.play()
+                    : playTracks(displayedTracks)
+                }
               >
-                {t('playAll')}
+                {t(view === 'queue' && s.playlist ? (playing ? 'pause' : 'play') : 'playAll')}
               </Button>
               {view !== 'queue' && (
                 <Input
@@ -649,68 +716,84 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
                 </li>
               ))}
             </ul>
-            <ol aria-label={t('queue')} className={styles.list} hidden={view !== 'queue'}>
-              {s.queue.map((track, index) => (
-                <li
-                  aria-current={s.activeId === track.id}
-                  className={styles.trackRow}
-                  key={track.id}
-                >
-                  <span aria-hidden className={styles.rowNumber}>
-                    {String(index + 1).padStart(2, '0')}
-                  </span>
-                  <span aria-hidden className={styles.trackArt}>
-                    {track.coverUrl ? (
-                      <img alt="" decoding="async" loading="lazy" src={track.coverUrl} />
-                    ) : (
-                      <Icon icon={Music2} size={20} />
-                    )}
-                  </span>
-                  <div className={styles.rowInfo}>
-                    <span className={styles.name} title={track.name}>
-                      {track.name}
+            {view === 'queue' && (
+              <MusicTrackList
+                className={styles.list}
+                initialIndex={activeIndex}
+                items={s.queue}
+                key={s.playlist?.startIndex ?? 'manual'}
+                label={t('queue')}
+                offset={s.playlist?.startIndex ?? 0}
+                total={queueTotal}
+                renderItem={(track, index) => (
+                  <li
+                    aria-current={s.activeId === track.id}
+                    className={styles.trackRow}
+                    key={track.id}
+                  >
+                    <span aria-hidden className={styles.rowNumber}>
+                      {String((s.playlist?.startIndex ?? 0) + index + 1).padStart(2, '0')}
                     </span>
-                    <span className={styles.fileMeta}>
-                      {track.source === 'kugou'
-                        ? track.artist
-                        : audioFormat(track) + ' · ' + audioSize(track)}
+                    <span aria-hidden className={styles.trackArt}>
+                      {track.coverUrl ? (
+                        <img alt="" decoding="async" loading="lazy" src={track.coverUrl} />
+                      ) : (
+                        <Icon icon={Music2} size={20} />
+                      )}
                     </span>
-                  </div>
-                  <div className={styles.rowActions}>
-                    <Button
-                      aria-label={t('play') + ' ' + track.name}
-                      icon={Play}
-                      size="small"
-                      type="text"
-                      onClick={() => playTrack(track)}
-                    />
-                    <Button
-                      aria-label={t('moveUp') + ' ' + track.name}
-                      disabled={index === 0}
-                      icon={ArrowUp}
-                      size="small"
-                      type="text"
-                      onClick={() => engine.move(track.id, -1)}
-                    />
-                    <Button
-                      aria-label={t('moveDown') + ' ' + track.name}
-                      disabled={index === s.queue.length - 1}
-                      icon={ArrowDown}
-                      size="small"
-                      type="text"
-                      onClick={() => engine.move(track.id, 1)}
-                    />
-                    <Button
-                      aria-label={t('remove') + ' ' + track.name}
-                      icon={Trash2}
-                      size="small"
-                      type="text"
-                      onClick={() => engine.remove(track.id)}
-                    />
-                  </div>
-                </li>
-              ))}
-            </ol>
+                    <div className={styles.rowInfo}>
+                      <span className={styles.name} title={track.name}>
+                        {track.name}
+                      </span>
+                      <span className={styles.fileMeta}>
+                        {track.source === 'kugou'
+                          ? track.artist
+                          : audioFormat(track) + ' · ' + audioSize(track)}
+                      </span>
+                    </div>
+                    <div className={styles.rowActions}>
+                      <Button
+                        aria-label={t('play') + ' ' + track.name}
+                        icon={Play}
+                        size="small"
+                        type="text"
+                        onClick={() => {
+                          engine.playQueuedTrack(track.id);
+                          setView('player');
+                        }}
+                      />
+                      {!s.playlist && (
+                        <>
+                          <Button
+                            aria-label={t('moveUp') + ' ' + track.name}
+                            disabled={index === 0}
+                            icon={ArrowUp}
+                            size="small"
+                            type="text"
+                            onClick={() => engine.move(track.id, -1)}
+                          />
+                          <Button
+                            aria-label={t('moveDown') + ' ' + track.name}
+                            disabled={index === s.queue.length - 1}
+                            icon={ArrowDown}
+                            size="small"
+                            type="text"
+                            onClick={() => engine.move(track.id, 1)}
+                          />
+                          <Button
+                            aria-label={t('remove') + ' ' + track.name}
+                            icon={Trash2}
+                            size="small"
+                            type="text"
+                            onClick={() => engine.remove(track.id)}
+                          />
+                        </>
+                      )}
+                    </div>
+                  </li>
+                )}
+              />
+            )}
           </div>
         </section>
         <section

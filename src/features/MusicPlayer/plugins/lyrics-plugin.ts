@@ -1,6 +1,6 @@
 import { type Plugin } from '@lobechat/cordis-foundation';
 
-import { activeLyric, type LyricLine, parseLrc } from '../lyrics';
+import { activeLyric, freezeLyricLines, type LyricLine, parseKrc, parseLrc } from '../lyrics';
 import { type MusicPlayerPort, type MusicPlayerSnapshot } from '../ports';
 import { type LyricsPluginView, type LyricsViewSlot, type MusicLyricsSource } from './types';
 
@@ -13,10 +13,27 @@ export function lyricsForClip(lines: Lines, offsetMs: number, durationMs?: numbe
   const end = durationMs ? offsetMs + durationMs : Infinity;
   const visible = lines.filter((line) => line.timeMs >= offsetMs && line.timeMs < end);
   const previous = lines.findLast((line) => line.timeMs < offsetMs);
-  const result: LyricLine[] = visible.map((line) => ({ ...line, timeMs: line.timeMs - offsetMs }));
+  const project = (line: Readonly<LyricLine>): LyricLine => ({
+    ...line,
+    ...(line.words
+      ? {
+          words: line.words.map((word) => ({ ...word, timeMs: word.timeMs - offsetMs })),
+        }
+      : {}),
+    ...(line.durationMs === undefined
+      ? {}
+      : {
+          durationMs: Math.max(
+            0,
+            Math.min(end, line.timeMs + line.durationMs) - Math.max(offsetMs, line.timeMs),
+          ),
+        }),
+    timeMs: Math.max(0, line.timeMs - offsetMs),
+  });
+  const result: LyricLine[] = visible.map(project);
   if (previous && (!visible.length || visible[0].timeMs > offsetMs))
-    result.unshift({ ...previous, timeMs: 0 });
-  return Object.freeze(result.map((line) => Object.freeze(line)));
+    result.unshift(project(previous));
+  return freezeLyricLines(result);
 }
 
 /** Trusted native plugin: its only playback capability is seeking a lyric line. */
@@ -64,6 +81,16 @@ export const lyricsPlugin: Plugin.Object = {
             currentLine: activeLyric(lines, snapshot.positionMs),
             durationMs: snapshot.durationMs,
             lines,
+            getPositionMs() {
+              if (
+                !active ||
+                !snapshot.track ||
+                player.getSnapshot().track?.id !== snapshot.track.id
+              )
+                throw new Error('MUSIC_LYRICS_STALE');
+              return player.getPositionMs();
+            },
+            playbackStatus: snapshot.status,
             positionMs: snapshot.positionMs,
             retry() {
               if (active && publishedIdentity && identity === publishedIdentity) fetchLyrics(true);
@@ -114,7 +141,9 @@ export const lyricsPlugin: Plugin.Object = {
           .then((result) => {
             if (!active || signal.aborted || revision !== request || identity !== key) return;
             const text = result.text ?? '';
-            const lines = Object.freeze(parseLrc(text).map((line) => Object.freeze(line)));
+            const lines = freezeLyricLines(
+              result.format === 'krc' ? parseKrc(text) : parseLrc(text),
+            );
             cacheBytes -= cache.get(key)?.bytes ?? 0;
             cache.delete(key);
             const bytes = new TextEncoder().encode(text).length;

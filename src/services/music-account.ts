@@ -50,6 +50,7 @@ export class MusicAccountClient {
     return result;
   }
   async playlist(playlistId: string, page = 1, signal?: AbortSignal) {
+    musicPlaylistTracksSchema.shape.page.parse(page);
     const result = musicPlaylistTracksSchema.parse(
       await this.invoke('playlist', undefined, signal, { page, playlistId }),
     );

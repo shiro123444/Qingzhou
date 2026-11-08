@@ -77,9 +77,11 @@ export class MusicClient {
   }
 
   async lyrics(trackId: string, signal?: AbortSignal) {
+    signal?.throwIfAborted();
     const result = musicLyricsSchema.parse(
       await this.invoke('music.lyrics.get', { trackId }, signal),
     );
+    signal?.throwIfAborted();
     if (result.trackId !== trackId) throw new Error('MUSIC_LYRICS_TRACK_MISMATCH');
     return result;
   }

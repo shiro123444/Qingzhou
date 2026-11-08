@@ -79,10 +79,19 @@ items and exposes `hasMore`, so collections and tracks can be loaded progressive
 Selecting or queuing a song uses the same AudioEngine, current playback-rights
 resolution, artwork, and automatic Cordis lyrics as public search.
 
-The playback queue remains bounded to 100 tracks. Bulk playback replaces the queue
-with up to the first 100 loaded songs, and the button identifies partial/limited
-playback. Selecting an individual later song makes room for it even when the queue
-is full. Loading more library pages does not itself add music to the queue.
+Playlist playback retains its signed account revision and full track count, while
+loading metadata in 100-song pages. The engine keeps at most three adjacent pages,
+prefetches near the current page boundary, and resolves audio only for the selected
+song. An unloaded page is not treated as the end of the playlist. Sequence, previous,
+repeat, shuffle, and retry use the full playlist position. Reload restores the
+active page and saved position in a paused state instead of resolving every song.
+Switching Qingzhou/Kugou accounts cancels pending pages and invalidates the source.
+
+Manual queues remain bounded to 1,000 tracks. Songs queued during playlist playback
+are kept separately and play after the playlist, so adding a song never silently
+replaces the remaining playlist with the current cache window. Long library and
+queue views render only visible rows. Browsing/loading more pages does not itself
+load audio or add songs to the queue.
 
 The request shapes follow KuGouMusicApi's
 [`user_playlist.js`](https://github.com/MakcRe/KuGouMusicApi/blob/main/module/user_playlist.js)
@@ -121,11 +130,22 @@ HTTPS; no certificate validation is disabled and no HTTPS URL is automatically
 retried over HTTP. The browser continues to use the same-origin authenticated proxy,
 without mixed-content permissions or disabled web security.
 
-`music.lyrics.get` obtains timed LRC for the exact Kugou hash. It bounds decoded LRC
-to 128 KiB and caches at most 64 public results for ten minutes. The Cordis lyric
+`music.lyrics.get` obtains lyrics for the exact Kugou hash, preferring the original
+KRC word timings. The server decodes the documented krc1/XOR/zlib wire format with
+limits on both compressed and decoded content, validates UTF-8 and timing bounds,
+and falls back to LRC only when word-timed lyrics are unavailable. It never invents
+word durations by splitting a line evenly. Decoded lyrics are limited to 128 KiB;
+at most 64 public results are cached for ten minutes. The Cordis lyric
 plugin uses its active-track capability, cancels work on track/account changes or
 plugin stop, and applies preview offsets. No title-based substitute lyric is silently
 selected. Local LRC remains available for owned audio.
+
+The Cordis player capability exposes a read-only native audio clock to the lyric
+view. Only the visible lyric panel samples that clock per animation frame; it does
+not publish frame-rate updates to the global player store. KRC words fill according
+to their real start/duration, while LRC uses line-level highlighting. Spring scrolling
+keeps the active line centered, pauses following on manual scroll, and supports
+explicit resume, reverse seeking, hidden tabs, and reduced motion.
 
 ## Verification
 

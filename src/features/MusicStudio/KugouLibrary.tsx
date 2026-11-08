@@ -5,10 +5,11 @@ import { ArrowLeft, Heart, ListMusic, ListPlus, Music2, Play, RefreshCw } from '
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { MAX_MUSIC_QUEUE_LENGTH } from '@/features/MusicPlayer/engine';
 import { formatTime } from '@/features/MusicPlayer/lyrics';
+import MusicTrackList from '@/features/MusicPlayer/MusicTrackList';
 import { musicAccountClient } from '@/services/music-account';
 import { type MusicTrack } from '@/types/music';
+import { type MusicPlaylistTracks } from '@/types/music-account';
 
 import { libraryStyles } from './library.style';
 import { styles } from './style';
@@ -34,8 +35,7 @@ export const librarySectionLabels = {
 interface LibraryProps {
   activeId: string | null;
   onEnqueue: (tracks: MusicTrack[]) => void;
-  onPlay: (track: MusicTrack) => void;
-  onPlayAll: (tracks: MusicTrack[]) => void;
+  onPlayPlaylist: (page: MusicPlaylistTracks, activeId?: string) => void;
   onSignIn: () => void;
   revision: number;
   section: Exclude<KugouLibrarySection, 'discover'>;
@@ -95,8 +95,7 @@ function PlaylistTracks({
   activeId,
   onBack,
   onEnqueue,
-  onPlay,
-  onPlayAll,
+  onPlayPlaylist,
   onSignIn,
   playlist,
   userId,
@@ -106,6 +105,7 @@ function PlaylistTracks({
 }) {
   const { t } = useTranslation('music');
   const [data, setData] = useState<TrackPage>();
+  const [pages, setPages] = useState<Map<number, TrackPage>>(() => new Map());
   const [page, setPage] = useState(1);
   const [retry, setRetry] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -118,6 +118,14 @@ function PlaylistTracks({
       .playlist(playlist.id, page, controller.signal)
       .then((result) => {
         if (controller.signal.aborted) return;
+        setPages((previous) => {
+          const next =
+            previous.get(1)?.revision === result.revision
+              ? new Map(previous)
+              : new Map<number, TrackPage>();
+          next.set(result.page, result);
+          return next;
+        });
         setData((previous) => ({
           ...result,
           tracks:
@@ -155,10 +163,15 @@ function PlaylistTracks({
           <span>{t('kugouTrackCount', { count: data?.total ?? playlist.trackCount })}</span>
         </div>
         <div className={libraryStyles.actions}>
-          <Button disabled={!tracks.length} icon={Play} onClick={() => onPlayAll(tracks)}>
-            {tracks.length > MAX_MUSIC_QUEUE_LENGTH
-              ? t('kugouPlayFirst', { count: MAX_MUSIC_QUEUE_LENGTH })
-              : t(data?.hasMore ? 'kugouPlayLoaded' : 'playAll')}
+          <Button
+            disabled={!!error || !pages.get(1)?.tracks.length}
+            icon={Play}
+            onClick={() => {
+              const first = pages.get(1);
+              if (first) onPlayPlaylist(first);
+            }}
+          >
+            {t('playAll')}
           </Button>
           <Button
             aria-label={t('kugouLibraryRefresh')}
@@ -167,6 +180,7 @@ function PlaylistTracks({
             type="text"
             onClick={() => {
               setData(undefined);
+              setPages(new Map());
               setPage(1);
               setRetry((value) => value + 1);
             }}
@@ -181,8 +195,12 @@ function PlaylistTracks({
         onRetry={() => setRetry((value) => value + 1)}
         onSignIn={onSignIn}
       />
-      <ul aria-label={playlist.name} className={styles.list}>
-        {tracks.map((track, index) => (
+      <MusicTrackList
+        className={styles.list}
+        items={tracks}
+        label={playlist.name}
+        total={data?.total ?? playlist.trackCount}
+        renderItem={(track, index) => (
           <li aria-current={activeId === track.id} className={styles.trackRow} key={track.id}>
             <span aria-hidden className={styles.rowNumber}>
               {String(index + 1).padStart(2, '0')}
@@ -209,7 +227,12 @@ function PlaylistTracks({
                 icon={Play}
                 size="small"
                 type="text"
-                onClick={() => onPlay(track)}
+                onClick={() => {
+                  const sourcePage = [...pages.values()].find((item) =>
+                    item.tracks.some((song) => song.id === track.id),
+                  );
+                  if (sourcePage) onPlayPlaylist(sourcePage, track.id);
+                }}
               />
               <Button
                 aria-label={t('enqueue') + ' ' + track.name}
@@ -220,8 +243,8 @@ function PlaylistTracks({
               />
             </div>
           </li>
-        ))}
-      </ul>
+        )}
+      />
       {data?.hasMore && !error && (
         <div className={libraryStyles.more}>
           <Button loading={loading} onClick={() => setPage((value) => value + 1)}>
@@ -293,8 +316,7 @@ function LibraryContent(props: LibraryProps) {
         userId={props.userId}
         onBack={props.section === 'liked' ? undefined : () => setSelected(undefined)}
         onEnqueue={props.onEnqueue}
-        onPlay={props.onPlay}
-        onPlayAll={props.onPlayAll}
+        onPlayPlaylist={props.onPlayPlaylist}
         onSignIn={props.onSignIn}
       />
     );

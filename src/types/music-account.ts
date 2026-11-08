@@ -57,7 +57,7 @@ export const musicLibrarySchema = z
 export const musicPlaylistTracksSchema = z
   .object({
     hasMore: z.boolean(),
-    page: z.number().int().positive(),
+    page: z.number().int().positive().safe(),
     playlist: musicLibraryPlaylistSchema,
     revision: z.string().uuid(),
     total: z.number().int().nonnegative(),

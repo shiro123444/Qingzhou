@@ -181,6 +181,10 @@ export class MusicPluginHost {
         assertCurrent();
         return activation.session.port.getSnapshot();
       },
+      getPositionMs: () => {
+        assertCurrent();
+        return activation.session.port.getPositionMs();
+      },
       subscribe: (listener: MusicPlayerListener) => {
         assertCurrent();
         return activation.session.port.subscribe((snapshot) => {

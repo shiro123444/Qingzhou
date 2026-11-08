@@ -38,8 +38,7 @@ const library = (playlists: MusicLibraryPlaylist[]): MusicLibrary => ({
 });
 const callbacks = () => ({
   onEnqueue: vi.fn(),
-  onPlay: vi.fn(),
-  onPlayAll: vi.fn(),
+  onPlayPlaylist: vi.fn(),
   onSignIn: vi.fn(),
 });
 function page(props: Partial<React.ComponentProps<typeof KugouLibrary>> = {}) {
@@ -88,15 +87,21 @@ it('opens only the chosen account collection, preserves artwork, and plays or qu
   );
   fireEvent.click(screen.getByRole('button', { name: music.enqueue + ' ' + track.name }));
   expect(actions.onEnqueue).toHaveBeenCalledWith([track]);
-  expect(actions.onPlay).not.toHaveBeenCalled();
+  expect(actions.onPlayPlaylist).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole('button', { name: music.play + ' ' + track.name }));
-  expect(actions.onPlay).toHaveBeenCalledWith(track);
+  expect(actions.onPlayPlaylist).toHaveBeenCalledWith(
+    expect.objectContaining({ playlist: collected, tracks: [track], page: 1 }),
+    track.id,
+  );
   fireEvent.click(screen.getByRole('button', { name: music.playAll }));
-  expect(actions.onPlayAll).toHaveBeenCalledWith([track]);
+  expect(actions.onPlayPlaylist).toHaveBeenLastCalledWith(
+    expect.objectContaining({ playlist: collected, tracks: [track], page: 1 }),
+  );
   expect(view.container.querySelector(`img[src="${track.coverUrl}"]`)).toBeVisible();
 });
 
 it('opens the actual liked playlist and appends pages without duplicating songs', async () => {
+  const actions = callbacks();
   const next = { ...track, id: 'second', name: 'Second song' };
   vi.mocked(musicAccountClient.playlist)
     .mockResolvedValueOnce({
@@ -104,7 +109,7 @@ it('opens the actual liked playlist and appends pages without duplicating songs'
       page: 1,
       playlist: liked,
       revision,
-      total: 2,
+      total: 669,
       tracks: [track],
     })
     .mockResolvedValueOnce({
@@ -112,13 +117,13 @@ it('opens the actual liked playlist and appends pages without duplicating songs'
       page: 2,
       playlist: liked,
       revision,
-      total: 2,
+      total: 669,
       tracks: [track, next],
     });
-  render(page({ section: 'liked' }));
+  render(page({ ...actions, section: 'liked' }));
   await screen.findByRole('button', { name: music.play + ' ' + track.name });
   expect(musicAccountClient.playlist).toHaveBeenCalledWith(liked.id, 1, expect.any(AbortSignal));
-  expect(screen.getByRole('button', { name: music.kugouPlayLoaded })).toBeVisible();
+  expect(screen.getByRole('button', { name: music.playAll })).toBeVisible();
   fireEvent.click(screen.getByRole('button', { name: music.kugouLoadMore }));
   await screen.findByRole('button', { name: music.play + ' ' + next.name });
   expect(musicAccountClient.playlist).toHaveBeenLastCalledWith(
@@ -128,6 +133,24 @@ it('opens the actual liked playlist and appends pages without duplicating songs'
   );
   expect(screen.getAllByText(track.name)).toHaveLength(1);
   expect(screen.queryByRole('button', { name: music.kugouLoadMore })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: music.playAll }));
+  expect(actions.onPlayPlaylist).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      page: 1,
+      total: 669,
+      tracks: [track],
+      hasMore: true,
+    }),
+  );
+  fireEvent.click(screen.getByRole('button', { name: music.play + ' ' + next.name }));
+  expect(actions.onPlayPlaylist).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      page: 2,
+      total: 669,
+      tracks: [track, next],
+    }),
+    next.id,
+  );
 });
 
 it('offers QR sign-in for a disconnected library and reloads after the account revision changes', async () => {

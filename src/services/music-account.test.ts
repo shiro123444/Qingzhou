@@ -64,3 +64,20 @@ it('surfaces an expired account without retrying its private library request', a
   await expect(new MusicAccountClient(fetcher).library()).rejects.toThrow('MUSIC_ACCOUNT_EXPIRED');
   expect(fetcher).toHaveBeenCalledTimes(1);
 });
+it('requests playlist page 51 and validates safe positive page numbers in both directions', async () => {
+  const result = { ...tracks, page: 51, total: 5200, hasMore: true };
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(envelope(result));
+  const client = new MusicAccountClient(fetcher);
+  expect(await client.playlist('7', 51)).toEqual(result);
+  expect(JSON.parse(fetcher.mock.calls[0][1]!.body as string)).toEqual({
+    operation: 'playlist',
+    playlistId: '7',
+    page: 51,
+  });
+  fetcher.mockClear();
+  for (const page of [-1, 0, 0.5, Number.MAX_SAFE_INTEGER + 1])
+    await expect(client.playlist('7', page)).rejects.toThrow();
+  expect(fetcher).not.toHaveBeenCalled();
+  fetcher.mockResolvedValueOnce(envelope({ ...result, page: Number.MAX_SAFE_INTEGER + 1 }));
+  await expect(client.playlist('7', 51)).rejects.toThrow();
+});

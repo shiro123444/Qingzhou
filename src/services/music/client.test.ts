@@ -26,6 +26,43 @@ function fixture() {
 }
 
 describe('audio upload transport', () => {
+  it('discards a lyric response that finishes after track cancellation', async () => {
+    const abort = new AbortController();
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => {
+      abort.abort();
+      return Response.json({
+        success: true,
+        result: { trackId: 'one', format: 'krc', text: '[0,100]<0,100,0>Word' },
+      });
+    });
+    const client = new MusicClient(fetcher);
+    await expect(client.lyrics('one', abort.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(client.lyrics('one', abort.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+  it('preserves decoded KRC and rejects unknown formats or a response for another track', async () => {
+    const f = fixture();
+    const text = '[1000,1000]<0,300,0>A<300,700,0>word';
+    f.fetcher.mockResolvedValueOnce(
+      Response.json({ success: true, result: { trackId: 'one', format: 'krc', text } }),
+    );
+    expect(await f.client.lyrics('one')).toEqual({ trackId: 'one', format: 'krc', text });
+    f.fetcher.mockResolvedValueOnce(
+      Response.json({ success: true, result: { trackId: 'other', format: 'krc', text } }),
+    );
+    await expect(f.client.lyrics('one')).rejects.toThrow('MISMATCH');
+    f.fetcher.mockResolvedValueOnce(
+      Response.json({ success: true, result: { trackId: 'one', format: 'raw', text } }),
+    );
+    await expect(f.client.lyrics('one')).rejects.toThrow();
+    f.fetcher.mockResolvedValueOnce(
+      Response.json({
+        success: true,
+        result: { trackId: 'one', format: 'krc', text: '词'.repeat(50000) },
+      }),
+    );
+    await expect(f.client.lyrics('one')).rejects.toThrow('MUSIC_LYRICS_LIMIT');
+  });
   it('gets bounded lyrics for exactly the requested track and forwards cancellation', async () => {
     const f = fixture();
     const signal = new AbortController().signal;

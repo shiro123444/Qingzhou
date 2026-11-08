@@ -33,7 +33,7 @@ export type MusicPlayback = z.infer<typeof musicPlaybackSchema>;
 export const MAX_MUSIC_LYRICS_BYTES = 128 * 1024;
 export const musicLyricsSchema = z
   .object({
-    format: z.literal('lrc'),
+    format: z.enum(['lrc', 'krc']),
     text: z
       .string()
       .max(MAX_MUSIC_LYRICS_BYTES)

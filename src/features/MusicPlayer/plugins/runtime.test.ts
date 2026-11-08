@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { type MusicLyrics } from '@/types/music';
 
 import { AudioEngine } from '../engine';
+import { lyricWordProgress, parseKrc } from '../lyrics';
 import { type MusicPlayerPort } from '../ports';
 import { lyricsForClip, lyricsPlugin } from './lyrics-plugin';
 import { MusicPluginHost } from './runtime';
@@ -92,6 +93,44 @@ function setTrack(engine: AudioEngine, id = 'a') {
 }
 
 describe('native Cordis music plugins', () => {
+  it('preserves real KRC timing and word progress when projecting a preview offset', async () => {
+    const { client, engine, host, state } = await setup();
+    client.lyrics.mockImplementation(async (trackId) => ({
+      trackId,
+      format: 'krc',
+      text: '[29000,4000]<0,2000,0>Before <2000,2000,0>after',
+    }));
+    setOnline(engine);
+    engine.store.setState({
+      durationMs: 60000,
+      offsetMs: 30000,
+      positionMs: 0,
+      queue: engine.store.getState().queue.map((track) => ({ ...track, playbackKind: 'preview' })),
+    });
+    await host.start();
+    await vi.waitFor(() => expect(state().lyrics?.status).toBe('ready'));
+    const line = state().lyrics!.lines[0];
+    expect(line).toMatchObject({
+      timeMs: 0,
+      durationMs: 3000,
+      words: [
+        { text: 'Before ', timeMs: -1000, durationMs: 2000 },
+        { text: 'after', timeMs: 1000, durationMs: 2000 },
+      ],
+    });
+    expect(lyricWordProgress(line.words![0], 0)).toBe(0.5);
+    expect(Object.isFrozen(line.words)).toBe(true);
+    expect(Object.isFrozen(line.words![0])).toBe(true);
+    const clock = vi.spyOn(engine, 'readPositionMs').mockReturnValue(1234);
+    expect(state().lyrics!.getPositionMs()).toBe(1234);
+    expect(clock).toHaveBeenCalledOnce();
+    const oldView = state().lyrics!;
+    setOnline(engine, 'new-song');
+    expect(() => oldView.getPositionMs()).toThrow('MUSIC_LYRICS_STALE');
+    expect(
+      lyricsForClip(parseKrc('[0,1000]<0,1000,0>word'), 250, 500)[0].words?.[0].durationMs,
+    ).toBe(1000);
+  });
   it('restores paused preview lyrics at the saved clip offset without starting audio', async () => {
     const { client, engine, host, state } = await setup();
     setOnline(engine);

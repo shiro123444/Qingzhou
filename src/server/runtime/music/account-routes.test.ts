@@ -105,3 +105,16 @@ it('authenticates collection covers and requires bounded IDs, revision and same-
   expect(service.playlistCover).toHaveBeenCalledWith('3', expect.any(Request));
   expect(createMusicAccountService).toHaveBeenLastCalledWith({}, 'alice');
 });
+it('accepts playlist pages beyond 50 without accepting unsafe, negative or fractional page numbers', async () => {
+  expect((await request({ operation: 'playlist', playlistId: '3', page: 51 })).status).toBe(200);
+  expect(service.playlist).toHaveBeenLastCalledWith('3', 51, expect.any(AbortSignal));
+  expect(
+    (await request({ operation: 'playlist', playlistId: '3', page: Number.MAX_SAFE_INTEGER }))
+      .status,
+  ).toBe(200);
+  service.playlist.mockClear();
+  for (const page of [-1, 0, 1.5, Number.MAX_SAFE_INTEGER + 1])
+    expect((await request({ operation: 'playlist', playlistId: '3', page })).status).toBe(400);
+  expect(service.playlist).not.toHaveBeenCalled();
+  expect((await request({ operation: 'library', page: 51 })).status).toBe(400);
+});
