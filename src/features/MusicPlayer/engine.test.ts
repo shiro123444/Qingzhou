@@ -439,6 +439,87 @@ describe('shared AudioEngine', () => {
     expect(audio.currentTime).toBe(7.2);
   });
 
+  it('restores the last full-playback label paused but resolves current rights before playing', async () => {
+    const original = setup();
+    const preview: MusicTrack = {
+      ...track('a'),
+      source: 'kugou',
+      playbackKind: 'preview',
+      durationMs: 60000,
+    };
+    vi.mocked(original.client.resolve).mockResolvedValue({
+      ...playback('a'),
+      track: { ...preview, playbackKind: 'full', durationMs: 269000 },
+    });
+    await original.engine.setAccount('alice');
+    original.engine.playTrack(preview);
+    await settle();
+    original.audio.duration = 269;
+    original.audio.metadata();
+    original.engine.seek(153000);
+    original.engine.pause();
+    original.engine.dispose();
+    expect(JSON.parse(original.storage.get('qingzhou:music:v1:alice')!)).toMatchObject({
+      playbackKind: 'full',
+      durationMs: 269000,
+      positionMs: 153000,
+    });
+
+    const restored = setup({
+      storage: {
+        getItem: (key) => original.storage.get(key) ?? null,
+        removeItem: (key) => original.storage.delete(key),
+        setItem: (key, value) => original.storage.set(key, value),
+      },
+    });
+    vi.mocked(restored.client.track).mockResolvedValue(preview);
+    vi.mocked(restored.client.resolve).mockResolvedValue({ ...playback('a'), track: preview });
+    await restored.engine.setAccount('alice');
+    expect(restored.state()).toMatchObject({
+      activeId: 'a',
+      durationMs: 269000,
+      positionMs: 153000,
+      status: 'paused',
+    });
+    expect(restored.state().queue[0].playbackKind).toBe('full');
+    expect(restored.client.resolve).not.toHaveBeenCalled();
+    expect(restored.createAudio).not.toHaveBeenCalled();
+
+    restored.engine.play();
+    await settle();
+    restored.audio.metadata();
+    expect(restored.client.resolve).toHaveBeenCalledTimes(1);
+    expect(restored.state().queue[0].playbackKind).toBe('preview');
+    expect(restored.state()).toMatchObject({ durationMs: 60000, positionMs: 0 });
+  });
+
+  it.each([
+    { durationMs: 269000 },
+    { durationMs: 269000, playbackKind: 'unknown' },
+    { playbackKind: 'full' },
+    { durationMs: 0, playbackKind: 'full' },
+    { durationMs: '269000', playbackKind: 'full' },
+    { activeId: 'missing', durationMs: 269000, playbackKind: 'full' },
+  ])('keeps public metadata when the saved playback label cannot be restored: %j', async (saved) => {
+    const { client, createAudio, engine, state, storage } = setup();
+    vi.mocked(client.track).mockResolvedValue({
+      ...track('a'),
+      source: 'kugou',
+      playbackKind: 'preview',
+    });
+    storage.set(
+      'qingzhou:music:v1:alice',
+      JSON.stringify({ activeId: 'a', ids: ['a'], ...saved }),
+    );
+    await engine.setAccount(null);
+    expect(state().queue).toEqual([]);
+    await engine.setAccount('alice');
+    expect(state().queue[0].playbackKind).toBe('preview');
+    expect(state().status).toBe('paused');
+    expect(client.resolve).not.toHaveBeenCalled();
+    expect(createAudio).not.toHaveBeenCalled();
+  });
+
   it('logout invalidates late resolve and restore, and an explicit action supersedes restoration', async () => {
     const { engine, client, state, storage, createAudio } = setup();
     const pending = deferred<MusicPlayback>();

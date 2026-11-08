@@ -97,6 +97,7 @@ export class AudioEngine {
         activeId: s.activeId,
         ids: s.queue.map((track) => track.id),
         lyrics: Object.fromEntries(Object.entries(s.lyrics).map(([id, lyric]) => [id, lyric.text])),
+        playbackKind: s.queue.find((track) => track.id === s.activeId)?.playbackKind,
         positionMs: s.positionMs,
         offsetMs: s.offsetMs,
         durationMs: s.durationMs,
@@ -153,6 +154,17 @@ export class AudioEngine {
       const activeId = queue.some((t) => t.id === saved.activeId)
         ? (saved.activeId as string)
         : (queue[0]?.id ?? null);
+      const durationMs = activeId === saved.activeId ? bounded(saved.durationMs, 86_400_000) : 0;
+      if (
+        activeId &&
+        activeId === saved.activeId &&
+        durationMs > 0 &&
+        (saved.playbackKind === 'full' || saved.playbackKind === 'preview')
+      ) {
+        // Restore the last resolved label for display only; Play always resolves current rights.
+        const activeIndex = queue.findIndex((track) => track.id === activeId);
+        queue[activeIndex] = { ...queue[activeIndex], playbackKind: saved.playbackKind };
+      }
       const lyrics: PlayerState['lyrics'] = {};
       for (const track of queue) {
         const text = saved.lyrics?.[track.id];
@@ -166,7 +178,7 @@ export class AudioEngine {
       }
       this.update({
         activeId,
-        durationMs: activeId === saved.activeId ? bounded(saved.durationMs, 86_400_000) : 0,
+        durationMs,
         offsetMs: activeId === saved.activeId ? bounded(saved.offsetMs, 86_400_000) : 0,
         lyrics,
         positionMs: activeId === saved.activeId ? bounded(saved.positionMs, 86_400_000) : 0,
