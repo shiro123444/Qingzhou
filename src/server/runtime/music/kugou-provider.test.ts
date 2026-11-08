@@ -70,6 +70,14 @@ function fixture() {
 }
 
 describe('Kugou catalog and source boundary', () => {
+  it('accepts the exact official playlist image CDN over HTTPS without allowing sibling or lookalike hosts', () => {
+    expect(kugouAssetUrl('http://c1.kgimg.com/custom/{size}/cover.jpg', 'cover')).toBe(
+      'https://c1.kgimg.com/custom/480/cover.jpg',
+    );
+    for (const host of ['c1.kgimg.com.evil.test', 'unknown.kgimg.com', 'localhost'])
+      expect(() => kugouAssetUrl(`http://${host}/cover.jpg`, 'cover')).toThrow();
+    expect(() => kugouAssetUrl('http://c1.kgimg.com/track.mp3', 'audio')).toThrow();
+  });
   it('preserves only the two official concept CDN protocols without weakening other upstream TLS', () => {
     for (const host of ['fs.youthandroid.kugou.com', 'fs.youthandroid2.kugou.com']) {
       expect(kugouAssetUrl(`http://${host}/track.mp3`, 'audio')).toBe(`http://${host}/track.mp3`);

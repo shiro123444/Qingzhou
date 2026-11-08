@@ -81,7 +81,7 @@ export function kugouAssetUrl(raw: string, kind: 'cover' | 'audio') {
     const url = new URL(raw.replaceAll('{size}', '480'));
     const permitted =
       kind === 'cover'
-        ? ['imge.kugou.com', 'imgessl.kugou.com'].includes(url.hostname)
+        ? ['imge.kugou.com', 'imgessl.kugou.com', 'c1.kgimg.com'].includes(url.hostname)
         : YOUTH_MEDIA_HOSTS.includes(url.hostname) ||
           /^(?:fsandroid|fsmobile|fsios|fsweb)(?:\.[a-z\d-]+)?\.kugou\.com$/u.test(url.hostname);
     if (
@@ -142,7 +142,7 @@ export class KugouMusicProvider implements MusicProvider {
     private account?: MusicAccountAccess,
   ) {}
 
-  private async api(
+  protected async api(
     path: string,
     router: string,
     parameters: Record<string, string | number>,

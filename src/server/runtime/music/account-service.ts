@@ -14,6 +14,7 @@ import type {
 } from './account-store';
 import { type KugouLoginUpstream, KugouQrUpstream } from './account-upstream';
 import { MusicError } from './contracts';
+import { clearKugouLibraryCache, KugouLibraryProvider } from './library-provider';
 
 const POLL_MS = 2000;
 const QR_LIFETIME_MS = 180_000;
@@ -76,8 +77,10 @@ export class MusicAccountService implements MusicAccountAccess {
           { ...rest, accountRevision: randomUUID(), state: 'expired' },
           saved.revision,
         )
-      )
+      ) {
+        clearKugouLibraryCache(connectionId);
         return;
+      }
     }
     throw new MusicError('MUSIC_ACCOUNT_CHANGED', 409);
   }
@@ -168,6 +171,8 @@ export class MusicAccountService implements MusicAccountAccess {
       next = { ...reserved.record, pending: { ...reserved.record.pending!, state: result.state } };
     const committed = await this.store.save(next, reserved.revision);
     if (!committed) return { pollAfterMs: POLL_MS, state: 'cancelled' };
+    if (result.state === 'connected' && reserved.record.connection)
+      clearKugouLibraryCache(reserved.record.connection.id);
     return {
       ...(result.state === 'connected' ? { account: dto(next) } : {}),
       pollAfterMs: POLL_MS,
@@ -189,8 +194,20 @@ export class MusicAccountService implements MusicAccountAccess {
     for (let attempt = 0; attempt < 4; attempt++) {
       const saved = await this.store.read();
       const record = { ...empty(), accountRevision: randomUUID() };
-      if (await this.store.save(record, saved?.revision ?? null)) return dto(record);
+      if (await this.store.save(record, saved?.revision ?? null)) {
+        if (saved?.record.connection) clearKugouLibraryCache(saved.record.connection.id);
+        return dto(record);
+      }
     }
     throw new MusicError('MUSIC_ACCOUNT_CHANGED', 409);
+  }
+  library(page = 1, signal?: AbortSignal) {
+    return new KugouLibraryProvider(this).library(page, signal);
+  }
+  playlist(id: string, page = 1, signal?: AbortSignal) {
+    return new KugouLibraryProvider(this).playlist(id, page, signal);
+  }
+  playlistCover(id: string, request: Request) {
+    return new KugouLibraryProvider(this).playlistCover(id, request);
   }
 }

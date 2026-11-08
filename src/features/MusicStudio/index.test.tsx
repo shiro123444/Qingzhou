@@ -5,7 +5,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { afterEach, expect, it, vi } from 'vitest';
 
 import { MusicPlayerProvider } from '@/features/MusicPlayer/context';
-import { AudioEngine } from '@/features/MusicPlayer/engine';
+import { AudioEngine, MAX_MUSIC_QUEUE_LENGTH } from '@/features/MusicPlayer/engine';
 import music from '@/locales/default/music';
 import { type MusicTrack } from '@/types/music';
 
@@ -148,6 +148,19 @@ it('searches Kugou separately from local files and shows real artwork and previe
   await waitFor(() =>
     expect(search).toHaveBeenLastCalledWith('Real song', 50, expect.any(AbortSignal), 'kugou'),
   );
+  act(() =>
+    engine.store.setState({
+      queue: Array.from({ length: MAX_MUSIC_QUEUE_LENGTH }, (_, index) => ({
+        ...track,
+        id: `queued-${index}`,
+      })),
+    }),
+  );
+  fireEvent.click(
+    await screen.findByRole('button', { name: music.enqueue + ' Real catalog song' }),
+  );
+  expect(screen.getByText(music.queueFull)).toBeVisible();
+  expect(engine.store.getState().queue).toHaveLength(MAX_MUSIC_QUEUE_LENGTH);
   fireEvent.click(await screen.findByRole('button', { name: music.play + ' Real catalog song' }));
   expect(play).toHaveBeenCalledWith(track);
   expect(screen.getByText(music.kugouPreview)).toBeVisible();

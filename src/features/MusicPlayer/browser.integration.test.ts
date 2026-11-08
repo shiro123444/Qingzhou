@@ -14,6 +14,7 @@ import { handleMusicCommand, handleMusicStream } from '@/server/runtime/music/ha
 import { musicByteRange, OwnedFileMusicProvider } from '@/server/runtime/music/owned-file-provider';
 import { createMusicRuntime } from '@/server/runtime/music/runtime';
 import { type MusicTrack } from '@/types/music';
+import { type MusicLibraryPlaylist } from '@/types/music-account';
 
 import { type AudioEngine } from './engine';
 import { type MusicPluginHost } from './plugins/runtime';
@@ -102,29 +103,51 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       playbackKind: 'preview',
       durationMs: 20000,
     };
+    const liked: MusicTrack = {
+      ...online,
+      id: 'liked-fixture',
+      name: 'Liked fixture',
+      playbackKind: 'full',
+      durationMs: 269000,
+    };
+    const collected: MusicTrack = {
+      ...liked,
+      id: 'collected-fixture',
+      name: 'Collected fixture',
+    };
+    const catalog = new Map([online, liked, collected].map((track) => [track.id, track]));
+    const playlists: MusicLibraryPlaylist[] = [
+      { id: '101', name: 'Liked songs fixture', kind: 'liked', trackCount: 1 },
+      { id: '102', name: 'Collected playlist fixture', kind: 'collected', trackCount: 1 },
+    ];
+    const accountRevision = '55d73ef1-8f31-4e90-abf7-2d3e663d988e';
+    const libraryRequests: { operation: string; playlistId?: string }[] = [];
     const provider: MusicProvider = {
       userId: 'alice',
       track: (id, signal) =>
-        id === online.id ? Promise.resolve(online) : library.track(id, signal),
+        catalog.has(id) ? Promise.resolve(catalog.get(id)!) : library.track(id, signal),
       search: (query, limit, signal, source) =>
         source === 'kugou' && query === 'automatic'
           ? Promise.resolve([online])
           : library.search(query, limit, signal),
       resolve: (id, signal) =>
-        id === online.id
+        catalog.has(id)
           ? Promise.resolve({
-              src: '/api/runtime/music/tracks/online-fixture/stream',
-              track: online,
-              offsetMs: 10000,
+              src: `/api/runtime/music/tracks/${id}/stream`,
+              track: catalog.get(id)!,
+              offsetMs: id === online.id ? 10000 : 0,
             })
           : library.resolve(id, signal),
-      stream: (id, request) => library.stream(id === online.id ? 'track-1' : id, request),
+      stream: (id, request) => library.stream(catalog.has(id) ? 'track-1' : id, request),
       lyrics: async (trackId) => {
         lyricRequests++;
         return {
           trackId,
           format: 'lrc',
-          text: '[00:09]Clip begins\n[00:12]Inside online clip\n[00:35]Outside available clip',
+          text:
+            trackId === online.id
+              ? '[00:09]Clip begins\n[00:12]Inside online clip\n[00:35]Outside available clip'
+              : `[00:01]${catalog.get(trackId)!.name} lyric`,
         };
       },
     };
@@ -191,13 +214,33 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
                 for await (const chunk of req) chunks.push(Buffer.from(chunk));
                 const body = Buffer.concat(chunks);
                 if (pathname === '/api/runtime/music/account') {
+                  const input = JSON.parse(body.toString());
+                  let result: unknown;
+                  if (input.operation === 'library') {
+                    libraryRequests.push({ operation: input.operation });
+                    result = { revision: accountRevision, playlists, page: 1, hasMore: false };
+                  } else if (input.operation === 'playlist') {
+                    libraryRequests.push({
+                      operation: input.operation,
+                      playlistId: input.playlistId,
+                    });
+                    result = {
+                      revision: accountRevision,
+                      playlist: playlists.find((playlist) => playlist.id === input.playlistId),
+                      tracks: input.playlistId === '101' ? [liked] : [collected],
+                      page: 1,
+                      hasMore: false,
+                      total: 1,
+                    };
+                  } else {
+                    result = {
+                      state: 'connected',
+                      revision: accountRevision,
+                      displayName: 'Fixture listener',
+                    };
+                  }
                   res.setHeader('Content-Type', 'application/json');
-                  res.end(
-                    JSON.stringify({
-                      success: true,
-                      result: { state: 'disconnected', revision: '0' },
-                    }),
-                  );
+                  res.end(JSON.stringify({ success: true, result }));
                   return;
                 }
                 if (pathname === '/fixture/upload') {
@@ -1058,6 +1101,65 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       expect(
         await page.evaluate(() => Math.abs(window.musicTest.audio!.currentTime - 2) < 0.75),
       ).toBe(true);
+
+      // Personal collections use the signed-in account API, then the same player and Cordis host.
+      await page.getByRole('tab', { name: music.library, exact: true }).click();
+      await page.getByRole('button', { name: music.kugouLiked, exact: true }).click();
+      await page.getByRole('button', { name: 'Play Liked fixture', exact: true }).click();
+      await page.waitForFunction(() => {
+        const state = window.musicTest.engine.store.getState();
+        const lyrics = window.musicTest.plugins.store.getState().lyrics;
+        return (
+          state.activeId === 'liked-fixture' &&
+          state.status === 'playing' &&
+          lyrics?.status === 'ready' &&
+          lyrics.lines[0]?.text === 'Liked fixture lyric'
+        );
+      });
+      expect(lyricRequests).toBe(2);
+      await page.getByRole('tab', { name: music.library, exact: true }).click();
+      await page.getByRole('button', { name: music.kugouCollectedPlaylists, exact: true }).click();
+      await page.getByRole('button', { name: 'Collected playlist fixture', exact: true }).click();
+      await page
+        .getByRole('button', { name: 'Add to queue Collected fixture', exact: true })
+        .click();
+      expect(
+        await page.evaluate(() => {
+          const state = window.musicTest.engine.store.getState();
+          return {
+            activeId: state.activeId,
+            queued: state.queue.some((track) => track.id === 'collected-fixture'),
+            playing: !window.musicTest.audio!.paused,
+            count: window.musicTest.audioCount,
+          };
+        }),
+      ).toEqual({ activeId: 'liked-fixture', queued: true, playing: true, count: 1 });
+      expect(lyricRequests).toBe(2);
+      await page.getByRole('button', { name: music.playAll, exact: true }).click();
+      await page.waitForFunction(() => {
+        const state = window.musicTest.engine.store.getState();
+        const lyrics = window.musicTest.plugins.store.getState().lyrics;
+        return (
+          state.activeId === 'collected-fixture' &&
+          state.status === 'playing' &&
+          lyrics?.status === 'ready' &&
+          lyrics.lines[0]?.text === 'Collected fixture lyric'
+        );
+      });
+      expect(lyricRequests).toBe(3);
+      expect(await page.evaluate(() => window.musicTest.audioCount)).toBe(1);
+      expect(
+        await page.evaluate(() =>
+          window.musicTest.engine.store.getState().queue.map((track) => track.id),
+        ),
+      ).toEqual(['collected-fixture']);
+      expect(libraryRequests).toEqual(
+        expect.arrayContaining([
+          { operation: 'library' },
+          { operation: 'playlist', playlistId: '101' },
+          { operation: 'playlist', playlistId: '102' },
+        ]),
+      );
       await page.getByRole('button', { name: 'Sign out', exact: true }).click();
       expect(
         await page.evaluate(() => ({

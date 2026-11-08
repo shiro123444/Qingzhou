@@ -3,18 +3,25 @@
 import { Button, Icon } from '@lobehub/ui';
 import { Modal, QRCode } from 'antd';
 import { CircleCheck, LogOut, QrCode, RefreshCw, UserRound } from 'lucide-react';
+import { type Ref, useImperativeHandle } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { styles } from './account.style';
 import { useKugouAccount } from './useKugouAccount';
 
+export interface KugouAccountHandle {
+  show: () => void;
+}
+
 export default function KugouAccount(props: {
   onBeforeDisconnect: () => void;
   onChanged: () => void;
+  ref?: Ref<KugouAccountHandle>;
   userId: string | null;
 }) {
   const { t } = useTranslation('music');
   const account = useKugouAccount(props);
+  useImperativeHandle(props.ref, () => ({ show: account.show }), [account.show]);
   const connected = account.account?.state === 'connected';
   const waiting = ['waiting', 'scanned'].includes(account.phase);
   return (

@@ -69,6 +69,37 @@ cached privileged source URL. The UI immediately invalidates active Kugou audio
 before refreshing the source, without recreating the shared audio element. Already
 delivered browser media bytes cannot be revoked server-side.
 
+## Personal music library
+
+The Kugou library separates public search from the linked account's liked songs,
+created playlists, collected playlists, and collected albums. The read-only
+`library` and `playlist` account commands use the current server-side credentials;
+the client never supplies a Kugou user ID or token. Each page contains at most 100
+items and exposes `hasMore`, so collections and tracks can be loaded progressively.
+Selecting or queuing a song uses the same AudioEngine, current playback-rights
+resolution, artwork, and automatic Cordis lyrics as public search.
+
+The playback queue remains bounded to 100 tracks. Bulk playback replaces the queue
+with up to the first 100 loaded songs, and the button identifies partial/limited
+playback. Selecting an individual later song makes room for it even when the queue
+is full. Loading more library pages does not itself add music to the queue.
+
+The request shapes follow KuGouMusicApi's
+[`user_playlist.js`](https://github.com/MakcRe/KuGouMusicApi/blob/main/module/user_playlist.js)
+and [`playlist_track_all_new.js`](https://github.com/MakcRe/KuGouMusicApi/blob/main/module/playlist_track_all_new.js):
+`/v7/get_all_list` enumerates the account's collections and
+`/v4/get_list_all_file_v3` reads a selected account playlist. This supports private
+liked-song collections without substituting a public playlist search. Playlist
+names and contents stay account-scoped and are not stored in the shared public
+track metadata cache. The feature reads existing collections; it does not create,
+delete, follow, subscribe to, or otherwise modify the listener's Kugou library.
+
+Collection artwork is resolved server-side from a verified playlist ID through an
+authenticated same-origin cover endpoint. The client cannot submit an arbitrary
+image URL. Account revisions bind returned collections and cover requests to the
+linked session; switching or disconnecting accounts clears the previous view and
+prevents late requests from repopulating it.
+
 ## Artwork and lyrics
 
 Tracks include real artist, album, and cover metadata. Covers use an authenticated

@@ -8,6 +8,8 @@ import {
   ArrowUp,
   AudioLines,
   ChevronDown,
+  Disc3,
+  Heart,
   Library,
   ListMusic,
   ListPlus,
@@ -31,7 +33,7 @@ import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 
 import { useAudioEngine, useMusicPlayer } from '@/features/MusicPlayer/context';
-import { type RepeatMode } from '@/features/MusicPlayer/engine';
+import { MAX_MUSIC_QUEUE_LENGTH, type RepeatMode } from '@/features/MusicPlayer/engine';
 import { formatTime, MAX_LRC_BYTES } from '@/features/MusicPlayer/lyrics';
 import { musicTheme } from '@/features/MusicPlayer/musicTheme';
 import { useMusicPluginState } from '@/features/MusicPlayer/plugins/context';
@@ -40,12 +42,22 @@ import MusicPluginSettings from '@/features/MusicPlayer/plugins/MusicPluginSetti
 import { liquidGlass } from '@/styles/liquidGlass';
 import { type MusicTrack } from '@/types/music';
 
-import KugouAccount from './KugouAccount';
+import KugouAccount, { type KugouAccountHandle } from './KugouAccount';
+import KugouLibrary, { type KugouLibrarySection, librarySectionLabels } from './KugouLibrary';
+import { libraryStyles } from './library.style';
 import { styles } from './style';
 
 const views = ['player', 'library', 'queue', 'plugins'] as const;
 type StudioView = (typeof views)[number];
 const viewIcons = { library: Library, player: AudioLines, plugins: Puzzle, queue: ListMusic };
+const kugouSections = ['discover', 'liked', 'created', 'collected', 'album'] as const;
+const kugouSectionIcons = {
+  album: Disc3,
+  collected: Library,
+  created: ListMusic,
+  discover: Search,
+  liked: Heart,
+};
 
 export default function MusicStudio({ navigation }: { navigation?: ReactNode }) {
   const { t } = useTranslation('music');
@@ -59,18 +71,25 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
   const tracks = library.userId === s.userId ? library.tracks : [];
   const [query, setQuery] = useState('');
   const [source, setSource] = useState<'library' | 'kugou'>('kugou');
+  const [kugouSection, setKugouSection] = useState<KugouLibrarySection>('discover');
   const [view, setView] = useState<StudioView>('player');
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<'requestError' | 'uploadError' | 'lyricError' | null>(null);
   const [revision, setRevision] = useState(0);
+  const [queueNotice, setQueueNotice] = useState<{
+    count: number;
+    key: 'queueAdded' | 'queueAlreadyAdded' | 'queueFull' | 'queuePartiallyAdded';
+  } | null>(null);
   const upload = useRef<HTMLInputElement>(null);
   const lyricInput = useRef<HTMLInputElement>(null);
+  const kugouAccount = useRef<KugouAccountHandle>(null);
   const lifetime = useRef<AbortController | null>(null);
   const active = s.queue.find((item) => item.id === s.activeId);
   const playing = ['playing', 'buffering', 'loading'].includes(s.status);
   const activeIndex = s.queue.findIndex((track) => track.id === s.activeId);
   const displayedTracks = view === 'library' ? tracks : s.queue;
+  const personalLibrary = view === 'library' && source === 'kugou' && kugouSection !== 'discover';
   const audioFormat = (track: MusicTrack) =>
     track.mimeType === 'audio/mpeg' ? 'MP3' : track.mimeType.split('/')[1]?.toUpperCase();
   const audioSize = (track: MusicTrack) => (track.size / (1024 * 1024)).toFixed(1) + ' MB';
@@ -80,13 +99,15 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
     lifetime.current = controller;
     setUploading(false);
     setError(null);
+    setQueueNotice(null);
     return () => controller.abort();
   }, [s.userId]);
 
   useEffect(() => {
     setLibrary({ tracks: [], userId: s.userId });
     setLoading(false);
-    if (!s.userId) return;
+    setError((current) => (current === 'requestError' ? null : current));
+    if (!s.userId || (source === 'kugou' && kugouSection !== 'discover')) return;
     const controller = new AbortController();
     const isCurrent = () =>
       !controller.signal.aborted && engine.store.getState().userId === s.userId;
@@ -111,7 +132,7 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
       clearTimeout(timer);
       controller.abort();
     };
-  }, [engine, query, revision, s.userId, source]);
+  }, [engine, kugouSection, query, revision, s.userId, source]);
 
   async function uploadAudio(file?: File) {
     const controller = lifetime.current;
@@ -153,8 +174,34 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
   }
 
   function playTrack(track: MusicTrack) {
+    setQueueNotice(null);
     engine.playTrack(track);
     setView('player');
+  }
+
+  function playTracks(items: MusicTrack[]) {
+    setQueueNotice(null);
+    engine.playTracks(items);
+    setView('player');
+  }
+
+  function enqueueTracks(items: MusicTrack[]) {
+    const queue = engine.store.getState().queue;
+    const incoming = [...new Map(items.map((track) => [track.id, track])).values()].filter(
+      (track) => !queue.some((item) => item.id === track.id),
+    );
+    const remaining = Math.max(0, MAX_MUSIC_QUEUE_LENGTH - queue.length);
+    engine.enqueue(items);
+    setQueueNotice({
+      count: Math.min(incoming.length, remaining),
+      key: !incoming.length
+        ? 'queueAlreadyAdded'
+        : !remaining
+          ? 'queueFull'
+          : incoming.length > remaining
+            ? 'queuePartiallyAdded'
+            : 'queueAdded',
+    });
   }
 
   return (
@@ -253,6 +300,16 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
         {!s.userId && <Alert showIcon title={t('login')} type="info" />}
         {error && (
           <Alert closable showIcon title={t(error)} type="error" onClose={() => setError(null)} />
+        )}
+        {queueNotice && (
+          <Alert
+            closable
+            showIcon
+            role="status"
+            title={t(queueNotice.key, { count: queueNotice.count })}
+            type="info"
+            onClose={() => setQueueNotice(null)}
+          />
         )}
 
         <div
@@ -424,7 +481,7 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
         >
           <div className={styles.collectionHeading}>
             <h2>{t(view === 'queue' ? 'queue' : 'library')}</h2>
-            <span>{displayedTracks.length}</span>
+            {!personalLibrary && <span>{displayedTracks.length}</span>}
           </div>
           {view === 'library' && (
             <div className={styles.sourceRow}>
@@ -444,6 +501,7 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
               </div>
               {source === 'kugou' && (
                 <KugouAccount
+                  ref={kugouAccount}
                   userId={s.userId}
                   onBeforeDisconnect={() => engine.invalidatePlayback()}
                   onChanged={() => {
@@ -454,172 +512,206 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
               )}
             </div>
           )}
-          <div className={styles.collectionToolbar}>
-            <Button
-              disabled={!displayedTracks.length}
-              icon={Play}
-              onClick={() => {
-                engine.enqueue(displayedTracks);
-                if (displayedTracks[0]) playTrack(displayedTracks[0]);
-              }}
-            >
-              {t('playAll')}
-            </Button>
-            {view !== 'queue' && (
-              <Input
-                allowClear
-                aria-label={t(source === 'kugou' ? 'searchKugou' : 'search')}
-                className={styles.search}
-                maxLength={200}
-                placeholder={t(source === 'kugou' ? 'searchKugou' : 'search')}
-                prefix={<Icon aria-hidden icon={Search} size={16} />}
-                type="search"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                onPressEnter={() => setRevision((value) => value + 1)}
-              />
-            )}
-          </div>
-          {loading && view === 'library' && (
-            <p className={styles.loading} role="status">
-              {t('loading')}
-            </p>
-          )}
-          {error === 'requestError' && view === 'library' && (
-            <Button onClick={() => setRevision((value) => value + 1)}>{t('retry')}</Button>
-          )}
-          {!loading && displayedTracks.length === 0 && (
-            <div className={styles.emptyCollection}>
-              <Icon aria-hidden icon={Music2} size={{ size: 40, strokeWidth: 1.5 }} />
-              <h3>
-                {view === 'queue'
-                  ? t('emptyQueue')
-                  : query
-                    ? t('noSearchResults')
-                    : t(source === 'kugou' ? 'kugouSearchHint' : 'emptyLibrary')}
-              </h3>
-              <p>
-                {query
-                  ? t('noSearchResultsHint')
-                  : t(
-                      source === 'kugou' && view === 'library'
-                        ? 'kugouAvailability'
-                        : 'chooseTrackHint',
-                    )}
-              </p>
-              {view !== 'queue' && source === 'library' && !query && (
-                <Button
-                  disabled={!s.userId}
-                  icon={Upload}
-                  loading={uploading}
-                  onClick={() => upload.current?.click()}
+          {view === 'library' && source === 'kugou' && (
+            <nav aria-label={t('kugouPersonalLibrary')} className={libraryStyles.navigation}>
+              {kugouSections.map((section) => (
+                <button
+                  aria-pressed={kugouSection === section}
+                  key={section}
+                  onClick={() => setKugouSection(section)}
                 >
-                  {t('upload')}
-                </Button>
+                  <Icon aria-hidden icon={kugouSectionIcons[section]} size={16} />
+                  {t(librarySectionLabels[section])}
+                </button>
+              ))}
+            </nav>
+          )}
+          {personalLibrary && (
+            <KugouLibrary
+              activeId={s.activeId}
+              key={`${s.userId}:${revision}:${kugouSection}`}
+              revision={revision}
+              section={kugouSection}
+              userId={s.userId}
+              onEnqueue={enqueueTracks}
+              onPlay={playTrack}
+              onPlayAll={playTracks}
+              onSignIn={() => kugouAccount.current?.show()}
+            />
+          )}
+          <div hidden={personalLibrary}>
+            <div className={styles.collectionToolbar}>
+              <Button
+                disabled={!displayedTracks.length}
+                icon={Play}
+                onClick={() => playTracks(displayedTracks)}
+              >
+                {t('playAll')}
+              </Button>
+              {view !== 'queue' && (
+                <Input
+                  allowClear
+                  aria-label={t(source === 'kugou' ? 'searchKugou' : 'search')}
+                  className={styles.search}
+                  maxLength={200}
+                  placeholder={t(source === 'kugou' ? 'searchKugou' : 'search')}
+                  prefix={<Icon aria-hidden icon={Search} size={16} />}
+                  type="search"
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  onPressEnter={() => setRevision((value) => value + 1)}
+                />
               )}
             </div>
-          )}
-          <ul aria-label={t('library')} className={styles.list} hidden={view === 'queue'}>
-            {tracks.map((track, index) => (
-              <li aria-current={s.activeId === track.id} className={styles.trackRow} key={track.id}>
-                <span aria-hidden className={styles.rowNumber}>
-                  {String(index + 1).padStart(2, '0')}
-                </span>
-                <span aria-hidden className={styles.trackArt}>
-                  {track.coverUrl ? (
-                    <img alt="" decoding="async" loading="lazy" src={track.coverUrl} />
-                  ) : (
-                    <Icon icon={Music2} size={20} />
-                  )}
-                </span>
-                <div className={styles.rowInfo}>
-                  <span className={styles.name} title={track.name}>
-                    {track.name}
-                  </span>
-                  <span className={styles.fileMeta}>{track.artist || audioFormat(track)}</span>
-                </div>
-                <span className={styles.fileSize}>
-                  {track.source === 'kugou'
-                    ? `${formatTime(track.durationMs ?? 0)}${track.playbackKind === 'preview' ? ' · ' + t('preview') : ''}`
-                    : audioSize(track)}
-                </span>
-                <div className={styles.rowActions}>
+            {loading && view === 'library' && (
+              <p className={styles.loading} role="status">
+                {t('loading')}
+              </p>
+            )}
+            {error === 'requestError' && view === 'library' && (
+              <Button onClick={() => setRevision((value) => value + 1)}>{t('retry')}</Button>
+            )}
+            {!loading && displayedTracks.length === 0 && (
+              <div className={styles.emptyCollection}>
+                <Icon aria-hidden icon={Music2} size={{ size: 40, strokeWidth: 1.5 }} />
+                <h3>
+                  {view === 'queue'
+                    ? t('emptyQueue')
+                    : query
+                      ? t('noSearchResults')
+                      : t(source === 'kugou' ? 'kugouSearchHint' : 'emptyLibrary')}
+                </h3>
+                <p>
+                  {query
+                    ? t('noSearchResultsHint')
+                    : t(
+                        source === 'kugou' && view === 'library'
+                          ? 'kugouAvailability'
+                          : 'chooseTrackHint',
+                      )}
+                </p>
+                {view !== 'queue' && source === 'library' && !query && (
                   <Button
-                    aria-label={t('play') + ' ' + track.name}
-                    icon={Play}
-                    size="small"
-                    type="text"
-                    onClick={() => playTrack(track)}
-                  />
-                  <Button
-                    aria-label={t('enqueue') + ' ' + track.name}
-                    icon={ListPlus}
-                    size="small"
-                    type="text"
-                    onClick={() => engine.enqueue([track])}
-                  />
-                </div>
-              </li>
-            ))}
-          </ul>
-          <ol aria-label={t('queue')} className={styles.list} hidden={view !== 'queue'}>
-            {s.queue.map((track, index) => (
-              <li aria-current={s.activeId === track.id} className={styles.trackRow} key={track.id}>
-                <span aria-hidden className={styles.rowNumber}>
-                  {String(index + 1).padStart(2, '0')}
-                </span>
-                <span aria-hidden className={styles.trackArt}>
-                  {track.coverUrl ? (
-                    <img alt="" decoding="async" loading="lazy" src={track.coverUrl} />
-                  ) : (
-                    <Icon icon={Music2} size={20} />
-                  )}
-                </span>
-                <div className={styles.rowInfo}>
-                  <span className={styles.name} title={track.name}>
-                    {track.name}
+                    disabled={!s.userId}
+                    icon={Upload}
+                    loading={uploading}
+                    onClick={() => upload.current?.click()}
+                  >
+                    {t('upload')}
+                  </Button>
+                )}
+              </div>
+            )}
+            <ul aria-label={t('library')} className={styles.list} hidden={view === 'queue'}>
+              {tracks.map((track, index) => (
+                <li
+                  aria-current={s.activeId === track.id}
+                  className={styles.trackRow}
+                  key={track.id}
+                >
+                  <span aria-hidden className={styles.rowNumber}>
+                    {String(index + 1).padStart(2, '0')}
                   </span>
-                  <span className={styles.fileMeta}>
+                  <span aria-hidden className={styles.trackArt}>
+                    {track.coverUrl ? (
+                      <img alt="" decoding="async" loading="lazy" src={track.coverUrl} />
+                    ) : (
+                      <Icon icon={Music2} size={20} />
+                    )}
+                  </span>
+                  <div className={styles.rowInfo}>
+                    <span className={styles.name} title={track.name}>
+                      {track.name}
+                    </span>
+                    <span className={styles.fileMeta}>{track.artist || audioFormat(track)}</span>
+                  </div>
+                  <span className={styles.fileSize}>
                     {track.source === 'kugou'
-                      ? track.artist
-                      : audioFormat(track) + ' · ' + audioSize(track)}
+                      ? `${formatTime(track.durationMs ?? 0)}${track.playbackKind === 'preview' ? ' · ' + t('preview') : ''}`
+                      : audioSize(track)}
                   </span>
-                </div>
-                <div className={styles.rowActions}>
-                  <Button
-                    aria-label={t('play') + ' ' + track.name}
-                    icon={Play}
-                    size="small"
-                    type="text"
-                    onClick={() => playTrack(track)}
-                  />
-                  <Button
-                    aria-label={t('moveUp') + ' ' + track.name}
-                    disabled={index === 0}
-                    icon={ArrowUp}
-                    size="small"
-                    type="text"
-                    onClick={() => engine.move(track.id, -1)}
-                  />
-                  <Button
-                    aria-label={t('moveDown') + ' ' + track.name}
-                    disabled={index === s.queue.length - 1}
-                    icon={ArrowDown}
-                    size="small"
-                    type="text"
-                    onClick={() => engine.move(track.id, 1)}
-                  />
-                  <Button
-                    aria-label={t('remove') + ' ' + track.name}
-                    icon={Trash2}
-                    size="small"
-                    type="text"
-                    onClick={() => engine.remove(track.id)}
-                  />
-                </div>
-              </li>
-            ))}
-          </ol>
+                  <div className={styles.rowActions}>
+                    <Button
+                      aria-label={t('play') + ' ' + track.name}
+                      icon={Play}
+                      size="small"
+                      type="text"
+                      onClick={() => playTrack(track)}
+                    />
+                    <Button
+                      aria-label={t('enqueue') + ' ' + track.name}
+                      icon={ListPlus}
+                      size="small"
+                      type="text"
+                      onClick={() => enqueueTracks([track])}
+                    />
+                  </div>
+                </li>
+              ))}
+            </ul>
+            <ol aria-label={t('queue')} className={styles.list} hidden={view !== 'queue'}>
+              {s.queue.map((track, index) => (
+                <li
+                  aria-current={s.activeId === track.id}
+                  className={styles.trackRow}
+                  key={track.id}
+                >
+                  <span aria-hidden className={styles.rowNumber}>
+                    {String(index + 1).padStart(2, '0')}
+                  </span>
+                  <span aria-hidden className={styles.trackArt}>
+                    {track.coverUrl ? (
+                      <img alt="" decoding="async" loading="lazy" src={track.coverUrl} />
+                    ) : (
+                      <Icon icon={Music2} size={20} />
+                    )}
+                  </span>
+                  <div className={styles.rowInfo}>
+                    <span className={styles.name} title={track.name}>
+                      {track.name}
+                    </span>
+                    <span className={styles.fileMeta}>
+                      {track.source === 'kugou'
+                        ? track.artist
+                        : audioFormat(track) + ' · ' + audioSize(track)}
+                    </span>
+                  </div>
+                  <div className={styles.rowActions}>
+                    <Button
+                      aria-label={t('play') + ' ' + track.name}
+                      icon={Play}
+                      size="small"
+                      type="text"
+                      onClick={() => playTrack(track)}
+                    />
+                    <Button
+                      aria-label={t('moveUp') + ' ' + track.name}
+                      disabled={index === 0}
+                      icon={ArrowUp}
+                      size="small"
+                      type="text"
+                      onClick={() => engine.move(track.id, -1)}
+                    />
+                    <Button
+                      aria-label={t('moveDown') + ' ' + track.name}
+                      disabled={index === s.queue.length - 1}
+                      icon={ArrowDown}
+                      size="small"
+                      type="text"
+                      onClick={() => engine.move(track.id, 1)}
+                    />
+                    <Button
+                      aria-label={t('remove') + ' ' + track.name}
+                      icon={Trash2}
+                      size="small"
+                      type="text"
+                      onClick={() => engine.remove(track.id)}
+                    />
+                  </div>
+                </li>
+              ))}
+            </ol>
+          </div>
         </section>
         <section
           aria-labelledby="music-tab-plugins"

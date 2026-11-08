@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 
 import { beforeEach, expect, it, vi } from 'vitest';
 
+import { GET as cover } from '@/app/(backend)/api/runtime/music/account/playlists/[playlistId]/cover/route';
 import { POST } from '@/app/(backend)/api/runtime/music/account/route';
 
 import { createMusicAccountService } from './account-production';
@@ -24,6 +25,9 @@ const service = {
   poll: vi.fn(),
   cancel: vi.fn(),
   disconnect: vi.fn(),
+  library: vi.fn(),
+  playlist: vi.fn(),
+  playlistCover: vi.fn(),
 };
 beforeEach(() => {
   vi.clearAllMocks();
@@ -63,4 +67,41 @@ it('bounds streamed bodies and sanitizes upstream and vault failures', async () 
   const response = await request({ operation: 'poll', challengeId: randomUUID() });
   expect(response.status).toBe(503);
   expect(await response.text()).not.toContain('private-provider-token');
+});
+it('bounds personal library pages and rejects caller-supplied account identifiers or upstream locations', async () => {
+  service.library.mockResolvedValue({ playlists: [], page: 1 });
+  expect((await request({ operation: 'library' })).status).toBe(200);
+  expect(service.library).toHaveBeenLastCalledWith(1, expect.any(AbortSignal));
+  expect((await request({ operation: 'playlist', playlistId: '3', page: 2 })).status).toBe(200);
+  expect(service.playlist).toHaveBeenLastCalledWith('3', 2, expect.any(AbortSignal));
+  for (const body of [
+    { operation: 'library', page: 0 },
+    { operation: 'library', page: 51 },
+    { operation: 'library', userId: 'other-owner' },
+    { operation: 'playlist', playlistId: 'https://localhost/private' },
+    { operation: 'playlist', playlistId: '3', token: 'forged-token' },
+  ])
+    expect((await request(body)).status).toBe(400);
+});
+it('authenticates collection covers and requires bounded IDs, revision and same-site requests', async () => {
+  const revision = randomUUID();
+  service.playlistCover.mockResolvedValue(new Response('image'));
+  const get = (id = '3', headers: Record<string, string> = {}, query: string = revision) =>
+    cover(
+      new Request(
+        `https://app.test/api/runtime/music/account/playlists/${id}/cover?revision=${query}`,
+        {
+          headers: { authorization: 'alice', ...headers },
+        },
+      ),
+      { params: Promise.resolve({ playlistId: id }) },
+    );
+  expect((await get('3', { authorization: '' })).status).toBe(401);
+  expect((await get('3', { 'sec-fetch-site': 'cross-site' })).status).toBe(403);
+  expect((await get('invalid')).status).toBe(400);
+  expect((await get('3', {}, 'invalid')).status).toBe(400);
+  expect(service.playlistCover).not.toHaveBeenCalled();
+  expect((await get()).status).toBe(200);
+  expect(service.playlistCover).toHaveBeenCalledWith('3', expect.any(Request));
+  expect(createMusicAccountService).toHaveBeenLastCalledWith({}, 'alice');
 });

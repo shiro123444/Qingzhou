@@ -6,6 +6,16 @@ import { MusicError } from './contracts';
 const command = z.discriminatedUnion('operation', [
   z.object({ operation: z.enum(['status', 'start', 'disconnect']) }).strict(),
   z.object({ challengeId: z.string().uuid(), operation: z.enum(['poll', 'cancel']) }).strict(),
+  z
+    .object({ operation: z.literal('library'), page: z.number().int().min(1).max(50).default(1) })
+    .strict(),
+  z
+    .object({
+      operation: z.literal('playlist'),
+      page: z.number().int().min(1).max(50).default(1),
+      playlistId: z.string().regex(/^\d{1,20}$/u),
+    })
+    .strict(),
 ]);
 const headers = { 'Cache-Control': 'private, no-store' };
 export function accountErrorResponse(error: unknown, request: Request) {
@@ -73,7 +83,11 @@ export async function handleMusicAccount(request: Request, service: MusicAccount
             ? await service.poll(input.challengeId, request.signal)
             : input.operation === 'cancel'
               ? await service.cancel(input.challengeId)
-              : await service.disconnect();
+              : input.operation === 'library'
+                ? await service.library(input.page, request.signal)
+                : input.operation === 'playlist'
+                  ? await service.playlist(input.playlistId, input.page, request.signal)
+                  : await service.disconnect();
     return Response.json({ result, success: true }, { headers });
   } catch (error) {
     return accountErrorResponse(error, request);

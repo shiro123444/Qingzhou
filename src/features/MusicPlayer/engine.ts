@@ -11,6 +11,7 @@ export type RepeatMode = 'sequence' | 'list' | 'single';
 export type MusicTransport = Pick<MusicClient, 'resolve' | 'track' | 'search' | 'uploadAudio'> &
   Partial<Pick<MusicClient, 'lyrics'>>;
 type StoragePort = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
+export const MAX_MUSIC_QUEUE_LENGTH = 100;
 
 export interface PlayerState {
   activeId: string | null;
@@ -142,7 +143,7 @@ export class AudioEngine {
         ...new Set<string>(
           saved.ids.filter((id: unknown) => typeof id === 'string' && id.length <= 256),
         ),
-      ].slice(0, 100);
+      ].slice(0, MAX_MUSIC_QUEUE_LENGTH);
       const queue: MusicTrack[] = [];
       for (let i = 0; i < ids.length; i += 4) {
         const tracks = await Promise.allSettled(
@@ -227,14 +228,42 @@ export class AudioEngine {
     }
     const queue = [...this.store.getState().queue];
     for (const track of tracks)
-      if (!queue.some((t) => t.id === track.id) && queue.length < 100) queue.push(track);
+      if (!queue.some((t) => t.id === track.id) && queue.length < MAX_MUSIC_QUEUE_LENGTH)
+        queue.push(track);
     this.update({ queue });
   }
 
   playTrack(track: MusicTrack) {
+    if (!this.store.getState().userId) return;
     this.enqueue([track]);
+    const state = this.store.getState();
+    if (!state.queue.some((item) => item.id === track.id)) {
+      // Explicit playback replaces the last inactive entry when the queue is full.
+      const displaced = [...state.queue].reverse().find((item) => item.id !== state.activeId);
+      if (displaced) this.remove(displaced.id);
+      this.enqueue([track]);
+    }
     if (this.store.getState().queue.some((t) => t.id === track.id))
       void this.load(track.id, true, 0);
+  }
+
+  playTracks(tracks: MusicTrack[]) {
+    const state = this.store.getState();
+    if (!state.userId || !tracks.length) return;
+    const queue: MusicTrack[] = [];
+    const ids = new Set<string>();
+    for (const track of tracks) {
+      if (ids.has(track.id)) continue;
+      ids.add(track.id);
+      queue.push(track);
+      if (queue.length === MAX_MUSIC_QUEUE_LENGTH) break;
+    }
+    this.history = [];
+    this.update({
+      lyrics: Object.fromEntries(Object.entries(state.lyrics).filter(([id]) => ids.has(id))),
+      queue,
+    });
+    void this.load(queue[0].id, true, 0);
   }
 
   private async load(id: string, autoplay: boolean, positionMs: number) {

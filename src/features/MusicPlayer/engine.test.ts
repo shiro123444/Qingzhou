@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { type MusicPlayback, type MusicTrack } from '@/types/music';
 
-import { AudioEngine, type MusicTransport } from './engine';
+import { AudioEngine, MAX_MUSIC_QUEUE_LENGTH, type MusicTransport } from './engine';
 
 const track = (id: string): MusicTrack => ({
   id,
@@ -237,6 +237,85 @@ describe('shared AudioEngine', () => {
     engine.previous();
     await settle();
     expect(state().activeId).toBe('99');
+  });
+
+  it.each(['0', '99'])(
+    'plays an explicit new selection from a full queue with %s active',
+    async (activeId) => {
+      const { audio, client, createAudio, engine, state } = setup();
+      await engine.setAccount('alice');
+      engine.enqueue(
+        Array.from({ length: MAX_MUSIC_QUEUE_LENGTH }, (_, index) => track(String(index))),
+      );
+      engine.playTrack(track(activeId));
+      await settle();
+      const displacedId = activeId === '99' ? '98' : '99';
+      engine.importLyrics(displacedId, '[00:01]Displaced lyric');
+      const missingActive: string[] = [];
+      const unsubscribe = engine.store.subscribe((snapshot) => {
+        if (snapshot.activeId && !snapshot.queue.some((item) => item.id === snapshot.activeId))
+          missingActive.push(snapshot.activeId);
+      });
+      engine.playTrack(track('new'));
+      await settle();
+      unsubscribe();
+      expect(state().queue).toHaveLength(MAX_MUSIC_QUEUE_LENGTH);
+      expect(state().queue.some((item) => item.id === activeId)).toBe(true);
+      expect(state().queue.some((item) => item.id === displacedId)).toBe(false);
+      expect(state().lyrics[displacedId]).toBeUndefined();
+      expect(state().activeId).toBe('new');
+      expect(state().status).toBe('playing');
+      expect(audio.src).toContain('/new/stream');
+      expect(client.resolve).toHaveBeenCalledTimes(2);
+      expect(createAudio).toHaveBeenCalledTimes(1);
+      expect(missingActive).toEqual([]);
+    },
+  );
+
+  it('replaces a playlist with its first 100 unique tracks and keeps normal enqueue bounded', async () => {
+    const { audio, createAudio, engine, state } = setup();
+    await engine.setAccount('alice');
+    engine.playTrack(track('old'));
+    await settle();
+    engine.importLyrics('old', '[00:01]Old lyric');
+    engine.playTracks([
+      track('batch-0'),
+      track('batch-0'),
+      ...Array.from({ length: 110 }, (_, index) => track(`batch-${index}`)),
+    ]);
+    await settle();
+    expect(state().queue.map((item) => item.id)).toEqual(
+      Array.from({ length: MAX_MUSIC_QUEUE_LENGTH }, (_, index) => `batch-${index}`),
+    );
+    expect(state()).toMatchObject({ activeId: 'batch-0', status: 'playing', lyrics: {} });
+    expect(audio.src).toContain('/batch-0/stream');
+    expect(createAudio).toHaveBeenCalledTimes(1);
+    engine.enqueue([track('overflow')]);
+    expect(state().queue).toHaveLength(MAX_MUSIC_QUEUE_LENGTH);
+    expect(state().queue.some((item) => item.id === 'overflow')).toBe(false);
+    engine.playTracks([]);
+    expect(state().activeId).toBe('batch-0');
+    expect(audio.paused).toBe(false);
+  });
+
+  it('ignores playlist playback without an account and cancels older pending sources', async () => {
+    const { audio, client, engine, state } = setup();
+    engine.playTracks([track('anonymous')]);
+    expect(client.resolve).not.toHaveBeenCalled();
+    expect(state().queue).toEqual([]);
+    await engine.setAccount('alice');
+    const old = deferred<MusicPlayback>();
+    vi.mocked(client.resolve).mockReturnValueOnce(old.promise);
+    engine.playTrack(track('old'));
+    const signal = vi.mocked(client.resolve).mock.calls[0][1]!;
+    engine.playTracks([track('selected')]);
+    await settle();
+    old.resolve(playback('old'));
+    await settle();
+    expect(signal.aborted).toBe(true);
+    expect(state()).toMatchObject({ activeId: 'selected', status: 'playing' });
+    expect(state().queue.map((item) => item.id)).toEqual(['selected']);
+    expect(audio.src).toContain('/selected/stream');
   });
   it('uses one media element for all tracks and derives playback from native events', async () => {
     const { audio, createAudio, engine, state } = setup();
@@ -500,25 +579,28 @@ describe('shared AudioEngine', () => {
     { durationMs: 0, playbackKind: 'full' },
     { durationMs: '269000', playbackKind: 'full' },
     { activeId: 'missing', durationMs: 269000, playbackKind: 'full' },
-  ])('keeps public metadata when the saved playback label cannot be restored: %j', async (saved) => {
-    const { client, createAudio, engine, state, storage } = setup();
-    vi.mocked(client.track).mockResolvedValue({
-      ...track('a'),
-      source: 'kugou',
-      playbackKind: 'preview',
-    });
-    storage.set(
-      'qingzhou:music:v1:alice',
-      JSON.stringify({ activeId: 'a', ids: ['a'], ...saved }),
-    );
-    await engine.setAccount(null);
-    expect(state().queue).toEqual([]);
-    await engine.setAccount('alice');
-    expect(state().queue[0].playbackKind).toBe('preview');
-    expect(state().status).toBe('paused');
-    expect(client.resolve).not.toHaveBeenCalled();
-    expect(createAudio).not.toHaveBeenCalled();
-  });
+  ])(
+    'keeps public metadata when the saved playback label cannot be restored: %j',
+    async (saved) => {
+      const { client, createAudio, engine, state, storage } = setup();
+      vi.mocked(client.track).mockResolvedValue({
+        ...track('a'),
+        source: 'kugou',
+        playbackKind: 'preview',
+      });
+      storage.set(
+        'qingzhou:music:v1:alice',
+        JSON.stringify({ activeId: 'a', ids: ['a'], ...saved }),
+      );
+      await engine.setAccount(null);
+      expect(state().queue).toEqual([]);
+      await engine.setAccount('alice');
+      expect(state().queue[0].playbackKind).toBe('preview');
+      expect(state().status).toBe('paused');
+      expect(client.resolve).not.toHaveBeenCalled();
+      expect(createAudio).not.toHaveBeenCalled();
+    },
+  );
 
   it('logout invalidates late resolve and restore, and an explicit action supersedes restoration', async () => {
     const { engine, client, state, storage, createAudio } = setup();
