@@ -105,6 +105,62 @@ afterEach(() => {
 });
 
 describe('shared AudioEngine', () => {
+  it('discards an authorized cached source and refreshes account rights without autoplay', async () => {
+    const { audio, client, createAudio, engine, state } = setup();
+    const online: MusicTrack = { ...track('a'), source: 'kugou', playbackKind: 'full' };
+    vi.mocked(client.resolve).mockResolvedValue({ ...playback('a'), track: online });
+    await engine.setAccount('alice');
+    engine.playTrack(online);
+    await settle();
+    audio.metadata();
+    expect(audio.paused).toBe(false);
+    engine.invalidatePlayback();
+    expect(audio.paused).toBe(true);
+    expect(audio.src).toBe('');
+    expect(state()).toMatchObject({
+      activeId: 'a',
+      status: 'paused',
+      durationMs: 0,
+      positionMs: 0,
+      offsetMs: 0,
+    });
+    vi.mocked(client.resolve).mockResolvedValue({
+      ...playback('a'),
+      offsetMs: 30000,
+      track: { ...online, playbackKind: 'preview', durationMs: 60000 },
+    });
+    await engine.refreshPlayback();
+    audio.metadata();
+    expect(audio.paused).toBe(true);
+    expect(state()).toMatchObject({ status: 'paused', offsetMs: 30000, durationMs: 60000 });
+    expect(createAudio).toHaveBeenCalledTimes(1);
+    expect(audio.play).toHaveBeenCalledTimes(1);
+    vi.mocked(client.resolve).mockImplementation(async (id) => playback(id));
+    engine.playTrack(track('local'));
+    await settle();
+    const calls = vi.mocked(client.resolve).mock.calls.length;
+    engine.invalidatePlayback();
+    await engine.refreshPlayback();
+    expect(vi.mocked(client.resolve)).toHaveBeenCalledTimes(calls);
+    expect(audio.paused).toBe(false);
+  });
+
+  it('rejects late account-authorized resolves after rights invalidation', async () => {
+    const { audio, client, engine, state } = setup();
+    const online: MusicTrack = { ...track('a'), source: 'kugou', playbackKind: 'full' };
+    const old = deferred<MusicPlayback>();
+    vi.mocked(client.resolve).mockReturnValueOnce(old.promise);
+    await engine.setAccount('alice');
+    engine.playTrack(online);
+    const signal = vi.mocked(client.resolve).mock.calls[0][1]!;
+    engine.invalidatePlayback();
+    expect(signal.aborted).toBe(true);
+    old.resolve({ ...playback('a'), track: online });
+    await settle();
+    expect(audio.src).toBe('');
+    expect(audio.play).not.toHaveBeenCalled();
+    expect(state().status).toBe('paused');
+  });
   it('replays a restored finished preview from the start on the first Play click', async () => {
     const { audio, client, engine, state, storage } = setup();
     const preview: MusicTrack = {

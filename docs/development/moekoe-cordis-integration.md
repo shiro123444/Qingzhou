@@ -52,13 +52,15 @@ Electron 官方也明确仅实现 Chrome 扩展 API 的一个子集，扩展必�
 ## 已落地的最小实现
 
 1. [ports.ts](../../src/features/MusicPlayer/ports.ts) 实现账户会话范围的 `MusicPlayerPort`。`getSnapshot()` 返回当前曲目元数据、播放状态、进度、时长、音量、模式、账户与当前歌词的深冻结副本；`subscribe(listener)` 返回取消函数；`command()` 严格校验 `play/pause/previous/next/seek/setVolume` 及其字段。端口不暴露媒体地址、完整队列、HTMLAudioElement 或可变 store，命令直接交给同一个 AudioEngine。账户往返也不会恢复旧端口权限。
-2. [plugins/runtime.ts](../../src/features/MusicPlayer/plugins/runtime.ts) 的 `MusicPluginHost` 直接使用 `@lobechat/cordis-foundation` 导出的真实 `Context`。每次激活创建独立上下文，先 `provide('music.player', …)` 与 `provide('music.lyrics', …)`，再加载固定、随应用打包的歌词插件，等待原生 Fiber 完成并校验激活状态。歌词插件获得的命令能力进一步收窄为 `seek`；没有远程插件地址或任意模块执行入口。
-3. [plugins/lyrics-plugin.ts](../../src/features/MusicPlayer/plugins/lyrics-plugin.ts) 声明上述两个服务依赖，通过 `ctx.effect()` 拥有端口订阅，并向 `LyricsViewSlot` 发布不可变歌词视图。逐行高亮与点击跳转由该视图提供；跳转前核对当前曲目和歌词行，卸载时取消订阅并清空自己的槽位。[LyricsPanel.tsx](../../src/features/MusicPlayer/plugins/LyricsPanel.tsx) 用 React 渲染正式歌词槽，不访问 MoeKoe DOM 或框架私有实例。
+2. [plugins/runtime.ts](../../src/features/MusicPlayer/plugins/runtime.ts) 的 `MusicPluginHost` 直接使用 `@lobechat/cordis-foundation` 导出的真实 `Context`。每次激活创建独立上下文，提供 `music.player`、`music.lyrics` 与 `music.lyricsSource`，再加载固定、随应用打包的歌词插件，等待原生 Fiber 完成并校验激活状态。歌词插件获得的播放器命令能力仍仅为 `seek`；歌词读取能力只能请求当前账号会话的当前酷狗歌曲，不能读取任意曲目、媒体地址或登录凭据。没有远程插件地址或任意模块执行入口。
+3. [plugins/lyrics-plugin.ts](../../src/features/MusicPlayer/plugins/lyrics-plugin.ts) 声明上述服务依赖，通过 `ctx.effect()` 拥有端口订阅和自动歌词请求，向 `LyricsViewSlot` 发布不可变歌词视图。换歌时通过 `music.lyrics.get` 获取真实 LRC；时间更新只推进逐行高亮，不重复请求。每次插件激活的缓存最多 32 首、1 MiB，单份 LRC 限制 128 KiB；缓存不跨账号或插件生命周期。换歌取消旧请求，账号切换/卸载同步撤销能力和取消请求，迟到结果不能覆盖新歌。界面分别显示加载中、无歌词与可重试的失败状态。[LyricsPanel.tsx](../../src/features/MusicPlayer/plugins/LyricsPanel.tsx) 用 React 渲染正式歌词槽，不访问 MoeKoe DOM 或框架私有实例。
 4. [MusicPlayer/context.tsx](../../src/features/MusicPlayer/context.tsx) 在常驻 MusicPlayerProvider 中持有宿主与现有引擎。插件启停和 SPA 页面切换不创建第二个媒体元素；禁用插件清空歌词展示并释放插件订阅，保留引擎中的歌词和正在进行的播放。插件依赖订阅与端口自身的账户监视订阅分别清理：端口会话在禁用、换号或宿主停止时同步撤销。
 5. [MusicPluginSettings.tsx](../../src/features/MusicPlayer/plugins/MusicPluginSettings.tsx) 提供内置歌词插件开关、读取/歌词跳转能力说明、启动失败重试与存储失败提示。开关保存在 `qingzhou:music:plugins:v1:<编码后的账户 ID>`，默认启用；账号切换后读取对应账户的设置。启动失败时可通过新的 Fiber 重试。
 6. 换号、关闭或停止宿主时，先同步撤销旧端口和激活权限，再让 Cordis 异步完成资源清理。旧视图、端口、迟到启动和槽位回调不能写入新激活。Cordis 根 Fiber 的 `dispose()` 实际具有重启语义，因此宿主清理后丢弃旧 Context；React StrictMode 的 cleanup/setup 可在同一宿主上重新启动。媒体停止与账户数据清理仍由 `AudioEngine.setAccount()` 负责。
 
-当前交付的是清舟原生歌词插件，使用现有账户音频库与本地导入的 LRC，没有新增音乐源或服务端音乐操作。后续如增加数据源，仍需实现 `MusicProvider` 并沿服务端受信任 modules/profile、认证 scope 与取消信号接入；长连接或桌面资源应由各自进程中的 Cordis Fiber 拥有，跨进程传带 schema 的消息，不能传递 Context 或函数。
+酷狗在线歌曲自动获取歌词，常规播放无需导入；本地上传文件仍可使用手动 LRC。试听源的 `offsetMs` 把完整歌词时间转换为片段内时间，保留跨越片段起点的歌词，只显示可播放片段内的后续行；点击跳转前再次核对当前曲目、片段范围与歌词视图。暂停恢复保存有界的片段起点和时长，刷新后无需先播放就能对齐歌词。账号权限改变时先清掉酷狗缓存媒体，再重新解析音源并保持暂停，本地文件播放不受影响。服务端数据源仍沿 `MusicProvider`、受信任 modules/profile、认证 scope 与取消信号接入；长连接或桌面资源应由各自进程中的 Cordis Fiber 拥有，跨进程传带 schema 的消息，不能传递 Context 或函数。
+
+自动歌词回归覆盖 HTTP 客户端的曲目匹配和 UTF-8 体积上限、Cordis 请求取消/重试/缓存/权限边界、暂停试听恢复、片段内点击跳转，以及真实浏览器的在线曲库 → 歌词命令 → Cordis 视图链路。该浏览器正确性测试使用隔离的目录与媒体夹具；上游真实歌词可用性单独验证，不把夹具通过当作账号全曲权限验证。
 
 ## 若以后明确要求运行原插件 ZIP
 

@@ -20,6 +20,7 @@ export * from './learningBudget';
 export * from './message';
 export * from './messengerAccountLink';
 export * from './messengerInstallation';
+export * from './musicAccount';
 export * from './nextauth';
 export * from './nexus';
 export * from './nexusReview';

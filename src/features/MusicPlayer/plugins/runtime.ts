@@ -1,6 +1,8 @@
 import { Context, type Plugin } from '@lobechat/cordis-foundation';
 import { createStore } from 'zustand/vanilla';
 
+import { musicLyricsSchema } from '@/types/music';
+
 import { type AudioEngine } from '../engine';
 import {
   createMusicPlayerPort,
@@ -9,11 +11,17 @@ import {
   type MusicPlayerSession,
 } from '../ports';
 import { lyricsPlugin } from './lyrics-plugin';
-import { type LyricsPluginView, type LyricsViewSlot, type MusicPluginState } from './types';
+import {
+  type LyricsPluginView,
+  type LyricsViewSlot,
+  type MusicLyricsSource,
+  type MusicPluginState,
+} from './types';
 
 type PreferenceStorage = Pick<Storage, 'getItem' | 'setItem'>;
 interface Activation {
   context: Context;
+  controller: AbortController;
   live: boolean;
   session: MusicPlayerSession;
 }
@@ -91,6 +99,7 @@ export class MusicPluginHost {
     this.activation = undefined;
     if (!activation) return;
     activation.live = false;
+    activation.controller.abort();
     activation.session.dispose();
     // Root disposal restarts Cordis's root fiber. Discard the context; never reuse it.
     const cleanup = Promise.resolve(activation.context.fiber.dispose()).then(
@@ -145,6 +154,7 @@ export class MusicPluginHost {
   private async activate() {
     const context = new Context();
     const activation: Activation = {
+      controller: new AbortController(),
       context,
       live: true,
       session: createMusicPlayerPort(this.engine),
@@ -186,9 +196,29 @@ export class MusicPluginHost {
         if (isCurrent()) this.store.setState({ lyrics });
       },
     });
+    const source: MusicLyricsSource = Object.freeze({
+      get: async (trackId: string, signal: AbortSignal) => {
+        assertCurrent();
+        const track = port.getSnapshot().track;
+        if (track?.id !== trackId || track.source !== 'kugou')
+          throw new Error('MUSIC_PLUGIN_PERMISSION_DENIED');
+        const combined = AbortSignal.any([activation.controller.signal, signal]);
+        combined.throwIfAborted();
+        const result = this.engine.client.lyrics
+          ? await this.engine.client.lyrics(trackId, combined)
+          : { trackId, text: null, format: 'lrc' as const };
+        combined.throwIfAborted();
+        assertCurrent();
+        const parsed = musicLyricsSchema.parse(result);
+        if (port.getSnapshot().track?.id !== trackId || parsed.trackId !== trackId)
+          throw new Error('MUSIC_LYRICS_TRACK_MISMATCH');
+        return parsed;
+      },
+    });
     try {
       context.provide('music.player', port);
       context.provide('music.lyrics', slot);
+      context.provide('music.lyricsSource', source);
       const fiber = context.plugin(this.options.lyrics ?? lyricsPlugin);
       await fiber;
       if (!isCurrent()) return;

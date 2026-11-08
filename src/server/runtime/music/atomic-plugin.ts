@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { musicPlaybackSchema, musicTrackSchema } from '@/types/music';
+import { musicLyricsSchema, musicPlaybackSchema, musicTrackSchema } from '@/types/music';
 
 import type { AtomicInvocation, AtomicPlugin } from '../atomic-runtime';
 import { MusicError, type MusicProvider } from './contracts';
@@ -40,6 +40,17 @@ export function createMusicPlugin(): AtomicPlugin {
         input: trackInput,
         output: musicTrackSchema,
         execute: ({ trackId }, ctx) => provider(ctx).track(trackId, ctx.signal),
+      },
+      {
+        name: 'music.lyrics.get',
+        description: 'Load timed lyrics for the selected catalog track.',
+        input: trackInput,
+        output: musicLyricsSchema,
+        execute: async ({ trackId }, ctx) => {
+          const service = provider(ctx);
+          if (!service.lyrics) throw new MusicError('MUSIC_LYRICS_UNAVAILABLE', 404);
+          return service.lyrics(trackId, ctx.signal);
+        },
       },
       {
         name: 'music.playback.resolve',

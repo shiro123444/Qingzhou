@@ -8,7 +8,8 @@ import { type LyricLine, parseLrc } from './lyrics';
 export type PlaybackStatus =
   'idle' | 'loading' | 'playing' | 'paused' | 'buffering' | 'blocked' | 'error' | 'ended';
 export type RepeatMode = 'sequence' | 'list' | 'single';
-export type MusicTransport = Pick<MusicClient, 'resolve' | 'track' | 'search' | 'uploadAudio'>;
+export type MusicTransport = Pick<MusicClient, 'resolve' | 'track' | 'search' | 'uploadAudio'> &
+  Partial<Pick<MusicClient, 'lyrics'>>;
 type StoragePort = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
 export interface PlayerState {
@@ -16,6 +17,7 @@ export interface PlayerState {
   durationMs: number;
   error: boolean;
   lyrics: Record<string, { lines: LyricLine[]; text: string }>;
+  offsetMs: number;
   positionMs: number;
   queue: MusicTrack[];
   repeat: RepeatMode;
@@ -33,6 +35,7 @@ const initialState = (userId: string | null = null): PlayerState => ({
   error: false,
   lyrics: {},
   positionMs: 0,
+  offsetMs: 0,
   queue: [],
   repeat: 'sequence',
   restoring: false,
@@ -95,6 +98,8 @@ export class AudioEngine {
         ids: s.queue.map((track) => track.id),
         lyrics: Object.fromEntries(Object.entries(s.lyrics).map(([id, lyric]) => [id, lyric.text])),
         positionMs: s.positionMs,
+        offsetMs: s.offsetMs,
+        durationMs: s.durationMs,
         repeat: s.repeat,
         shuffle: s.shuffle,
         volume: s.volume,
@@ -161,6 +166,8 @@ export class AudioEngine {
       }
       this.update({
         activeId,
+        durationMs: activeId === saved.activeId ? bounded(saved.durationMs, 86_400_000) : 0,
+        offsetMs: activeId === saved.activeId ? bounded(saved.offsetMs, 86_400_000) : 0,
         lyrics,
         positionMs: activeId === saved.activeId ? bounded(saved.positionMs, 86_400_000) : 0,
         queue,
@@ -219,7 +226,8 @@ export class AudioEngine {
   }
 
   private async load(id: string, autoplay: boolean, positionMs: number) {
-    if (!this.store.getState().userId) return;
+    const previous = this.store.getState();
+    if (!previous.userId) return;
     this.stopSource();
     const generation = this.generation;
     const controller = new AbortController();
@@ -228,7 +236,8 @@ export class AudioEngine {
     this.pendingSeek = positionMs;
     this.update({
       activeId: id,
-      durationMs: 0,
+      durationMs: previous.activeId === id ? previous.durationMs : 0,
+      offsetMs: previous.activeId === id ? previous.offsetMs : 0,
       error: false,
       positionMs,
       restoring: false,
@@ -238,6 +247,8 @@ export class AudioEngine {
       const playback = await this.client.resolve(id, controller.signal);
       if (generation !== this.generation) return;
       this.update({
+        offsetMs: bounded(playback.offsetMs, 86_400_000),
+        durationMs: bounded(playback.track.durationMs, 86_400_000),
         queue: this.store
           .getState()
           .queue.map((track) => (track.id === id ? playback.track : track)),
@@ -348,6 +359,26 @@ export class AudioEngine {
     if (!this.audio?.getAttribute('src') || s.status === 'error' || s.status === 'ended') {
       void this.load(s.activeId, true, s.status === 'ended' ? 0 : s.positionMs);
     } else void this.attemptPlay();
+  }
+  /** Drop cached account-authorized media before account permissions change. Local files stay live. */
+  invalidatePlayback() {
+    const state = this.store.getState();
+    if (state.queue.find((track) => track.id === state.activeId)?.source !== 'kugou') return;
+    this.stopSource();
+    this.update({ durationMs: 0, offsetMs: 0, error: false, positionMs: 0, status: 'paused' });
+  }
+
+  /** Refresh rights explicitly; connecting or disconnecting never starts playback by itself. */
+  async refreshPlayback() {
+    const state = this.store.getState();
+    if (
+      !state.userId ||
+      !state.activeId ||
+      state.queue.find((track) => track.id === state.activeId)?.source !== 'kugou'
+    )
+      return;
+    this.invalidatePlayback();
+    await this.load(state.activeId, false, 0);
   }
   pause() {
     this.wantsPlay = false;

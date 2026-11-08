@@ -1,4 +1,5 @@
 import { MusicError, type MusicProvider } from './contracts';
+import { kugouLyricsSource } from './kugou-lyrics';
 
 /** One account boundary and one playback engine, with explicit catalog routing. */
 export class CatalogMusicProvider implements MusicProvider {
@@ -25,6 +26,11 @@ export class CatalogMusicProvider implements MusicProvider {
   }
   resolve(id: string, signal?: AbortSignal) {
     return this.provider(id).resolve(id, signal);
+  }
+  async lyrics(id: string, signal?: AbortSignal) {
+    if (id.startsWith('kugou:')) return kugouLyricsSource.get(id, signal);
+    await this.library.track(id, signal);
+    return { format: 'lrc' as const, text: null, trackId: id };
   }
   stream(id: string, request: Request) {
     return this.provider(id).stream(id, request);

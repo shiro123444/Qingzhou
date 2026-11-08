@@ -10,6 +10,7 @@ const envelope = z
       'music.search',
       'music.track.get',
       'music.playback.resolve',
+      'music.lyrics.get',
       'skills.catalog',
     ]),
     input: z.unknown(),

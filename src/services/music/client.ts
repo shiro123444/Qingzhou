@@ -1,6 +1,11 @@
 import { sha256 } from 'js-sha256';
 
-import { MAX_MUSIC_UPLOAD_BYTES, musicPlaybackSchema, musicTrackSchema } from '@/types/music';
+import {
+  MAX_MUSIC_UPLOAD_BYTES,
+  musicLyricsSchema,
+  musicPlaybackSchema,
+  musicTrackSchema,
+} from '@/types/music';
 
 export interface MusicUploadPort {
   register: (input: {
@@ -69,6 +74,14 @@ export class MusicClient {
     return musicPlaybackSchema.parse(
       await this.invoke('music.playback.resolve', { trackId }, signal),
     );
+  }
+
+  async lyrics(trackId: string, signal?: AbortSignal) {
+    const result = musicLyricsSchema.parse(
+      await this.invoke('music.lyrics.get', { trackId }, signal),
+    );
+    if (result.trackId !== trackId) throw new Error('MUSIC_LYRICS_TRACK_MISMATCH');
+    return result;
   }
 
   async uploadAudio(file: Pick<File, 'arrayBuffer' | 'name' | 'size'>, signal?: AbortSignal) {

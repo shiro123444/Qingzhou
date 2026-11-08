@@ -4,14 +4,17 @@ import { z } from 'zod';
 
 import type { MusicTrack } from '@/types/music';
 
+import type { MusicAccountAccess } from './account-service';
+import type { KugouCredentials } from './account-store';
 import { MusicError, type MusicProvider } from './contracts';
 
 // Protocol interoperability with MakcRe/KuGouMusicApi (MIT), the backend used by
-// MoeKoeMusic. Only anonymous search, metadata and the granted free/preview URL
-// are requested. No account cookies, entitlement upgrades or verification bypass.
+// MoeKoeMusic. Public catalog data and account-granted playback are separated;
+// credentials stay in the server vault. No entitlement or verification bypass.
 const APP_ID = 1005;
 const CLIENT_VERSION = 20489;
 const DEVICE_ID = randomBytes(16).toString('hex');
+const YOUTH_MEDIA_HOSTS = ['fs.youthandroid.kugou.com', 'fs.youthandroid2.kugou.com'];
 const headers = {
   'Cache-Control': 'private, no-store',
   'Referrer-Policy': 'no-referrer',
@@ -79,7 +82,8 @@ export function kugouAssetUrl(raw: string, kind: 'cover' | 'audio') {
     const permitted =
       kind === 'cover'
         ? ['imge.kugou.com', 'imgessl.kugou.com'].includes(url.hostname)
-        : /^(?:fsandroid|fsmobile|fsios|fsweb)(?:\.[a-z\d-]+)?\.kugou\.com$/u.test(url.hostname);
+        : YOUTH_MEDIA_HOSTS.includes(url.hostname) ||
+          /^(?:fsandroid|fsmobile|fsios|fsweb)(?:\.[a-z\d-]+)?\.kugou\.com$/u.test(url.hostname);
     if (
       !permitted ||
       !['http:', 'https:'].includes(url.protocol) ||
@@ -88,7 +92,11 @@ export function kugouAssetUrl(raw: string, kind: 'cover' | 'audio') {
       url.port
     )
       throw new Error('invalid');
-    url.protocol = 'https:';
+    // These two official concept-client CDNs issue HTTP URLs and do not present
+    // a matching TLS certificate. Preserve only their issued protocol; never
+    // downgrade an HTTPS response or disable certificate checks. No account
+    // token/cookie is sent to media CDNs; the browser still uses our own origin.
+    if (!(kind === 'audio' && YOUTH_MEDIA_HOSTS.includes(url.hostname))) url.protocol = 'https:';
     return url.href;
   } catch {
     throw new MusicError('MUSIC_SOURCE_UNAVAILABLE', 502);
@@ -131,6 +139,7 @@ export class KugouMusicProvider implements MusicProvider {
   constructor(
     readonly userId: string,
     private fetcher: typeof fetch = fetch,
+    private account?: MusicAccountAccess,
   ) {}
 
   private async api(
@@ -139,21 +148,25 @@ export class KugouMusicProvider implements MusicProvider {
     parameters: Record<string, string | number>,
     signal?: AbortSignal,
     body?: object,
+    credentials?: KugouCredentials,
   ) {
     signal?.throwIfAborted();
     const params: Record<string, string | number> = {
-      appid: APP_ID,
+      appid: credentials?.appId ?? APP_ID,
       clienttime: Math.floor(Date.now() / 1000),
       clientver: CLIENT_VERSION,
-      dfid: '-',
-      mid: DEVICE_ID,
+      dfid: credentials?.device.dfid ?? '-',
+      mid: credentials?.device.mid ?? DEVICE_ID,
       uuid: '-',
+      ...(credentials ? { token: credentials.token, userid: credentials.userId } : {}),
       ...parameters,
     };
     if (path === '/v5/url')
-      params.key = md5(`${params.hash}57ae12eb6890223e355ccfcb74edf70d${APP_ID}${DEVICE_ID}0`);
+      params.key = md5(
+        `${params.hash}${credentials ? '185672dd44712f60bb1736df5a377e82' : '57ae12eb6890223e355ccfcb74edf70d'}${params.appid}${params.mid}${credentials?.userId ?? 0}`,
+      );
     const serialized = body ? JSON.stringify(body) : '';
-    const salt = 'OIlwieks28dk2k092lksi2UIkp';
+    const salt = credentials ? 'LnT6xpN3khm36zse0QzvmgTZ3waWdRSA' : 'OIlwieks28dk2k092lksi2UIkp';
     params.signature = md5(
       salt +
         Object.keys(params)
@@ -173,8 +186,8 @@ export class KugouMusicProvider implements MusicProvider {
         'Content-Type': 'application/json',
         'User-Agent': 'Android15-1070-11083-46-0-DiscoveryDRADProtocol-wifi',
         'clienttime': String(params.clienttime),
-        'dfid': '-',
-        'mid': DEVICE_ID,
+        'dfid': String(params.dfid),
+        'mid': String(params.mid),
         'kg-rc': '1',
         'kg-rec': '1',
         'kg-rf': 'B9EDA08A64250DEFFBCADDEE00F8F25F',
@@ -187,11 +200,39 @@ export class KugouMusicProvider implements MusicProvider {
     });
     if (!response.ok || response.headers.has('ssa-code')) {
       await response.body?.cancel();
+      if (credentials && response.headers.has('ssa-code'))
+        throw new MusicError('MUSIC_ACCOUNT_VERIFICATION_REQUIRED', 403);
+      if (credentials && [401, 403].includes(response.status)) {
+        await this.account?.expire(credentials.id);
+        throw new MusicError('MUSIC_ACCOUNT_EXPIRED', 401);
+      }
       throw new MusicError('MUSIC_SOURCE_UNAVAILABLE', 502);
     }
-    return JSON.parse(
+    const result: unknown = JSON.parse(
       new TextDecoder().decode(await boundedBytes(response, 2 * 1024 * 1024)),
-    ) as unknown;
+    );
+    const failure = z
+      .object({
+        error: z.string().optional(),
+        error_msg: z.string().optional(),
+        message: z.string().optional(),
+        status: z.number().optional(),
+      })
+      .safeParse(result);
+    if (
+      credentials &&
+      failure.success &&
+      failure.data.status === 0 &&
+      /token.*(?:invalid|expired|失效|过期)|登录.*(?:失效|过期)|请.*登录/iu.test(
+        [failure.data.error, failure.data.error_msg, failure.data.message]
+          .filter(Boolean)
+          .join(' '),
+      )
+    ) {
+      await this.account?.expire(credentials.id);
+      throw new MusicError('MUSIC_ACCOUNT_EXPIRED', 401);
+    }
+    return result;
   }
 
   async search(query: string, limit: number, signal?: AbortSignal) {
@@ -298,34 +339,50 @@ export class KugouMusicProvider implements MusicProvider {
     );
   }
 
-  private async playback(id: string, signal?: AbortSignal) {
+  private async playback(id: string, signal?: AbortSignal, expectedAccount?: string | null) {
     const { hash, album, mix } = parseId(id);
-    const response = urlResponse.parse(
-      await this.api(
-        '/v5/url',
-        'trackercdn.kugou.com',
-        {
-          IsFreePart: 1,
-          album_audio_id: mix,
-          album_id: album,
-          area_code: 1,
-          behavior: 'play',
-          cdnBackup: 1,
-          clientver: 11430,
-          cmd: 26,
-          hash,
-          module: '',
-          page_id: 151369488,
-          pid: 2,
-          pidversion: 3001,
-          ppage_id: '463467626,350369493,788954147',
-          quality: 128,
-          ssa_flag: 'is_fromtrack',
-          version: 11430,
-        },
-        signal,
-      ),
-    );
+    const credentials = await this.account?.credentials(signal);
+    const accountRevision = credentials?.id ?? 'anonymous';
+    if (expectedAccount && expectedAccount !== accountRevision)
+      throw new MusicError('MUSIC_ACCOUNT_CHANGED', 409);
+    const requestUrl = async (auth?: KugouCredentials) =>
+      urlResponse.parse(
+        await this.api(
+          '/v5/url',
+          'trackercdn.kugou.com',
+          {
+            IsFreePart: auth ? 0 : 1,
+            album_audio_id: mix,
+            album_id: album,
+            area_code: 1,
+            behavior: 'play',
+            cdnBackup: 1,
+            clientver: 11430,
+            cmd: 26,
+            hash,
+            module: '',
+            page_id: auth ? 967177915 : 151369488,
+            pid: auth ? 411 : 2,
+            pidversion: 3001,
+            ppage_id: auth ? '356753938,823673182,967485191' : '463467626,350369493,788954147',
+            quality: 128,
+            ssa_flag: 'is_fromtrack',
+            version: 11430,
+          },
+          signal,
+          undefined,
+          auth,
+        ),
+      );
+    let response = await requestUrl(credentials);
+    if (credentials && response.status === 2)
+      throw new MusicError('MUSIC_ACCOUNT_VERIFICATION_REQUIRED', 403);
+    // Account rights determine the full source. If none is granted, use only
+    // Kugou's anonymous preview flow, never an alternate hash/quality/provider.
+    if (credentials && (response.status !== 1 || !response.url?.length))
+      response = await requestUrl();
+    if (credentials && !(await this.account!.isCurrent(credentials.id)))
+      throw new MusicError('MUSIC_ACCOUNT_CHANGED', 409);
     if (response.status !== 1 || !response.url?.length || response.extName !== 'mp3')
       throw new MusicError('MUSIC_TRACK_UNAVAILABLE', 404);
     const offset = response.hash_offset;
@@ -333,7 +390,9 @@ export class KugouMusicProvider implements MusicProvider {
       ? offset.end_ms - (offset.start_ms ?? 0)
       : (response.timeLength ?? 0) * 1000;
     return {
+      accountRevision,
       durationMs: integer(duration),
+      offsetMs: offset?.end_ms ? integer(offset.start_ms) : 0,
       preview: Boolean(offset?.end_ms),
       url: kugouAssetUrl(response.url[0], 'audio'),
     };
@@ -345,7 +404,8 @@ export class KugouMusicProvider implements MusicProvider {
       this.playback(id, signal),
     ]);
     return {
-      src: `/api/runtime/music/tracks/${encodeURIComponent(id)}/stream`,
+      offsetMs: playback.offsetMs,
+      src: `/api/runtime/music/tracks/${encodeURIComponent(id)}/stream${this.account ? '?accountRevision=' + encodeURIComponent(playback.accountRevision) : ''}`,
       track: {
         ...track,
         durationMs: playback.durationMs,
@@ -382,13 +442,25 @@ export class KugouMusicProvider implements MusicProvider {
     const range = request.headers.get('range');
     if (range && !/^bytes=(?:\d+-\d*|-\d+)$/u.test(range))
       throw new MusicError('MUSIC_RANGE_INVALID', 416);
-    const playback = await this.playback(id, request.signal);
+    const playback = await this.playback(
+      id,
+      request.signal,
+      new URL(request.url).searchParams.get('accountRevision'),
+    );
     const response = await this.fetcher(playback.url, {
       headers: { 'Accept-Encoding': 'identity', ...(range ? { Range: range } : {}) },
       method: request.method,
       redirect: 'error',
       signal: AbortSignal.any([request.signal, AbortSignal.timeout(120_000)]),
     });
+    if (
+      this.account &&
+      playback.accountRevision !== 'anonymous' &&
+      !(await this.account.isCurrent(playback.accountRevision))
+    ) {
+      await response.body?.cancel();
+      throw new MusicError('MUSIC_ACCOUNT_CHANGED', 409);
+    }
     const resultHeaders = new Headers({
       ...headers,
       'Accept-Ranges': 'bytes',

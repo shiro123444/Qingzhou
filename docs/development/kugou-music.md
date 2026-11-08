@@ -1,40 +1,109 @@
-# Kugou catalog in Qingzhou
+# Kugou music in Qingzhou
 
-The existing account-scoped Cordis `music` service routes `music.search` with
-`source: "kugou"` to an anonymous Kugou catalog adapter. Omitting the source still
-searches owned audio files. Both sources use the persistent AudioEngine and the
-same queue. The UI opens the Kugou source by default; uploads switch to local music.
+The account-scoped Cordis `music` service routes `music.search` with
+`source: "kugou"` to the public Kugou catalog. Omitting the source still searches
+owned audio files. Both sources use the persistent AudioEngine and the same queue.
+The music library opens the Kugou source by default; uploads switch to owned audio.
 
-This follows the request flow of [MoeKoeMusic](https://github.com/MoeKoeMusic/MoeKoeMusic)
-and the protocol documented in its MIT-licensed backend,
-[KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi): `/search` maps to
-`/v2/search/song`, metadata to `/v2/get_res_privilege/lite`, and `/song/url` to
-`/v5/url`. Request signing and parameter interoperability are adapted from that
-backend; its [MIT notice](licenses/KuGouMusicApi-MIT.txt) is included. No GPL UI code
-or third-party desktop runtime is copied into Qingzhou.
+This follows [MoeKoeMusic](https://github.com/MoeKoeMusic/MoeKoeMusic) and the protocol
+in its MIT-licensed backend [KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi):
+search uses `/v2/search/song`, metadata `/v2/get_res_privilege/lite`, playback
+`/v5/url`, and QR login `/v2/qrcode` plus `/v2/get_userinfo_qrcode`. Protocol signing
+and parameters are adapted from that backend; its [MIT notice](licenses/KuGouMusicApi-MIT.txt)
+is included. No GPL UI code or third-party desktop runtime is copied into Qingzhou.
 
-Every URL request sets `IsFreePart=1`, as MoeKoeMusic does for unauthenticated
-listeners. Kugou decides whether to return a full free track, a preview, or no
-playable source. Preview tracks are labelled in the results and player; resolved
-clip duration supersedes the catalog duration in the queue and caps playback/seek,
-even when a clipped MP3 retains the original recording’s duration header. There is no silent
-fallback to another recording, account cookie sharing, entitlement bypass, or
-verification/challenge simulation. Kugou account login is not implemented here.
+## Account linking and persistence
 
-Tracks include real artist, album, and cover metadata. Their cover URL is an
-account-authenticated same-origin endpoint, so ordinary `<img>` elements and the
-glass snapshot renderer can read the same pixels without a tainted canvas. The
-cover proxy accepts no client URL: it resolves a bounded track identifier against
-Kugou and accepts JPEG/PNG/WebP from the two Kugou image hosts only. Public metadata
-has a bounded five-minute cache. Covers are limited to 3 MiB; JSON to 2 MiB. Media
-streams preserve Range/HEAD and stream without buffering. CDN hosts are allowlisted,
-HTTP locations are upgraded to HTTPS, redirects are rejected, and upstream signed
-media URLs never appear in client track data or error responses. All routes retain
-the existing Qingzhou account check and reject cross-site embedding.
+The account panel creates an official Kugou QR URL and renders it with the existing
+Ant Design QR component. The listener scans and confirms in Kugou. Like MoeKoe's
+`platform=lite` configuration, the linked session uses appid 3116; login and signed
+playback use that same profile. The adapter does not switch profiles to try to
+obtain additional rights. The existing anonymous catalog/preview profile remains
+unchanged.
 
-Run targeted regressions in `src/server/runtime/music`, `src/services/music`,
-`src/features/MusicPlayer/engine.test.ts`, and `src/features/MusicStudio/index.test.tsx`.
-An optional `KUGOU_LIVE=1` run of `kugou.live.integration.test.ts` verifies catalog
-metadata, actual 206 MP3 bytes, and a real cover. Its report goes under ignored
-`.data/kugou-validation/provider-live.json`. This external check is opt-in because
-Kugou availability and geographic restrictions can change independently of this app.
+`POST /api/runtime/music/account` provides `status`, `start`, `poll`, `cancel`, and
+`disconnect`. Every command runs through Qingzhou authentication, rejects cross-site
+writes, and has a strict bounded input. The account API is separate from the Cordis
+agent tools. Tokens, provider user IDs, device identifiers, and raw upstream login
+responses are never returned to the client. Only display name, account state,
+revision, timestamps, and the scan URL are public. The scan URL necessarily contains
+the nonce encoded by the QR; polling and cancellation use a separate opaque ID.
+
+Migration `0112_music_accounts` adds one row per Qingzhou user with cascading account
+deletion. The entire state, including pending QR keys and linked tokens, is encrypted
+with the existing `KeyVaultsGateKeeper` AES-GCM key. The authenticated encrypted
+payload includes its Qingzhou owner, so swapping ciphertext between users fails
+closed. It is not stored in user settings/key-vault structures returned to clients.
+Apply normal database migrations before deploying the account UI. A configured
+`KEY_VAULTS_SECRET` is required; there is no plaintext fallback.
+
+A three-minute pending challenge and two-second server polling interval bound the
+QR flow. Revision-based compare-and-swap checks reject late creation or approval
+responses after cancel/disconnect and survive process restarts. Account display
+revision changes only when the linked account changes or expires; ordinary QR
+polling does not invalidate audio. Disconnect deletes the token and pending challenge
+from the encrypted record. An upstream absolute token expiry is honored, otherwise
+there is a local 30-day ceiling. Explicit token rejection expires the linked account;
+verification challenges are surfaced without simulation or automatic authorization.
+
+## Playback rights and source changes
+
+Anonymous playback asks for Kugou's normal free/preview source (`IsFreePart=1`). A
+linked account first requests the full source with its own token (`IsFreePart=0`).
+Kugou decides whether that account has rights. If no full source is granted, only the
+same recording's normal anonymous preview is attempted. There is no alternate
+recording/quality/provider bypass, shared account, or fabricated VIP state. HTTP
+authentication rejection and verification challenges are not retried as privileged
+requests. Connecting an account does not guarantee every recording is playable.
+
+Resolved tracks distinguish full songs from previews. A preview's granted duration
+caps native playback and seeking even if its MP3 header retains the original
+recording's duration. Its start offset aligns full-song lyrics with the clipped
+audio. A finished preview restored after reload starts at zero on the first Play
+click, while ordinary restoration stays paused.
+
+The same-origin stream URL includes an account revision. Every new media request
+reads current credentials, rejects a stale revision, and rechecks a linked session
+after acquiring upstream bytes. Disconnecting or changing accounts cannot reuse a
+cached privileged source URL. The UI immediately invalidates active Kugou audio
+before refreshing the source, without recreating the shared audio element. Already
+delivered browser media bytes cannot be revoked server-side.
+
+## Artwork and lyrics
+
+Tracks include real artist, album, and cover metadata. Covers use an authenticated
+same-origin endpoint, so `<img>` and the glass renderer read the same untainted
+pixels. The proxy accepts no client URL: it resolves a bounded track identifier,
+accepts JPEG/PNG/WebP from the Kugou image hosts, and limits artwork to 3 MiB. Public
+metadata has a bounded five-minute cache. JSON responses are bounded; media preserves
+Range/HEAD and streams without buffering. CDN hosts are allowlisted and redirects
+are rejected. Upstream signed URLs never appear in public DTOs or error messages.
+
+The official concept-client hosts `fs.youthandroid.kugou.com` and
+`fs.youthandroid2.kugou.com` currently issue HTTP media URLs and present mismatched
+HTTPS certificates. Only these two exact hosts retain the protocol issued by the
+HTTPS playback API, matching MoeKoe's original-source handling. This is a server-to-CDN
+HTTP transport limitation: those media bytes and their short-lived media ticket are
+not encrypted in transit. Account tokens/cookies are never forwarded to these media
+requests. QR login, token-bearing API calls, artwork, and all other media hosts keep
+HTTPS; no certificate validation is disabled and no HTTPS URL is automatically
+retried over HTTP. The browser continues to use the same-origin authenticated proxy,
+without mixed-content permissions or disabled web security.
+
+`music.lyrics.get` obtains timed LRC for the exact Kugou hash. It bounds decoded LRC
+to 128 KiB and caches at most 64 public results for ten minutes. The Cordis lyric
+plugin uses its active-track capability, cancels work on track/account changes or
+plugin stop, and applies preview offsets. No title-based substitute lyric is silently
+selected. Local LRC remains available for owned audio.
+
+## Verification
+
+Targeted tests cover account isolation, real encryption and migration schema, atomic
+cancel/disconnect races, expiry, source revisions, actual-rights full/preview branches,
+lyrics, and player continuity. Optional `KUGOU_LIVE=1` runs
+`kugou.live.integration.test.ts` against real catalog/audio/artwork. Optional
+`KUGOU_LOGIN_LIVE=1` runs `account-live.integration.test.ts` to create an actual QR
+and observe waiting. Reports under ignored `.data/kugou-validation/` contain no QR
+keys or tokens. QR creation/waiting is not proof of a completed user login or VIP
+playback: those require the listener's scan/confirmation and the actual account's
+rights. Upstream availability and regional restrictions can change independently.

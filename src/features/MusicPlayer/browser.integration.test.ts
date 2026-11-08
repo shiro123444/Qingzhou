@@ -9,10 +9,11 @@ import { createServer } from 'vite';
 import { expect, it } from 'vitest';
 
 import music from '@/locales/default/music';
-import { type MusicFile } from '@/server/runtime/music/contracts';
+import { type MusicFile, type MusicProvider } from '@/server/runtime/music/contracts';
 import { handleMusicCommand, handleMusicStream } from '@/server/runtime/music/handler';
 import { musicByteRange, OwnedFileMusicProvider } from '@/server/runtime/music/owned-file-provider';
 import { createMusicRuntime } from '@/server/runtime/music/runtime';
+import { type MusicTrack } from '@/types/music';
 
 import { type AudioEngine } from './engine';
 import { type MusicPluginHost } from './plugins/runtime';
@@ -78,7 +79,7 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
     let base = '';
     let counter = 0;
     const requests: string[] = [];
-    const provider = new OwnedFileMusicProvider(
+    const library = new OwnedFileMusicProvider(
       'alice',
       {
         findById: async (id) => rows.get(id),
@@ -90,6 +91,43 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
         getFileMetadata: async (key) => ({ contentLength: objects.get(key)!.length }),
       },
     );
+    let lyricRequests = 0;
+    const online: MusicTrack = {
+      id: 'online-fixture',
+      name: 'Online preview',
+      mimeType: 'audio/mpeg',
+      size: bytes.length,
+      source: 'kugou',
+      version: 'fixture',
+      playbackKind: 'preview',
+      durationMs: 20000,
+    };
+    const provider: MusicProvider = {
+      userId: 'alice',
+      track: (id, signal) =>
+        id === online.id ? Promise.resolve(online) : library.track(id, signal),
+      search: (query, limit, signal, source) =>
+        source === 'kugou' && query === 'automatic'
+          ? Promise.resolve([online])
+          : library.search(query, limit, signal),
+      resolve: (id, signal) =>
+        id === online.id
+          ? Promise.resolve({
+              src: '/api/runtime/music/tracks/online-fixture/stream',
+              track: online,
+              offsetMs: 10000,
+            })
+          : library.resolve(id, signal),
+      stream: (id, request) => library.stream(id === online.id ? 'track-1' : id, request),
+      lyrics: async (trackId) => {
+        lyricRequests++;
+        return {
+          trackId,
+          format: 'lrc',
+          text: '[00:09]Clip begins\n[00:12]Inside online clip\n[00:35]Outside available clip',
+        };
+      },
+    };
     const server = await createServer({
       configFile: false,
       envFile: false,
@@ -152,6 +190,16 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
                 const chunks: Buffer[] = [];
                 for await (const chunk of req) chunks.push(Buffer.from(chunk));
                 const body = Buffer.concat(chunks);
+                if (pathname === '/api/runtime/music/account') {
+                  res.setHeader('Content-Type', 'application/json');
+                  res.end(
+                    JSON.stringify({
+                      success: true,
+                      result: { state: 'disconnected', revision: '0' },
+                    }),
+                  );
+                  return;
+                }
                 if (pathname === '/fixture/upload') {
                   const path = `${++counter}.mp3`;
                   objects.set(path, body);
@@ -971,6 +1019,45 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       await page.waitForFunction(
         () => window.musicTest.engine.store.getState().status === 'playing',
       );
+      // Online songs obtain timed lyrics through the actual command/client/Cordis path.
+      // The fake catalog keeps this correctness test independent of upstream availability.
+      await page.getByRole('tab', { name: music.library, exact: true }).click();
+      await page.getByRole('button', { name: music.kugou, exact: true }).click();
+      await page.getByRole('searchbox', { name: music.searchKugou, exact: true }).fill('automatic');
+      await page.getByRole('button', { name: 'Play Online preview', exact: true }).click();
+      await page.waitForFunction(() => {
+        const view = window.musicTest.plugins.store.getState().lyrics;
+        return (
+          window.musicTest.engine.store.getState().status === 'playing' &&
+          view?.status === 'ready' &&
+          view.lines.length === 2
+        );
+      });
+      expect(lyricRequests).toBe(1);
+      expect(
+        await page.evaluate(() => ({
+          count: window.musicTest.audioCount,
+          offset: window.musicTest.engine.store.getState().offsetMs,
+          duration: window.musicTest.engine.store.getState().durationMs,
+          lines: window.musicTest.plugins.store.getState().lyrics?.lines,
+          manualImport: [...document.querySelectorAll('button')].some(
+            (button) => button.textContent === 'Import LRC',
+          ),
+        })),
+      ).toEqual({
+        count: 1,
+        offset: 10000,
+        duration: 20000,
+        manualImport: false,
+        lines: [
+          { text: 'Clip begins', timeMs: 0 },
+          { text: 'Inside online clip', timeMs: 2000 },
+        ],
+      });
+      await page.getByRole('button', { name: 'Inside online clip', exact: true }).click();
+      expect(
+        await page.evaluate(() => Math.abs(window.musicTest.audio!.currentTime - 2) < 0.75),
+      ).toBe(true);
       await page.getByRole('button', { name: 'Sign out', exact: true }).click();
       expect(
         await page.evaluate(() => ({

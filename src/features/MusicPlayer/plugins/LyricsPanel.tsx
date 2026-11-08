@@ -46,9 +46,9 @@ export default function LyricsPanel({ visible }: { visible: boolean }) {
             {t('enableLyricsPlugin')}
           </button>
         </div>
-      ) : status === 'loading' ? (
+      ) : status === 'loading' || lyrics?.status === 'loading' ? (
         <div className={styles.emptyLyrics}>
-          <p role="status">{t('pluginLoading')}</p>
+          <p role="status">{t(status === 'loading' ? 'pluginLoading' : 'lyricsLoading')}</p>
         </div>
       ) : status === 'error' ? (
         <div className={styles.emptyLyrics}>
@@ -61,10 +61,17 @@ export default function LyricsPanel({ visible }: { visible: boolean }) {
             {t('retry')}
           </button>
         </div>
+      ) : lyrics?.status === 'error' ? (
+        <div className={styles.emptyLyrics}>
+          <p role="alert">{t('lyricsFetchFailed')}</p>
+          <button className={styles.emptyAction} disabled={!userId} onClick={() => lyrics.retry()}>
+            {t('lyricsRetry')}
+          </button>
+        </div>
       ) : !lyrics?.lines.length ? (
         <div className={styles.emptyLyrics}>
-          <p>{t('emptyLyrics')}</p>
-          <span>{t('lyricHint')}</span>
+          <p>{t(lyrics?.source === 'kugou' ? 'lyricsUnavailable' : 'emptyLyrics')}</p>
+          <span>{t(lyrics?.source === 'kugou' ? 'lyricsAutomaticHint' : 'lyricHint')}</span>
         </div>
       ) : (
         lyrics.lines.map((line, index) => (

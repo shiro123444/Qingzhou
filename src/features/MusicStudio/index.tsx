@@ -40,6 +40,7 @@ import MusicPluginSettings from '@/features/MusicPlayer/plugins/MusicPluginSetti
 import { liquidGlass } from '@/styles/liquidGlass';
 import { type MusicTrack } from '@/types/music';
 
+import KugouAccount from './KugouAccount';
 import { styles } from './style';
 
 const views = ['player', 'library', 'queue', 'plugins'] as const;
@@ -398,15 +399,17 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
 
           <section className={styles.lyricPanel}>
             <div className={styles.lyricToolbar}>
-              <Button
-                disabled={!active || lyricsStatus !== 'active'}
-                icon={TextQuote}
-                size="small"
-                type="text"
-                onClick={() => lyricInput.current?.click()}
-              >
-                {t('importLrc')}
-              </Button>
+              {active?.source !== 'kugou' && (
+                <Button
+                  disabled={!active || lyricsStatus !== 'active'}
+                  icon={TextQuote}
+                  size="small"
+                  type="text"
+                  onClick={() => lyricInput.current?.click()}
+                >
+                  {t('importLrc')}
+                </Button>
+              )}
             </div>
             <LyricsPanel visible={view === 'player'} />
           </section>
@@ -424,19 +427,31 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
             <span>{displayedTracks.length}</span>
           </div>
           {view === 'library' && (
-            <div aria-label={t('musicSource')} className={styles.sourceSelector} role="group">
-              {(['kugou', 'library'] as const).map((item) => (
-                <button
-                  aria-pressed={source === item}
-                  key={item}
-                  onClick={() => {
-                    setSource(item);
-                    setQuery('');
+            <div className={styles.sourceRow}>
+              <div aria-label={t('musicSource')} className={styles.sourceSelector} role="group">
+                {(['kugou', 'library'] as const).map((item) => (
+                  <button
+                    aria-pressed={source === item}
+                    key={item}
+                    onClick={() => {
+                      setSource(item);
+                      setQuery('');
+                    }}
+                  >
+                    {t(item === 'kugou' ? 'kugou' : 'localLibrary')}
+                  </button>
+                ))}
+              </div>
+              {source === 'kugou' && (
+                <KugouAccount
+                  userId={s.userId}
+                  onBeforeDisconnect={() => engine.invalidatePlayback()}
+                  onChanged={() => {
+                    void engine.refreshPlayback();
+                    setRevision((value) => value + 1);
                   }}
-                >
-                  {t(item === 'kugou' ? 'kugou' : 'localLibrary')}
-                </button>
-              ))}
+                />
+              )}
             </div>
           )}
           <div className={styles.collectionToolbar}>

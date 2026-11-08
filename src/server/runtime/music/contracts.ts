@@ -1,4 +1,4 @@
-import type { MusicPlayback, MusicTrack } from '@/types/music';
+import type { MusicLyrics, MusicPlayback, MusicTrack } from '@/types/music';
 
 export class MusicError extends Error {
   constructor(
@@ -31,6 +31,7 @@ export interface MusicStorage {
 
 export interface MusicProvider {
   cover?: (id: string, request: Request) => Promise<Response>;
+  lyrics?: (id: string, signal?: AbortSignal) => Promise<MusicLyrics>;
   resolve: (id: string, signal?: AbortSignal) => Promise<MusicPlayback>;
   search: (
     query: string,

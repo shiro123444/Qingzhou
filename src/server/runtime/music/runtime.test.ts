@@ -42,6 +42,28 @@ const fixture = () => {
 };
 
 describe('music Cordis boundary', () => {
+  it('routes automatic lyrics through the account-scoped service without exposing a skill tool', async () => {
+    const f = fixture();
+    f.provider.lyrics = vi
+      .fn()
+      .mockResolvedValue({ trackId: 'one', format: 'lrc', text: '[00:01]Test' });
+    const response = await f.command('music.lyrics.get', { trackId: 'one' });
+    expect(response.status).toBe(200);
+    expect((await response.json()).result.text).toBe('[00:01]Test');
+    expect((await f.command('music.lyrics.get', { trackId: 'one', userId: 'bob' })).status).toBe(
+      400,
+    );
+    await expect(
+      f.host.invoke(
+        'music.lyrics.get',
+        { trackId: 'one' },
+        {
+          scope: { userId: 'bob', sessionId: 's' },
+          services: { music: f.provider },
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'MUSIC_FORBIDDEN' });
+  });
   it('mounts the music profile and keeps playback secrets out of skills', async () => {
     const f = fixture();
     const response = await f.command('music.search', { query: 'rain', limit: 3 });

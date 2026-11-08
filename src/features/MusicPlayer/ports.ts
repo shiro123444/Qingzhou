@@ -6,7 +6,9 @@ import { activeLyric, type LyricLine } from './lyrics';
 export type MusicPlayerCommand =
   { type: 'play' | 'pause' | 'previous' | 'next' } | { type: 'seek' | 'setVolume'; value: number };
 
-type TrackSnapshot = Readonly<Pick<MusicTrack, 'id' | 'name' | 'mimeType' | 'size'>>;
+type TrackSnapshot = Readonly<
+  Pick<MusicTrack, 'id' | 'name' | 'mimeType' | 'size' | 'source' | 'playbackKind'>
+>;
 type LineSnapshot = Readonly<LyricLine>;
 
 export interface MusicPlayerSnapshot {
@@ -15,6 +17,7 @@ export interface MusicPlayerSnapshot {
     currentLine: number;
     lines: readonly LineSnapshot[];
   }>;
+  readonly offsetMs: number;
   readonly positionMs: number;
   readonly repeat: RepeatMode;
   readonly shuffle: boolean;
@@ -86,6 +89,8 @@ function snapshotFrom(state: PlayerState, previous?: MusicPlayerSnapshot): Music
     ? previous?.track?.id === active.id &&
       previous.track.name === active.name &&
       previous.track.mimeType === active.mimeType &&
+      previous.track.source === active.source &&
+      previous.track.playbackKind === active.playbackKind &&
       previous.track.size === active.size
     : previous?.track === null;
   const track = sameTrack
@@ -96,6 +101,8 @@ function snapshotFrom(state: PlayerState, previous?: MusicPlayerSnapshot): Music
           mimeType: active.mimeType,
           name: active.name,
           size: active.size,
+          source: active.source,
+          playbackKind: active.playbackKind,
         })
       : null;
   if (
@@ -105,6 +112,7 @@ function snapshotFrom(state: PlayerState, previous?: MusicPlayerSnapshot): Music
     previous.userId === state.userId &&
     previous.status === state.status &&
     previous.positionMs === state.positionMs &&
+    previous.offsetMs === state.offsetMs &&
     previous.durationMs === state.durationMs &&
     previous.volume === state.volume &&
     previous.repeat === state.repeat &&
@@ -115,6 +123,7 @@ function snapshotFrom(state: PlayerState, previous?: MusicPlayerSnapshot): Music
     durationMs: state.durationMs,
     lyrics,
     positionMs: state.positionMs,
+    offsetMs: state.offsetMs,
     repeat: state.repeat,
     shuffle: state.shuffle,
     status: state.status,

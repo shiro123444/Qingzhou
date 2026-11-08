@@ -784,6 +784,13 @@
       "when": 1792627200001,
       "tag": "0111_learning_budgets",
       "breakpoints": true
+    },
+    {
+      "idx": 112,
+      "version": "7",
+      "when": 1794096000000,
+      "tag": "0112_music_accounts",
+      "breakpoints": true
     }
   ],
   "version": "6"

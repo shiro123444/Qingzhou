@@ -29,7 +29,7 @@ export function parseLrc(text: string): LyricLine[] {
   return lines.sort((a, b) => a.timeMs - b.timeMs);
 }
 
-export function activeLyric(lines: LyricLine[], positionMs: number): number {
+export function activeLyric(lines: readonly Readonly<LyricLine>[], positionMs: number): number {
   let left = 0;
   let right = lines.length;
   while (left < right) {

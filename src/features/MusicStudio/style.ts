@@ -632,6 +632,15 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       gap: 14px;
     }
   `,
+  sourceRow: css`
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    justify-content: space-between;
+
+    margin-block-start: 18px;
+  `,
   sourceSelector: css`
     display: inline-flex;
     gap: 4px;

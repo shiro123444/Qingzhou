@@ -26,6 +26,39 @@ function fixture() {
 }
 
 describe('audio upload transport', () => {
+  it('gets bounded lyrics for exactly the requested track and forwards cancellation', async () => {
+    const f = fixture();
+    const signal = new AbortController().signal;
+    f.fetcher.mockResolvedValueOnce(
+      Response.json({
+        success: true,
+        result: { trackId: 'one', format: 'lrc', text: '[00:00]A line' },
+      }),
+    );
+    expect(await f.client.lyrics('one', signal)).toMatchObject({
+      trackId: 'one',
+      text: '[00:00]A line',
+    });
+    expect(JSON.parse(f.fetcher.mock.calls[0][1]!.body as string)).toEqual({
+      operation: 'music.lyrics.get',
+      input: { trackId: 'one' },
+    });
+    expect(f.fetcher.mock.calls[0][1]?.signal).toBe(signal);
+    f.fetcher.mockResolvedValueOnce(
+      Response.json({
+        success: true,
+        result: { trackId: 'other', format: 'lrc', text: '[00:00]Wrong' },
+      }),
+    );
+    await expect(f.client.lyrics('one')).rejects.toThrow('MISMATCH');
+    f.fetcher.mockResolvedValueOnce(
+      Response.json({
+        success: true,
+        result: { trackId: 'one', format: 'lrc', text: '字'.repeat(50000) },
+      }),
+    );
+    await expect(f.client.lyrics('one')).rejects.toThrow('MUSIC_LYRICS_LIMIT');
+  });
   it('calls a native-style fetch without binding the MusicClient as its receiver', async () => {
     const fetcher: typeof fetch = async function (this: unknown) {
       expect(this).toBeUndefined();

@@ -70,6 +70,17 @@ function fixture() {
 }
 
 describe('Kugou catalog and source boundary', () => {
+  it('preserves only the two official concept CDN protocols without weakening other upstream TLS', () => {
+    for (const host of ['fs.youthandroid.kugou.com', 'fs.youthandroid2.kugou.com']) {
+      expect(kugouAssetUrl(`http://${host}/track.mp3`, 'audio')).toBe(`http://${host}/track.mp3`);
+      expect(kugouAssetUrl(`https://${host}/track.mp3`, 'audio')).toBe(`https://${host}/track.mp3`);
+      expect(() => kugouAssetUrl(`http://${host}.evil.test/track.mp3`, 'audio')).toThrow();
+    }
+    expect(kugouAssetUrl('http://fsandroid.kugou.com/track.mp3', 'audio')).toBe(
+      'https://fsandroid.kugou.com/track.mp3',
+    );
+    expect(() => kugouAssetUrl('http://unapproved.kugou.com/track.mp3', 'audio')).toThrow();
+  });
   it('maps real catalog fields and serves same-origin artwork without exposing upstream media URLs', async () => {
     const f = fixture();
     const [track] = await f.provider.search('Song', 3);

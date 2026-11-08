@@ -151,6 +151,7 @@ it('searches Kugou separately from local files and shows real artwork and previe
   fireEvent.click(await screen.findByRole('button', { name: music.play + ' Real catalog song' }));
   expect(play).toHaveBeenCalledWith(track);
   expect(screen.getByText(music.kugouPreview)).toBeVisible();
+  expect(screen.queryByRole('button', { name: music.importLrc })).not.toBeInTheDocument();
   expect(page.container.querySelector('img[src="' + track.coverUrl + '"]')).toBeVisible();
   fireEvent.click(screen.getByRole('tab', { name: music.library }));
   fireEvent.click(screen.getByRole('button', { name: music.localLibrary }));
