@@ -248,7 +248,7 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       browser = await chromium.launch({
         executablePath: process.env.MUSIC_BROWSER_EXECUTABLE!,
         headless: true,
-        args: ['--autoplay-policy=no-user-gesture-required'],
+        args: ['--autoplay-policy=no-user-gesture-required', '--enable-unsafe-swiftshader'],
       });
       page = await browser.newPage();
       page.on('pageerror', (error) => errors.push(error.message));
@@ -367,6 +367,73 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
         undefined,
         { timeout: 60_000 },
       );
+      const glassCanvases = () =>
+        page!.evaluate(() => {
+          const canvases = [
+            ...document.querySelectorAll<HTMLCanvasElement>('[data-qz-glass-canvas]'),
+          ];
+          const surfaces = [...document.querySelectorAll('[data-qz-renderer="webgl2"]')];
+          return {
+            count: canvases.length,
+            owners: surfaces.length,
+            valid:
+              canvases.every(
+                (canvas) =>
+                  canvas.width > 0 &&
+                  canvas.height > 0 &&
+                  canvas.getAttribute('aria-hidden') === 'true' &&
+                  getComputedStyle(canvas).pointerEvents === 'none' &&
+                  canvas.parentElement?.getAttribute('data-qz-renderer') === 'webgl2',
+              ) &&
+              surfaces.every(
+                (surface) =>
+                  surface.querySelectorAll(':scope > [data-qz-glass-canvas]').length === 1,
+              ),
+          };
+        });
+      const waitForCapsuleGlass = () =>
+        page!.waitForFunction(
+          () =>
+            document.querySelector('[data-capsule-body]')?.getAttribute('data-qz-renderer') ===
+            'webgl2',
+          undefined,
+          { timeout: 60_000 },
+        );
+      await waitForCapsuleGlass();
+      const studioGlass = await glassCanvases();
+      expect(studioGlass.count).toBeGreaterThan(0);
+      expect(studioGlass.count).toBeLessThanOrEqual(8);
+      expect(studioGlass.owners).toBe(studioGlass.count);
+      expect(studioGlass.valid).toBe(true);
+      await page.screenshot({
+        fullPage: true,
+        path: '.data/music-m2-validation/glass-runtime-studio.png',
+      });
+
+      // Runtime preferences tear down GPU output, then rebuild one canvas per surviving owner.
+      const runtimePreferences = await page.context().newCDPSession(page);
+      for (const name of ['prefers-contrast', 'prefers-reduced-transparency']) {
+        await runtimePreferences.send('Emulation.setEmulatedMedia', {
+          features: [{ name, value: name === 'prefers-contrast' ? 'more' : 'reduce' }],
+        });
+        await page.waitForFunction(
+          () =>
+            document.querySelectorAll('[data-qz-renderer="webgl2"], [data-qz-glass-canvas]')
+              .length === 0,
+        );
+        expect(
+          await page.evaluate(
+            () => getComputedStyle(document.querySelector('[data-capsule-body]')!).backdropFilter,
+          ),
+        ).toBe('none');
+        await runtimePreferences.send('Emulation.setEmulatedMedia', { features: [] });
+        await waitForCapsuleGlass();
+        const recovered = await glassCanvases();
+        expect(recovered.count).toBeLessThanOrEqual(8);
+        expect(recovered.owners).toBe(recovered.count);
+        expect(recovered.valid).toBe(true);
+      }
+      await runtimePreferences.detach();
       await page
         .locator('input[type=file][accept="audio/*"]')
         .setInputFiles({ buffer: bytes, mimeType: 'audio/mpeg', name: 'Rain.mp3' });
@@ -389,6 +456,12 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
             .querySelector('[data-testid="music-capsule"]')
             ?.getAttribute('data-positioned') === 'true',
       );
+      await waitForCapsuleGlass();
+      await page.evaluate(() => {
+        document.querySelector<HTMLCanvasElement>(
+          '[data-capsule-body] > [data-qz-glass-canvas]',
+        )!.dataset.fixtureIdentity = 'persistent-capsule';
+      });
       const capsuleBounds = () =>
         page!.evaluate(() => {
           const rect = document.querySelector('[data-capsule-body]')!.getBoundingClientRect();
@@ -399,6 +472,7 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       expect(await page.evaluate(() => window.musicTest.audio!.paused)).toBe(false);
       await page.getByRole('link', { name: 'Presentation', exact: true }).click();
       await page.waitForFunction(() => location.pathname === '/presentation');
+      await waitForCapsuleGlass();
       const titleBounds = (await page.locator('[data-capsule-body] strong').boundingBox())!;
       await page.mouse.move(
         titleBounds.x + titleBounds.width / 2,
@@ -411,6 +485,26 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       expect(dragged.left).toBeLessThan(300);
       expect(dragged.top).toBeLessThan(240);
       expect(await page.evaluate(() => location.pathname)).toBe('/presentation');
+      await waitForCapsuleGlass();
+      expect(
+        await page.evaluate(() => {
+          const body = document.querySelector<HTMLElement>('[data-capsule-body]')!;
+          const canvas = body.querySelector<HTMLCanvasElement>(':scope > [data-qz-glass-canvas]')!;
+          const a = body.getBoundingClientRect();
+          const b = canvas.getBoundingClientRect();
+          return (
+            canvas.dataset.fixtureIdentity === 'persistent-capsule' &&
+            Math.abs(a.left - b.left) <= 1 &&
+            Math.abs(a.top - b.top) <= 1 &&
+            Math.abs(a.width - b.width) <= 2 &&
+            Math.abs(a.height - b.height) <= 2
+          );
+        }),
+      ).toBe(true);
+      await page.screenshot({
+        fullPage: true,
+        path: '.data/music-m2-validation/glass-runtime-dragged.png',
+      });
       const dragFrom = async (selector: string, dx: number, dy: number, hold = false) => {
         const rect = (await page!.locator(selector).boundingBox())!;
         const x = rect.x + rect.width / 2;
@@ -426,6 +520,45 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       expect(await page.evaluate(() => window.musicTest.audio!.paused)).toBe(false);
       await page.getByRole('button', { name: music.capsulePause, exact: true }).click();
       await page.waitForFunction(() => window.musicTest.audio!.paused);
+      await waitForCapsuleGlass();
+      const presentationGlass = await glassCanvases();
+      for (let cycle = 0; cycle < 3; cycle++) {
+        await page.getByRole('link', { name: 'Chat', exact: true }).click();
+        await waitForCapsuleGlass();
+        await page.getByRole('link', { name: 'Presentation', exact: true }).click();
+        await waitForCapsuleGlass();
+        expect(await glassCanvases()).toEqual(presentationGlass);
+        expect(
+          await page.evaluate(
+            () =>
+              document.querySelector<HTMLCanvasElement>(
+                '[data-capsule-body] > [data-qz-glass-canvas]',
+              )?.dataset.fixtureIdentity,
+          ),
+        ).toBe('persistent-capsule');
+      }
+      const contrast = await page.context().newCDPSession(page);
+      const beforeContrast = await capsuleBounds();
+      await contrast.send('Emulation.setEmulatedMedia', {
+        features: [{ name: 'prefers-contrast', value: 'more' }],
+      });
+      await page.waitForFunction(
+        () => document.querySelectorAll('[data-qz-glass-canvas]').length === 0,
+      );
+      expect(await capsuleBounds()).toEqual(beforeContrast);
+      await page.screenshot({
+        fullPage: true,
+        path: '.data/music-m2-validation/glass-runtime-opaque.png',
+      });
+      await contrast.send('Emulation.setEmulatedMedia', { features: [] });
+      await waitForCapsuleGlass();
+      expect(await glassCanvases()).toEqual(presentationGlass);
+      expect(await capsuleBounds()).toEqual(beforeContrast);
+      await contrast.detach();
+      await page.screenshot({
+        fullPage: true,
+        path: '.data/music-m2-validation/glass-runtime-restored.png',
+      });
       const beforeRangeDrag = await page.evaluate(() => window.musicTest.audio!.currentTime);
       const beforeRangeDock = await capsuleBounds();
       await dragFrom('[data-capsule-body] input[type="range"]', 45, 30, true);
@@ -783,6 +916,11 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
         status: 'disabled',
         lyrics: null,
       });
+      await page.waitForFunction(() => !document.querySelector('[data-capsule-body]'));
+      const signedOutGlass = await glassCanvases();
+      expect(signedOutGlass.count).toBeLessThanOrEqual(8);
+      expect(signedOutGlass.owners).toBe(signedOutGlass.count);
+      expect(signedOutGlass.valid).toBe(true);
       expect(errors).toEqual([]);
     } catch (error) {
       await mkdir('.data/music-m2-validation', { recursive: true });

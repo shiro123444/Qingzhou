@@ -2,7 +2,7 @@
 
 import { BRANDING_NAME } from '@lobechat/business-const';
 import { Flexbox } from '@lobehub/ui';
-import { createStaticStyles, useTheme } from 'antd-style';
+import { createStaticStyles, cx, useTheme } from 'antd-style';
 import { memo, useCallback, useEffect, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 
@@ -14,6 +14,7 @@ import { useResourceManagerStore } from '@/routes/(main)/resource/features/store
 import { documentService } from '@/services/document';
 import { useFileStore } from '@/store/file';
 import { documentSelectors } from '@/store/file/slices/document/selectors';
+import { glassSurface } from '@/styles/liquidGlass';
 
 import FileEditor from './components/Editor';
 import Explorer from './components/Explorer';
@@ -28,26 +29,29 @@ const styles = createStaticStyles(({ css, cssVar }) => {
       overflow: hidden;
     `,
     editorOverlay: css`
+      --qz-glass-surface: var(
+        --qz-glass-strong,
+        var(--editor-overlay-bg, ${cssVar.colorBgContainer})
+      );
+
       position: absolute;
       z-index: 1;
       inset: 0;
 
       width: 100%;
       height: 100%;
-
-      background: var(--qz-glass-strong, var(--editor-overlay-bg, ${cssVar.colorBgContainer}));
-      backdrop-filter: var(--qz-glass-filter, none);
+      border-radius: ${cssVar.borderRadiusLG};
     `,
     pageEditorOverlay: css`
+      --qz-glass-surface: var(--qz-glass-strong, ${cssVar.colorBgLayout});
+
       position: absolute;
       z-index: 1;
       inset: 0;
 
       width: 100%;
       height: 100%;
-
-      background: var(--qz-glass-strong, ${cssVar.colorBgLayout});
-      backdrop-filter: var(--qz-glass-filter, none);
+      border-radius: ${cssVar.borderRadiusLG};
     `,
   };
 });
@@ -145,14 +149,14 @@ const ResourceManager = memo(() => {
 
           {/* Editor overlay */}
           {mode === 'editor' && (
-            <Flexbox className={styles.editorOverlay} data-qz-glass="editor">
+            <Flexbox className={cx(glassSurface, styles.editorOverlay)} data-qz-glass="editor">
               <FileEditor onBack={handleBack} />
             </Flexbox>
           )}
 
           {/* PageEditor overlay */}
           {mode === 'page' && (
-            <Flexbox className={styles.pageEditorOverlay} data-qz-glass="editor">
+            <Flexbox className={cx(glassSurface, styles.pageEditorOverlay)} data-qz-glass="editor">
               <PageEditor
                 emoji={currentDocument?.metadata?.emoji as string | undefined}
                 knowledgeBaseId={libraryId}

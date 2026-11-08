@@ -1,11 +1,25 @@
 import { type DraggablePanelProps } from '@lobehub/ui';
 import { DraggablePanel } from '@lobehub/ui';
-import { cssVar } from 'antd-style';
+import { createStaticStyles, cx } from 'antd-style';
 import { memo, Suspense, useState } from 'react';
 
 import Loading from '@/components/Loading/BrandTextLoading';
 import { useGlobalStore } from '@/store/global';
 import { systemStatusSelectors } from '@/store/global/selectors';
+import { glassSurface } from '@/styles/liquidGlass';
+
+const styles = createStaticStyles(({ css, cssVar }) => ({
+  surface: css`
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    border-radius: ${cssVar.borderRadiusLG};
+  `,
+}));
 
 export interface Size {
   height?: string | number;
@@ -50,7 +64,7 @@ const RightPanel = memo<RightPanelProps>(
 
     return (
       <DraggablePanel
-        backgroundColor={cssVar.colorBgContainer}
+        backgroundColor="transparent"
         expand={expand}
         expandable={false}
         maxWidth={maxWidth}
@@ -69,7 +83,9 @@ const RightPanel = memo<RightPanelProps>(
         }}
         {...rest}
       >
-        <Suspense fallback={<Loading debugId={'RightPanel'} />}>{children}</Suspense>
+        <div className={cx(glassSurface, styles.surface)} data-qz-glass="panel">
+          <Suspense fallback={<Loading debugId={'RightPanel'} />}>{children}</Suspense>
+        </div>
       </DraggablePanel>
     );
   },

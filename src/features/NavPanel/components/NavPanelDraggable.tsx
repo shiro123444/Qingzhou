@@ -96,6 +96,10 @@ const draggableStyles = createStaticStyles(({ css, cssVar }) => ({
       }
     }
   `,
+  surface: css`
+    width: 100%;
+    border-radius: ${cssVar.borderRadiusLG};
+  `,
 }));
 
 interface NavPanelDraggableProps {
@@ -134,9 +138,8 @@ export const NavPanelDraggable = memo<NavPanelDraggableProps>(({ activeContent }
 
   return (
     <DraggablePanel
-      className={cx(draggableStyles.panel, glassSurface)}
+      className={draggableStyles.panel}
       classNames={classNames}
-      data-qz-glass="sidebar"
       defaultSize={defaultSize}
       expand={expand && !workspaceDrawerMode}
       expandable={false}
@@ -148,14 +151,19 @@ export const NavPanelDraggable = memo<NavPanelDraggableProps>(({ activeContent }
       onExpandChange={togglePanel}
       onSizeDragging={handleSizeChange}
     >
-      <div className={draggableStyles.inner}>
-        <div className={draggableStyles.layer} key={activeContent.key}>
-          {activeContent.node}
+      <div
+        className={cx(glassSurface, draggableStyles.content, draggableStyles.surface)}
+        data-qz-glass="sidebar"
+      >
+        <div className={draggableStyles.inner}>
+          <div className={draggableStyles.layer} key={activeContent.key}>
+            {activeContent.node}
+          </div>
         </div>
+        <Suspense>
+          <Footer />
+        </Suspense>
       </div>
-      <Suspense>
-        <Footer />
-      </Suspense>
     </DraggablePanel>
   );
 });

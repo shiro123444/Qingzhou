@@ -82,6 +82,7 @@ function Fixture() {
         <BrowserRouter>
           <LiquidGlass />
           <div
+            data-qz-glass-scene
             className={cx(liquidGlass, liquidGlassBackdrop)}
             style={{ display: 'flex', flexDirection: 'column', height: '100dvh' }}
           >

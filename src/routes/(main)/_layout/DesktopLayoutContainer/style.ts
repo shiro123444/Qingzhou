@@ -9,10 +9,6 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     border: 1px solid var(--qz-glass-border, var(--container-border-color, ${cssVar.colorBorder}));
     border-radius: var(--container-border-radius, ${cssVar.borderRadius});
-    border-end-end-radius: var(
-      --container-border-bottom-right-radius,
-      var(--container-border-radius, ${cssVar.borderRadius})
-    );
 
     background: transparent;
   `,

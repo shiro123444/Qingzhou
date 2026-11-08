@@ -30,12 +30,10 @@ const DesktopLayoutContainer: FC<PropsWithChildren> = ({ children }) => {
   const innerCssVariables = useMemo<Record<string, string>>(() => {
     const darwinMajorVersion = getDarwinMajorVersion();
 
-    const borderRadius = darwinMajorVersion >= 25 ? '12px' : cssVar.borderRadius;
-    const borderBottomRightRadius =
-      darwinMajorVersion >= 26 || isMacOSWithLargeWindowBorders() ? '12px' : borderRadius;
+    const borderRadius =
+      darwinMajorVersion >= 25 || isMacOSWithLargeWindowBorders() ? '12px' : cssVar.borderRadius;
 
     return {
-      '--container-border-bottom-right-radius': borderBottomRightRadius,
       '--container-border-color': isDarkMode ? cssVar.colorBorderSecondary : cssVar.colorBorder,
       '--container-border-radius': borderRadius,
     };

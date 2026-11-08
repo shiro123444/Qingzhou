@@ -23,6 +23,7 @@ export default function GlassLab() {
         data-glass-probe
         className={styles.glass}
         data-qz-glass="capsule"
+        data-qz-glass-backend="svg"
         style={{
           position: 'absolute',
           left: 100,

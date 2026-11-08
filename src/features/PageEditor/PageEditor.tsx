@@ -2,7 +2,6 @@
 
 import { EditorProvider } from '@lobehub/editor/react';
 import { Flexbox } from '@lobehub/ui';
-import { cssVar } from 'antd-style';
 import type { FC, ReactNode } from 'react';
 import { memo } from 'react';
 
@@ -101,11 +100,7 @@ const PageEditorCanvas = memo<PageEditorCanvasProps>(({ header, fullWidthHeader 
     return (
       <>
         <PageTitle />
-        <Flexbox
-          height={'100%'}
-          style={{ backgroundColor: cssVar.colorBgContainer }}
-          width={'100%'}
-        >
+        <Flexbox height={'100%'} width={'100%'}>
           {headerSlot}
           <Flexbox horizontal flex={1} style={{ minHeight: 0 }} width={'100%'}>
             {editorPane}
@@ -119,12 +114,7 @@ const PageEditorCanvas = memo<PageEditorCanvasProps>(({ header, fullWidthHeader 
   return (
     <>
       <PageTitle />
-      <Flexbox
-        horizontal
-        height={'100%'}
-        style={{ backgroundColor: cssVar.colorBgContainer }}
-        width={'100%'}
-      >
+      <Flexbox horizontal height={'100%'} width={'100%'}>
         {editorPane}
         <RightPanel />
       </Flexbox>

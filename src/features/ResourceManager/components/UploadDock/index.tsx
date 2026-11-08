@@ -1,6 +1,6 @@
 import { CheckCircleFilled, CloseCircleFilled } from '@ant-design/icons';
 import { ActionIcon, Center, Flexbox, Icon, Text } from '@lobehub/ui';
-import { createStaticStyles, cssVar } from 'antd-style';
+import { createStaticStyles, cssVar, cx } from 'antd-style';
 import isEqual from 'fast-deep-equal';
 import { UploadIcon, XIcon } from 'lucide-react';
 import { AnimatePresence, m } from 'motion/react';
@@ -8,6 +8,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { fileManagerSelectors, useFileStore } from '@/store/file';
+import { glassSurface } from '@/styles/liquidGlass';
 
 import Item from './Item';
 
@@ -22,8 +23,8 @@ const styles = createStaticStyles(({ css }) => {
       overflow: hidden;
 
       width: 360px;
-      border: 1px solid ${cssVar.colorSplit};
-      border-radius: 8px;
+      border: 1px solid var(--qz-glass-border, ${cssVar.colorSplit});
+      border-radius: ${cssVar.borderRadiusLG};
 
       box-shadow: ${cssVar.boxShadow};
     `,
@@ -126,13 +127,13 @@ const UploadDock = memo(() => {
   if (count === 0 || !show) return;
 
   return (
-    <Flexbox className={styles.container}>
+    <Flexbox className={cx(glassSurface, styles.container)} data-qz-glass="panel">
       <Flexbox
         horizontal
         align={'center'}
         justify={'space-between'}
         style={{
-          background: cssVar.colorBgContainer,
+          background: 'transparent',
           borderBottom: expand ? `1px solid ${cssVar.colorSplit}` : undefined,
           borderBottomLeftRadius: expand ? 0 : 8,
           borderBottomRightRadius: expand ? 0 : 8,
@@ -193,7 +194,7 @@ const UploadDock = memo(() => {
           >
             <Flexbox
               style={{
-                background: cssVar.colorBgContainer,
+                background: 'transparent',
                 borderBottomLeftRadius: 8,
                 borderBottomRightRadius: 8,
                 height: 400,

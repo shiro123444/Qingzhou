@@ -158,6 +158,7 @@ const AppTheme = memo<AppThemeProps>(
           defaultAppearance={currentAppearence}
           defaultThemeMode={currentAppearence}
           className={cx(
+            'qz-glass-scene',
             styles.app,
             styles.scrollbar,
             styles.scrollbarPolyfill,

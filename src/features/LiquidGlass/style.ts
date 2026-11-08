@@ -12,11 +12,11 @@ export const styles = createStaticStyles(({ css }) => ({
     height: 0;
   `,
   optics: css`
-    &[data-qz-optics='direct'] {
+    &[data-qz-optics='direct']:not([data-qz-renderer='webgl2']) {
       backdrop-filter: var(--qz-refraction-filter) !important;
     }
 
-    &[data-qz-optics='backplate']::before {
+    &[data-qz-optics='backplate']:not([data-qz-renderer='webgl2'])::before {
       backdrop-filter: var(--qz-refraction-filter) !important;
     }
   `,

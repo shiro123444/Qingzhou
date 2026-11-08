@@ -7,12 +7,11 @@ import { memo } from 'react';
 import ToggleLeftPanelButton from '@/features/NavPanel/ToggleLeftPanelButton';
 import { useGlobalStore } from '@/store/global';
 import { systemStatusSelectors } from '@/store/global/selectors';
+import { glassSurface } from '@/styles/liquidGlass';
 
 const glassStyles = createStaticStyles(({ css, cssVar }) => ({
   header: css`
-    background: var(--qz-glass-surface, ${cssVar.colorBgContainer});
-    backdrop-filter: var(--qz-glass-filter, none);
-    box-shadow: inset 0 1px 0 var(--qz-glass-highlight, transparent);
+    border-radius: ${cssVar.borderRadiusLG};
   `,
 }));
 
@@ -56,7 +55,7 @@ const NavHeader = memo<NavHeaderProps>(
         allowShrink
         horizontal
         align={'center'}
-        className={cx(glassStyles.header, className)}
+        className={cx(glassSurface, glassStyles.header, className)}
         data-qz-glass="header"
         flex={'none'}
         gap={4}
