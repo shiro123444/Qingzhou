@@ -1,5 +1,7 @@
+import { watchGlassPreferences } from '../preferences';
 import { styles as fallbackStyles } from '../style';
 import { type Vec3 } from './geometry';
+import { captureDelay, GlassFrameBudget } from './performance';
 import { type GlassVolume } from './raytrace';
 import { createGlassRenderer, type GlassRenderer, type GlassRenderPlane } from './renderer';
 import { resolveSceneDepths } from './scene';
@@ -18,7 +20,6 @@ const SELECTOR = [
 ].join(',');
 const OUTPUT = '[data-qz-glass-canvas], [data-qz-glass-definitions]';
 const MAX_SURFACES = 8;
-const CAPTURE_INTERVAL = 250;
 
 interface Material {
   front: number;
@@ -40,9 +41,11 @@ const materials: Record<string, Material> = {
 interface Target {
   canvas: HTMLCanvasElement;
   element: HTMLElement;
+  gpuSamples?: number;
   id: string;
   originalPosition: string;
   positioned: boolean;
+  renderer?: GlassRenderer | null;
 }
 
 interface VisibleTarget {
@@ -66,8 +69,7 @@ const cleanClass = (value: string) =>
 
 function start() {
   const targets = new Map<HTMLElement, Target>();
-  const reduced = matchMedia('(prefers-reduced-transparency: reduce)');
-  const contrast = matchMedia('(prefers-contrast: more)');
+  let preferencesAllowed = false;
   let renderer: GlassRenderer | null = null;
   let source: SourceFrame | undefined;
   let sourceVersion = 0;
@@ -81,13 +83,21 @@ function start() {
   let layoutEpoch = 0;
   let controller: AbortController | undefined;
   let serial = 0;
-  let lastDraw = -Infinity;
   let drawSignature = '';
+  let sharedSignature = '';
+  let sharedSourceVersion = -1;
+  let captureDuration = 0;
+  let allSourcesDirty = true;
+  let dirtySources = new Set<string>();
+  let interactionUntil = 0;
+  const budget = new GlassFrameBudget();
+  const staging = document.createElement('canvas');
+  const stagingContext = staging.getContext('2d');
   const prefix = `qz-three-${++generation}`;
 
   const sceneRoot = () =>
     document.querySelector<HTMLElement>('[data-qz-glass-scene], .qz-glass-scene');
-  const preferenceAllows = () => !reduced.matches && !contrast.matches && !document.hidden;
+  const preferenceAllows = () => preferencesAllowed;
 
   const deactivate = (target: Target) => {
     target.canvas.remove();
@@ -100,6 +110,7 @@ function start() {
   };
   const deactivateAll = () => {
     drawSignature = '';
+    sharedSignature = '';
     targets.forEach(deactivate);
   };
 
@@ -216,7 +227,7 @@ function start() {
       : { top: [0.94, 0.98, 0.98], bottom: [0.84, 0.91, 0.92] };
   };
 
-  const draw = () => {
+  const draw = (now: number) => {
     if (stopped || sourceInvalid || !preferenceAllows() || !source || !renderer) return;
     const visible = visibleTargets().filter(
       ({ kind, target }) => kind === 'shell' || source!.planes.some(({ id }) => id === target.id),
@@ -253,49 +264,114 @@ function start() {
       environment,
       visible.map(({ volume }) => volume),
     ]);
-    if (signature === drawSignature) return;
+    const geometryChanged = signature !== drawSignature;
+    if (!geometryChanged && signature === sharedSignature) return;
     drawSignature = signature;
     const volumes = visible.map(({ volume }) => volume);
-    for (const item of visible) {
-      const output = renderer.render({
-        activeVolumeId: item.target.id,
-        target: item.bounds,
-        volumes,
-        planes,
-        source: source.canvas,
-        sourceBlur: item.kind === 'capsule' ? 5 : item.kind === 'shell' ? 0 : 3,
-        sourceVersion,
-        viewport: { width: innerWidth, height: innerHeight },
-        // Reserve detail for the persistent player while bounding the whole scene's GPU work.
-        pixelRatio: Math.min(
-          devicePixelRatio,
-          1.5,
-          Math.sqrt(
-            (item.kind === 'capsule' ? 90_000 : 35_000) / (item.bounds.width * item.bounds.height),
-          ),
+    const request = (item: VisibleTarget) => ({
+      activeVolumeId: item.target.id,
+      target: item.bounds,
+      volumes,
+      planes,
+      source: source!.canvas,
+      sourceBlur: item.kind === 'capsule' ? 5 : item.kind === 'shell' ? 0 : 3,
+      sourceVersion,
+      viewport: { width: innerWidth, height: innerHeight },
+      pixelRatio: Math.min(
+        devicePixelRatio,
+        1.5,
+        Math.sqrt(
+          (item.kind === 'capsule' ? budget.capsulePixels() : budget.sharedPixels()) /
+            (item.bounds.width * item.bounds.height),
         ),
-        environmentTop: environment.top,
-        environmentBottom: environment.bottom,
-      });
-      if (!output) {
-        deactivate(item.target);
-        continue;
-      }
-      const { canvas, element } = item.target;
-      if (canvas.width !== output.width) canvas.width = output.width;
-      if (canvas.height !== output.height) canvas.height = output.height;
-      const context = canvas.getContext('2d');
-      if (!context) continue;
-      context.clearRect(0, 0, canvas.width, canvas.height);
-      context.drawImage(output, 0, 0);
+      ),
+      environmentTop: environment.top,
+      environmentBottom: environment.bottom,
+    });
+    const attach = ({ target }: VisibleTarget) => {
+      const { canvas, element } = target;
       if (getComputedStyle(element).position === 'static') {
-        item.target.positioned = true;
+        target.positioned = true;
         element.style.position = 'relative';
       }
       if (canvas.parentElement !== element) element.prepend(canvas);
       if (!element.classList.contains(styles.surface)) element.classList.add(styles.surface);
       if (element.dataset.qzRenderer !== 'webgl2') element.dataset.qzRenderer = 'webgl2';
+    };
+    // The player has a visible GPU canvas: moving it never requires a synchronous GPU→CPU copy.
+    if (geometryChanged)
+      for (const item of visible.filter(({ kind }) => kind === 'capsule')) {
+        const { target } = item;
+        if (target.renderer === undefined)
+          target.renderer = createGlassRenderer({
+            canvas: target.canvas,
+            preserveDrawingBuffer: false,
+            maxPixels: 100_000,
+            onContextLost: () => deactivate(target),
+            onContextRestored: () => {
+              target.renderer?.dispose();
+              target.renderer = undefined;
+              target.canvas = makeCanvas();
+              drawSignature = '';
+              requestDraw();
+            },
+          });
+        if (!target.renderer?.render(request(item))) {
+          deactivate(target);
+          continue;
+        }
+        const metrics = target.renderer.metrics;
+        if (metrics.gpuSamples !== target.gpuSamples && metrics.gpuMilliseconds !== undefined) {
+          budget.recordCapsule(metrics.gpuMilliseconds);
+          target.gpuSamples = metrics.gpuSamples;
+        }
+        attach(item);
+      }
+    const secondary = visible.filter(({ kind }) => kind !== 'capsule');
+    if (!secondary.length || sharedSignature === signature || !stagingContext) return;
+    const interacting = now < interactionUntil;
+    if (!budget.shouldDrawShared(now, interacting, sharedSourceVersion !== sourceVersion)) {
+      requestDraw();
+      return;
     }
+    const before = performance.now();
+    const batch = renderer.renderBatch(secondary.map(request));
+    if (!batch) {
+      secondary.forEach(({ target }) => deactivate(target));
+      return;
+    }
+    if (staging.width !== batch.canvas.width) staging.width = batch.canvas.width;
+    if (staging.height !== batch.canvas.height) staging.height = batch.canvas.height;
+    stagingContext.clearRect(0, 0, staging.width, staging.height);
+    // Exactly one GPU read/copy for all secondary surfaces, then ordinary 2D tile copies.
+    stagingContext.drawImage(batch.canvas, 0, 0);
+    for (const tile of batch.tiles) {
+      const item = secondary.find(({ target }) => target.id === tile.activeVolumeId)!;
+      const { canvas } = item.target;
+      if (canvas.width !== tile.width) canvas.width = tile.width;
+      if (canvas.height !== tile.height) canvas.height = tile.height;
+      const context = canvas.getContext('2d');
+      if (!context) continue;
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(
+        staging,
+        tile.x,
+        tile.y,
+        tile.width,
+        tile.height,
+        0,
+        0,
+        tile.width,
+        tile.height,
+      );
+      attach(item);
+    }
+    budget.recordShared(
+      now,
+      Math.max(performance.now() - before, renderer.metrics.gpuMilliseconds ?? 0),
+    );
+    sharedSignature = signature;
+    sharedSourceVersion = sourceVersion;
   };
 
   const capture = async () => {
@@ -315,6 +391,9 @@ function start() {
     controller = new AbortController();
     const signal = controller.signal;
     const epoch = layoutEpoch;
+    const dirty = allSourcesDirty ? undefined : dirtySources;
+    allSourcesDirty = false;
+    dirtySources = new Set();
     try {
       const next = await captureGlassSources({
         root,
@@ -322,6 +401,8 @@ function start() {
         width: innerWidth,
         height: innerHeight,
         signal,
+        previous: source,
+        dirtyIds: dirty,
       });
       if (stopped || signal.aborted || !preferenceAllows() || epoch !== layoutEpoch) {
         next.dispose();
@@ -329,6 +410,7 @@ function start() {
       }
       source?.dispose();
       source = next;
+      captureDuration = next.stats.durationMs;
       sourceVersion++;
       sourceInvalid = false;
       root.dataset.qzGlassStatus = 'ready';
@@ -337,6 +419,7 @@ function start() {
     } catch (error) {
       if (!signal.aborted) {
         sourceInvalid = true;
+        allSourcesDirty = true;
         deactivateAll();
         root.dataset.qzGlassStatus = 'fallback';
         root.dataset.qzGlassError =
@@ -354,27 +437,42 @@ function start() {
     if (timer || capturePending || stopped || !preferenceAllows() || !renderer) return;
     timer = window.setTimeout(
       () => void capture(),
-      Math.max(50, CAPTURE_INTERVAL - (performance.now() - lastCapture)),
+      captureDelay(performance.now() - lastCapture, captureDuration),
     );
   };
   const requestDraw = () => {
     if (frame || stopped) return;
-    const paint = (now: number) => {
-      if (now - lastDraw < 1000 / 30) {
-        frame = requestAnimationFrame(paint);
-        return;
-      }
+    frame = requestAnimationFrame((now) => {
       frame = 0;
-      lastDraw = now;
-      draw();
-    };
-    frame = requestAnimationFrame(paint);
+      draw(now);
+    });
   };
-  function invalidate(content: boolean) {
+  function invalidate(content: boolean, element?: Element) {
     if (content) {
-      // A capture may yield while walking the tree; never publish a mixed DOM revision.
-      layoutEpoch++;
+      // Completed layers remain usable while the next revision is captured. Content changes
+      // do not cancel unrelated work or remove the live player during typing/audio time updates.
       sourceDirty = true;
+      if (
+        !element ||
+        element === sceneRoot() ||
+        element === document.body ||
+        element === document.documentElement
+      ) {
+        allSourcesDirty = true;
+      } else {
+        let owner: Target | undefined;
+        for (const target of targets.values()) {
+          if (
+            target.element.dataset.qzGlass !== 'shell' &&
+            target.element.contains(element) &&
+            (!owner || owner.element.contains(target.element))
+          )
+            owner = target;
+        }
+        dirtySources.add(owner?.id ?? 'background');
+        for (const target of targets.values())
+          if (element.contains(target.element)) dirtySources.add(target.id);
+      }
       scheduleCapture();
     }
     requestDraw();
@@ -387,6 +485,13 @@ function start() {
     deactivateAll();
     invalidate(true);
   };
+  function makeCanvas() {
+    const canvas = document.createElement('canvas');
+    canvas.className = styles.canvas;
+    canvas.dataset.qzGlassCanvas = '';
+    canvas.setAttribute('aria-hidden', 'true');
+    return canvas;
+  }
   const resize = new ResizeObserver(invalidateLayout);
   const register = (element: Element) => {
     if (
@@ -395,10 +500,7 @@ function start() {
       element.dataset.qzGlassBackend === 'svg'
     )
       return;
-    const canvas = document.createElement('canvas');
-    canvas.className = styles.canvas;
-    canvas.dataset.qzGlassCanvas = '';
-    canvas.setAttribute('aria-hidden', 'true');
+    const canvas = makeCanvas();
     const target: Target = {
       element,
       canvas,
@@ -418,6 +520,8 @@ function start() {
     let content = false;
     let geometry = false;
     let structure = false;
+    const beforeTargets = targets.size;
+    const changed = new Set<Element>();
     for (const record of records) {
       const element =
         record.target instanceof Element ? record.target : record.target.parentElement;
@@ -429,7 +533,6 @@ function start() {
           (node) => !(node instanceof Element) || !node.matches(OUTPUT),
         );
         content ||= realNodes;
-        structure ||= realNodes;
       } else if (record.type === 'characterData') content = true;
       else if (record.attributeName === 'class') {
         content ||=
@@ -443,20 +546,26 @@ function start() {
             .replaceAll(/[;\s]/g, '');
         content ||=
           withoutPosition(record.oldValue ?? '') !==
-          withoutPosition(element.getAttribute('style') ?? '');
+            withoutPosition(element.getAttribute('style') ?? '') ||
+          // Moving ordinary page content changes its optical texture. Only a registered
+          // glass pane (or its explicit motion container) can reuse the same local pixels.
+          (!targets.has(element as HTMLElement) && !element.hasAttribute('data-qz-glass-motion'));
       } else content = true;
+      if (content) changed.add(element);
     }
     for (const target of targets.values()) {
       if (!target.element.isConnected || !target.element.matches(SELECTOR)) {
         resize.unobserve(target.element);
         deactivate(target);
+        target.renderer?.dispose();
         targets.delete(target.element);
         content = true;
         structure = true;
       }
     }
-    if (structure) invalidateLayout();
-    else if (content || geometry) invalidate(content);
+    if (structure || targets.size !== beforeTargets) invalidateLayout();
+    else if (content) changed.forEach((element) => invalidate(true, element));
+    else if (geometry) invalidate(false);
   });
   mutations.observe(document.body, {
     subtree: true,
@@ -482,9 +591,19 @@ function start() {
 
   const scroll = invalidateLayout;
   const geometry = (event: PointerEvent) => {
-    if (event.buttons) invalidate(false);
+    if (event.buttons) {
+      interactionUntil = performance.now() + 100;
+      invalidate(false);
+    }
   };
-  const content = () => invalidate(true);
+  const content = (event: Event) => {
+    if (event.type === 'input') interactionUntil = performance.now() + 100;
+    invalidate(true, event.target instanceof Element ? event.target : undefined);
+  };
+  const pointerUp = () => {
+    interactionUntil = 0;
+    requestDraw();
+  };
   const sync = () => {
     if (!preferenceAllows()) {
       controller?.abort();
@@ -493,6 +612,11 @@ function start() {
       deactivateAll();
       renderer?.dispose();
       renderer = null;
+      for (const target of targets.values()) {
+        target.renderer?.dispose();
+        target.renderer = undefined;
+        target.canvas = makeCanvas();
+      }
       source?.dispose();
       source = undefined;
     } else {
@@ -502,14 +626,15 @@ function start() {
   };
   document.addEventListener('scroll', scroll, true);
   document.addEventListener('pointermove', geometry, { passive: true });
-  document.addEventListener('pointerup', content, { passive: true });
+  document.addEventListener('pointerup', pointerUp, { passive: true });
   document.addEventListener('input', content, true);
   document.addEventListener('load', content, true);
-  document.addEventListener('visibilitychange', sync);
+
   window.addEventListener('resize', scroll);
-  reduced.addEventListener('change', sync);
-  contrast.addEventListener('change', sync);
-  sync();
+  const unwatchPreferences = watchGlassPreferences((allowed) => {
+    preferencesAllowed = allowed;
+    sync();
+  });
 
   return () => {
     stopped = true;
@@ -520,21 +645,22 @@ function start() {
     resize.disconnect();
     document.removeEventListener('scroll', scroll, true);
     document.removeEventListener('pointermove', geometry);
-    document.removeEventListener('pointerup', content);
+    document.removeEventListener('pointerup', pointerUp);
     document.removeEventListener('input', content, true);
     document.removeEventListener('load', content, true);
-    document.removeEventListener('visibilitychange', sync);
+    unwatchPreferences();
     window.removeEventListener('resize', scroll);
-    reduced.removeEventListener('change', sync);
-    contrast.removeEventListener('change', sync);
     deactivateAll();
+    targets.forEach((target) => target.renderer?.dispose());
     targets.clear();
+    staging.width = 0;
+    staging.height = 0;
     source?.dispose();
     renderer?.dispose();
   };
 }
 
-/** One GPU context and one asynchronous source job serve every registered surface. */
+/** A direct player GPU canvas and a batched background renderer share one incremental source job. */
 export function mountThreeGlass() {
   if (++clients === 1) stop = start();
   let mounted = true;

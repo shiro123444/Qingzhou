@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  captureGlassSources,
   isLocalGlassResource,
   planGlassAtlas,
   serializeGlassSource,
@@ -191,5 +192,137 @@ describe('glass atlas layout', () => {
     ]) {
       expect(() => planGlassAtlas(invalid)).toThrow(RangeError);
     }
+  });
+});
+
+describe('incremental glass source capture', () => {
+  function captureFixture() {
+    const root = document.createElement('main');
+    root.innerHTML =
+      '<p>Page text</p><aside><b>Sidebar text</b><span>Nested text</span></aside><section><strong>Paused</strong></section>';
+    document.body.append(root);
+    const sidebar = root.querySelector('aside')!;
+    const capsule = root.querySelector('section')!;
+    const setBounds = (element: HTMLElement, x: number, y: number, width: number, height: number) =>
+      vi.spyOn(element, 'getBoundingClientRect').mockReturnValue(new DOMRect(x, y, width, height));
+    setBounds(root, 0, 0, 500, 300);
+    setBounds(sidebar, 0, 0, 100, 300);
+    const capsuleBounds = setBounds(capsule, 200, 20, 200, 60);
+    const context = { drawImage() {} };
+    const draw = vi.spyOn(context, 'drawImage');
+    const canvases: HTMLCanvasElement[] = [];
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (
+      this: HTMLCanvasElement,
+    ) {
+      canvases.push(this);
+      return context as unknown as ReturnType<HTMLCanvasElement['getContext']>;
+    });
+    const images: string[] = [];
+    vi.spyOn(HTMLImageElement.prototype, 'src', 'set').mockImplementation(function (
+      this: HTMLImageElement,
+      src: string,
+    ) {
+      images.push(src);
+      queueMicrotask(() => this.dispatchEvent(new Event('load')));
+    });
+    const options = {
+      height: 300,
+      layers: [
+        { element: sidebar, id: 'sidebar' },
+        { element: capsule, id: 'capsule' },
+      ],
+      root,
+      width: 500,
+    };
+    return { canvases, capsule, capsuleBounds, draw, images, options, root, setBounds, sidebar };
+  }
+
+  it('rasterizes only dirty foreground and reuses static content while the capsule moves', async () => {
+    const { capsule, capsuleBounds, draw, images, options } = captureFixture();
+    const first = await captureGlassSources(options);
+    expect(first.stats).toMatchObject({ captured: 4, reused: 0 });
+    const firstNodes = first.stats.nodes;
+    capsule.querySelector('strong')!.textContent = 'Playing';
+    images.length = 0;
+    draw.mockClear();
+    const second = await captureGlassSources({
+      ...options,
+      dirtyIds: new Set(['capsule']),
+      previous: first,
+    });
+    expect(second.stats).toMatchObject({ captured: 1, reused: 3 });
+    expect(second.stats.nodes).toBeLessThan(firstNodes);
+    expect(images).toHaveLength(1);
+    expect(decodeURIComponent(images[0])).toContain('Playing');
+    expect(draw.mock.calls.filter((call) => (call as unknown[])[0] === first.canvas)).toHaveLength(
+      3,
+    );
+    first.dispose();
+    expect(first.canvas.width).toBe(0);
+    expect(second.canvas.width).toBeGreaterThan(0);
+
+    capsuleBounds.mockReturnValue(new DOMRect(260, 100, 200, 60));
+    images.length = 0;
+    const moved = await captureGlassSources({ ...options, dirtyIds: new Set(), previous: second });
+    expect(moved.stats).toMatchObject({ captured: 0, nodes: 0, reused: 4 });
+    expect(images).toEqual([]);
+    expect(moved.planes.find(({ id }) => id === 'capsule')?.bounds).toMatchObject({
+      x: 260,
+      y: 100,
+    });
+    second.dispose();
+    moved.dispose();
+  });
+
+  it('invalidates changed exclusion ownership, dimensions and disposed caches', async () => {
+    const { capsuleBounds, options, setBounds, sidebar } = captureFixture();
+    const first = await captureGlassSources(options);
+    const nested = sidebar.querySelector('span')!;
+    setBounds(nested, 4, 50, 80, 30);
+    const second = await captureGlassSources({
+      ...options,
+      dirtyIds: new Set(),
+      layers: [...options.layers, { element: nested, id: 'nested' }],
+      previous: first,
+    });
+    expect(second.stats).toMatchObject({ captured: 3, reused: 2 });
+    first.dispose();
+    capsuleBounds.mockReturnValue(new DOMRect(200, 20, 230, 60));
+    const resized = await captureGlassSources({
+      ...options,
+      dirtyIds: new Set(),
+      previous: second,
+    });
+    // Removing the nested plane updates its parents; changing the capsule size updates its tile.
+    expect(resized.stats).toMatchObject({ captured: 3, reused: 1 });
+    second.dispose();
+    resized.dispose();
+    const fresh = await captureGlassSources({ ...options, dirtyIds: new Set(), previous: resized });
+    expect(fresh.stats).toMatchObject({ captured: 4, reused: 0 });
+    fresh.dispose();
+  });
+
+  it('releases a cancelled partial atlas and keeps the previous frame intact', async () => {
+    const { canvases, capsule, options } = captureFixture();
+    const first = await captureGlassSources(options);
+    const originalWidth = first.canvas.width;
+    const controller = new AbortController();
+    const getStyle = window.getComputedStyle.bind(window);
+    vi.spyOn(window, 'getComputedStyle').mockImplementation((element, pseudo) => {
+      if (element === capsule) controller.abort();
+      return getStyle(element, pseudo);
+    });
+    await expect(
+      captureGlassSources({
+        ...options,
+        dirtyIds: new Set(['capsule']),
+        previous: first,
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(first.canvas.width).toBe(originalWidth);
+    expect(canvases.at(-1)?.width).toBe(0);
+    expect(capsule.textContent).toBe('Paused');
+    first.dispose();
   });
 });

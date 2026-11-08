@@ -13,6 +13,7 @@ export interface Glass3dOptions {
   blur?: number;
   boundedSources?: boolean;
   double?: boolean;
+  environmentOnly?: boolean;
   overlay?: 'half' | 'none' | 'opaque' | 'transparent';
   ownForeground?: boolean;
   source?: 'grid' | 'solid';
@@ -176,7 +177,7 @@ function prepare(options: Glass3dOptions) {
     activeVolumeId: 'capsule',
     environmentBottom: environment,
     environmentTop: environment,
-    planes,
+    planes: options.environmentOnly ? [] : planes,
     source: atlas,
     sourceBlur: options.blur,
     sourceVersion: ++version,
@@ -225,7 +226,87 @@ function oracle(x: number, y: number) {
   return rgb.map(display);
 }
 
+function batchProof() {
+  prepare({ double: true, blur: 5 });
+  const requests = request.volumes.map((volume) => ({
+    ...request,
+    activeVolumeId: volume.id,
+    pixelRatio: volume.id === 'capsule' ? 1 : 0.7,
+    target: {
+      x: volume.center[0] - volume.size[0] / 2,
+      y: volume.center[1] - volume.size[1] / 2,
+      width: volume.size[0],
+      height: volume.size[1],
+    },
+  }));
+  const expected = requests.map((item) => {
+    const frame = renderer!.render(item)!;
+    const copy = document.createElement('canvas');
+    copy.width = frame.width;
+    copy.height = frame.height;
+    const context = copy.getContext('2d', { willReadFrequently: true })!;
+    context.drawImage(frame, 0, 0);
+    return {
+      width: copy.width,
+      height: copy.height,
+      pixels: context.getImageData(0, 0, copy.width, copy.height).data,
+    };
+  });
+  const before = renderer!.metrics;
+  const batch = renderer!.renderBatch(requests)!;
+  const staging = document.createElement('canvas');
+  staging.width = batch.canvas.width;
+  staging.height = batch.canvas.height;
+  const context = staging.getContext('2d', { willReadFrequently: true })!;
+  context.drawImage(batch.canvas, 0, 0);
+  const differences = batch.tiles.map((tile, index) => {
+    const actual = context.getImageData(tile.x, tile.y, tile.width, tile.height).data;
+    let difference = 0;
+    for (let at = 0; at < actual.length; at++)
+      difference = Math.max(difference, Math.abs(actual[at] - expected[index].pixels[at]));
+    return {
+      difference,
+      size: [tile.width, tile.height],
+      expectedSize: [expected[index].width, expected[index].height],
+    };
+  });
+  const first = renderer!.metrics;
+  renderer!.renderBatch(requests);
+  const second = renderer!.metrics;
+  return {
+    differences,
+    draws: first.draws - before.draws,
+    allocations: second.bufferResizes - first.bufferResizes,
+    uploads: second.sourceUploads - before.sourceUploads,
+  };
+}
+
+function directProof() {
+  const canvas = document.createElement('canvas');
+  canvas.style.cssText = 'display:block;width:320px;height:100px';
+  canvas.dataset.glass3dDirect = '';
+  document.body.append(canvas);
+  const direct = createGlassRenderer({ canvas, preserveDrawingBuffer: false });
+  prepare({ double: true, source: 'solid' });
+  const frame = direct!.render(request)!;
+  const context = frame.getContext('webgl2')!;
+  const pixel = new Uint8Array(4);
+  context.readPixels(160, frame.height - 51, 1, 1, context.RGBA, context.UNSIGNED_BYTE, pixel);
+  const result = {
+    sameCanvas: frame === canvas,
+    preserved: context.getContextAttributes()!.preserveDrawingBuffer,
+    pixel: Array.from(pixel),
+    expected: oracle(160, 50),
+    error: context.getError(),
+  };
+  direct!.dispose();
+  canvas.remove();
+  return result;
+}
+
 export const glass3dTest = {
+  batchProof,
+  directProof,
   dispose: () => {
     disposed = true;
     renderer?.dispose();

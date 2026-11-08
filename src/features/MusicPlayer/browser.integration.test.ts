@@ -926,8 +926,20 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       await mkdir('.data/music-m2-validation', { recursive: true });
       await page?.screenshot({ fullPage: true, path: '.data/music-m2-validation/failure.png' });
       const body = await page?.evaluate(() => document.body.innerText.slice(0, 2000));
+      const glass = await page?.evaluate(() => ({
+        contrast: matchMedia('(prefers-contrast: more)').matches,
+        reducedTransparency: matchMedia('(prefers-reduced-transparency: reduce)').matches,
+        hidden: document.hidden,
+        scene: { ...document.querySelector<HTMLElement>('[data-qz-glass-scene]')?.dataset },
+        surfaces: [...document.querySelectorAll<HTMLElement>('[data-qz-glass]')].map((element) => ({
+          kind: element.dataset.qzGlass,
+          renderer: element.dataset.qzRenderer,
+          canvas: element.querySelectorAll(':scope > canvas').length,
+          bounds: element.getBoundingClientRect().toJSON(),
+        })),
+      }));
       throw new Error(
-        `${(error as Error).message}\nBrowser: ${JSON.stringify(errors)}\nUploads: ${counter}, rows: ${rows.size}\nHTTP: ${requests.join('\n')}\n${body}`,
+        `${(error as Error).message}\nGlass: ${JSON.stringify(glass)}\nBrowser: ${JSON.stringify(errors)}\nUploads: ${counter}, rows: ${rows.size}\nHTTP: ${requests.join('\n')}\n${body}`,
         { cause: error },
       );
     } finally {

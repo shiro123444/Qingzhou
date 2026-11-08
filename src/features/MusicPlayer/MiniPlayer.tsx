@@ -81,6 +81,7 @@ export default function MiniPlayer() {
   return (
     <section
       {...position.surfaceProps}
+      data-qz-glass-motion
       aria-label={t('player')}
       className={cx(styles.dock, musicTheme, liquidGlass)}
       data-collapsed={collapsed}

@@ -268,11 +268,16 @@ export interface GlassSourceCapture {
   canvas: HTMLCanvasElement;
   dispose: () => void;
   planes: GlassSourcePlane[];
+  stats: { captured: number; durationMs: number; nodes: number; reused: number };
 }
 
 export interface CaptureGlassSourcesOptions {
+  /** Omit to refresh every plane. Otherwise unchanged planes may reuse the previous atlas. */
+  dirtyIds?: ReadonlySet<string>;
   height: number;
   layers: Array<{ element: HTMLElement; id: string }>;
+  /** Keep this capture alive until the new capture has resolved or rejected. */
+  previous?: GlassSourceCapture;
   root: HTMLElement;
   signal?: AbortSignal;
   width: number;
@@ -280,6 +285,7 @@ export interface CaptureGlassSourcesOptions {
 
 interface SnapshotBudget {
   nodes: number;
+  sliceStart: number;
 }
 
 interface SnapshotOptions {
@@ -293,6 +299,38 @@ interface SnapshotOptions {
 const checkAbort = (signal?: AbortSignal) => {
   if (signal?.aborted) throw new DOMException('Glass source capture aborted.', 'AbortError');
 };
+
+/** Keep DOM work below a small slice, with input/render work ahead of the continuation. */
+async function yieldCapture(document: Document, signal?: AbortSignal) {
+  checkAbort(signal);
+  const scheduler = (
+    document.defaultView as
+      | (Window & {
+          scheduler?: {
+            postTask: (
+              callback: () => void,
+              options: { priority: 'background'; signal?: AbortSignal },
+            ) => Promise<void>;
+          };
+        })
+      | null
+  )?.scheduler;
+  if (scheduler?.postTask) await scheduler.postTask(() => {}, { priority: 'background', signal });
+  else {
+    await new Promise<void>((resolve, reject) => {
+      const abort = () => {
+        clearTimeout(timer);
+        reject(new DOMException('Glass source capture aborted.', 'AbortError'));
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener('abort', abort);
+        resolve();
+      }, 0);
+      signal?.addEventListener('abort', abort, { once: true });
+    });
+  }
+  checkAbort(signal);
+}
 
 /** No fetch is performed. Only already decoded, origin-readable image pixels may be copied. */
 export function isLocalGlassResource(source: string, baseURI: string) {
@@ -414,7 +452,7 @@ export function serializeGlassWallpaper(source: HTMLElement, bounds: GlassSource
 /** Build a self-contained, resource-free SVG without attaching clones or changing live DOM. */
 export async function serializeGlassSource(source: HTMLElement, options: SnapshotOptions) {
   const { bounds, exclude = new Set<Element>(), foreground = false, signal } = options;
-  const budget = options.budget ?? { nodes: 0 };
+  const budget = options.budget ?? { nodes: 0, sliceStart: performance.now() };
   const document = source.ownerDocument;
   const view = document.defaultView;
   if (!view) throw new Error('Glass source has no window.');
@@ -424,9 +462,9 @@ export async function serializeGlassSource(source: HTMLElement, options: Snapsho
     checkAbort(signal);
     if (++budget.nodes > MAX_NODES)
       throw new RangeError('Glass source exceeds the capture node budget.');
-    if (budget.nodes % 64 === 0) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-      checkAbort(signal);
+    if (performance.now() - budget.sliceStart >= 2) {
+      await yieldCapture(document, signal);
+      budget.sliceStart = performance.now();
     }
     if (node.nodeType === Node.TEXT_NODE) return document.createTextNode(node.textContent ?? '');
     if (!(node instanceof view.Element)) return null;
@@ -610,13 +648,34 @@ function rasterize(svg: string, document: Document, signal?: AbortSignal) {
   });
 }
 
+interface CachedPlane {
+  bounds: GlassSourceBounds;
+  element: HTMLElement;
+  exclusions: ReadonlySet<Element>;
+  origin: readonly [number, number];
+  tile: { height: number; width: number; x: number; y: number };
+}
+
+// Capture-owned metadata is released with the atlas. Nothing is attached to the live page.
+const captureCache = new WeakMap<
+  GlassSourceCapture,
+  { planes: Map<string, CachedPlane>; root: HTMLElement }
+>();
+
+function sameExclusions(a: ReadonlySet<Element>, b: ReadonlySet<Element>) {
+  return a.size === b.size && [...a].every((element) => b.has(element));
+}
+
 export async function captureGlassSources({
+  dirtyIds,
   height,
   layers,
+  previous,
   root,
   signal,
   width,
 }: CaptureGlassSourcesOptions): Promise<GlassSourceCapture> {
+  const started = performance.now();
   checkAbort(signal);
   const eligible = layers.filter(({ element }) => element.dataset.qzGlass !== 'shell');
   const ids = new Set(['background', 'wallpaper']);
@@ -655,30 +714,92 @@ export async function captureGlassSources({
     canvas.height = 0;
     throw new Error('Canvas 2D is unavailable for glass sources.');
   }
-  const budget = { nodes: 0 };
+  const budget = { nodes: 0, sliceStart: performance.now() };
   const planes: GlassSourcePlane[] = [];
+  const cachedPlanes = new Map<string, CachedPlane>();
+  const previousCache = previous && captureCache.get(previous);
+  const stats = { captured: 0, durationMs: 0, nodes: 0, reused: 0 };
   const dispose = () => {
+    captureCache.delete(capture);
     canvas.width = 0;
     canvas.height = 0;
   };
+  const capture: GlassSourceCapture = { canvas, dispose, planes, stats };
   try {
     for (const [index, source] of sources.entries()) {
-      const svg =
-        source.id === 'wallpaper'
-          ? serializeGlassWallpaper(source.element, source.bounds)
-          : await serializeGlassSource(source.element, {
-              bounds: source.bounds,
-              budget,
-              exclude: elements,
-              // The main page is transparent content at z=8; theme paint lives behind the shell.
-              foreground: true,
-              signal,
-            });
-      const image = await rasterize(svg, root.ownerDocument, signal);
       checkAbort(signal);
+      if (performance.now() - budget.sliceStart >= 2) {
+        await yieldCapture(root.ownerDocument, signal);
+        budget.sliceStart = performance.now();
+      }
       const tile = atlas.tiles[index];
-      context.drawImage(image, tile.x, tile.y, tile.width, tile.height);
-      image.removeAttribute('src');
+      const exclusions = new Set(
+        source.id === 'wallpaper'
+          ? []
+          : [...elements].filter(
+              (element) => element !== source.element && source.element.contains(element),
+            ),
+      );
+      const rect = source.element.getBoundingClientRect();
+      const origin = [rect.x - source.bounds.x, rect.y - source.bounds.y] as const;
+      const cached = previousCache?.root === root ? previousCache.planes.get(source.id) : undefined;
+      const canReuse =
+        dirtyIds &&
+        !dirtyIds.has(source.id) &&
+        previous &&
+        previous.canvas.width > 0 &&
+        previous.canvas.height > 0 &&
+        cached &&
+        cached.element === source.element &&
+        cached.bounds.width === source.bounds.width &&
+        cached.bounds.height === source.bounds.height &&
+        cached.origin[0] === origin[0] &&
+        cached.origin[1] === origin[1] &&
+        // Repacking may reduce resolution. Never retain an old, lower-resolution tile after growth.
+        tile.width <= cached.tile.width &&
+        tile.height <= cached.tile.height &&
+        sameExclusions(cached.exclusions, exclusions);
+      if (canReuse) {
+        context.drawImage(
+          previous.canvas,
+          cached.tile.x,
+          cached.tile.y,
+          cached.tile.width,
+          cached.tile.height,
+          tile.x,
+          tile.y,
+          tile.width,
+          tile.height,
+        );
+        stats.reused++;
+      } else {
+        const svg =
+          source.id === 'wallpaper'
+            ? serializeGlassWallpaper(source.element, source.bounds)
+            : await serializeGlassSource(source.element, {
+                bounds: source.bounds,
+                budget,
+                exclude: elements,
+                // The main page is transparent content at z=8; theme paint lives behind the shell.
+                foreground: true,
+                signal,
+              });
+        const image = await rasterize(svg, root.ownerDocument, signal);
+        try {
+          checkAbort(signal);
+          context.drawImage(image, tile.x, tile.y, tile.width, tile.height);
+        } finally {
+          image.removeAttribute('src');
+        }
+        stats.captured++;
+      }
+      cachedPlanes.set(source.id, {
+        bounds: source.bounds,
+        element: source.element,
+        exclusions,
+        origin,
+        tile,
+      });
       planes.push({
         bounds: source.bounds,
         id: source.id,
@@ -690,7 +811,10 @@ export async function captureGlassSources({
         ],
       });
     }
-    return { canvas, dispose, planes };
+    stats.durationMs = performance.now() - started;
+    stats.nodes = budget.nodes;
+    captureCache.set(capture, { planes: cachedPlanes, root });
+    return capture;
   } catch (error) {
     dispose();
     throw error;

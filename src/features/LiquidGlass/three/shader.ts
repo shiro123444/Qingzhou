@@ -24,6 +24,7 @@ uniform sampler2D uSource;
 uniform float uSourceBlur;
 uniform vec2 uViewport;
 uniform vec2 uResolution;
+uniform vec2 uOutputOrigin;
 uniform vec4 uRegion;
 uniform float uCameraZ;
 uniform float uFar;
@@ -50,17 +51,13 @@ struct Path {
   int media[MAX_VOLUMES];
 };
 
-vec3 linearColor(vec3 color) {
-  return mix(color / 12.92, pow((color + 0.055) / 1.055, vec3(2.4)), greaterThan(color, vec3(0.04045)));
-}
-
 vec3 displayColor(vec3 color) {
   color = max(color, vec3(0.0));
   return mix(color * 12.92, 1.055 * pow(color, vec3(1.0 / 2.4)) - 0.055, greaterThan(color, vec3(0.0031308)));
 }
 
 vec3 environment(vec3 direction) {
-  return mix(linearColor(uEnvironmentBottom), linearColor(uEnvironmentTop), clamp(direction.z * 0.5 + 0.5, 0.0, 1.0));
+  return mix(uEnvironmentBottom, uEnvironmentTop, clamp(direction.z * 0.5 + 0.5, 0.0, 1.0));
 }
 
 float surface(int index, vec3 point, out vec3 normal) {
@@ -175,7 +172,7 @@ vec4 planeColor(int index, vec3 point) {
   bool opaque = uPlaneSizeOwnerOpaque[index].w > 0.5;
   if (uSourceBlur <= 0.0) {
     vec4 color = texture(uSource, clamp(uv, minimum, maximum));
-    return vec4(linearColor(color.rgb), opaque ? 1.0 : color.a);
+    return vec4(color.rgb, opaque ? 1.0 : color.a);
   }
   // Bounded nine-tap Gaussian source prefilter, not a change to the optical surface.
   // Accumulate premultiplied linear light to prevent transparent texels creating dark halos.
@@ -186,7 +183,7 @@ vec4 planeColor(int index, vec3 point) {
       float weight = float((x == 0 ? 2 : 1) * (y == 0 ? 2 : 1)) / 16.0;
       vec4 color = texture(uSource, clamp(uv + vec2(float(x), float(y)) * stepUV, minimum, maximum));
       float alpha = opaque ? 1.0 : color.a;
-      filtered += vec4(linearColor(color.rgb) * alpha, alpha) * weight;
+      filtered += vec4(color.rgb * alpha, alpha) * weight;
     }
   }
   return vec4(filtered.a > 0.0 ? filtered.rgb / filtered.a : vec3(0.0), filtered.a);
@@ -197,7 +194,8 @@ float mediumIor(Path path) {
 }
 
 void main() {
-  vec2 local = vec2(gl_FragCoord.x / uResolution.x, 1.0 - gl_FragCoord.y / uResolution.y);
+  vec2 pixel = gl_FragCoord.xy - uOutputOrigin;
+  vec2 local = vec2(pixel.x / uResolution.x, 1.0 - pixel.y / uResolution.y);
   Path first;
   first.origin = vec3(uRegion.xy + local * uRegion.zw, uCameraZ);
   first.direction = vec3(0.0, 0.0, -1.0);

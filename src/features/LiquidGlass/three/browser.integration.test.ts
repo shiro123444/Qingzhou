@@ -109,6 +109,25 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE)(
         }
       }
 
+      const environmentSamples = await page.evaluate(() => {
+        const test = window.glass3dTest;
+        test.render({ double: true, environmentOnly: true, absorption: true });
+        return [
+          [160, 50],
+          [70, 3],
+          [20, 48],
+          [300, 48],
+        ].map(([x, y]) => ({ actual: test.pixel(x, y), expected: test.oracle(x, y) }));
+      });
+      for (const sample of environmentSamples) {
+        for (let channel = 0; channel < 3; channel++) {
+          expect(
+            Math.abs(sample.actual[channel] - sample.expected[channel]),
+            JSON.stringify(sample),
+          ).toBeLessThan(5);
+        }
+      }
+
       const layering = await page.evaluate(() => {
         const test = window.glass3dTest;
         test.render({ double: false });
@@ -216,6 +235,23 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE)(
       await page.screenshot({ path: '.data/music-m2-validation/glass-3d-source-prefilter.png' });
       expect(await page.evaluate(() => window.glass3dTest.resolution(0.02))).toEqual([6, 2]);
       expect(await page.evaluate(() => window.glass3dTest.resolution(0))).toBeNull();
+
+      const batch = await page.evaluate(() => window.glass3dTest.batchProof());
+      for (const tile of batch.differences) {
+        expect(tile.size).toEqual(tile.expectedSize);
+        expect(tile.difference).toBeLessThanOrEqual(1);
+      }
+      expect(batch.draws).toBe(2);
+      expect(batch.allocations).toBe(0);
+      expect(batch.uploads).toBe(0);
+      const direct = await page.evaluate(() => window.glass3dTest.directProof());
+      expect(direct.sameCanvas).toBe(true);
+      expect(direct.preserved).toBe(false);
+      expect(direct.error).toBe(0);
+      expect(direct.pixel[3]).toBe(255);
+      for (let channel = 0; channel < 3; channel++) {
+        expect(Math.abs(direct.pixel[channel] - direct.expected[channel])).toBeLessThan(5);
+      }
 
       await page.evaluate(() => window.glass3dTest.loseContext());
       await page.waitForFunction(() => window.glass3dTest.lifecycle().lost === 1);

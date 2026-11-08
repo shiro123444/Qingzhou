@@ -1,4 +1,5 @@
 import { generateGlassMaps } from './optics';
+import { watchGlassPreferences } from './preferences';
 import { styles } from './style';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -410,23 +411,17 @@ function createRegistry() {
 
 function startRuntime() {
   if (!supportsRefraction()) return () => {};
-  const reduceTransparency = matchMedia('(prefers-reduced-transparency: reduce)');
-  const highContrast = matchMedia('(prefers-contrast: more)');
   let stopRegistry: (() => void) | undefined;
 
-  const syncPreference = () => {
-    if (reduceTransparency.matches || highContrast.matches) {
+  const unwatch = watchGlassPreferences((allowed) => {
+    if (!allowed) {
       stopRegistry?.();
       stopRegistry = undefined;
     } else if (!stopRegistry) stopRegistry = createRegistry();
-  };
-  reduceTransparency.addEventListener('change', syncPreference);
-  highContrast.addEventListener('change', syncPreference);
-  syncPreference();
+  });
 
   return () => {
-    reduceTransparency.removeEventListener('change', syncPreference);
-    highContrast.removeEventListener('change', syncPreference);
+    unwatch();
     stopRegistry?.();
   };
 }
