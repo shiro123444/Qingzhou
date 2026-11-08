@@ -230,7 +230,13 @@ function start() {
       const bounds = owner?.bounds ?? plane.bounds;
       planes.push({
         id: `${plane.id}-content`,
-        ownerVolumeId: owner?.target.id,
+        // Main-page text is the shell's own native foreground. Other panes may see it,
+        // but the shell must not mirror it back underneath the same text.
+        ownerVolumeId:
+          owner?.target.id ??
+          (plane.id === 'background'
+            ? visible.find(({ kind }) => kind === 'shell')?.target.id
+            : undefined),
         center: [
           bounds.x + bounds.width / 2,
           bounds.y + bounds.height / 2,
