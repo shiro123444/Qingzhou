@@ -159,13 +159,13 @@ Authorization: Bearer <CRON_SECRET>
 
 本次共通过 138 项聚焦检查，其中 34 项连接真实数据库或 Redis。
 
-| 范围 | 通过数量 | 验证内容 |
-| --- | --- | --- |
-| `botDelivery.integration.test.ts` | 10 | 收件去重、竞争领取、SKIP LOCKED、outbox 事务、旧 owner 拒绝、unknown 隔离、人工核对与审计 |
-| `botInbound.integration.test.ts` | 12 | 原始入站去重、会话顺序、dispatch 前后崩溃恢复、控制通道、游标恢复、会话 owner 与停止传播 |
-| `BotDeliveryService.integration.test.ts` | 7 | Redis 意图经 SQL outbox/inbox 恢复、SQL 写失败保留、迟到 ACK 的 CAS、无效进度不阻断 final、unknown 隔离、账号删除、跨 worker 分片续传 |
-| `redisLease.integration.test.ts` | 5 | Lua 租约竞争、过期 owner 拒绝、运行状态原子提交、跨实例 completion 去重、未知投递保留 |
-| `BotCallbackService.test.ts`、`callbackLedger.test.ts`、`BotInboundService.test.ts`、`deliveryEnvelope.test.ts` | 104 | 平台投递、台账、入站 worker 和回调身份的聚焦单元回归 |
+| 范围                                                                                                            | 通过数量 | 验证内容                                                                                                                              |
+| --------------------------------------------------------------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `botDelivery.integration.test.ts`                                                                               | 10       | 收件去重、竞争领取、SKIP LOCKED、outbox 事务、旧 owner 拒绝、unknown 隔离、人工核对与审计                                             |
+| `botInbound.integration.test.ts`                                                                                | 12       | 原始入站去重、会话顺序、dispatch 前后崩溃恢复、控制通道、游标恢复、会话 owner 与停止传播                                              |
+| `BotDeliveryService.integration.test.ts`                                                                        | 7        | Redis 意图经 SQL outbox/inbox 恢复、SQL 写失败保留、迟到 ACK 的 CAS、无效进度不阻断 final、unknown 隔离、账号删除、跨 worker 分片续传 |
+| `redisLease.integration.test.ts`                                                                                | 5        | Lua 租约竞争、过期 owner 拒绝、运行状态原子提交、跨实例 completion 去重、未知投递保留                                                 |
+| `BotCallbackService.test.ts`、`callbackLedger.test.ts`、`BotInboundService.test.ts`、`deliveryEnvelope.test.ts` | 104      | 平台投递、台账、入站 worker 和回调身份的聚焦单元回归                                                                                  |
 
 新增扫描器测试使用真实 PostgreSQL、Redis、SQL 台账和 worker。平台回调入口由测试替身承接，其中分片恢复用例通过真实 `PostgresCallbackLedger` 记录效果，模拟第一次已发送、第二次尚未发送时中断，重建 worker 后仅发送剩余分片。SQL 故障与并发更新在明确的边界注入。测试没有调用真实平台消息 API，也没有模拟整台数据库断电。
 
@@ -204,8 +204,7 @@ QQ（官方机器人和个人 NapCat）、飞书/Lark 可在「通道 → 机器
 2. 保留原 `/api/agent/delivery/cron` 发送/接收恢复调度，另每分钟调用一次 `/api/agent/delivery/cron?lane=digest`，使用相同 `Authorization: Bearer <CRON_SECRET>`。摘要不加入实时消息唤醒路径，也不阻塞 control lane。部署平台请求时限应至少 60 秒；单实例一分钟一份摘要的吞吐不足时，可增加独立调度频率/并发，数据库领取会隔离任务。
 3. 登录通道页面选择已出现的群，设置每日时间，按需启用「发回原群」。不需要新建聊天路由。未部署独立调度时，仅保存规则不会自行运行定时任务。
 
-验证使用隔离的内存 PostgreSQL（PGlite）执行真实 0108/0109/0113 迁移，覆盖新事件与采集事务回滚、去重、账号隔离、空消息窗口、容量限制、租约过期、配置撤销、原子 outbox、删除和保留期。它不代替生产 PostgreSQL 多连接锁竞争、真实供应商模型计费及飞书/QQ 账号联调；本次未调用真实平台发送 API。
-
+自动测试使用隔离的内存 PostgreSQL（PGlite）执行真实 0108/0109/0113 迁移，覆盖新事件与采集事务回滚、去重、账号隔离、空消息窗口、容量限制、租约过期、配置撤销、原子 outbox、删除和保留期。它不代替生产 PostgreSQL 多连接锁竞争及真实平台联调；后续个人 QQ 实测结果见下文。
 
 ## 2026-11-09 本机运行与个人 QQ
 
@@ -221,5 +220,19 @@ QQ（官方机器人和个人 NapCat）、飞书/Lark 可在「通道 → 机器
 
 协议参考：[NapCat 配置](https://napneko.github.io/config/basic)、[macOS 安装器](https://github.com/NapNeko/NapCat-Mac-Installer)、[OneBot 正向 WebSocket](https://github.com/botuniverse/onebot-11/blob/master/communication/ws.md)。自动测试用本机 OneBot 服务验证鉴权、账号核对、会话过滤、主动回群和销毁，并用 PGlite 验证采集—摘要—outbox 与撤销。真实账号验收必须另外核对实际收件群和发送结果。
 
+本机端到端补充验收：使用隔离 SQL schema、本机鉴权 OneBot WebSocket 服务和当前账号配置的真实模型，输入 4 次事件（含 1 次重复），采集 3 条文本；生成摘要后通过正式 outbox 转 inbox、SQL 发送台账、BotCallbackService 和 NapCat messenger 回送 1 条，结果为 delivered，第二次摘要扫描为空。测试 schema 随后清理。该项的发送终点为本机协议测试服务。
 
-本机端到端补充验收：使用隔离 SQL schema、本机鉴权 OneBot WebSocket 服务和当前账号配置的真实模型，输入 4 次事件（含 1 次重复），采集 3 条文本；生成摘要后通过正式 outbox 转 inbox、SQL 发送台账、BotCallbackService 和 NapCat messenger 回送 1 条，结果为 delivered，第二次摘要扫描为空。测试 schema 随后清理。它验证真实模型和完整应用发送路径，但发送终点是本机协议测试服务；真实 QQ 群尚需完成本机 NapCat 授权、提供测试群并核对群内收件。微信扫码与群同步能力须另行验收。
+### 真实个人 QQ 验收
+
+2026-11-09 在用户授权的测试群完成双账号实测：普通 QQ 客户端使用第二个账号发送一条不带 @ 的验收文本，NapCat 账号收到后，应用入站事件为 `processed`，摘要原文只保存一条。随后将该群计划临时设为到期，通过正式 digest 调度入口调用真实模型，生成一份包含进展与待办的摘要。outbox 和 inbox 均为 `delivered`，并在普通 QQ 客户端实际看到 NapCat 账号发回的摘要。验收后计划恢复为每日北京时间 18:00；没有新文本时跳过生成和发送。
+
+本机验收记录保存在被 Git 忽略的 `.data/bot-channels/napcat-live-verification.json`，账号、群号和消息正文不写入仓库。飞书及官方 QQ 机器人仍需分别完成平台实测，不能用个人 QQ 的结果代替。
+
+macOS 安装与运行补充：
+
+- 本机使用 NapCat 4.18.42、官方 Mac 安装器 1.8。安装器完成入口切换后，需以 QQ 可执行程序的 `--no-sandbox` 参数启动 NapCat；普通 QQ 可同时使用另一个账号。同一账号已被普通 QQ 占用时，NapCat 快速登录会失败。
+- 此安装环境实际读取的配置目录是 `~/Library/Containers/com.tencent.qq/Data/Library/Application Support/QQ/NapCat/config`，不是安装目录下的 `config`。应检查正在运行的监听端口，确认 WebUI 和 OneBot 都仅绑定 `127.0.0.1`，且分别配置鉴权。
+- 本机另配置当前用户的 `com.qingzhou.local-napcat` LaunchAgent，在登录 Mac 后启动 NapCat，并在进程退出后重新启动；自动登录使用此前已授权的保存账号。已实际终止 NapCat 进程，确认新进程自动启动并恢复经账号核对的应用连接，记录保存在 `.data/bot-channels/napcat-restart-verification.json`。服务工作目录使用 QQ 容器目录，日志写入 `~/Library/Logs/Qingzhou/napcat.log`，避免直接启动 QQ 时访问项目目录导致启动失败。停用时运行 `launchctl bootout gui/$(id -u)/com.qingzhou.local-napcat`。该服务与消息 worker 分开管理，应用和数据库仍需运行；账号登录失效时仍需重新认证。
+- 开发时若新增平台定义，须完整重启应用进程，使驻留的网关管理器加载新定义。仅请求网关 stop/start 不会重新创建已有全局管理器。
+
+微信 iLink 已完成真实扫码并保存加密凭证，轮询连接正常。此状态只证明连接建立，微信消息收发须另验；现有连接仍限于机器人会话，不支持个人微信所有群的被动采集。
