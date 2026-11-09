@@ -12,6 +12,7 @@ export * from './asyncTask';
 export * from './betterAuth';
 export * from './botDelivery';
 export * from './botInbound';
+export * from './channelDigest';
 export * from './chatGroup';
 export * from './documentHistory';
 export * from './file';

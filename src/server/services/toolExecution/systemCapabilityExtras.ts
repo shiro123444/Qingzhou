@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 import type { AtomicOperation } from '@/server/runtime/atomic-runtime';
-import { type PngRenderInput, pngRenderSchema } from '@/server/runtime/presentation/png-renderer';
+import { type PngRenderInput, pngRenderSchema } from '@/server/runtime/presentation/png-contracts';
 
 export interface OwnedCapabilityFile {
   fileId: string;

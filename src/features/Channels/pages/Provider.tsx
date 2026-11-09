@@ -1,5 +1,4 @@
-import ChannelTasks from '../components/Tasks';
-('use client');
+'use client';
 
 import { Button, Flexbox, Text } from '@lobehub/ui';
 import { App, Descriptions, Empty, Switch, Table, Tag } from 'antd';
@@ -14,8 +13,10 @@ import { channelService } from '@/services/channel';
 import { useUserStore } from '@/store/user';
 
 import ChannelAccess from '../components/Access';
+import ChannelDigests from '../components/Digests';
 import { ChannelPage, LoadError, LoadingState } from '../components/Page';
 import ChannelStatus from '../components/Status';
+import ChannelTasks from '../components/Tasks';
 import {
   CHANNEL_SECTIONS,
   channelPath,
@@ -186,6 +187,9 @@ export default function ChannelProviderPage() {
       )}
       {section === 'activity' && (
         <Flexbox gap={24}>
+          {provider.platform !== 'wechat' && (
+            <ChannelDigests key={`${userId}:${providerId}`} providerId={providerId} />
+          )}
           <ChannelTasks platform={platform} providerId={providerId} />
           <Flexbox horizontal align="center" justify="space-between">
             <Text weight={600}>{t('channels.recentInbound')}</Text>

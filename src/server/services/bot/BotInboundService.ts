@@ -48,17 +48,32 @@ export class BotInboundService {
       }),
     );
     return boundedDeliveryIO(() =>
-      this.model.enqueue({
-        id: callbackHash([userId, platform, applicationId, eventId]),
-        userId,
-        platform,
-        applicationId,
-        eventId,
-        threadId,
-        payload: wire,
-        payloadHash: callbackHash(canonical),
-        isControl: isInboundStopCommand(platform, payload),
-      }),
+      this.model.enqueue(
+        {
+          id: callbackHash([userId, platform, applicationId, eventId]),
+          userId,
+          platform,
+          applicationId,
+          eventId,
+          threadId,
+          payload: wire,
+          payloadHash: callbackHash(canonical),
+          isControl: isInboundStopCommand(platform, payload),
+        },
+        ['napcat', 'qq', 'feishu', 'lark'].includes(platform)
+          ? async (tx) => {
+              const { captureDigestMessage } = await import('./digestCapture');
+              await captureDigestMessage(tx, {
+                userId,
+                platform,
+                applicationId,
+                payload,
+                eventId,
+                threadId,
+              });
+            }
+          : undefined,
+      ),
     );
   }
 

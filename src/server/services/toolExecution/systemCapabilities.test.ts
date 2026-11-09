@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { CordisAtomicHost } from '@/server/runtime/cordis-atomic-host';
+
 import { createSystemCapabilityTools } from './systemCapabilities';
 
 const create = (overrides: Record<string, unknown> = {}) => {
@@ -22,6 +24,36 @@ const create = (overrides: Record<string, unknown> = {}) => {
 };
 
 describe('system capability bridge', () => {
+  it('discovers without mounting plugins and activates only the requested operation', async () => {
+    const mount = vi.spyOn(CordisAtomicHost.prototype, 'mount');
+    const loadPresentation = vi.fn().mockResolvedValue({
+      listOperations: async () => ({ tools: [], runtimeTools: [{ name: 'private' }] }),
+      createJob: vi.fn().mockResolvedValue({ jobId: 'presentation-job' }),
+    });
+    try {
+      const { tools } = create({ loadPresentation });
+      const catalog = JSON.parse((await tools.catalog()).content);
+      expect(catalog).toMatchObject({ presentationReady: false, presentationConfigured: true });
+      expect(mount).not.toHaveBeenCalled();
+      expect(loadPresentation).not.toHaveBeenCalled();
+      await tools.invoke({ operation: 'tasks.list', input: '{}' });
+      expect(mount).toHaveBeenCalledTimes(1);
+      expect(mount.mock.calls[0][0].id).toBe('tasks');
+      expect(loadPresentation).not.toHaveBeenCalled();
+      await tools.invoke({
+        operation: 'presentation.create',
+        input: '{"title":"Deck","prompt":"Outline"}',
+      });
+      expect(loadPresentation).toHaveBeenCalledTimes(1);
+      expect(JSON.parse((await tools.catalog()).content).presentationReady).toBe(true);
+      const result = JSON.parse(
+        (await tools.invoke({ operation: 'presentation.catalog', input: '{}' })).content,
+      ).result;
+      expect(result).toEqual({ tools: [] });
+    } finally {
+      mount.mockRestore();
+    }
+  });
   it('discovers configured PNG/files/search and registers generated files for the owning reply', async () => {
     const fileId = '4da6ad13-2e08-430f-90f8-42c8c97f65b8';
     const render = vi

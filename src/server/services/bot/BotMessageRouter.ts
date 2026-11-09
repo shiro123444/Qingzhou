@@ -1,5 +1,3 @@
-import { ChannelTaskModel } from '@/database/models/channelTask';
-import { withChannelReplyContext } from './replyBudget';
 import { createIoRedisState } from '@chat-adapter/state-ioredis';
 import { DEFAULT_BOT_DEBOUNCE_MS } from '@lobechat/const';
 import { Chat, ConsoleLogger, type Message, type MessageContext } from 'chat';
@@ -9,6 +7,7 @@ import { getServerDB } from '@/database/core/db-adaptor';
 import type { DecryptedBotProvider } from '@/database/models/agentBotProvider';
 import { AgentBotProviderModel } from '@/database/models/agentBotProvider';
 import { BotInboundModel } from '@/database/models/botInbound';
+import { ChannelTaskModel } from '@/database/models/channelTask';
 import type { BotInboundEvent } from '@/database/schemas/botInbound';
 import type { LobeChatDatabase } from '@/database/type';
 import { appEnv } from '@/envs/app';
@@ -55,6 +54,7 @@ import {
   type UserAllowlist,
   type WatchKeywordEntry,
 } from './platforms';
+import { withChannelReplyContext } from './replyBudget';
 import {
   renderApproveSuccess,
   renderCommandReply,
@@ -386,7 +386,7 @@ export class BotMessageRouter {
     const chatBot = this.createChatBot(
       adapters,
       `agent-${userId}-${platform}-${applicationId}`,
-      ['qq', 'wechat', 'feishu'].includes(platform) ? 'concurrent' : concurrencyStrategy,
+      ['napcat', 'qq', 'wechat', 'feishu'].includes(platform) ? 'concurrent' : concurrencyStrategy,
       debounceMs,
     );
     this.registerHandlers(chatBot, serverDB, client, commands, {
@@ -1627,7 +1627,7 @@ export class BotMessageRouter {
             await ctx.post('当前会话没有可取回的任务结果。');
             return;
           }
-          const url = `${appEnv.APP_URL}/channels/${platform === 'lark' ? 'feishu' : platform}/${providerId}/activity/tasks/${task.id}`;
+          const url = `${appEnv.APP_URL}/channels/${platform === 'lark' ? 'feishu' : platform === 'napcat' ? 'qq' : platform}/${providerId}/activity/tasks/${task.id}`;
           const preview = task.content.slice(0, 1000);
           await ctx.post(
             `${preview || '任务已结束。'}\n\n${task.content.length > 1000 ? '完整结果：' : '任务详情：'}${url}${task.artifactIds.length ? `\n附件 ${task.artifactIds.length} 个，请在清舟会话中查看。` : ''}`,

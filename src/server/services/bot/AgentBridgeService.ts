@@ -849,7 +849,7 @@ export class AgentBridgeService {
         () =>
           thread.post(
             renderStart(userMessage.text, { lng: replyLocale, timezone }) +
-              (['qq', 'wechat'].includes(botContext?.platformThreadId?.split(':')[0] ?? '')
+              (['napcat', 'qq', 'wechat'].includes(botContext?.platformThreadId?.split(':')[0] ?? '')
                 ? '\n结果会保留在清舟，可发送 /result 取回。'
                 : ''),
           ),

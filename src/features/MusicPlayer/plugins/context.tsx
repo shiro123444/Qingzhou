@@ -11,7 +11,7 @@ const PluginContext = createContext<MusicPluginHost | null>(null);
 export function MusicPluginsProvider({
   children,
   host,
-}: PropsWithChildren<{ host: MusicPluginHost }>) {
+}: PropsWithChildren<{ host: MusicPluginHost | null }>) {
   return <PluginContext value={host}>{children}</PluginContext>;
 }
 

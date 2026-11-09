@@ -1,4 +1,39 @@
 export default {
+  'channels.platforms.napcat': 'Personal QQ / NapCat',
+  'channels.digest.delivery.pending': 'Waiting to send',
+  'channels.digest.delivery.running': 'Sending',
+  'channels.digest.delivery.transferred': 'Queued for delivery',
+  'channels.digest.delivery.delivered': 'Accepted by the platform',
+  'channels.digest.delivery.unknown': 'Delivery outcome unknown',
+  'channels.digest.delivery.dead': 'Delivery stopped',
+
+  'channels.digest.title': 'Scheduled group summaries',
+  'channels.digest.hint':
+    'Opt in per group. Collects authorized text from now on, without triggering replies. Text is retained for 7 days and summaries for 30 days. Each run processes up to 200 messages / 40,000 characters; remaining messages wait for the next daily run and may expire. No new messages means no model call. Uses this bot’s selected model.',
+  'channels.digest.qqHint':
+    'QQ summaries are saved here. This connection currently requires a recent incoming message to send a reply, so scheduled QQ delivery is unavailable.',
+  'channels.digest.daily': 'Daily at {{time}} (China time)',
+  'channels.digest.enabled': 'Collect and summarize this group',
+  'channels.digest.deleteConfirm': 'Delete this rule, its collected messages and saved summaries?',
+  'channels.digest.delete': 'Delete summary rule',
+  'channels.digest.send': 'Send completed summaries to the same group',
+  'channels.digest.keep': 'Save summaries here',
+  'channels.digest.group': 'Choose a group observed by this bot',
+  'channels.digest.noGroups':
+    'Let the bot receive a group message first. Full-message permissions must be enabled on the platform to include messages without an @mention.',
+  'channels.digest.time': 'Daily time (China time)',
+  'channels.digest.save': 'Save and enable',
+  'channels.digest.scheduleHint':
+    'Scheduled summaries require the server’s summary worker. Saving a rule begins collection; it does not run a summary immediately.',
+  'channels.digest.history': 'Recent summaries',
+  'channels.digest.empty': 'No summaries yet',
+  'channels.digest.status.running': 'Summarizing',
+  'channels.digest.status.completed': 'Saved',
+  'channels.digest.status.empty': 'No new text',
+  'channels.digest.status.failed': 'Generation failed; no immediate retry',
+  'channels.digest.status.unknown': 'Worker interrupted; outcome unknown',
+  'channels.digest.status.cancelled': 'Cancelled after settings or permissions changed',
+
   'cmdk.music': 'Music',
   'tab.music': 'Music',
   'presentationTrial.serial.budget':
@@ -187,7 +222,7 @@ export default {
   'channels.tasks.unknown': 'Platform receipt is uncertain. Automatic resend is paused.',
   'channels.tasks.noText': 'This task has no text result',
   'channels.tasks.running': 'Task in progress',
-  'channels.tasks.files': '{{count}} attachment(s) \u00b7 Open the conversation to view',
+  'channels.tasks.files': '{{count}} attachment(s) \u00B7 Open the conversation to view',
   'channels.tasks.status.running': 'Running',
   'channels.tasks.status.pending': 'Pending',
   'channels.tasks.status.submitted': 'Submitted to platform',

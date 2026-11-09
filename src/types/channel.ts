@@ -2,7 +2,7 @@ import type { ConnectionMode, DmPolicy, GroupPolicy } from '@/server/services/bo
 
 import type { BotRuntimeStatusSnapshot } from './botRuntimeStatus';
 
-export type ManagedChannelPlatform = 'wechat' | 'qq' | 'feishu' | 'lark';
+export type ManagedChannelPlatform = 'wechat' | 'napcat' | 'qq' | 'feishu' | 'lark';
 
 export interface ChannelProviderSummary {
   agentId: string;

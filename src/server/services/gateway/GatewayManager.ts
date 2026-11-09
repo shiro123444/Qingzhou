@@ -252,7 +252,7 @@ export class GatewayManager {
     if (this.config.persistentOnly && connectionMode === 'webhook') return 'queued';
     let connection: CordisConnection | undefined;
     const requiresLease =
-      connectionMode !== 'webhook' && ['wechat', 'qq', 'feishu', 'lark'].includes(platform);
+      connectionMode !== 'webhook' && ['wechat', 'napcat', 'qq', 'feishu', 'lark'].includes(platform);
     const lease = !requiresLease
       ? undefined
       : await ConnectionLease.acquire(getAgentRuntimeRedisClient(), key, () => {

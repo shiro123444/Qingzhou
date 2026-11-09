@@ -63,14 +63,17 @@ export default function CreateBot({ platform }: { platform?: string }) {
           }))}
           onChange={setAgentId}
         />
-        {!platform && (
+        {(!platform || platform === 'qq') && (
           <>
             <label htmlFor="channel-platform">{t('channels.platform')}</label>
             <Select
               id="channel-platform"
               style={{ marginBlockStart: 8, width: '100%' }}
               value={selectedPlatform}
-              options={CHANNEL_PLATFORMS.map((value) => ({
+              options={(platform === 'qq'
+                ? (['napcat', 'qq'] as const)
+                : ([...CHANNEL_PLATFORMS, 'napcat'] as const)
+              ).map((value) => ({
                 label: t(`channels.platforms.${value}`),
                 value,
               }))}

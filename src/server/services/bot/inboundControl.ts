@@ -1,7 +1,10 @@
+import { parseOneBotEvent } from './platforms/napcat/protocol';
+
 /** Called only after platform authentication. Routing still enforces sender policy. */
 export function isInboundStopCommand(platform: string, payload: unknown): boolean {
   const body = payload as any;
   let text: string | undefined;
+  if (platform === 'napcat') text = parseOneBotEvent(payload)?.text;
   if (platform === 'qq') text = body?.d?.content;
   if (platform === 'wechat')
     text = body?.item_list?.find((item: any) => item.text_item)?.text_item?.text;

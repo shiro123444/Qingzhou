@@ -30,11 +30,11 @@ describe('GatewayManager installation ownership', () => {
   const contexts: Array<Parameters<PlatformDefinition['clientFactory']['createClient']>[1]> = [];
   let factory: ReturnType<typeof vi.fn>;
   const provider = { applicationId: 'app', credentials: { token: 'first' } };
-  const createManager = () => {
+  const createManager = (platform = 'wechat') => {
     const manager = new GatewayManager({
       definitions: [
         {
-          id: 'wechat',
+          id: platform,
           connectionMode: 'polling',
           schema: [],
           clientFactory: { createClient: factory },
@@ -95,6 +95,17 @@ describe('GatewayManager installation ownership', () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(standby.hasClient('wechat', 'app')).toBe(true);
     expect(factory).toHaveBeenCalledTimes(2);
+  });
+
+  it('also fences personal QQ sockets across replicas', async () => {
+    const first = createManager('napcat');
+    const standby = createManager('napcat');
+    await Promise.all([first.start(), standby.start()]);
+    expect(factory).toHaveBeenCalledTimes(1);
+    expect(contexts[0].assertConnectionHeld).toBeTypeOf('function');
+    await first.stop();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(standby.hasClient('napcat', 'app')).toBe(true);
   });
 
   it('reconciles remote configuration changes and disables without reopening', async () => {

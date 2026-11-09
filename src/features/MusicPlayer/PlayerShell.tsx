@@ -1,17 +1,20 @@
 'use client';
 
-import { type PropsWithChildren } from 'react';
+import { lazy, type PropsWithChildren, Suspense } from 'react';
 
-import ArtworkAtmosphere from './ArtworkAtmosphere';
-import MiniPlayer from './MiniPlayer';
+import { useMusicActivation } from './session-context';
 import { styles } from './style';
 
+const ArtworkAtmosphere = lazy(() => import('./ArtworkAtmosphere'));
+const MiniPlayer = lazy(() => import('./MiniPlayer'));
+
 export default function PlayerShell({ children }: PropsWithChildren) {
+  const { ready } = useMusicActivation();
   return (
     <div className={styles.shell}>
-      <ArtworkAtmosphere />
+      <Suspense fallback={null}>{ready && <ArtworkAtmosphere />}</Suspense>
       <div className={styles.content}>{children}</div>
-      <MiniPlayer />
+      <Suspense fallback={null}>{ready && <MiniPlayer />}</Suspense>
     </div>
   );
 }

@@ -1,14 +1,7 @@
-import { ChannelTaskModel } from '@/database/models/channelTask';
-import { ReplyUnavailableError } from '../replyBudget';
-const taskRecord = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
-vi.mock('../ChannelTaskService', () => ({
-  ChannelTaskService: class {
-    record = taskRecord;
-  },
-}));
 import { describe, expect, it, vi } from 'vitest';
 
 import { BotInboundModel } from '@/database/models/botInbound';
+import { ChannelTaskModel } from '@/database/models/channelTask';
 import { getMessageGatewayClient } from '@/server/services/gateway/MessageGatewayClient';
 import { isQueueAgentRuntimeEnabled } from '@/server/services/queue/impls';
 
@@ -24,6 +17,15 @@ import {
   InMemoryCallbackLedger,
 } from '../callbackLedger';
 import { ChannelIdentityService } from '../channelIdentity';
+import * as digestDelivery from '../digestDelivery';
+import { ReplyUnavailableError } from '../replyBudget';
+
+const taskRecord = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock('../ChannelTaskService', () => ({
+  ChannelTaskService: class {
+    record = taskRecord;
+  },
+}));
 
 // ==================== Hoisted mocks ====================
 
@@ -285,6 +287,37 @@ describe('BotCallbackService', () => {
       createClient: mockMessengerBinderCreateClient,
     }));
   });
+
+  it.each(['feishu', 'napcat'])(
+    'delivers a scheduled %s digest without disturbing an active conversation in the same group',
+    async (platform) => {
+      const access = vi.spyOn(digestDelivery, 'assertDigestDeliveryAccess').mockResolvedValue();
+      (getMessageGatewayClient() as any).isEnabled = true;
+      const body: BotCallbackBody = {
+        type: 'completion',
+        digestRunId: '00000000-0000-4000-8000-000000000001',
+        operationId: 'channel-digest:00000000-0000-4000-8000-000000000001',
+        applicationId: 'app-123',
+        userId: 'user-1',
+        agentId: 'agent',
+        platformThreadId: `${platform}:group:123456`,
+        lastAssistantContent: '今日摘要',
+      };
+      try {
+        await service.handleCallback(body);
+        expect(mockCreateMessage).toHaveBeenCalledTimes(1);
+        expect(access.mock.calls.length).toBeGreaterThanOrEqual(3);
+        expect(BotInboundModel.prototype.releaseSession).not.toHaveBeenCalled();
+        expect(AgentBridgeService.clearActiveThread).not.toHaveBeenCalled();
+        expect(getMessageGatewayClient().stopTyping).not.toHaveBeenCalled();
+        access.mockRejectedValue(new Error('digest_delivery_revoked'));
+        await expect(service.handleCallback(body)).rejects.toThrow('digest_delivery_revoked');
+        expect(mockCreateMessage).toHaveBeenCalledTimes(1);
+      } finally {
+        access.mockRestore();
+      }
+    },
+  );
 
   describe('current channel identity authorization', () => {
     it('retains the full result after a known-unsent rejection and never replays that callback', async () => {

@@ -19,7 +19,10 @@ const context: ToolExecutionContext = {
   userId: 'owner',
 };
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+});
 
 describe('system capabilities authorization', () => {
   it('rejects missing authenticated scope before reading agent configuration', async () => {
@@ -39,7 +42,8 @@ describe('system capabilities authorization', () => {
     expect(assemble).not.toHaveBeenCalled();
   });
 
-  it('builds the presentation port from the authenticated account and preserves task scope', async () => {
+  it('defers the presentation port until requested and binds it to the authenticated account', async () => {
+    vi.stubEnv('CORDIS_PPT_MASTER_ROOT', '/configured/ppt');
     vi.spyOn(AgentService.prototype, 'getAgentConfig').mockResolvedValue({
       plugins: [SystemCapabilityIdentifier],
     } as any);
@@ -54,12 +58,23 @@ describe('system capabilities authorization', () => {
       listTasks: vi.fn(),
     });
     const runtime = await systemCapabilitiesRuntime.factory(context);
-    expect(tasks).toHaveBeenCalledWith(context);
+    expect(tasks).not.toHaveBeenCalled();
+    expect(portFactory).not.toHaveBeenCalled();
+    expect(JSON.parse((await runtime.catalog()).content)).toMatchObject({
+      presentationReady: false,
+      presentationConfigured: true,
+    });
+    expect(portFactory).not.toHaveBeenCalled();
+    await runtime.invoke({ operation: 'presentation.catalog', input: '{}' });
     expect(portFactory).toHaveBeenCalledWith({
       userId: 'owner',
       sessionId: 'presentation-account:owner',
       request: expect.any(Request),
     });
     expect(JSON.parse((await runtime.catalog()).content).presentationReady).toBe(true);
+    expect(tasks).not.toHaveBeenCalled();
+    await runtime.invoke({ operation: 'tasks.list', input: '{}' });
+    expect(tasks).toHaveBeenCalledTimes(1);
+    expect(tasks).toHaveBeenCalledWith(context);
   });
 });

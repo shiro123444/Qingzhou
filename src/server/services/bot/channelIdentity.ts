@@ -16,7 +16,7 @@ import {
 } from './channelIdentityStore';
 
 export const supportsChannelIdentity = (platform: string) =>
-  ['wechat', 'qq', 'feishu', 'lark'].includes(platform);
+  ['wechat', 'napcat', 'qq', 'feishu', 'lark'].includes(platform);
 export const channelIdentityTenant = (provider: {
   applicationId: string;
   id: string;

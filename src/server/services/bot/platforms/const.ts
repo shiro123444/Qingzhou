@@ -88,6 +88,7 @@ const PLATFORM_REPLY_LOCALES: Record<string, BotReplyLocale> = {
   feishu: 'zh-CN',
   lark: 'en-US',
   qq: 'zh-CN',
+  napcat: 'zh-CN',
   slack: 'en-US',
   telegram: 'en-US',
   wechat: 'zh-CN',

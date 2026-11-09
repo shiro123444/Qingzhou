@@ -1,4 +1,5 @@
 import { resolve } from 'node:path';
+
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
@@ -16,6 +17,7 @@ export default defineConfig({
   },
   test: {
     alias: {
+      '@/const/locale': resolve(__dirname, '../../src/const/locale'),
       '@/const': resolve(__dirname, '../const/src'),
       '@/utils/errorResponse': resolve(__dirname, '../../src/utils/errorResponse'),
       '@/utils': resolve(__dirname, '../utils/src'),
@@ -23,7 +25,6 @@ export default defineConfig({
       '@/libs/model-runtime': resolve(__dirname, '../model-runtime/src'),
       '@/types': resolve(__dirname, '../types/src'),
       '@': resolve(__dirname, '../../src'),
-
     },
     coverage: {
       exclude: [

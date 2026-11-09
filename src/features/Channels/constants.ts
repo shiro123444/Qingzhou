@@ -11,10 +11,12 @@ export const isChannelPlatform = (value?: string): value is ChannelPlatform =>
   (CHANNEL_PLATFORMS as readonly string[]).includes(value ?? '');
 
 export const matchesPlatform = (actual: string, selected: string) =>
-  actual === selected || (selected === 'feishu' && actual === 'lark');
+  actual === selected ||
+  (selected === 'qq' && actual === 'napcat') ||
+  (selected === 'feishu' && actual === 'lark');
 
 export const channelPath = (platform: string, providerId: string, section = 'overview') =>
-  `/channels/${platform === 'lark' ? 'feishu' : platform}/${encodeURIComponent(providerId)}/${section}`;
+  `/channels/${platform === 'lark' ? 'feishu' : platform === 'napcat' ? 'qq' : platform}/${encodeURIComponent(providerId)}/${section}`;
 
 export const configurationPath = (agentId: string, platform: string) =>
   `/agent/${encodeURIComponent(agentId)}/channel?platform=${encodeURIComponent(platform)}`;

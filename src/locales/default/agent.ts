@@ -1,4 +1,12 @@
 export default {
+  'channel.napcatAccount': 'QQ account number',
+  'channel.napcatAccountHint': 'The personal QQ account currently signed in to NapCat.',
+  'channel.napcatToken': 'OneBot access token',
+  'channel.napcatTokenHint':
+    'Use the token of the Universal WebSocket server, not the WebUI password.',
+  'channel.napcatUrl': 'NapCat WebSocket address',
+  'channel.napcatUrlHint':
+    'Enable the Universal WebSocket server and Array messages in NapCat. Use local ws:// or remote wss://.',
   'channel.feishuNativeCards': 'Native Feishu cards',
   'channel.feishuNativeCardsHint':
     'Use cards for step updates, results and approval buttons. Subscribe to card.action.trigger callbacks.',

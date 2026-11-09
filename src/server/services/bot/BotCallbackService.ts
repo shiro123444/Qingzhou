@@ -1,11 +1,9 @@
-import { ChannelTaskModel } from '@/database/models/channelTask';
-import { ChannelTaskService } from './ChannelTaskService';
-import { ReplyUnavailableError } from './replyBudget';
 import debug from 'debug';
 
 import type { MessengerPlatform } from '@/config/messenger';
 import { AgentBotProviderModel } from '@/database/models/agentBotProvider';
 import { BotInboundModel } from '@/database/models/botInbound';
+import { ChannelTaskModel } from '@/database/models/channelTask';
 import { MessengerAccountLinkModel } from '@/database/models/messengerAccountLink';
 import { TopicModel } from '@/database/models/topic';
 import { type LobeChatDatabase } from '@/database/type';
@@ -27,6 +25,7 @@ import type { LedgerBackend } from './callbackLedger';
 import { CallbackDeliveryError, CallbackDeliverySession, callbackHash } from './callbackLedger';
 import { supportsChannelIdentity } from './channelIdentity';
 import { assertChannelIdentityAccess, guardChannelMessenger } from './channelIdentityAccess';
+import { ChannelTaskService } from './ChannelTaskService';
 import { normalizeBotPausePayload } from './deliveryEnvelope';
 import { deliverNativeReply } from './nativeReply';
 import type { BotReplyLocale, PlatformClient, PlatformMessenger, UsageStats } from './platforms';
@@ -38,6 +37,7 @@ import {
 } from './platforms';
 import { PostgresCallbackLedger } from './postgresCallbackLedger';
 import { clearReactionState, getReactionState, saveReactionState } from './reactionState';
+import { ReplyUnavailableError } from './replyBudget';
 import {
   renderAgentError,
   renderFinalReply,
@@ -56,6 +56,7 @@ export interface BotCallbackBody {
   applicationId: string;
   content?: string;
   cost?: number;
+  digestRunId?: string;
   duration?: number;
   elapsedMs?: number;
   errorMessage?: string;
@@ -122,6 +123,10 @@ export class BotCallbackService {
   async handleCallback(
     body: BotCallbackBody,
   ): Promise<{ status: 'delivered' | 'skipped' | 'retained' }> {
+    if (body.digestRunId) {
+      const { assertDigestDeliveryAccess } = await import('./digestDelivery');
+      await assertDigestDeliveryAccess(this.db, body);
+    }
     body = normalizeBotPausePayload(
       body as unknown as Record<string, unknown>,
     ) as unknown as BotCallbackBody;
@@ -204,6 +209,7 @@ export class BotCallbackService {
       replyToMessageReceivedAt: body.userMessageReceivedAt,
       agentId: body.agentId,
       senderExternalUserId: body.senderExternalUserId,
+      digestBody: body.digestRunId ? body : undefined,
     });
 
     const entry = platformRegistry.getPlatform(platform);
@@ -305,7 +311,7 @@ export class BotCallbackService {
         );
       }
     } else if (type === 'completion') {
-      if (body.userId && body.operationId) {
+      if (!body.digestRunId && body.userId && body.operationId) {
         const key = botSessionKey(body.userId, {
           platform,
           applicationId,
@@ -318,9 +324,10 @@ export class BotCallbackService {
         AgentBridgeService.clearActiveThread(key);
       }
       // Stop typing on the gateway
-      await delivery.bestEffort('gateway-stop', () =>
-        this.stopGatewayTyping(connectionId, platformThreadId),
-      );
+      if (!body.digestRunId)
+        await delivery.bestEffort('gateway-stop', () =>
+          this.stopGatewayTyping(connectionId, platformThreadId),
+        );
 
       await this.handleCompletion(
         body,
@@ -344,6 +351,7 @@ export class BotCallbackService {
   }
 
   private async createMessenger(params: {
+    digestBody?: BotCallbackBody;
     agentId?: string;
     applicationId: string;
     messengerInstallationKey?: string;
@@ -399,8 +407,12 @@ export class BotCallbackService {
       platform,
       senderExternalUserId: params.senderExternalUserId ?? '',
     };
-    const assertAccess = () =>
-      assertChannelIdentityAccess(this.db, userId, identityContext, params.agentId);
+    const assertAccess = params.digestBody
+      ? async () => {
+          const { assertDigestDeliveryAccess } = await import('./digestDelivery');
+          await assertDigestDeliveryAccess(this.db, params.digestBody!);
+        }
+      : () => assertChannelIdentityAccess(this.db, userId, identityContext, params.agentId);
     await assertAccess();
 
     const gateKeeper = await KeyVaultsGateKeeper.initWithEnvKey();
@@ -636,7 +648,7 @@ export class BotCallbackService {
     // those collapse to empty text downstream and get rejected by Telegram as
     // "message text is empty", silently losing the reply. Trim before testing.
     const artifacts =
-      messenger.prepareFile && body.userId && body.operationId
+      !body.digestRunId && messenger.prepareFile && body.userId && body.operationId
         ? await new BotArtifactService(this.db, body.userId).list(body.operationId)
         : [];
     if (!lastAssistantContent?.trim() && !artifacts.length) {

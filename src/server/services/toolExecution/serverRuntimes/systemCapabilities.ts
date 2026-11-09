@@ -3,8 +3,7 @@ import { createHash } from 'node:crypto';
 import { AgentModel } from '@/database/models/agent';
 import { toolsEnv } from '@/envs/tools';
 import { presentationAccountScope } from '@/server/runtime/presentation/account-workspace';
-import { getDefaultPresentationComposition } from '@/server/runtime/presentation/default-composition';
-import { renderSemanticPng } from '@/server/runtime/presentation/png-renderer';
+import type { PresentationGenerationPort } from '@/server/runtime/presentation/generation-port';
 import { AgentService } from '@/server/services/agent';
 import { FileService } from '@/server/services/file';
 import { SearchService } from '@/server/services/search';
@@ -24,11 +23,28 @@ export const systemCapabilitiesRuntime: ServerRuntimeRegistration = {
     );
     if (!agent?.plugins?.includes(SystemCapabilityIdentifier))
       throw new Error('System capabilities are not enabled for this agent');
-    const { composition, error } = getDefaultPresentationComposition();
-    const presentation = composition?.generationPortFactory?.({
-      ...presentationAccountScope(context.userId),
-      request: new Request('http://presentation.internal/channel'),
-    });
+    const presentationConfigured = !!process.env.CORDIS_PPT_MASTER_ROOT;
+    let presentation: Promise<PresentationGenerationPort> | undefined;
+    const loadPresentation = () => {
+      assertActive();
+      presentation ??= import('@/server/runtime/presentation/default-composition')
+        .then(({ getDefaultPresentationComposition }) => {
+          assertActive();
+          const { composition } = getDefaultPresentationComposition();
+          const port = composition?.generationPortFactory?.({
+            ...presentationAccountScope(context.userId!),
+            request: new Request('http://presentation.internal/channel'),
+          });
+          if (!port)
+            throw new Error('Presentation provider unavailable; check the host configuration');
+          return port;
+        })
+        .catch((error) => {
+          presentation = undefined;
+          throw error;
+        });
+      return presentation;
+    };
     const assertActive = () => {
       context.assertStepLease?.();
       context.signal?.throwIfAborted();
@@ -40,9 +56,37 @@ export const systemCapabilitiesRuntime: ServerRuntimeRegistration = {
     );
     const search =
       toolsEnv.SEARCH_PROVIDERS || toolsEnv.SEARXNG_URL ? new SearchService() : undefined;
-    // TaskService imports the agent executor; resolve it after registry initialization.
-    const { taskRuntime } = await import('./task');
-    const tasks = await taskRuntime.factory(context);
+    // TaskService imports the agent executor; discovery must not initialize it either.
+    let taskPromise: Promise<SystemCapabilityTaskRuntime> | undefined;
+    type SystemCapabilityTaskRuntime = {
+      createTask: (args: { name: string; instruction: string }) => Promise<unknown>;
+      listTasks: (args: { limit?: number }) => Promise<unknown>;
+    };
+    const loadTasks = () => {
+      assertActive();
+      taskPromise ??= import('./task')
+        .then(({ taskRuntime }) => {
+          assertActive();
+          return taskRuntime.factory(context) as SystemCapabilityTaskRuntime;
+        })
+        .catch((error) => {
+          taskPromise = undefined;
+          throw error;
+        });
+      return taskPromise;
+    };
+    const tasks: SystemCapabilityTaskRuntime = {
+      createTask: async (args) => {
+        const runtime = await loadTasks();
+        assertActive();
+        return runtime.createTask(args);
+      },
+      listTasks: async (args) => {
+        const runtime = await loadTasks();
+        assertActive();
+        return runtime.listTasks(args);
+      },
+    };
     return createSystemCapabilityTools(context, {
       agents: async () =>
         new AgentModel(context.serverDB!, context.userId!).queryAgents({ limit: 30 }),
@@ -54,10 +98,10 @@ export const systemCapabilitiesRuntime: ServerRuntimeRegistration = {
         createText: accountFiles.createText,
         rename: accountFiles.rename,
         copy: accountFiles.copy,
-        ...(presentation
+        ...(presentationConfigured
           ? {
               importPresentation: async (artifactId: string) => {
-                const artifact = await presentation.getRawArtifact(artifactId);
+                const artifact = await (await loadPresentation()).getRawArtifact(artifactId);
                 if (!artifact?.bytes || artifact.status !== 'ready')
                   throw new Error(
                     'Ready presentation artifact not found in the authenticated account',
@@ -83,6 +127,8 @@ export const systemCapabilitiesRuntime: ServerRuntimeRegistration = {
       },
       images: {
         render: async (input) => {
+          const { renderSemanticPng } = await import('@/server/runtime/presentation/png-renderer');
+          assertActive();
           const rendered = await renderSemanticPng(input, context.signal);
           assertActive();
           const hash = createHash('sha256').update(rendered.bytes).digest('hex');
@@ -123,10 +169,7 @@ export const systemCapabilitiesRuntime: ServerRuntimeRegistration = {
             },
           }
         : {}),
-      presentation,
-      presentationUnavailableReason: error
-        ? 'Presentation provider configuration invalid; check the host configuration. System/task and vector capabilities remain available.'
-        : undefined,
+      ...(presentationConfigured ? { loadPresentation } : {}),
       saveSvg: async (svg) => {
         context.assertStepLease?.();
         context.signal?.throwIfAborted();

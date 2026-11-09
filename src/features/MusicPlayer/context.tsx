@@ -1,20 +1,13 @@
 'use client';
 
-import {
-  createContext,
-  type PropsWithChildren,
-  use,
-  useEffect,
-  useLayoutEffect,
-  useState,
-} from 'react';
-import { useStore } from 'zustand';
+import { type PropsWithChildren, useEffect, useLayoutEffect, useState } from 'react';
 
-import { AudioEngine, type PlayerState } from './engine';
+import { AudioEngine } from './engine';
 import { MusicPluginsProvider } from './plugins/context';
 import { MusicPluginHost } from './plugins/runtime';
+import { EngineContext } from './session-context';
 
-const EngineContext = createContext<AudioEngine | null>(null);
+export { useAudioEngine, useMusicPlayer } from './session-context';
 
 export function MusicPlayerProvider({
   children,
@@ -46,14 +39,4 @@ export function MusicPlayerProvider({
       <MusicPluginsProvider host={plugins}>{children}</MusicPluginsProvider>
     </EngineContext>
   );
-}
-
-export function useAudioEngine() {
-  const engine = use(EngineContext);
-  if (!engine) throw new Error('MusicPlayerProvider is required');
-  return engine;
-}
-
-export function useMusicPlayer<T>(selector: (state: PlayerState) => T) {
-  return useStore(useAudioEngine().store, selector);
 }

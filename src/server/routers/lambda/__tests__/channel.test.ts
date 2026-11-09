@@ -2,6 +2,7 @@
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { ChannelDigestModel } from '@/database/models/channelDigest';
 import { createCallerFactory } from '@/libs/trpc/lambda';
 
 import { channelRouter } from '../channel';
@@ -99,6 +100,65 @@ describe('channel management metadata', () => {
     expect(getServerDB).not.toHaveBeenCalled();
   });
 
+  it('requires an owned installation and an observed group before enabling collection', async () => {
+    const id = '00000000-0000-4000-8000-000000000001';
+    const input = {
+      providerId: id,
+      threadId: 'feishu:group:oc_test',
+      scheduleTime: '18:00',
+      enabled: true,
+      sendToSource: false,
+    };
+    const save = vi.spyOn(ChannelDigestModel.prototype, 'save').mockResolvedValue();
+    const caller = createCaller({ userId: 'owner' });
+    getServerDB.mockResolvedValue(database([[]]).db);
+    await expect(caller.saveDigest(input)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    getServerDB.mockResolvedValue(
+      database([[{ ...provider, id, platform: 'feishu', settings: {} }], []]).db,
+    );
+    await expect(caller.saveDigest(input)).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    expect(save).not.toHaveBeenCalled();
+    const observed = database([
+      [{ ...provider, id, platform: 'feishu', settings: {} }],
+      [{ id: 'event' }],
+    ]);
+    getServerDB.mockResolvedValue(observed.db);
+    await caller.saveDigest(input);
+    expect(dialect.sqlToQuery(observed.predicates[1] as any).params).toEqual([
+      'owner',
+      'feishu',
+      'app-1',
+      'feishu:group:oc_test',
+    ]);
+    expect(save).toHaveBeenCalledWith('owner', id, input);
+    save.mockRestore();
+  });
+
+  it('rejects private sources, cross-platform sources and scheduled QQ delivery', async () => {
+    const id = '00000000-0000-4000-8000-000000000001';
+    const input = {
+      providerId: id,
+      threadId: 'qq:group:g',
+      scheduleTime: '18:00',
+      enabled: true,
+      sendToSource: true,
+    };
+    const caller = createCaller({ userId: 'owner' });
+    getServerDB.mockResolvedValue(
+      database([[{ ...provider, id, platform: 'qq', settings: {} }]]).db,
+    );
+    await expect(caller.saveDigest(input)).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    await expect(
+      caller.saveDigest({ ...input, threadId: 'qq:c2c:person', sendToSource: false }),
+    ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    getServerDB.mockResolvedValue(
+      database([[{ ...provider, id, platform: 'qq', settings: {} }]]).db,
+    );
+    await expect(
+      caller.saveDigest({ ...input, threadId: 'feishu:group:g', sendToSource: false }),
+    ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+  });
+
   it('filters the authenticated owner and supported platforms in SQL without selecting credentials', async () => {
     const fixture = database([[provider]]);
     getServerDB.mockResolvedValue(fixture.db);
@@ -107,6 +167,7 @@ describe('channel management metadata', () => {
     expect(dialect.sqlToQuery(fixture.predicates[0] as any).params).toEqual([
       'owner',
       'wechat',
+      'napcat',
       'qq',
       'feishu',
       'lark',
@@ -145,6 +206,7 @@ describe('channel management metadata', () => {
     expect(dialect.sqlToQuery(fixture.predicates[0] as any).params).toEqual([
       'other-user',
       'wechat',
+      'napcat',
       'qq',
       'feishu',
       'lark',

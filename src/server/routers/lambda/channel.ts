@@ -1,12 +1,14 @@
-import { ChannelTaskModel } from '@/database/models/channelTask';
 import { TRPCError } from '@trpc/server';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 
+import { ChannelDigestModel } from '@/database/models/channelDigest';
+import { ChannelTaskModel } from '@/database/models/channelTask';
 import { agentBotProviders, agents, botInboundEvents } from '@/database/schemas';
 import type { LobeChatDatabase } from '@/database/type';
 import { authedProcedure, router } from '@/libs/trpc/lambda';
 import { serverDatabase } from '@/libs/trpc/lambda/middleware';
+import { digestGroupAllowed } from '@/server/services/bot/digestCapture';
 import {
   extractDmSettings,
   extractGroupSettings,
@@ -22,8 +24,9 @@ import type {
   ChannelProviderSummary,
   ManagedChannelPlatform,
 } from '@/types/channel';
+import { channelDigestSettingsSchema } from '@/types/channelDigest';
 
-const managedPlatforms: ManagedChannelPlatform[] = ['wechat', 'qq', 'feishu', 'lark'];
+const managedPlatforms: ManagedChannelPlatform[] = ['wechat', 'napcat', 'qq', 'feishu', 'lark'];
 const procedure = authedProcedure.use(serverDatabase);
 
 /** Project only management metadata. Credentials never leave the provider table. */
@@ -94,6 +97,62 @@ function accessSettings(settings: Provider['settings']): ChannelAccessSettings {
 }
 
 export const channelRouter = router({
+  digests: procedure
+    .input(z.object({ providerId: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      const [provider] = await ownedProviders(ctx.serverDB, ctx.userId, input.providerId);
+      if (!provider) throw new TRPCError({ code: 'NOT_FOUND' });
+      const groups = await ctx.serverDB
+        .select({ threadId: botInboundEvents.threadId })
+        .from(botInboundEvents)
+        .where(
+          and(
+            eq(botInboundEvents.userId, ctx.userId),
+            eq(botInboundEvents.platform, provider.platform),
+            eq(botInboundEvents.applicationId, provider.applicationId),
+            sql`${botInboundEvents.threadId} like ${`${provider.platform}:group:%`}`,
+          ),
+        )
+        .groupBy(botInboundEvents.threadId)
+        .orderBy(sql`max(${botInboundEvents.createdAt}) desc`)
+        .limit(50);
+      return {
+        ...(await new ChannelDigestModel(ctx.serverDB).list(ctx.userId, provider.id)),
+        groups: groups.filter((group) => digestGroupAllowed(provider.settings, group.threadId)),
+        supported: ['napcat', 'qq', 'feishu', 'lark'].includes(provider.platform),
+        canSend: ['napcat', 'feishu', 'lark'].includes(provider.platform),
+      };
+    }),
+  saveDigest: procedure.input(channelDigestSettingsSchema).mutation(async ({ ctx, input }) => {
+    const [provider] = await ownedProviders(ctx.serverDB, ctx.userId, input.providerId);
+    if (!provider) throw new TRPCError({ code: 'NOT_FOUND' });
+    if (
+      !input.threadId.startsWith(`${provider.platform}:group:`) ||
+      (input.enabled && !digestGroupAllowed(provider.settings, input.threadId)) ||
+      (input.sendToSource && !['napcat', 'feishu', 'lark'].includes(provider.platform))
+    )
+      throw new TRPCError({ code: 'BAD_REQUEST', message: 'Group or delivery unavailable' });
+    const [observed] = await ctx.serverDB
+      .select({ id: botInboundEvents.id })
+      .from(botInboundEvents)
+      .where(
+        and(
+          eq(botInboundEvents.userId, ctx.userId),
+          eq(botInboundEvents.platform, provider.platform),
+          eq(botInboundEvents.applicationId, provider.applicationId),
+          eq(botInboundEvents.threadId, input.threadId),
+        ),
+      )
+      .limit(1);
+    if (!observed)
+      throw new TRPCError({ code: 'BAD_REQUEST', message: 'Group not observed by this bot' });
+    await new ChannelDigestModel(ctx.serverDB).save(ctx.userId, provider.id, input);
+  }),
+  removeDigest: procedure
+    .input(z.object({ providerId: z.string().uuid(), ruleId: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      await new ChannelDigestModel(ctx.serverDB).remove(ctx.userId, input.providerId, input.ruleId);
+    }),
   tasks: procedure
     .input(z.object({ providerId: z.string().min(1).max(100) }))
     .query(async ({ ctx, input }) => {

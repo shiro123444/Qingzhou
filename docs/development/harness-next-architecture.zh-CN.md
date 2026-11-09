@@ -2,6 +2,10 @@
 
 日期：2026-10-22。本文记录架构复核与分阶段设计；A 的首个实现增量见[行为版本与运行快照记录](harness-behavior-snapshots.zh-CN.md)，B 见[可信写入与原子采用记录](harness-publication-cas.zh-CN.md)，C 的服务端纯文本机制见[受管技能实现记录](harness-managed-skills.zh-CN.md)，D 的首个预算及经验接入增量见[共同预算与经验命令](harness-common-budget.zh-CN.md)，E 的首个提供者及产品机制增量见[版本化材料提供者](harness-material-capabilities.zh-CN.md)。真实质量、账号浏览器、文件保留/删除与生产多进程验收及自动付费实验策略仍为后续目标。以下架构观察来自设计时的工作树静态调用链，不代替实现验收。
 
+2026-11-09 按需激活增量：聊天壳层只保留轻量音乐上下文，首次进入 `/music` 才加载 AudioEngine 与 MusicPluginHost。激活不重建当前聊天子树，离开音乐页仍可继续播放，壳层退出时释放资源。异步加载失败可重试，加载尚未完成即退出时会释放迟到的会话。本增量没有实现空闲时自动卸载音乐会话，也不宣称浏览器已执行代码可以从模块缓存中卸载。
+
+系统能力桥的普通 `catalog` 只生成描述和 schema，不创建 AtomicRuntime，也不启动 PPT 或任务服务。执行时仅挂载选中的 operation，并在 `finally` 中释放临时 Cordis 宿主。`presentation.catalog` 是显式激活入口，用来获取提供者的额外操作；PPT 创建、产物导入、PNG 渲染、任务服务分别在实际使用时加载。PNG schema 与 Sharp/公式渲染实现分离。已有账号作用域、租约检查、公开操作白名单及真实 schema 校验保留。该改动验证了生命周期和调用边界；尚未进行生产构建体积、冷启动耗时或常驻内存的前后测量，因此没有给出未经实测的节省比例。
+
 后续同日的独立环境、真实模型、PostgreSQL 多进程和生命周期验收见[验收记录](harness-acceptance-lifecycle.zh-CN.md)。其中真实候选未通过留出验证，仍保留原方案；该结果不代表整体质量验收完成。
 本文接续[原架构设计](cordis-harness-evolution.zh-CN.md)和[首轮实现记录](harness-core-implementation.zh-CN.md)。前者描述目标，后者限定已实现范围；本文调整下一阶段的顺序，不将已有试跑和接口测试等同于整体迁移完成。
 

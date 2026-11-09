@@ -13,7 +13,7 @@ export class ChannelTaskService {
   async record(body: BotCallbackBody) {
     const platform = body.platformThreadId.split(':')[0];
     if (
-      !['wechat', 'qq', 'feishu', 'lark'].includes(platform) ||
+      !['wechat', 'napcat', 'qq', 'feishu', 'lark'].includes(platform) ||
       body.messengerInstallationKey ||
       !body.userId ||
       !body.operationId ||

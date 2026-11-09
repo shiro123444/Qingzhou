@@ -5,9 +5,9 @@ import { and, asc, eq, isNull, lte, sql } from 'drizzle-orm';
 import { botDeliveryAudits } from '../schemas/botDelivery';
 import {
   botExecutionSessions as sessions,
+  type BotInboundEvent,
   botInboundEvents as events,
   botPollingCursors as cursors,
-  type BotInboundEvent,
 } from '../schemas/botInbound';
 import type { LobeChatDatabase, Transaction } from '../type';
 
@@ -34,12 +34,18 @@ export class BotInboundModel {
       | 'payload'
       | 'payloadHash'
     > & { isControl?: boolean },
+    onCreated?: (tx: Transaction) => Promise<void>,
   ) {
     return this.transaction(async (tx) => {
-      await tx.insert(events).values(input).onConflictDoNothing();
+      const inserted = await tx
+        .insert(events)
+        .values(input)
+        .onConflictDoNothing()
+        .returning({ id: events.id });
       const [row] = await tx.select().from(events).where(eq(events.id, input.id));
       if (!row || row.userId !== input.userId || row.payloadHash !== input.payloadHash)
         throw new Error('inbound_payload_conflict');
+      if (inserted.length) await onCreated?.(tx);
       return { id: row.id, status: row.status };
     });
   }

@@ -9,6 +9,11 @@ export async function botDeliveryCron(c: Context): Promise<Response> {
   c.header('Cache-Control', 'no-store');
   try {
     const db = await getServerDB();
+    if (c.req.query('lane') === 'digest') {
+      const { ChannelDigestService } = await import('@/server/services/bot/ChannelDigestService');
+      const digest = await new ChannelDigestService(db).sweep();
+      return c.json({ digest, success: true });
+    }
     if (c.req.query('lane') === 'control') {
       const inbound = await new BotInboundService(db).sweep({ controlsOnly: true });
       return c.json({ inbound, success: true });
