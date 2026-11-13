@@ -1,5 +1,5 @@
+import { LazyClientFactory } from '../lazyClientFactory';
 import type { PlatformDefinition } from '../types';
-import { DiscordClientFactory } from './client';
 import { DEFAULT_DISCORD_CONNECTION_MODE } from './const';
 import { schema } from './schema';
 
@@ -13,5 +13,8 @@ export const discord: PlatformDefinition = {
     setupGuideUrl: 'https://lobehub.com/docs/usage/channels/discord',
   },
   schema,
-  clientFactory: new DiscordClientFactory(),
+  clientFactory: new LazyClientFactory(async () => {
+    const { DiscordClientFactory } = await import('./client');
+    return new DiscordClientFactory();
+  }),
 };

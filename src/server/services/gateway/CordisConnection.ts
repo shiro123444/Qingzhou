@@ -8,6 +8,7 @@ import { boundedGatewayIO, type ConnectionLease } from './ConnectionLease';
 export class CordisConnection {
   readonly context = new Context();
   readonly ready: Promise<void>;
+  private client?: PlatformClient;
   private closeTask?: Promise<void>;
   private disposeTask?: Promise<void>;
   private closed = false;
@@ -24,13 +25,14 @@ export class CordisConnection {
   }
 
   constructor(
-    private readonly client: PlatformClient,
+    source: PlatformClient | { id: string; load: () => Promise<PlatformClient> },
     private readonly lease?: ConnectionLease,
   ) {
+    if (!('load' in source)) this.client = source;
     let startupFailed = false;
     let startupError: unknown;
     const fiber = this.context.plugin({
-      name: `bot-channel.${client.id}`,
+      name: `bot-channel.${source.id}`,
       apply: async (ctx: Context) => {
         // Register before acquiring so a partially failed start is reclaimed too.
         ctx.effect(() => () => this.close(), 'channel.transport');
@@ -39,12 +41,23 @@ export class CordisConnection {
         });
         const timeout = setTimeout(() => this.interrupt(), 60_000);
         timeout.unref?.();
-        const starting = Promise.resolve().then(() => client.start());
+        const starting = Promise.resolve().then(async () => {
+          if (this.interrupted) throw new Error('Channel connection startup interrupted');
+          const client = 'load' in source ? await source.load() : source;
+          this.client = client;
+          // Imports cannot be aborted. A late module must never open a revoked transport.
+          if (this.interrupted) return;
+          this.lease?.assertHeld();
+          await client.start();
+        });
         // A late SDK acquisition must also release anything it created after cancellation.
         void starting
-          .finally(() => {
-            if (this.interrupted && this.closed)
-              void boundedGatewayIO(() => client.stop(), 35_000).catch(() => undefined);
+          .finally(async () => {
+            if (!this.interrupted) return;
+            // Loading may finish while close() is releasing the lease, after its stop check.
+            await this.closeTask;
+            const client = this.client;
+            if (this.closed && client) await boundedGatewayIO(() => client.stop(), 35_000);
           })
           .catch(() => undefined);
         try {
@@ -81,10 +94,9 @@ export class CordisConnection {
       void this.close();
       return;
     }
-    if (!this.acquired && !this.interruptTask) {
-      this.interruptTask = boundedGatewayIO(() => this.client.stop(), 35_000).catch(
-        () => undefined,
-      );
+    const client = this.client;
+    if (!this.acquired && !this.interruptTask && client) {
+      this.interruptTask = boundedGatewayIO(() => client.stop(), 35_000).catch(() => undefined);
     }
   }
 
@@ -95,7 +107,8 @@ export class CordisConnection {
     this.closeTask = Promise.resolve()
       .then(async () => {
         await this.interruptTask;
-        await boundedGatewayIO(() => this.client.stop(), 35_000);
+        const client = this.client;
+        if (client) await boundedGatewayIO(() => client.stop(), 35_000);
         await this.lease?.release();
       })
       .then(
@@ -118,6 +131,7 @@ export class CordisConnection {
 
   dispose(): Promise<void> {
     if (this.disposeTask) return this.disposeTask;
+    this.prepareStop();
     this.disposeTask = (async () => {
       if (this.rootDisposed) {
         await this.close();

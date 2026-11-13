@@ -37,7 +37,7 @@ export class PlatformRegistry {
 
   /** List platform definitions serialized for frontend consumption. */
   listSerializedPlatforms(): SerializedPlatformDefinition[] {
-    return this.listPlatforms().map(({ clientFactory, ...rest }) => rest);
+    return this.listPlatforms().map(({ clientFactory: _clientFactory, ...rest }) => rest);
   }
 
   /**
@@ -46,11 +46,11 @@ export class PlatformRegistry {
    * Looks up the platform definition and delegates to its createClient.
    * Throws if the platform is not registered.
    */
-  createClient(
+  async createClient(
     platform: string,
     config: BotProviderConfig,
     context?: BotPlatformRuntimeContext,
-  ): PlatformClient {
+  ): Promise<PlatformClient> {
     const definition = this.platforms.get(platform);
     if (!definition) {
       throw new Error(`Platform "${platform}" is not registered`);

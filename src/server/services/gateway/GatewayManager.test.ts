@@ -49,7 +49,7 @@ const createMockBot = (): PlatformClient => ({
 // Helper: create a fake definition that returns the given bot
 const createFakeDefinition = (
   id: string,
-  factoryFn?: (...args: any[]) => PlatformClient,
+  factoryFn?: (...args: any[]) => PlatformClient | Promise<PlatformClient>,
 ): PlatformDefinition =>
   ({
     clientFactory: {
@@ -251,6 +251,37 @@ describe('GatewayManager', () => {
   });
 
   describe('Cordis lifecycle concurrency', () => {
+    it.each(['gateway', 'installation'])(
+      'interrupts lazy loading when stopping the %s',
+      async (scope) => {
+        const bot = createMockBot();
+        let resolveLoad!: (client: PlatformClient) => void;
+        const factory = vi.fn(
+          () =>
+            new Promise<PlatformClient>((resolve) => {
+              resolveLoad = resolve;
+            }),
+        );
+        mockAgentBotProviderModel.findEnabledByApplicationId.mockResolvedValue({
+          applicationId: 'app-1',
+          credentials: {},
+        });
+        const manager = new GatewayManager({
+          definitions: [createFakeDefinition('slack', factory)],
+        });
+        const starting = manager.startClient('slack', 'app-1', 'user-1');
+        const rejected = expect(starting).rejects.toThrow('startup interrupted');
+        await vi.waitFor(() => expect(factory).toHaveBeenCalledOnce());
+        if (scope === 'gateway') await manager.stop();
+        else await manager.stopClient('slack', 'app-1');
+        await rejected;
+        expect(manager.hasClient('slack', 'app-1')).toBe(false);
+        resolveLoad(bot);
+        await vi.waitFor(() => expect(bot.stop).toHaveBeenCalledOnce());
+        expect(bot.start).not.toHaveBeenCalled();
+      },
+    );
+
     it('interrupts an acquiring transport during shutdown', async () => {
       let releaseStart!: () => void;
       let notifyStarting!: () => void;

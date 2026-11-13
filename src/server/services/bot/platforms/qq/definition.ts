@@ -1,5 +1,5 @@
+import { LazyClientFactory } from '../lazyClientFactory';
 import type { PlatformDefinition } from '../types';
-import { QQClientFactory } from './client';
 import { DEFAULT_QQ_CONNECTION_MODE } from './const';
 import { schema } from './schema';
 
@@ -15,5 +15,8 @@ export const qq: PlatformDefinition = {
   schema,
   supportsMarkdown: false,
   supportsMessageEdit: false,
-  clientFactory: new QQClientFactory(),
+  clientFactory: new LazyClientFactory(async () => {
+    const { QQClientFactory } = await import('./client');
+    return new QQClientFactory();
+  }),
 };

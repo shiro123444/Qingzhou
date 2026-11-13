@@ -1,5 +1,5 @@
+import { LazyClientFactory } from '../lazyClientFactory';
 import type { PlatformDefinition } from '../types';
-import { LineClientFactory } from './client';
 import { schema } from './schema';
 
 export const line: PlatformDefinition = {
@@ -15,5 +15,8 @@ export const line: PlatformDefinition = {
   showWebhookUrl: true,
   supportsMarkdown: false,
   supportsMessageEdit: false,
-  clientFactory: new LineClientFactory(),
+  clientFactory: new LazyClientFactory(async () => {
+    const { LineClientFactory } = await import('./client');
+    return new LineClientFactory();
+  }),
 };

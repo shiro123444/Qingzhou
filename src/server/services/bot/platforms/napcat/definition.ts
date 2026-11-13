@@ -5,8 +5,8 @@ import {
   makeUserIdField,
   watchKeywordsField,
 } from '../const';
+import { LazyClientFactory } from '../lazyClientFactory';
 import type { PlatformDefinition } from '../types';
-import { NapCatClientFactory } from './client';
 
 export const napcat: PlatformDefinition = {
   id: 'napcat',
@@ -15,7 +15,10 @@ export const napcat: PlatformDefinition = {
   supportsMarkdown: false,
   supportsMessageEdit: false,
   documentation: { setupGuideUrl: 'https://napneko.github.io/config/basic' },
-  clientFactory: new NapCatClientFactory(),
+  clientFactory: new LazyClientFactory(async () => {
+    const { NapCatClientFactory } = await import('./client');
+    return new NapCatClientFactory();
+  }),
   schema: [
     {
       key: 'applicationId',

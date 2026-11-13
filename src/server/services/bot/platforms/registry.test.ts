@@ -54,24 +54,24 @@ describe('PlatformRegistry', () => {
   });
 
   describe('createClient', () => {
-    it('should delegate to definition.clientFactory.createClient', () => {
+    it('should delegate to definition.clientFactory.createClient', async () => {
       const mockClient = { id: 'test' };
       const mockCreateClient = vi.fn().mockReturnValue(mockClient);
       const registry = new PlatformRegistry();
       registry.register(fakeDef('test', { clientFactory: { createClient: mockCreateClient } }));
 
       const config = { applicationId: 'app-1', credentials: {}, platform: 'test', settings: {} };
-      const result = registry.createClient('test', config);
+      const result = await registry.createClient('test', config);
 
       expect(result).toBe(mockClient);
       expect(mockCreateClient).toHaveBeenCalledWith(config, {});
     });
 
-    it('should throw for unknown platform', () => {
+    it('should throw for unknown platform', async () => {
       const registry = new PlatformRegistry();
       const config = { applicationId: 'app-1', credentials: {}, platform: 'x', settings: {} };
 
-      expect(() => registry.createClient('x', config)).toThrow('not registered');
+      await expect(registry.createClient('x', config)).rejects.toThrow('not registered');
     });
   });
 

@@ -145,6 +145,7 @@ export class GatewayManager {
 
   async stopClient(platform: string, applicationId: string): Promise<void> {
     const key = buildRuntimeKey(platform, applicationId);
+    this.clients.get(key)?.prepareStop();
     await this.operations.run(key, () => this.disposeClient(key));
     log('Stopped client %s', key);
   }
@@ -252,7 +253,8 @@ export class GatewayManager {
     if (this.config.persistentOnly && connectionMode === 'webhook') return 'queued';
     let connection: CordisConnection | undefined;
     const requiresLease =
-      connectionMode !== 'webhook' && ['wechat', 'napcat', 'qq', 'feishu', 'lark'].includes(platform);
+      connectionMode !== 'webhook' &&
+      ['wechat', 'napcat', 'qq', 'feishu', 'lark'].includes(platform);
     const lease = !requiresLease
       ? undefined
       : await ConnectionLease.acquire(getAgentRuntimeRedisClient(), key, () => {
@@ -266,12 +268,10 @@ export class GatewayManager {
     if (requiresLease && !lease) return 'queued';
     try {
       this.assertAcceptingConnections();
-      const client = this.createClient(platform, provider, lease);
-      if (!client) {
-        await lease?.release();
-        return 'queued';
-      }
-      connection = new CordisConnection(client, lease);
+      connection = new CordisConnection(
+        { id: platform, load: () => this.createClient(platform, provider, lease) },
+        lease,
+      );
       this.clients.set(key, connection);
       this.revisions.set(key, this.revision(provider));
       await connection.ready;
@@ -283,7 +283,7 @@ export class GatewayManager {
     }
   }
 
-  private createClient(
+  private async createClient(
     platform: string,
     provider: {
       applicationId: string;
@@ -291,11 +291,10 @@ export class GatewayManager {
       settings?: Record<string, unknown> | null;
     },
     lease?: ConnectionLease,
-  ): PlatformClient | null {
+  ): Promise<PlatformClient> {
     const def = this.definitionByPlatform.get(platform);
     if (!def) {
-      log('No definition registered for platform: %s', platform);
-      return null;
+      throw new Error(`No definition registered for platform: ${platform}`);
     }
 
     const { config } = resolveBotProviderConfig(def, provider);

@@ -350,7 +350,7 @@ export class BotMessageRouter {
       },
     };
 
-    const client = entry.clientFactory.createClient(providerConfig, runtimeContext);
+    const client = await entry.clientFactory.createClient(providerConfig, runtimeContext);
     const adapters = client.createAdapter();
 
     // dmSettings + operatorUserId are needed by `/approve` (to enforce the

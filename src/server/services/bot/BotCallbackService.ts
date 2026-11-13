@@ -437,7 +437,7 @@ export class BotCallbackService {
     const charLimit =
       platform === 'wechat' ? Math.min(configuredLimit || 2000, 2000) : configuredLimit;
 
-    const client = entry.clientFactory.createClient(config, {
+    const client = await entry.clientFactory.createClient(config, {
       replyToMessageId: params.replyToMessageId,
       replyToMessageReceivedAt: params.replyToMessageReceivedAt,
       redisClient: getAgentRuntimeRedisClient() as any,

@@ -1,5 +1,5 @@
+import { LazyClientFactory } from '../lazyClientFactory';
 import type { PlatformDefinition } from '../types';
-import { TelegramClientFactory } from './client';
 import { schema } from './schema';
 
 export const telegram: PlatformDefinition = {
@@ -12,5 +12,8 @@ export const telegram: PlatformDefinition = {
     setupGuideUrl: 'https://lobehub.com/docs/usage/channels/telegram',
   },
   schema,
-  clientFactory: new TelegramClientFactory(),
+  clientFactory: new LazyClientFactory(async () => {
+    const { TelegramClientFactory } = await import('./client');
+    return new TelegramClientFactory();
+  }),
 };

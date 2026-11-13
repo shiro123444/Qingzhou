@@ -1,5 +1,5 @@
+import { LazyClientFactory } from '../lazyClientFactory';
 import type { PlatformDefinition } from '../types';
-import { WechatClientFactory } from './client';
 import { schema } from './schema';
 
 export const wechat: PlatformDefinition = {
@@ -12,5 +12,8 @@ export const wechat: PlatformDefinition = {
   },
   schema,
   supportsMessageEdit: false,
-  clientFactory: new WechatClientFactory(),
+  clientFactory: new LazyClientFactory(async () => {
+    const { WechatClientFactory } = await import('./client');
+    return new WechatClientFactory();
+  }),
 };

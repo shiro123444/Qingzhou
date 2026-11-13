@@ -396,11 +396,11 @@ export interface PlatformDocumentation {
  * - `validateSettings`: validate platform-specific settings — called from UI flow only
  */
 export abstract class ClientFactory {
-  /** Create a PlatformClient instance. Fast and sync — no network calls. */
+  /** Load code and construct a client; transport acquisition belongs to client.start(). */
   abstract createClient(
     config: BotProviderConfig,
     context: BotPlatformRuntimeContext,
-  ): PlatformClient;
+  ): PlatformClient | Promise<PlatformClient>;
 
   /**
    * Verify credentials against the platform API.

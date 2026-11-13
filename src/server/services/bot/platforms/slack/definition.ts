@@ -1,5 +1,5 @@
+import { LazyClientFactory } from '../lazyClientFactory';
 import type { PlatformDefinition } from '../types';
-import { SlackClientFactory } from './client';
 import { DEFAULT_SLACK_CONNECTION_MODE } from './const';
 import { schema } from './schema';
 
@@ -13,5 +13,8 @@ export const slack: PlatformDefinition = {
     setupGuideUrl: 'https://lobehub.com/docs/usage/channels/slack',
   },
   schema,
-  clientFactory: new SlackClientFactory(),
+  clientFactory: new LazyClientFactory(async () => {
+    const { SlackClientFactory } = await import('./client');
+    return new SlackClientFactory();
+  }),
 };
