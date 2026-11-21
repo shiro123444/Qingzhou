@@ -5,6 +5,7 @@ import type {
   ArtifactSnapshot,
   PresentationJob,
 } from '../../../packages/runtime-contracts/src/index';
+import { confirmTestOutline, outlineTestClient } from './outlineTestClient';
 import PresentationStudio from './PresentationStudio';
 
 const t0 = '2026-08-30T10:00:00.000Z';
@@ -46,12 +47,15 @@ describe('PresentationStudio recovery interaction hardening (C-76)', () => {
             resolveCreate = resolve;
           }),
       );
-    render(<PresentationStudio client={baseClient({ createPresentationJob })} />);
+    render(
+      <PresentationStudio
+        agentClient={outlineTestClient}
+        initialTopic={'Busy deck'}
+        client={baseClient({ createPresentationJob })}
+      />,
+    );
 
-    fireEvent.change(screen.getByLabelText('Presentation title'), {
-      target: { value: 'Busy deck' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
+    await confirmTestOutline();
     await screen.findByTestId('presentation-provider-unavailable');
 
     const resubmit = screen.getByTestId('presentation-provider-resubmit');
@@ -82,12 +86,15 @@ describe('PresentationStudio recovery interaction hardening (C-76)', () => {
     const createPresentationJob = vi
       .fn()
       .mockRejectedValue(new Error('HTTP 503 PROVIDER_UNAVAILABLE: still not configured'));
-    render(<PresentationStudio client={baseClient({ createPresentationJob })} />);
+    render(
+      <PresentationStudio
+        agentClient={outlineTestClient}
+        initialTopic={'Still here'}
+        client={baseClient({ createPresentationJob })}
+      />,
+    );
 
-    fireEvent.change(screen.getByLabelText('Presentation title'), {
-      target: { value: 'Still here' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
+    await confirmTestOutline();
     await screen.findByTestId('presentation-provider-unavailable');
 
     fireEvent.click(screen.getByTestId('presentation-provider-resubmit'));
@@ -96,7 +103,7 @@ describe('PresentationStudio recovery interaction hardening (C-76)', () => {
     });
 
     // Failure path: draft intact, hint still shown, no fabricated progress.
-    expect(screen.getByLabelText('Presentation title')).toHaveValue('Still here');
+    expect(screen.getByTestId('outline-slide-1')).toHaveTextContent('Still here');
     expect(screen.getByTestId('presentation-provider-unavailable')).toBeInTheDocument();
     expect(screen.getByTestId('studio-empty-state')).toBeInTheDocument();
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
@@ -110,12 +117,15 @@ describe('PresentationStudio recovery interaction hardening (C-76)', () => {
     const createPresentationJob = vi
       .fn()
       .mockRejectedValue(new Error('HTTP 503 PROVIDER_UNAVAILABLE: not configured'));
-    render(<PresentationStudio client={baseClient({ createPresentationJob })} />);
+    render(
+      <PresentationStudio
+        agentClient={outlineTestClient}
+        initialTopic={'Keyboard deck'}
+        client={baseClient({ createPresentationJob })}
+      />,
+    );
 
-    fireEvent.change(screen.getByLabelText('Presentation title'), {
-      target: { value: 'Keyboard deck' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
+    await confirmTestOutline();
     await screen.findByTestId('presentation-provider-unavailable');
 
     // Resubmit button is keyboard-focusable with a real button contract.
@@ -134,21 +144,14 @@ describe('PresentationStudio recovery interaction hardening (C-76)', () => {
     // Failure keeps the hint mounted so the button stays reachable for AT.
     expect(screen.getByTestId('presentation-provider-unavailable')).toBeInTheDocument();
 
-    // Edit request button is a real button: keyboard focus + activation moves
-    // focus to the composer title input. Two buttons share this aria-label
-    // (the empty state's "Start creating" and the hint's "Edit request"); the
-    // hint is identified by its visible label.
-    const composerTitle = screen.getByLabelText('Presentation title');
-    const editRequest = screen
-      .getAllByRole('button', { name: 'Focus the presentation creator' })
-      .find((el) => el.textContent === 'Edit request');
-    if (!editRequest) throw new Error('Edit request button was not rendered');
+    const editRequest = screen.getByRole('button', { name: 'Focus the presentation creator' });
     editRequest.focus();
     expect(document.activeElement).toBe(editRequest);
     fireEvent.keyDown(editRequest, { key: 'Enter', code: 'Enter' });
+    await waitFor(() => expect(resubmit).not.toBeDisabled());
     fireEvent.click(editRequest);
     await waitFor(() => {
-      expect(document.activeElement).toBe(composerTitle);
+      expect(document.activeElement).toBe(screen.getByLabelText('第 1 页标题'));
     });
   }, 12_000);
 
@@ -167,12 +170,15 @@ describe('PresentationStudio provider unavailable recovery (C-74)', () => {
     const createPresentationJob = vi
       .fn()
       .mockRejectedValue(new Error('HTTP 503 PROVIDER_UNAVAILABLE: PPT Master is not configured'));
-    render(<PresentationStudio client={baseClient({ createPresentationJob })} />);
+    render(
+      <PresentationStudio
+        agentClient={outlineTestClient}
+        initialTopic={'Config deck'}
+        client={baseClient({ createPresentationJob })}
+      />,
+    );
 
-    fireEvent.change(screen.getByLabelText('Presentation title'), {
-      target: { value: 'Config deck' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
+    await confirmTestOutline();
 
     const hint = await screen.findByTestId('presentation-provider-unavailable');
     expect(hint).toHaveTextContent('Presentation generation is currently unavailable');
@@ -191,12 +197,15 @@ describe('PresentationStudio provider unavailable recovery (C-74)', () => {
 
   it('keeps other error codes on the existing plain error alert', async () => {
     const createPresentationJob = vi.fn().mockRejectedValue(new Error('network down mid-request'));
-    render(<PresentationStudio client={baseClient({ createPresentationJob })} />);
+    render(
+      <PresentationStudio
+        agentClient={outlineTestClient}
+        initialTopic={'Net deck'}
+        client={baseClient({ createPresentationJob })}
+      />,
+    );
 
-    fireEvent.change(screen.getByLabelText('Presentation title'), {
-      target: { value: 'Net deck' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
+    await confirmTestOutline();
 
     const errorBox = await screen.findByTestId('presentation-client-error');
     expect(errorBox).toHaveTextContent('Presentation runtime error: RUNTIME_ERROR');
@@ -213,20 +222,19 @@ describe('PresentationStudio provider unavailable recovery (C-74)', () => {
       .fn()
       .mockRejectedValueOnce(new Error('HTTP 503 PROVIDER_UNAVAILABLE: not configured'))
       .mockResolvedValueOnce(queuedJob('job-recovered'));
-    render(<PresentationStudio client={baseClient({ createPresentationJob })} />);
+    render(
+      <PresentationStudio
+        agentClient={outlineTestClient}
+        initialTopic={'Draft deck\nA recovered draft'}
+        client={baseClient({ createPresentationJob })}
+      />,
+    );
 
-    fireEvent.change(screen.getByLabelText('Presentation title'), {
-      target: { value: 'Draft deck' },
-    });
-    fireEvent.change(screen.getByLabelText('Presentation prompt'), {
-      target: { value: 'A recovered draft' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
+    await confirmTestOutline();
 
     await screen.findByTestId('presentation-provider-unavailable');
     // Draft survives the failure for editing/re-submitting.
-    expect(screen.getByLabelText('Presentation title')).toHaveValue('Draft deck');
-    expect(screen.getByLabelText('Presentation prompt')).toHaveValue('A recovered draft');
+    expect(screen.getByTestId('outline-slide-1')).toHaveTextContent('Draft deck');
 
     fireEvent.click(
       screen.getByRole('button', { name: /Resubmit the last presentation request/i }),
@@ -238,7 +246,7 @@ describe('PresentationStudio provider unavailable recovery (C-74)', () => {
     // Exactly the same wire input is re-sent — not a fabricated job.
     expect(createPresentationJob.mock.calls[1][0]).toMatchObject({ title: 'Draft deck' });
     expect(createPresentationJob.mock.calls[1][0]).toMatchObject({
-      prompt: 'A recovered draft',
+      prompt: expect.stringContaining('A recovered draft'),
     });
     await waitFor(() => {
       expect(screen.getByTestId('presentation-job-job-recovered')).toBeInTheDocument();

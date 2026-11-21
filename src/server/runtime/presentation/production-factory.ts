@@ -36,6 +36,11 @@ import type { PresentationPlanner, RuntimeScope } from '../../../../packages/run
 import type { AtomicRuntime } from '../atomic-runtime';
 import { runSkillSteps } from '../skills-plugin';
 import {
+  createPresentationAgentRouter,
+  type PresentationAgentExecution,
+  type PresentationAgentRole,
+} from './agent-model-routing';
+import {
   InMemoryPresentationArtifactStore,
   type PresentationArtifactStore,
 } from './artifact-store';
@@ -64,7 +69,7 @@ import type { PresentationJobRepository } from './file-storage';
 import { createPresentationGenerationCapability } from './generation-capability';
 import type { ImageGenerationCapability } from './image-generation-capability';
 import { PresentationJobEventJournal } from './job-event-journal';
-import type { MultimodalChatPort } from './multimodal-chat-provider';
+import type { MultimodalChatContext, MultimodalChatPort } from './multimodal-chat-provider';
 import { createMultimodalPresentationPlanner } from './multimodal-planner';
 import { createPresentationGenerationPipeline } from './pipeline';
 import type { PlanningContextFactory } from './planning-session';
@@ -414,6 +419,8 @@ export const createPptMasterProductionComposition =
   createPptMasterProductionPresentationComposition;
 
 export interface ProductionPresentationGenerationCompositionOptions {
+  readonly agentChatPorts?: Partial<Record<PresentationAgentRole, MultimodalChatPort>>;
+  readonly agentRoutingFingerprint?: string;
   readonly artifactStore?: PresentationArtifactStore;
   readonly audioTranscriber?: PresentationAudioTranscriber;
   readonly capabilityMemory?: CapabilityMemory;
@@ -429,6 +436,10 @@ export interface ProductionPresentationGenerationCompositionOptions {
   readonly journalLoader?: PresentationJobEventJournalLoader;
   readonly multimodalChatPort?: MultimodalChatPort;
   readonly now?: () => string;
+  readonly onAgentExecution?: (
+    receipt: PresentationAgentExecution,
+    context: MultimodalChatContext,
+  ) => void | Promise<void>;
   readonly planner?: PresentationPlanner;
   readonly planningContextFactory?: PlanningContextFactory;
   readonly prepareCapabilityLibrary?: (scope: RuntimeScope) => Promise<void>;
@@ -466,15 +477,41 @@ export const createProductionPresentationGenerationComposition = (
   }
 
   const visionChatPort = options.visionChatPort ?? options.multimodalChatPort;
+  const agents = options.multimodalChatPort
+    ? createPresentationAgentRouter({
+        defaultPort: options.multimodalChatPort,
+        ports: {
+          ...(options.visionChatPort
+            ? {
+                planning: visionChatPort,
+                design: visionChatPort,
+                assets: visionChatPort,
+                review: visionChatPort,
+                reference: visionChatPort,
+              }
+            : {}),
+          ...options.agentChatPorts,
+        },
+        onExecution: options.onAgentExecution,
+      })
+    : undefined;
+  const contentChat = agents?.port('content');
+  const designChat = agents?.port('design');
+  const planningChat = agents?.port('planning');
+  const assetsChat = agents?.port('assets');
+  const referenceChat = agents?.port('reference');
+  const reviewChat = agents?.port('review');
+  const diagnosisChat = options.agentChatPorts?.diagnosis ? agents?.port('diagnosis') : undefined;
   const planner =
     options.planner ??
     (options.multimodalChatPort
       ? createMultimodalPresentationPlanner({
           // Layout must inspect real template pages and artwork. Keep the user's
           // text model for content compilation and as the layout fallback.
-          chatPort: visionChatPort ?? options.multimodalChatPort,
-          fallbackChatPort: options.multimodalChatPort,
+          chatPort: designChat!,
+          fallbackChatPort: options.agentChatPorts?.design ? undefined : contentChat!,
           defaultSlideCount: options.defaultSlideCount,
+          layoutDiagnosisChat: diagnosisChat,
         })
       : undefined);
 
@@ -485,9 +522,11 @@ export const createProductionPresentationGenerationComposition = (
   const contentCompiler =
     options.contentCompiler ??
     (!options.planner && options.multimodalChatPort
-      ? createPresentationContentCompiler(options.multimodalChatPort, options.defaultSlideCount, {
-          ...(visionChatPort && visionChatPort !== options.multimodalChatPort
-            ? { fallbackChat: visionChatPort }
+      ? createPresentationContentCompiler(contentChat!, options.defaultSlideCount, {
+          ...(!options.agentChatPorts?.content &&
+          visionChatPort &&
+          visionChatPort !== options.multimodalChatPort
+            ? { fallbackChat: designChat! }
             : {}),
           ...(imageBudget === undefined ? {} : { maxRasterVisuals: imageBudget }),
           imageGenerationAvailable: Boolean(options.imageGenerationCapability),
@@ -520,21 +559,21 @@ export const createProductionPresentationGenerationComposition = (
           audioTranscriber: options.audioTranscriber,
           library: options.templateLibrary,
           store: artifactStore,
-          chat: visionChatPort!,
+          chat: referenceChat!,
         })
       : undefined;
   const visualStoryboardPlanner = options.multimodalChatPort
-    ? createPresentationVisualStoryboardPlanner({ chat: visionChatPort! })
+    ? createPresentationVisualStoryboardPlanner({ chat: planningChat! })
     : undefined;
   const visualCritic = options.multimodalChatPort
-    ? createPresentationVisualCritic({ chat: visionChatPort!, store: artifactStore })
+    ? createPresentationVisualCritic({ chat: reviewChat!, store: artifactStore })
     : undefined;
   const revisionAssetPlanner = options.multimodalChatPort
     ? createRevisionAssetPlanner({
-        chatPort: visionChatPort!,
+        chatPort: assetsChat!,
         validateReferenceAssets: createPresentationReferenceValidator({
           store: artifactStore,
-          chat: visionChatPort!,
+          chat: referenceChat!,
         }),
         ...(imageBudget === undefined ? {} : { maxGeneratedSlots: imageBudget }),
         readReusableAssets: async (refs, input) => {
@@ -601,7 +640,7 @@ export const createProductionPresentationGenerationComposition = (
                     ...input,
                     ref: extracted.ref,
                     store: artifactStore,
-                    chat: visionChatPort!,
+                    chat: referenceChat!,
                   })
                 : extracted;
             }
@@ -644,12 +683,9 @@ export const createProductionPresentationGenerationComposition = (
     : undefined;
   const teachingLearning =
     options.teachingMemory && options.templateLibrary && options.multimodalChatPort
-      ? new TeachingLearning(
-          options.teachingMemory,
-          options.templateLibrary,
-          options.multimodalChatPort,
-          { store: artifactStore },
-        )
+      ? new TeachingLearning(options.teachingMemory, options.templateLibrary, contentChat!, {
+          store: artifactStore,
+        })
       : undefined;
   const atomicRuntime: AtomicRuntime | undefined = planner
     ? createPresentationAtomicRuntime({
@@ -666,7 +702,7 @@ export const createProductionPresentationGenerationComposition = (
             ? capabilityMemoryOperations(options.capabilityMemory, options.jobRepository)
             : []),
         ],
-        chatPort: options.multimodalChatPort,
+        chatPort: contentChat,
         worker,
         artifactStore,
         templateLibrary: options.templateLibrary,
@@ -715,7 +751,10 @@ export const createProductionPresentationGenerationComposition = (
       : options.journalLoader;
 
   const composition = createPresentationRuntimeComposition({
+    agentRoutingFingerprint: options.agentRoutingFingerprint,
+    layoutDiagnosisChat: diagnosisChat,
     planningContextFactory: options.planningContextFactory,
+    outlineChatPort: planningChat,
     atomicRuntime,
     collaborationHook: atomicRuntime
       ? (input, context) =>
@@ -724,7 +763,7 @@ export const createProductionPresentationGenerationComposition = (
     contentCompiler,
     capabilityMemory: options.capabilityMemory,
     capabilitySelector: options.multimodalChatPort
-      ? createPresentationCapabilitySelector(options.multimodalChatPort)
+      ? createPresentationCapabilitySelector(planningChat!)
       : undefined,
     prepareCapabilityLibrary: options.prepareCapabilityLibrary,
     teachingMemory: options.teachingMemory,
@@ -742,7 +781,7 @@ export const createProductionPresentationGenerationComposition = (
       : {}),
     ...(options.journalCache ? { journalCache: options.journalCache } : {}),
     ...(journalLoader ? { journalLoader } : {}),
-    ...(options.multimodalChatPort ? { multimodalChatPort: options.multimodalChatPort } : {}),
+    ...(contentChat ? { multimodalChatPort: contentChat } : {}),
     ...(options.now ? { now: options.now } : {}),
   });
 

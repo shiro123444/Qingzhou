@@ -8,6 +8,7 @@ interface RunningOperation {
   operationId: string;
   scope?: string;
   threadId?: string | null;
+  transport?: 'native' | 'gateway';
 }
 
 /**
@@ -29,9 +30,10 @@ export const useGatewayReconnect = (
   runningOperation: RunningOperation | null | undefined,
 ) => {
   const agentGatewayUrl = useServerConfigStore((s) => s.serverConfig.agentGatewayUrl);
+  const native = useServerConfigStore((s) => s.serverConfig.agentRuntimeMode === 'native');
 
   useSWR(
-    runningOperation && topicId && agentGatewayUrl
+    runningOperation && topicId && (agentGatewayUrl || native)
       ? ['reconnectGateway', runningOperation.operationId]
       : null,
     async () => {
@@ -40,6 +42,7 @@ export const useGatewayReconnect = (
       await useChatStore.getState().reconnectToGatewayOperation({
         assistantMessageId: runningOperation.assistantMessageId,
         operationId: runningOperation.operationId,
+        transport: runningOperation.transport,
         scope: runningOperation.scope,
         threadId: runningOperation.threadId,
         topicId,

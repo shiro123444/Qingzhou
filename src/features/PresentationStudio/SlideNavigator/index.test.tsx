@@ -85,6 +85,10 @@ describe('SlideNavigator', () => {
     // Right moves forward
     fireEvent.keyDown(grid, { key: 'ArrowRight' });
     expect(onSelect).toHaveBeenLastCalledWith('s-2');
+    expect(screen.getByTestId('slide-navigator-item-s-2')).toHaveFocus();
+    fireEvent.keyDown(grid, { key: 'End' });
+    expect(onSelect).toHaveBeenLastCalledWith('s-3');
+    expect(screen.getByTestId('slide-navigator-item-s-3')).toHaveFocus();
 
     // Left and Up move backward with wrap-around
     fireEvent.keyDown(grid, { key: 'ArrowLeft' });

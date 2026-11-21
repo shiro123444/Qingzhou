@@ -1,4 +1,10 @@
 export async function register() {
+  if (process.env.NEXT_RUNTIME === 'nodejs' && process.env.QINGZHOU_AGENT_WORKER === '1') {
+    const { getServerDB } = await import('@/database/server');
+    const { ensureNativeAgentWorkerHost } = await import('./server/runtime/tasks/production');
+    const host = ensureNativeAgentWorkerHost(await getServerDB());
+    await host.run(async () => undefined);
+  }
   // In local development, write debug logs to logs/server.log
   if (process.env.NODE_ENV !== 'production' && process.env.NEXT_RUNTIME === 'nodejs') {
     await import('./libs/debug-file-logger');

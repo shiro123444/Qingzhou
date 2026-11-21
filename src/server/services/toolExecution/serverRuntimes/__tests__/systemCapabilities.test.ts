@@ -25,6 +25,24 @@ afterEach(() => {
 });
 
 describe('system capabilities authorization', () => {
+  it('omits and rejects PPT operations when the deployment disables the plugin', async () => {
+    vi.stubEnv('QINGZHOU_PLUGINS', 'music,sites');
+    vi.stubEnv('CORDIS_PPT_MASTER_ROOT', '/configured/ppt');
+    vi.spyOn(AgentService.prototype, 'getAgentConfig').mockResolvedValue({
+      plugins: [SystemCapabilityIdentifier],
+    } as any);
+    const assemble = vi.spyOn(compositionModule, 'getDefaultPresentationComposition');
+    const runtime = await systemCapabilitiesRuntime.factory(context);
+    const catalog = JSON.parse((await runtime.catalog()).content);
+    expect(catalog.presentationConfigured).toBe(false);
+    expect(
+      catalog.tools.some((tool: { name: string }) => tool.name.startsWith('presentation.')),
+    ).toBe(false);
+    await expect(
+      runtime.invoke({ operation: 'presentation.diagram.render', input: '{}' }),
+    ).rejects.toThrow('Capability unavailable');
+    expect(assemble).not.toHaveBeenCalled();
+  });
   it('rejects missing authenticated scope before reading agent configuration', async () => {
     const read = vi.spyOn(AgentService.prototype, 'getAgentConfig');
     await expect(

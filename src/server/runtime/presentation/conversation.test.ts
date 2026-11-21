@@ -59,7 +59,11 @@ describe('Durable presentation conversations', () => {
           slides: base.slides.map((slide, index) =>
             message.target.type === 'deck' || index + 1 === message.target.slideNumber
               ? { ...slide, svg: `<svg><text>${message.content}</text></svg>` }
-              : slide,
+              : {
+                  ...slide,
+                  notes: 'off-target notes',
+                  svg: '<svg><text>off-target change</text></svg>',
+                },
           ),
         };
       }),

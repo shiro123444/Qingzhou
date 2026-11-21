@@ -1,10 +1,16 @@
+import { createHash } from 'node:crypto';
+
+import { currentPresentationAgentJob } from './agent-execution-context';
 import { InMemoryPresentationArtifactStore } from './artifact-store';
+import type { PresentationContentCompiler } from './content-intent';
 import { createDeckVisualSystem } from './deck-visual-system';
+import type { StoredPresentationJob } from './file-storage';
 import type { PresentationGenerationCapability } from './generation-capability';
 import { PresentationGenerationPort } from './generation-port';
 import type { ImageGenerationCapability } from './image-generation-capability';
 import type { PresentationRevisionAssetPlanner } from './revision-assets';
 import type { PresentationVisualCritic } from './visual-critic';
+import { presentationStageHandoff } from './stage-handoff';
 import { presentationStoryboardInputFingerprint } from './visual-storyboard';
 
 const scope = { request: new Request('https://example.test'), userId: 'u1', sessionId: 's1' };
@@ -200,108 +206,120 @@ describe('PresentationGenerationPort', () => {
     expect(capability.plan).not.toHaveBeenCalled();
     expect(saved.job.messages[0].status).toBe('applied');
   });
-  it('restores complete raster bindings before checking a resumed draft for missing assets', async () => {
-    const directedInput = {
-      ...input,
-      slideCount: 1,
-      options: {
-        contentIntents: {
-          slides: [
+  it.each(['current-server-model-route', 'old-prepared-model-route'])(
+    'restores complete raster bindings without reviving a cached model route in a resumed draft (%s)',
+    async (preparedRoute) => {
+      const directedInput = {
+        ...input,
+        slideCount: 1,
+        options: {
+          contentIntents: {
+            slides: [
+              {
+                slideId: 'cover',
+                claim: 'Keep the prepared figure',
+                formulas: [],
+                visualKind: 'illustration',
+                visualReason: 'Prepared image',
+                visuals: [
+                  {
+                    id: 'visual-1',
+                    kind: 'illustration',
+                    brief: 'A campus',
+                    required: true,
+                    renderer: 'image',
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      };
+      const preparedInput = {
+        ...directedInput,
+        options: {
+          ...directedInput.options,
+          agentRoutingFingerprint: preparedRoute,
+          generatedImageSlots: [
             {
               slideId: 'cover',
-              claim: 'Keep the prepared figure',
-              formulas: [],
-              visualKind: 'illustration',
-              visualReason: 'Prepared image',
-              visuals: [
-                {
-                  id: 'visual-1',
-                  kind: 'illustration',
-                  brief: 'A campus',
-                  required: true,
-                  renderer: 'image',
-                },
-              ],
+              slotId: 'initial-assets:visual-1',
+              state: 'ready',
+              assetRefs: [{ ref: 'image-owned' }],
+              visualBinding: { visualId: 'visual-1', kind: 'illustration', origin: 'generated' },
             },
           ],
         },
-      },
-    };
-    const preparedInput = {
-      ...directedInput,
-      options: {
-        ...directedInput.options,
-        generatedImageSlots: [
-          {
-            slideId: 'cover',
-            slotId: 'initial-assets:visual-1',
-            state: 'ready',
-            assetRefs: [{ ref: 'image-owned' }],
-            visualBinding: { visualId: 'visual-1', kind: 'illustration', origin: 'generated' },
-          },
-        ],
-      },
-    };
-    let saved = {
-      initialAssetsComplete: true,
-      input: directedInput,
-      job: {
-        jobId: 'job-cached-raster',
-        projectId: 'project',
-        title: input.title,
-        aspectRatio: '16:9',
-        slideCount: 1,
-        state: 'failed',
-        messages: [],
-        revisions: [],
-        createdAt: '2026-01-01T00:00:00.000Z',
-        updatedAt: '2026-01-01T00:00:00.000Z',
-      },
-      preparedAssets: {
-        initial: { input: preparedInput, assetArtifactIds: ['image-owned'], intents: [] },
-      },
-    };
-    const capability = {
-      execute: vi.fn(async (_scope, _input, context) => ({
-        artifacts: [],
-        plan: context.initialPlan,
-      })),
-      plan: vi.fn(),
-    } as unknown as PresentationGenerationCapability;
-    const prepare = vi.fn();
-    const port = new PresentationGenerationPort(
-      {
-        artifactStore: new InMemoryPresentationArtifactStore(),
-        capability,
-        contextFactory: () => ({
-          plannerContext: {},
-          workerContext: {
-            convert: vi.fn(),
-            qualityCheck: vi.fn(),
-            jobId: 'ignored',
-            workspace: { path: '/tmp', write: vi.fn() },
-          },
-        }),
-        repository: {
-          getJob: vi.fn(async () => structuredClone(saved) as never),
-          saveJob: vi.fn(async (_scope, snapshot) => {
-            saved = structuredClone(snapshot) as typeof saved;
-          }),
+      };
+      let saved = {
+        initialAssetsComplete: true,
+        input: directedInput,
+        job: {
+          jobId: 'job-cached-raster',
+          projectId: 'project',
+          title: input.title,
+          aspectRatio: '16:9',
+          slideCount: 1,
+          state: 'failed',
+          messages: [],
+          revisions: [],
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
         },
-        revisionAssetPlanner: { prepare, prepareInitial: vi.fn() } as never,
-      },
-      scope,
-    );
-    await port.retryJob('job-cached-raster');
-    await vi.waitFor(async () =>
-      expect((await port.getJob('job-cached-raster'))?.state).toBe('completed'),
-    );
-    expect(prepare).not.toHaveBeenCalled();
-    expect(vi.mocked(capability.execute).mock.calls[0]?.[1].options?.generatedImageSlots).toEqual(
-      preparedInput.options.generatedImageSlots,
-    );
-    expect(saved.initialAssetsComplete).toBe(true);
-  });
+        preparedAssets: {
+          initial: { input: preparedInput, assetArtifactIds: ['image-owned'], intents: [] },
+        },
+      };
+      const capability = {
+        execute: vi.fn(async (_scope, _input, context) => ({
+          artifacts: [],
+          plan: context.initialPlan,
+        })),
+        plan: vi.fn(),
+      } as unknown as PresentationGenerationCapability;
+      const prepare = vi.fn(async () => ({
+        input: preparedInput,
+        assetArtifactIds: ['image-owned'],
+        intents: [],
+      }));
+      const port = new PresentationGenerationPort(
+        {
+          agentRoutingFingerprint: 'current-server-model-route',
+          artifactStore: new InMemoryPresentationArtifactStore(),
+          capability,
+          contextFactory: () => ({
+            plannerContext: {},
+            workerContext: {
+              convert: vi.fn(),
+              qualityCheck: vi.fn(),
+              jobId: 'ignored',
+              workspace: { path: '/tmp', write: vi.fn() },
+            },
+          }),
+          repository: {
+            getJob: vi.fn(async () => structuredClone(saved) as never),
+            saveJob: vi.fn(async (_scope, snapshot) => {
+              saved = structuredClone(snapshot) as typeof saved;
+            }),
+          },
+          revisionAssetPlanner: { prepare, prepareInitial: vi.fn() } as never,
+        },
+        scope,
+      );
+      await port.retryJob('job-cached-raster');
+      await vi.waitFor(async () =>
+        expect((await port.getJob('job-cached-raster'))?.state).toBe('completed'),
+      );
+      expect(prepare).toHaveBeenCalledTimes(preparedRoute === 'current-server-model-route' ? 0 : 1);
+      expect(vi.mocked(capability.execute).mock.calls[0]?.[1].options?.generatedImageSlots).toEqual(
+        preparedInput.options.generatedImageSlots,
+      );
+      expect(
+        vi.mocked(capability.execute).mock.calls[0]?.[1].options?.agentRoutingFingerprint,
+      ).toBe('current-server-model-route');
+      expect(saved.initialAssetsComplete).toBe(true);
+    },
+  );
   it('retains minor review findings without rewriting a publishable deck', async () => {
     const initial = { ...samplePlan, designSpec: { contentPolicyVersion: 1 } };
     const capability = {
@@ -358,6 +376,110 @@ describe('PresentationGenerationPort', () => {
       final: { passed: true, issues: [expect.objectContaining({ severity: 'minor' })] },
     });
   });
+
+  it.each([
+    ['server-model-a', 'server-model-b'],
+    [undefined, 'server-model-b'],
+    ['server-model-a', undefined],
+  ])(
+    'owns role routing on the server and rechecks an approved deck after model changes with the right job context (route: %s to %s)',
+    async (initialRoute, nextRoute) => {
+      const jobId = 'model-routed-export';
+      const store = new InMemoryPresentationArtifactStore();
+      let saved: StoredPresentationJob | undefined;
+      const initial = { ...samplePlan, designSpec: { contentPolicyVersion: 1 } };
+      const observedJobs: Array<string | undefined> = [];
+      const review = vi.fn<PresentationVisualCritic['review']>(async () => {
+        await Promise.resolve();
+        observedJobs.push(currentPresentationAgentJob());
+        return { schemaVersion: 1, passed: true, summary: 'Independent review passed', issues: [] };
+      });
+      const capability = {
+        execute: vi.fn(),
+        plan: vi.fn(),
+      } as unknown as PresentationGenerationCapability;
+      vi.mocked(capability.execute).mockImplementation(
+        async (_scope, _input, context) =>
+          ({
+            artifacts: [],
+            plan: await context.preparePlan!(context.initialPlan ?? initial),
+          }) as never,
+      );
+      const createPort = (agentRoutingFingerprint?: string) =>
+        new PresentationGenerationPort(
+          {
+            agentRoutingFingerprint,
+            artifactStore: store,
+            capability,
+            idFactory: () => jobId,
+            repository: {
+              getJob: vi.fn(async () => (saved ? structuredClone(saved) : null)),
+              saveJob: vi.fn(async (_scope, snapshot) => {
+                saved = structuredClone(snapshot);
+              }),
+            },
+            contextFactory: () => ({
+              plannerContext: {},
+              workerContext: {
+                convert: vi.fn(),
+                jobId: 'ignored',
+                qualityCheck: vi.fn(),
+                workspace: { path: '/tmp', write: vi.fn() },
+              },
+            }),
+            visualCritic: { review },
+          },
+          scope,
+        );
+      const first = createPort(initialRoute);
+      expect(currentPresentationAgentJob()).toBeUndefined();
+      try {
+        await first.createJob({
+          ...input,
+          options: { agentRoutingFingerprint: 'client-forged-routing' },
+        });
+        await vi.waitFor(async () => expect((await first.getJob(jobId))?.state).toBe('completed'));
+        expect(review).toHaveBeenCalledOnce();
+        expect(saved!.input.options?.agentRoutingFingerprint).toBe(initialRoute);
+        expect(saved!.plan?.designSpec?.templateVisualReview).toMatchObject({
+          final: { passed: true },
+        });
+        expect(
+          (saved!.plan?.designSpec?.templateVisualReview as { agentRoutingFingerprint?: string })
+            .agentRoutingFingerprint,
+        ).toBe(initialRoute);
+        await first.retryJob(jobId);
+        await vi.waitFor(async () => expect((await first.getJob(jobId))?.state).toBe('completed'));
+        // The same server route and unchanged reviewed geometry remain reusable.
+        expect(review).toHaveBeenCalledOnce();
+      } finally {
+        await first.dispose();
+      }
+      const changed = createPort(nextRoute);
+      try {
+        await changed.retryJob(jobId);
+        await vi.waitFor(async () =>
+          expect((await changed.getJob(jobId))?.state).toBe('completed'),
+        );
+        expect(review).toHaveBeenCalledTimes(2);
+        expect(saved!.input.options?.agentRoutingFingerprint).toBe(nextRoute);
+        expect(saved!.plan?.designSpec?.templateVisualReview).toMatchObject({
+          agentRoutingFingerprint: nextRoute,
+          final: { passed: true },
+        });
+        expect(saved!.plan?.designSpec?.agentRoutingFingerprint).toBe(nextRoute);
+        expect(observedJobs).toEqual([jobId, jobId]);
+        expect(
+          vi
+            .mocked(capability.execute)
+            .mock.calls.map((call) => call[1].options?.agentRoutingFingerprint),
+        ).toEqual([initialRoute, initialRoute, nextRoute]);
+        expect(currentPresentationAgentJob()).toBeUndefined();
+      } finally {
+        await changed.dispose();
+      }
+    },
+  );
 
   it('updates the visible draft after visual repair even when export remains blocked', async () => {
     const store = new InMemoryPresentationArtifactStore();
@@ -440,11 +562,66 @@ describe('PresentationGenerationPort', () => {
     expect(job!.error?.code).toBe('PRESENTATION_QUALITY_FAILED');
   });
 
+  it('checkpoints direct creation as an outline before content compilation and reuses it on retry', async () => {
+    const slides = [{ id: 'slide-1', title: '晚间开放', keyPoints: ['周五晚九点闭馆'] }];
+    const outline = vi.fn(async () => ({ slides }));
+    const compile = vi.fn(async () => {
+      throw Object.assign(new Error('Busy'), { code: 'CHAT_UNAVAILABLE' });
+    });
+    const port = new PresentationGenerationPort(
+      {
+        artifactStore: new InMemoryPresentationArtifactStore(),
+        capability: { execute: vi.fn() } as unknown as PresentationGenerationCapability,
+        contentCompiler: { compile } satisfies PresentationContentCompiler,
+        outlineCapability: { execute: outline, id: 'presentation.outline' },
+        contextFactory: () => ({
+          plannerContext: {},
+          workerContext: {
+            convert: vi.fn(),
+            jobId: 'direct',
+            qualityCheck: vi.fn(),
+            workspace: { path: '/tmp', write: vi.fn() },
+          },
+        }),
+        idFactory: () => 'job-direct',
+      },
+      scope,
+    );
+    await port.createJob({
+      ...input,
+      prompt: '周五开放至晚上九点。',
+      options: { creationMode: 'direct' },
+      slideCount: 1,
+    });
+    await vi.waitFor(async () => expect((await port.getJob('job-direct'))?.state).toBe('failed'));
+    expect(outline).toHaveBeenCalledWith(
+      expect.objectContaining({
+        exactSlideCount: 1,
+        instruction: expect.stringContaining('晚上九点'),
+      }),
+      expect.anything(),
+    );
+    expect(compile).toHaveBeenCalledWith(
+      expect.objectContaining({ options: expect.objectContaining({ outline: slides }) }),
+      expect.anything(),
+    );
+    await port.retryJob('job-direct');
+    await vi.waitFor(() => expect(compile).toHaveBeenCalledTimes(2));
+    expect(outline).toHaveBeenCalledOnce();
+  });
+
   it('returns queued immediately and completes through the generation capability', async () => {
     const store = new InMemoryPresentationArtifactStore(() => '2026-01-01T00:00:00.000Z');
     const capability = {
       execute: vi.fn(async () => ({
         artifacts: [
+          {
+            artifactId: 'cover',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            type: 'svg',
+            metadata: { slideNumber: 1 },
+            status: 'ready' as const,
+          },
           {
             artifactId: 'a1',
             createdAt: '2026-01-01T00:00:00.000Z',
@@ -476,16 +653,21 @@ describe('PresentationGenerationPort', () => {
       scope,
     );
 
-    const queued = await port.createJob(input);
+    const chatOrigin = { agentId: 'agent', topicId: 'topic', messageId: 'message' };
+    const queued = await port.createJob({ ...input, options: { chatOrigin } });
     expect(queued).toMatchObject({ jobId: 'job-1', state: 'queued' });
     await new Promise((resolve) => setTimeout(resolve, 0));
     await expect(port.getJob('job-1')).resolves.toMatchObject({
       state: 'completed',
-      artifactIds: ['a1'],
+      artifactIds: ['cover', 'a1'],
+      delivery: { coverId: 'cover', pptxId: 'a1', versionId: expect.any(String) },
+      chatOrigin,
     });
+    expect((await port.listJobs(chatOrigin)).jobs).toHaveLength(1);
+    expect((await port.listJobs({ ...chatOrigin, messageId: 'another' })).jobs).toEqual([]);
     expect(capability.execute).toHaveBeenCalledWith(
       scope,
-      input,
+      { ...input, options: { chatOrigin } },
       expect.objectContaining({ plannerContext: expect.objectContaining({ scope }) }),
     );
   });
@@ -611,7 +793,9 @@ describe('PresentationGenerationPort', () => {
 
   it('runs requested image slots before planning so assets can be referenced by the planner', async () => {
     const imageGenerationCapability = {
-      generate: vi.fn(async () => ({ slots: [{ slotId: 'hero', state: 'ready' }] })),
+      generate: vi.fn(async () => ({
+        slots: [{ slideId: 's1', slotId: 'hero', state: 'ready', assetRefs: [] }],
+      })),
     } as unknown as ImageGenerationCapability;
     const capability = {
       execute: vi.fn(async (_scope: unknown, receivedInput: typeof input) => ({
@@ -658,11 +842,142 @@ describe('PresentationGenerationPort', () => {
       scope,
       expect.objectContaining({
         options: expect.objectContaining({
-          generatedImageSlots: [{ slotId: 'hero', state: 'ready' }],
+          generatedImageSlots: [{ slideId: 's1', slotId: 'hero', state: 'ready', assetRefs: [] }],
         }),
       }),
       expect.anything(),
     );
+  });
+
+  it('persists ready image slot bindings and owned artifact IDs before the author starts and resumes without a second generation', async () => {
+    const jobId = 'image-handoff-checkpoint';
+    const assetRef = 'owned-generated-figure';
+    const store = new InMemoryPresentationArtifactStore();
+    let saved: StoredPresentationJob | undefined;
+    let atAuthorStart: StoredPresentationJob | undefined;
+    let failAuthor: ((reason: Error) => void) | undefined;
+    const imageGenerationCapability = {
+      generate: vi.fn<ImageGenerationCapability['generate']>(async () => {
+        await store.put(scope, {
+          artifactId: assetRef,
+          bytes: png,
+          mimeType: 'image/png',
+          type: 'image',
+          name: 'figure.png',
+        });
+        return {
+          jobId,
+          scope,
+          slots: [
+            { slideId: 'slide-1', slotId: 'hero', state: 'ready', assetRefs: [{ ref: assetRef }] },
+          ],
+        };
+      }),
+    };
+    const execute = vi.fn<PresentationGenerationCapability['execute']>(async () => {
+      atAuthorStart = saved && structuredClone(saved);
+      return new Promise<never>((_resolve, reject) => {
+        failAuthor = reject;
+      });
+    });
+    const createPort = (imageProvider?: ImageGenerationCapability) =>
+      new PresentationGenerationPort(
+        {
+          artifactStore: store,
+          capability: { execute, plan: vi.fn() } as unknown as PresentationGenerationCapability,
+          contextFactory: () => ({
+            plannerContext: {},
+            workerContext: {
+              convert: vi.fn(),
+              jobId: 'ignored',
+              qualityCheck: vi.fn(),
+              workspace: { path: '/tmp', write: vi.fn() },
+            },
+          }),
+          idFactory: () => jobId,
+          imageGenerationCapability: imageProvider,
+          repository: {
+            getJob: vi.fn(async () => (saved ? structuredClone(saved) : null)),
+            saveJob: vi.fn(async (_scope, snapshot) => {
+              saved = structuredClone(snapshot);
+            }),
+          },
+        },
+        scope,
+      );
+    const port = createPort(imageGenerationCapability as unknown as ImageGenerationCapability);
+    const readyBinding = {
+      slideId: 'slide-1',
+      slotId: 'hero',
+      state: 'ready',
+      assetRefs: [{ ref: assetRef }],
+      visualBinding: { visualId: 'hero', kind: 'illustration', origin: 'generated' },
+    };
+    try {
+      await port.createJob({
+        ...input,
+        slideCount: 1,
+        options: {
+          imageSlots: [{ slideId: 'slide-1', slotId: 'hero', prompt: 'Draw the approved figure' }],
+          contentIntents: {
+            slides: [
+              {
+                slideId: 'slide-1',
+                claim: 'Keep the approved figure',
+                formulas: [],
+                visualKind: 'illustration',
+                visualReason: 'Explain the approved content',
+                visuals: [
+                  {
+                    id: 'hero',
+                    kind: 'illustration',
+                    renderer: 'image',
+                    fidelity: 'conceptual',
+                    required: true,
+                    brief: 'Draw the approved figure',
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      });
+      await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+      expect(atAuthorStart?.input.options?.generatedImageSlots).toEqual([readyBinding]);
+      expect(atAuthorStart?.job.artifactIds).toContain(assetRef);
+      expect(atAuthorStart?.plan).toBeUndefined();
+      expect(saved?.job.state).toBe('running');
+      expect(saved?.input.options?.generatedImageSlots).toEqual([readyBinding]);
+      expect(saved?.job.artifactIds).toContain(assetRef);
+      await expect(store.get(scope, assetRef)).resolves.toMatchObject({ artifactId: assetRef });
+      failAuthor!(Object.assign(new Error('Author step failed'), { code: 'WORKER_FAILED' }));
+      await vi.waitFor(async () => expect((await port.getJob(jobId))?.state).toBe('failed'));
+      expect(saved?.input.options?.generatedImageSlots).toEqual([readyBinding]);
+      expect(saved?.job.artifactIds).toContain(assetRef);
+      const receipt = saved?.stageHandoffs?.['image:["slide-1","hero"]'];
+      expect(receipt).toMatchObject({
+        schemaVersion: 1,
+        stage: 'image',
+        assetDigests: { [assetRef]: expect.stringMatching(/^[a-f0-9]{64}$/u) },
+      });
+      const resumed = createPort();
+      try {
+        execute.mockResolvedValueOnce({ artifacts: [] } as never);
+        await resumed.retryJob(jobId);
+        await vi.waitFor(async () =>
+          expect((await resumed.getJob(jobId))?.state).toBe('completed'),
+        );
+        expect(execute).toHaveBeenCalledTimes(2);
+        expect(execute.mock.calls.at(-1)?.[1].options?.generatedImageSlots).toEqual([readyBinding]);
+        expect(saved?.stageHandoffs?.['image:["slide-1","hero"]']).toEqual(receipt);
+        expect(imageGenerationCapability.generate).toHaveBeenCalledOnce();
+      } finally {
+        await resumed.dispose();
+      }
+    } finally {
+      failAuthor?.(Object.assign(new Error('Test cleanup'), { code: 'WORKER_FAILED' }));
+      await port.dispose();
+    }
   });
 
   it('cancels an in-flight generation without fabricating an artifact', async () => {
@@ -1346,6 +1661,174 @@ describe('PresentationGenerationPort completed-state template application', () =
         return samplePlan;
       }),
     }) as unknown as PresentationGenerationCapability;
+
+  it.each(['exact', 'missing storyboard', 'deck', 'mixed', 'late deck'] as const)(
+    'reuses only the published storyboard for scoped edits (%s) while still reviewing and exporting',
+    async (scenario) => {
+      const versionId = 'published';
+      const board = {
+        deckRationale: 'Keep the approved cover',
+        inputFingerprint: 'a'.repeat(40),
+        rhythm: ['cover'],
+        schemaVersion: 1 as const,
+        slides: [
+          {
+            archetypeId: 'f1',
+            assetMode: 'none' as const,
+            componentIds: [],
+            compositionIntent: 'Title',
+            continuity: 'Paper',
+            familyId: 'f1',
+            role: 'cover' as const,
+            slideId: samplePlan.slides[0].slideId,
+          },
+        ],
+        templateId: pptxApplication.templateId,
+        versionId: pptxApplication.versionId,
+      };
+      const visual = {
+        ...templateVisual,
+        designProgram: {
+          tokens: { palette: ['#123456'], typography: ['serif'], artwork: [], surface: [] },
+          archetypes: [],
+          cadence: { rules: [] },
+          flexibilities: [],
+          invariants: [],
+          schemaVersion: 1,
+        },
+      };
+      const deck = {
+        ...input,
+        slideCount: 1,
+        template: board.templateId,
+        options: {
+          outline: [{ title: 'Cover' }],
+          style: 'business',
+          templateVersionId: board.versionId,
+          templateVisual: visual,
+          ...(scenario === 'missing storyboard' ? {} : { visualStoryboard: board }),
+          deckVisualSystem: createDeckVisualSystem({ ...input, options: { style: 'business' } }),
+        },
+      };
+      const oldReceipt = presentationStageHandoff(
+        'storyboard',
+        'deck',
+        board.inputFingerprint,
+        board,
+        'previous-route',
+      );
+      let saved: StoredPresentationJob = {
+        initialAssetsComplete: true,
+        input: deck,
+        plan: samplePlan,
+        stageHandoffs: { 'storyboard:deck': oldReceipt },
+        job: {
+          jobId: 'revision',
+          versionId,
+          title: input.title,
+          state: 'completed',
+          createdAt: '2026-01-01',
+          updatedAt: '2026-01-01',
+          delivery: { versionId, pptxId: 'base' },
+          messages:
+            scenario === 'mixed'
+              ? [
+                  {
+                    requestId: 'rewrite',
+                    target: { type: 'deck' },
+                    content: 'Reconsider the outline',
+                    createdAt: '',
+                    status: 'queued',
+                  },
+                ]
+              : [],
+        },
+      };
+      const planStoryboard = vi.fn(async ({ jobInput }) => ({
+        ...board,
+        inputFingerprint: presentationStoryboardInputFingerprint(jobInput),
+      }));
+      let port: PresentationGenerationPort;
+      let added = false;
+      const review = vi.fn(async () => {
+        if (scenario === 'late deck' && !added) {
+          added = true;
+          await port.sendMessage('revision', {
+            requestId: 'late',
+            target: { type: 'deck' },
+            content: 'Revise the full outline',
+          });
+        }
+        return { issues: [], passed: true, schemaVersion: 1, summary: 'OK' };
+      });
+      const application = { ...pptxApplication, visual };
+      const templateLibrary = {
+        get: vi.fn(async () => ({ ...pptxProfile, source: { kind: 'plan', planId: 'base' } })),
+        resolve: vi.fn(async () => application),
+      };
+      const capability = createCapability();
+      port = new PresentationGenerationPort(
+        {
+          artifactStore: new InMemoryPresentationArtifactStore(),
+          capability,
+          agentRoutingFingerprint: 'changed-route',
+          contextFactory: () => ({
+            plannerContext: {},
+            workerContext: {
+              convert: vi.fn(),
+              qualityCheck: vi.fn(),
+              jobId: 'ignored',
+              workspace: { write: vi.fn(), path: '/tmp' },
+            },
+          }),
+          repository: {
+            getJob: async () => structuredClone(saved),
+            saveJob: async (_scope, snapshot) => {
+              saved = structuredClone(snapshot);
+            },
+          },
+          templateLibrary: templateLibrary as never,
+          visualCritic: { review } as never,
+          visualStoryboardPlanner: { plan: planStoryboard },
+        },
+        scope,
+      );
+      await port.sendMessage(
+        'revision',
+        scenario === 'deck'
+          ? {
+              requestId: 'edit',
+              content: 'Change the outline',
+              target: { type: 'deck' },
+            }
+          : {
+              requestId: 'edit',
+              content: 'Change the cover heading',
+              target: { type: 'slide', slideNumber: 1 },
+              annotation: {
+                slideId: 'cover',
+                expectedVersionId: versionId,
+                baseSvgHash: createHash('sha256').update(samplePlan.slides[0].svg).digest('hex'),
+                elementIndices: [0],
+                region: { x: 0, y: 0, width: 0.6, height: 0.3 },
+              },
+            },
+      );
+      await vi.waitFor(() => expect(saved.job.state).toBe('completed'));
+      expect(planStoryboard).toHaveBeenCalledTimes(scenario === 'exact' ? 0 : 1);
+      expect(templateLibrary.get).toHaveBeenCalledTimes(
+        scenario === 'exact' || scenario === 'late deck' ? 0 : 1,
+      );
+      expect(review).toHaveBeenCalled();
+      expect(saved.job.delivery?.pptxId).toBe(readyArtifact.artifactId);
+      expect(saved.job.delivery?.versionId).not.toBe(versionId);
+      if (scenario === 'exact') {
+        expect(saved.input.options?.visualStoryboard).toEqual(board);
+        expect(saved.stageHandoffs?.['storyboard:deck']).toEqual(oldReceipt);
+      }
+      await port.dispose();
+    },
+  );
 
   it('reexports a completed plan without reviving an older failed edit', async () => {
     let saved: any = {

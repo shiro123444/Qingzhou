@@ -166,6 +166,16 @@ export class GeneralChatAgent implements Agent {
         }
       }
 
+      if (
+        this.config.mandatoryInterventionTools?.includes(identifier) &&
+        this.matchesAlwaysPolicy(
+          this.getToolInterventionConfig(toolCalling, state) as HumanInterventionConfig,
+          toolArgs,
+        )
+      ) {
+        toolsNeedingIntervention.push(toolCalling);
+        continue;
+      }
       // Phase 2: Headless mode - fully automated for async tasks
       if (approvalMode === 'headless') {
         if (globalBlocked && globalPolicy === 'always') {

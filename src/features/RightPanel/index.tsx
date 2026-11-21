@@ -4,11 +4,23 @@ import { createStaticStyles, cx } from 'antd-style';
 import { memo, Suspense, useState } from 'react';
 
 import Loading from '@/components/Loading/BrandTextLoading';
+import { panelResizeTiming } from '@/features/GlassMotion/panelMotion';
 import { useGlobalStore } from '@/store/global';
 import { systemStatusSelectors } from '@/store/global/selectors';
 import { glassSurface } from '@/styles/liquidGlass';
 
 const styles = createStaticStyles(({ css, cssVar }) => ({
+  // The resizer explicitly sets transition:none during a drag. Leave that path alone.
+  frame: css`
+    > div:not([style*='transition: none']) {
+      transition: width ${panelResizeTiming} !important;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      > div:not([style*='transition: none']) {
+        transition: none !important;
+      }
+    }
+  `,
   surface: css`
     overflow: hidden;
     display: flex;
@@ -43,6 +55,7 @@ interface RightPanelProps extends Omit<
 
 const RightPanel = memo<RightPanelProps>(
   ({
+    className,
     maxWidth = 600,
     minWidth = 300,
     children,
@@ -64,6 +77,8 @@ const RightPanel = memo<RightPanelProps>(
 
     return (
       <DraggablePanel
+        stableLayout
+        className={cx(styles.frame, className)}
         backgroundColor="transparent"
         expand={expand}
         expandable={false}
@@ -83,7 +98,7 @@ const RightPanel = memo<RightPanelProps>(
         }}
         {...rest}
       >
-        <div className={cx(glassSurface, styles.surface)} data-qz-glass="panel">
+        <div className={cx(glassSurface, styles.surface)} data-qz-glass="panel" inert={!expand}>
           <Suspense fallback={<Loading debugId={'RightPanel'} />}>{children}</Suspense>
         </div>
       </DraggablePanel>

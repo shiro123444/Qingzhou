@@ -6,6 +6,7 @@ import {
   BusinessMobileRoutesWithMainLayout,
   BusinessMobileRoutesWithoutMainLayout,
 } from '@/business/client/BusinessMobileRoutes';
+import { builtinPluginElement } from '@/features/BuiltinPlugins';
 import { dynamicElement, dynamicLayout, ErrorBoundary, redirectElement } from '@/utils/router';
 
 // Mobile router configuration (declarative mode)
@@ -321,8 +322,20 @@ export const mobileRoutes: RouteObject[] = [
       },
 
       {
-        element: dynamicElement(() => import('@/routes/(main)/sites'), 'Mobile > Sites'),
+        element: builtinPluginElement(
+          'sites',
+          () => import('@/routes/(main)/sites'),
+          'Mobile > Sites',
+        ),
         path: 'sites',
+      },
+      {
+        element: builtinPluginElement(
+          'presentation',
+          () => import('@/routes/(main)/presentation'),
+          'Mobile > Presentation > Studio',
+        ),
+        path: 'presentation',
       },
       // Default route - home page
       {
@@ -373,7 +386,11 @@ export const mobileRoutes: RouteObject[] = [
   ...BusinessMobileRoutesWithoutMainLayout,
 
   {
-    element: dynamicElement(() => import('@/routes/share/sites/[siteId]'), 'Mobile > Public Blog'),
+    element: builtinPluginElement(
+      'sites',
+      () => import('@/routes/share/sites/[siteId]'),
+      'Mobile > Public Blog',
+    ),
     path: '/sites/view/:siteId',
   },
   // Share topic route (outside main layout)

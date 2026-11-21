@@ -5,6 +5,7 @@ import nodePath from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { GET as publicSite } from '@/app/(backend)/api/sites/public/[id]/route';
 import type { MultimodalChatPort } from '@/server/runtime/presentation/multimodal-chat-provider';
 import * as userChat from '@/server/runtime/presentation/user-chat-provider';
 import type { Site } from '@/server/runtime/sites/contracts';
@@ -84,6 +85,25 @@ afterEach(async () => {
 });
 
 describe('site runtime HTTP boundary', () => {
+  it('rejects private and public site endpoints before consulting storage when disabled', async () => {
+    vi.stubEnv('QINGZHOU_PLUGINS', 'music,presentation');
+    const storage = vi.spyOn(siteRuntime, 'getSitesStore');
+    try {
+      expect((await post('sites.list', {})).status).toBe(404);
+      expect(
+        (
+          await publicSite(new Request('https://qingzhou.test'), {
+            params: Promise.resolve({ id: site.id }),
+          })
+        ).status,
+      ).toBe(404);
+      expect(siteRuntime.getSitesRuntime).not.toHaveBeenCalled();
+      expect(storage).not.toHaveBeenCalled();
+      expect(userChat.createUserChatProvider).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
   it('runs the production education profile with the authenticated model and writes only public stages', async () => {
     const education = await siteRuntime.createProductionSitesRuntime(
       { store: host.store },

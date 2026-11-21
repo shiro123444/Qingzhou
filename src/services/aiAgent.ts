@@ -1,6 +1,7 @@
-import type { ExecAgentAppContext, ExecAgentResult } from '@lobechat/types';
+import type { ExecAgentAppContext, ExecAgentResult, UserInterventionConfig } from '@lobechat/types';
 
 import { lambdaClient } from '@/libs/trpc/client';
+import type { UiAttention } from '@/types/uiAttention';
 
 export type { ExecAgentResult };
 
@@ -15,11 +16,12 @@ export type { ExecAgentResult };
  * can validate it independently.
  */
 export interface ResumeApprovalParam {
-  decision: 'approved' | 'rejected' | 'rejected_continue';
+  decision: 'approved' | 'rejected' | 'rejected_continue' | 'answered';
   /** ID of the pending `role='tool'` message this decision targets. */
   parentMessageId: string;
   /** Optional user-supplied rejection reason (only meaningful for rejected variants). */
   rejectionReason?: string;
+  response?: Record<string, unknown>;
   /** tool_call_id of the pending tool call being approved/rejected. */
   toolCallId: string;
 }
@@ -50,6 +52,8 @@ export interface ExecAgentTaskParams {
    * `agent_operations.trigger` column reflects the real source.
    */
   trigger?: string;
+  uiAttention?: UiAttention;
+  userInterventionConfig?: UserInterventionConfig;
 }
 
 /**
@@ -128,6 +132,9 @@ export interface UpdateClientTaskThreadStatusParams {
 }
 
 class AiAgentService {
+  async getOperationStatus(operationId: string) {
+    return lambdaClient.aiAgent.getOperationStatus.query({ operationId });
+  }
   /**
    * Execute a single Agent task.
    * Returns the operationId needed to connect to the Agent Gateway.

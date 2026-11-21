@@ -1,11 +1,14 @@
 import debug from 'debug';
 
+import type { LobeChatDatabase } from '@/database/type';
 import { appEnv } from '@/envs/app';
+import { isNativeAgentRuntimeEnabled } from '@/server/runtime/tasks/mode';
 
 import { AgentStateManager } from './AgentStateManager';
 import { GatewayStreamNotifier } from './GatewayStreamNotifier';
 import { inMemoryAgentStateManager } from './InMemoryAgentStateManager';
 import { inMemoryStreamEventManager } from './InMemoryStreamEventManager';
+import { PostgresAgentStateManager } from './PostgresAgentStateManager';
 import { getAgentRuntimeRedisClient } from './redis';
 import { StreamEventManager } from './StreamEventManager';
 import { type IAgentStateManager, type IStreamEventManager } from './types';
@@ -29,8 +32,13 @@ const isQueueModeEnabled = (): boolean => {
 
 /**
  * Create AgentStateManager based on configuration
+ * Native mode uses authoritative PostgreSQL checkpoints without a cache TTL.
  */
-export const createAgentStateManager = (): IAgentStateManager => {
+export const createAgentStateManager = (database?: LobeChatDatabase): IAgentStateManager => {
+  if (isNativeAgentRuntimeEnabled())
+    return new PostgresAgentStateManager(
+      database ?? (async () => (await import('@/database/server')).getServerDB()),
+    );
   // When queue mode is disabled, always use InMemory for simplicity
   if (!isQueueModeEnabled()) {
     log('Queue mode disabled, using InMemoryAgentStateManager');
@@ -62,12 +70,12 @@ export const createStreamEventManager = (): IStreamEventManager => {
   if (isRedisAvailable()) {
     log('Redis available, using StreamEventManager');
     manager = new StreamEventManager();
-  } else if (!isQueueModeEnabled()) {
+  } else if (!isQueueModeEnabled() && !isNativeAgentRuntimeEnabled()) {
     log('Redis unavailable and queue mode disabled, using InMemoryStreamEventManager');
     manager = inMemoryStreamEventManager;
   } else {
     throw new Error(
-      'Redis is required when AGENT_RUNTIME_MODE=queue. Please configure `REDIS_URL`.',
+      'Redis is required for distributed agent event streams. Please configure `REDIS_URL`.',
     );
   }
 

@@ -1,6 +1,7 @@
 import debug from 'debug';
 import type { Context } from 'hono';
 
+import { isNativeAgentRuntimeEnabled } from '@/server/runtime/tasks/mode';
 import { runHeartbeatTick } from '@/server/services/taskRunner/heartbeatTick';
 
 const log = debug('lobe-server:workflows:task:heartbeat-tick');
@@ -11,6 +12,7 @@ export interface HeartbeatTickPayload {
 }
 
 export async function heartbeatTick(c: Context) {
+  if (isNativeAgentRuntimeEnabled()) return c.json({ success: true, managedBy: 'native-worker' });
   try {
     const body = (await c.req.json()) as HeartbeatTickPayload;
     const { taskId, userId } = body;

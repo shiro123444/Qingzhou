@@ -3,13 +3,7 @@ import type { BriefArtifacts } from '../brief';
 // ── Task type aliases ──
 
 export type TaskStatus =
-  | 'backlog'
-  | 'canceled'
-  | 'completed'
-  | 'failed'
-  | 'paused'
-  | 'running'
-  | 'scheduled';
+  'backlog' | 'canceled' | 'completed' | 'failed' | 'paused' | 'running' | 'scheduled';
 
 export type TaskPriority = 0 | 1 | 2 | 3 | 4;
 
@@ -94,6 +88,7 @@ export interface TaskSchedulerContext {
   // the fuse threshold (currently 3) we stop re-arming until the user resolves
   // the urgent brief.
   consecutiveFailures?: number;
+  nativeGeneration?: string;
   // ISO timestamp when the latest tick was scheduled. Informational only.
   scheduledAt?: string;
   // QStash messageId (or LocalScheduler scheduleId) for the next tick. Used to
@@ -272,6 +267,7 @@ export interface TaskDetailActivity {
   runningOperation?: {
     assistantMessageId: string;
     operationId: string;
+    transport?: 'native' | 'gateway';
     scope?: string;
     threadId?: string | null;
   } | null;

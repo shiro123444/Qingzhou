@@ -1,5 +1,12 @@
 import debug from 'debug';
 
+import { isNativeAgentRuntimeEnabled } from '@/server/runtime/tasks/mode';
+import {
+  collectNativeCallbackIntents,
+  NATIVE_THREAD_CALLBACK,
+  TASK_COMPLETION_CALLBACK,
+} from '@/server/runtime/tasks/wakeHooks';
+import { NativeWakeStore } from '@/server/runtime/tasks/wakeStore';
 import {
   BOT_CALLBACK_PATH,
   normalizeBotPausePayload,
@@ -43,7 +50,7 @@ function frozenBotPayload(event: AnyHookEvent, payload: Record<string, unknown>)
 
 export interface HookDispatchFailure {
   code: WebhookFailureCode | 'LOCAL_HANDLER_FAILED';
-  delivery: 'fetch' | 'qstash' | 'local' | 'sql-outbox';
+  delivery: 'fetch' | 'qstash' | 'local' | 'sql-outbox' | 'native';
   hookId: string;
   hookType: AgentHookType;
   operationId: string;
@@ -159,7 +166,19 @@ export class HookDispatcher {
             hookId: hook.id,
             hookType: type,
           };
-          if (hook.webhook.url === BOT_CALLBACK_PATH) {
+          if (
+            isNativeAgentRuntimeEnabled() &&
+            [NATIVE_THREAD_CALLBACK, TASK_COMPLETION_CALLBACK].includes(hook.webhook.url)
+          ) {
+            const commands = collectNativeCallbackIntents(operationId, type, event, [hook]);
+            const store = new NativeWakeStore(async () =>
+              (await import('@/database/server')).getServerDB(),
+            );
+            for (const command of commands) {
+              assertStepLease?.();
+              await store.enqueue(command);
+            }
+          } else if (hook.webhook.url === BOT_CALLBACK_PATH) {
             // Internal callbacks enter SQL, not a self-HTTP request or QStash fallback.
             await enqueueBotOutbox(frozenBotPayload(event, payload), assertStepLease).catch(() => {
               throw new WebhookDeliveryError('OUTBOX_PERSIST_FAILED');

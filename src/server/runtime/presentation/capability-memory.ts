@@ -1,4 +1,3 @@
-import { ownedLearningDirectory, withAccountData } from '../learning-lifecycle/files';
 import { createHash, randomUUID } from 'node:crypto';
 import { link, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -7,9 +6,11 @@ import { z } from 'zod';
 
 import type { PresentationPlan, RuntimeScope } from '../../../../packages/runtime-contracts/src';
 import type { AtomicOperation } from '../atomic-runtime';
+import { ownedLearningDirectory, withAccountData } from '../learning-lifecycle/files';
 import { composeCapabilityPolicy } from './capability-composition';
 import { PRESENTATION_CONTENT_BUDGET } from './content-intent';
 import { assertPresentationPublishable, inspectPresentationContent } from './content-quality';
+import { designReferenceSchema } from './design-reference';
 import type { PresentationJobRepository } from './file-storage';
 import {
   type RepresentativeTrial,
@@ -37,6 +38,13 @@ const capsuleSchema = z
         planId: z.string().optional(),
         familyId: z.string().optional(),
         archetypeId: z.string().optional(),
+        workspaceKind: z.enum(['style', 'layout']).optional(),
+        workspaceId: z.string().max(180).optional(),
+        sourceDigest: z
+          .string()
+          .regex(/^[a-f\d]{64}$/u)
+          .optional(),
+        aspectRatio: z.string().max(20).optional(),
         evidencePages: z.array(z.number().int().positive()).max(100),
       })
       .strict(),
@@ -44,6 +52,7 @@ const capsuleSchema = z
     rules: z.array(z.string().max(1800)).max(24),
     palette: z.array(z.string().regex(/^#[a-f\d]{6}$/iu)).max(10),
     layout: templateDesignProgramSchema.shape.archetypes.element.optional(),
+    designReference: designReferenceSchema.optional(),
     recipe: z
       .enum([
         'formula-with-explanation',
@@ -108,7 +117,16 @@ const trialRecordSchema = z
   })
   .strict();
 export type CapabilityTrialRecord = z.infer<typeof trialRecordSchema>;
-type MemoryKind = 'capsules' | 'outcomes' | 'trials';
+const referenceWorkspaceSchema = z
+  .object({
+    workspaceId: z.string().regex(/^[\w-]+$/u),
+    templateId: z.string().min(1),
+    versionId: z.string().min(1),
+    observedPages: z.array(z.number().int().positive()).min(1).max(100),
+    sourceHash: z.string().regex(/^[a-f\d]{64}$/u),
+  })
+  .strict();
+type MemoryKind = 'capsules' | 'outcomes' | 'trials' | 'references';
 
 const isUserVerdict = (result: Outcome['result']): boolean =>
   result === 'accepted' || result === 'rejected';
@@ -123,7 +141,16 @@ const supersededOutcomeIds = (outcomes: Outcome[]): Set<string> => {
   return superseded;
 };
 export interface CapabilityMemory {
-  candidates?: (scope: RuntimeScope, query: string) => Promise<CapabilityCapsule[]>;
+  resolveWorkspaces?: (
+    scope: RuntimeScope,
+    workspaceIds: readonly string[],
+  ) => Promise<CapabilityCapsule[]>;
+  candidates?: (
+    scope: RuntimeScope,
+    query: string,
+    aspectRatio?: string,
+    options?: { includeMeasuredStyles?: boolean },
+  ) => Promise<CapabilityCapsule[]>;
   compose: (
     scope: RuntimeScope,
     ids: string[],
@@ -179,9 +206,12 @@ const layoutRoleTerms = {
 
 const observedTemplateAtom = (capsule: CapabilityCapsule) =>
   capsule.kind !== 'render-recipe' &&
-  Boolean(
-    capsule.source.templateId && capsule.source.versionId && capsule.source.evidencePages.length,
-  );
+  (Boolean(
+    capsule.source.workspaceKind && capsule.source.workspaceId && capsule.source.sourceDigest,
+  ) ||
+    Boolean(
+      capsule.source.templateId && capsule.source.versionId && capsule.source.evidencePages.length,
+    ));
 
 /** User-scoped immutable evidence on the same persistent volume as presentations. */
 export class FileCapabilityCapsuleStore implements CapabilityMemory {
@@ -189,6 +219,68 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
     private readonly root: string,
     private readonly now = () => new Date().toISOString(),
   ) {}
+
+  /** Trusted import links a workspace to real, account-owned visual observations.
+   * It does not mark either the reference or generated output as accepted. */
+  async bindReferenceWorkspace(
+    scope: RuntimeScope,
+    input: z.infer<typeof referenceWorkspaceSchema>,
+  ) {
+    const binding = referenceWorkspaceSchema.parse(input);
+    await this.save(scope, 'references', binding.workspaceId, binding);
+  }
+
+  /** Trusted host import: reference rules are observed design data, not a successful trial. */
+  async importReference(
+    scope: RuntimeScope,
+    draft: Omit<CapabilityCapsule, 'id' | 'schemaVersion' | 'createdAt'>,
+  ) {
+    if (
+      !draft.source.workspaceId ||
+      !draft.source.sourceDigest ||
+      draft.source.workspaceKind !== draft.kind
+    )
+      throw new Error('A reference must identify its workspace and content digest');
+    if (draft.kind === 'layout') {
+      const workspaceId = draft.source.workspaceId.split('/')[0];
+      const binding = await this.read(
+        path.join(this.directory(scope, 'references'), `${hash(workspaceId)}.json`),
+        referenceWorkspaceSchema,
+      );
+      if (
+        binding &&
+        draft.source.evidencePages.every((page) => binding.observedPages.includes(page))
+      )
+        draft = {
+          ...draft,
+          source: { ...draft.source, templateId: binding.templateId, versionId: binding.versionId },
+        };
+    }
+    const capsule = capsuleSchema.parse({
+      ...draft,
+      id: `capsule-${hash(draft).slice(0, 40)}`,
+      schemaVersion: 1,
+      createdAt: this.now(),
+    });
+    const existing = await this.read(
+      path.join(this.directory(scope, 'capsules'), `${hash(capsule.id)}.json`),
+      capsuleSchema,
+    );
+    if (!existing) await this.save(scope, 'capsules', capsule.id, capsule);
+    for (const previous of await this.list(scope, 'capsules', capsuleSchema)) {
+      if (
+        previous.id === capsule.id ||
+        previous.source.workspaceKind !== capsule.source.workspaceKind ||
+        previous.source.workspaceId !== capsule.source.workspaceId
+      )
+        continue;
+      const file = path.join(this.directory(scope, 'capsules'), `${hash(previous.id)}.json`);
+      await rename(file, `${file}.retired`).catch((error) => {
+        if (!missing(error)) throw error;
+      });
+    }
+    return existing ?? capsule;
+  }
 
   private directory(scope: RuntimeScope, kind: MemoryKind) {
     if (!scope.userId?.trim() || !scope.sessionId?.trim())
@@ -303,6 +395,7 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
     for (const previous of await this.list(scope, 'capsules', capsuleSchema)) {
       if (
         previous.kind === 'render-recipe' ||
+        previous.source.workspaceKind !== undefined ||
         previous.source.templateId !== visual.templateId ||
         previous.source.versionId !== visual.versionId ||
         currentIds.has(previous.id)
@@ -458,7 +551,12 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
     return { active, rejected };
   }
 
-  private async rankedCandidates(scope: RuntimeScope, query: string, includeObserved = false) {
+  private async rankedCandidates(
+    scope: RuntimeScope,
+    query: string,
+    includeObserved = false,
+    includeMeasuredStyles = false,
+  ) {
     const outcomes = await this.effectiveOutcomes(scope);
     const { active, rejected } = await this.promoted(scope, outcomes);
     const reliability = new Map<string, number>();
@@ -489,27 +587,126 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
           score: [...terms].filter((term) => words.has(term)).length,
           reliability: Math.max(-5, Math.min(5, reliability.get(capsule.id) ?? 0)),
           verified: Number(active.has(capsule.id)),
+          observed: Number(
+            Boolean(
+              capsule.source.workspaceKind === 'layout' &&
+              capsule.source.templateId &&
+              capsule.source.versionId &&
+              capsule.source.evidencePages.length,
+            ),
+          ),
         };
       });
     return scored
-      .filter((item) => item.score > 0)
+      .filter(
+        (item) =>
+          item.score > 0 ||
+          (includeMeasuredStyles &&
+            item.capsule.kind === 'style' &&
+            Boolean(
+              item.capsule.designReference?.style?.flat ||
+              item.capsule.designReference?.style?.grid ||
+              item.capsule.designReference?.style?.sparseDecoration,
+            )) ||
+          (includeObserved &&
+            item.observed &&
+            item.capsule.kind === 'layout' &&
+            item.capsule.designReference?.slots?.length),
+      )
       .sort(
         (a, b) =>
           b.score - a.score ||
           b.verified - a.verified ||
+          b.observed - a.observed ||
           b.reliability - a.reliability ||
           a.capsule.id.localeCompare(b.capsule.id),
       );
   }
 
-  async candidates(scope: RuntimeScope, query: string) {
-    const ranked = await this.rankedCandidates(scope, query, true);
-    return ['style', 'layout', 'render-recipe'].flatMap((kind) =>
-      ranked
-        .filter(({ capsule }) => capsule.kind === kind)
-        .slice(0, 8)
-        .map(({ capsule }) => capsule),
+  async resolveWorkspaces(scope: RuntimeScope, workspaceIds: readonly string[]) {
+    const capsules = await this.list(scope, 'capsules', capsuleSchema);
+    return workspaceIds.flatMap((workspaceId) => {
+      const capsule = capsules.find(
+        (item) =>
+          item.source.workspaceId === workspaceId && item.source.workspaceKind === item.kind,
+      );
+      return capsule ? [capsule] : [];
+    });
+  }
+
+  async candidates(
+    scope: RuntimeScope,
+    query: string,
+    aspectRatio?: string,
+    options?: { includeMeasuredStyles?: boolean },
+  ) {
+    const ranked = (
+      await this.rankedCandidates(scope, query, true, options?.includeMeasuredStyles)
+    ).filter(
+      ({ capsule }) =>
+        !aspectRatio || !capsule.source.aspectRatio || capsule.source.aspectRatio === aspectRatio,
     );
+    return ['style', 'layout', 'render-recipe'].flatMap((kind) => {
+      const matches = ranked
+        .filter(({ capsule }) => capsule.kind === kind)
+        .map(({ capsule }) => capsule);
+      if (kind !== 'layout') {
+        if (kind === 'style' && options?.includeMeasuredStyles)
+          return matches
+            .filter(
+              (capsule) =>
+                capsule.designReference?.style?.flat ||
+                capsule.designReference?.style?.grid ||
+                capsule.designReference?.style?.sparseDecoration,
+            )
+            .slice(0, 8);
+        return matches.slice(0, 8);
+      }
+      const essential = new Map<string, CapabilityCapsule>();
+      for (const item of matches) {
+        const slots = item.designReference?.slots ?? [];
+        const role =
+          item.layout?.roles.includes('process') && slots.some((s) => s.kind === 'object')
+            ? 'process'
+            : item.layout?.roles.includes('data') && slots.some((s) => s.kind === 'table')
+              ? 'table'
+              : item.layout?.roles.includes('cover') && slots.some((s) => s.kind === 'title')
+                ? 'cover'
+                : item.layout?.roles.includes('comparison') &&
+                    slots.filter((s) => s.kind === 'object').length === 2
+                  ? 'comparison'
+                  : item.layout?.roles.includes('content') &&
+                      slots.filter((s) => s.kind === 'object').length === 3
+                    ? 'three-column'
+                    : undefined;
+        for (const type of ['picture', 'object', 'chart'] as const) {
+          const count = slots.filter((slot) => slot.kind === type).length;
+          const key = `${item.source.aspectRatio}:${type}:${count}`;
+          if (count && !essential.has(key)) essential.set(key, item);
+        }
+        if (role && !essential.has(`${item.source.aspectRatio}:${role}`))
+          essential.set(`${item.source.aspectRatio}:${role}`, item);
+      }
+      const groups = new Map<string, CapabilityCapsule>();
+      for (const item of matches) {
+        const types = [
+          ...new Set(item.designReference?.slots?.map((slot) => slot.kind) ?? []),
+        ].sort();
+        const key = JSON.stringify([
+          item.source.aspectRatio,
+          item.layout?.roles[0],
+          types,
+          item.designReference?.slots?.filter((slot) => slot.kind === 'object').length,
+          item.designReference?.slots?.filter((slot) => slot.kind === 'picture').length,
+        ]);
+        if (!groups.has(key)) groups.set(key, item);
+      }
+      return [
+        ...new Map(
+          [...essential.values(), ...groups.values(), ...matches].map((item) => [item.id, item]),
+        ).values(),
+      ].slice(0, 24);
+    });
   }
 
   async search(
@@ -541,8 +738,8 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
   }
 
   async compose(scope: RuntimeScope, ids: string[], includeObserved = false) {
-    if (ids.length > 6 || new Set(ids).size !== ids.length)
-      throw new Error('Compose up to six distinct capabilities');
+    if (ids.length > 10 || new Set(ids).size !== ids.length)
+      throw new Error('Compose up to ten distinct capabilities');
     const { active, rejected } = await this.promoted(scope);
     const available = new Set(
       (await this.list(scope, 'capsules', capsuleSchema)).map(({ id }) => id),
@@ -580,8 +777,7 @@ export class FileCapabilityCapsuleStore implements CapabilityMemory {
     if (input.result === 'passed' || input.result === 'accepted') {
       assertPresentationPublishable(input.plan);
       const visual = input.plan.designSpec?.templateVisualReview as
-        | { final?: { passed?: boolean } }
-        | undefined;
+        { final?: { passed?: boolean } } | undefined;
       if (!visual?.final?.passed || !inspectPresentationContent(input.plan).passed)
         throw new Error('Promotion requires both visual and semantic quality evidence');
     }
@@ -723,7 +919,7 @@ export function capabilityMemoryOperations(
         'Compose verified atoms across templates: one style anchor, task-specific layouts and rendering recipes. Current task and content budgets take precedence; record only actual per-page use.',
       agent: { contexts: ['presentation.intake', 'skills'], maxCalls: 2 },
       input: z
-        .object({ ids: z.array(z.string()).max(6), includeObserved: z.boolean().optional() })
+        .object({ ids: z.array(z.string()).max(10), includeObserved: z.boolean().optional() })
         .strict(),
       execute: ({ ids, includeObserved }, ctx) => memory.compose(ctx.scope, ids, includeObserved),
     },

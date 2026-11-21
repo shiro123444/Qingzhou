@@ -13,6 +13,8 @@ import { eq } from 'drizzle-orm';
 import type * as ModelBankModule from 'model-bank';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { AiAgentService } from '@/server/services/aiAgent';
+
 import { aiAgentRouter } from '../aiAgent';
 import { cleanupTestUser, createTestUser } from './integration/setup';
 
@@ -127,6 +129,62 @@ describe('AI Agent Router Integration Tests', () => {
   const createTestContext = () => ({
     userId,
     jwtPayload: { userId },
+  });
+
+  describe('mentionBot', () => {
+    it('persists the question in the recipient conversation through the scoped Cordis service', async () => {
+      const caller = aiAgentRouter.createCaller(createTestContext());
+      const receipt = await caller.mentionBot({
+        source: 'music',
+        agentId: testAgentId,
+        prompt: 'Explain the chorus',
+      });
+      const [topic] = await serverDB.select().from(topics).where(eq(topics.id, receipt.topicId));
+      expect(topic).toMatchObject({ userId, agentId: testAgentId });
+      const thread = await serverDB
+        .select()
+        .from(messages)
+        .where(eq(messages.topicId, receipt.topicId));
+      expect(thread).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ userId, role: 'user', content: 'Explain the chorus' }),
+        ]),
+      );
+    });
+    it('verifies the plugin profile, ownership and manual approval policy before dispatch', async () => {
+      const dispatch = vi.spyOn(AiAgentService.prototype, 'execAgent').mockResolvedValue({
+        success: true,
+        topicId: 'test-topic',
+      } as Awaited<ReturnType<AiAgentService['execAgent']>>);
+      const caller = aiAgentRouter.createCaller(createTestContext());
+      const request = {
+        source: 'presentation' as const,
+        agentId: testAgentId,
+        prompt: 'Outline a talk',
+      };
+      try {
+        vi.stubEnv('QINGZHOU_PLUGINS', 'music');
+        await expect(caller.mentionBot(request)).rejects.toThrow();
+        vi.stubEnv('QINGZHOU_PLUGINS', 'presentation');
+        await expect(caller.mentionBot({ ...request, agentId: 'not-owned' })).rejects.toThrow();
+        await expect(
+          caller.mentionBot({ ...request, deviceId: 'other' } as typeof request),
+        ).rejects.toThrow();
+        expect(dispatch).not.toHaveBeenCalled();
+        await expect(caller.mentionBot(request)).resolves.toEqual({ topicId: 'test-topic' });
+        expect(dispatch).toHaveBeenCalledWith({
+          agentId: testAgentId,
+          prompt: 'Outline a talk',
+          clientRuntime: 'web',
+          trigger: 'chat',
+          disableLocalSystem: true,
+          userInterventionConfig: { approvalMode: 'manual' },
+        });
+      } finally {
+        vi.unstubAllEnvs();
+        dispatch.mockRestore();
+      }
+    });
   });
 
   describe('execAgent', () => {

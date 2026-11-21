@@ -1,5 +1,6 @@
 import { memo, type ReactNode, useEffect, useRef, useState } from 'react';
 
+import { liquidGlass } from '@/styles/liquidGlass';
 import { styles } from './style';
 
 export type StudioNoticeTone = 'error' | 'success' | 'warning';
@@ -44,7 +45,7 @@ export const StudioNotice = memo<StudioNoticeProps>(
       <div
         data-testid={testId}
         role={role ?? (tone === 'success' ? 'status' : 'alert')}
-        className={`${styles.notice} ${
+        className={`${liquidGlass} ${styles.notice} ${
           tone === 'success'
             ? styles.noticeSuccess
             : tone === 'warning'

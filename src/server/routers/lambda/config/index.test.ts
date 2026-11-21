@@ -22,6 +22,23 @@ beforeEach(async () => {
 
 describe('configRouter', () => {
   describe('getGlobalConfig', () => {
+    it('publishes native background chat without requiring an external gateway', async () => {
+      vi.stubEnv('AGENT_RUNTIME_MODE', 'native');
+      try {
+        expect((await router.getGlobalConfig()).serverConfig.agentRuntimeMode).toBe('native');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+    it('publishes the deployment plugin selection for SPA route activation', async () => {
+      vi.stubEnv('QINGZHOU_PLUGINS', 'music,sites');
+      try {
+        const response = await router.getGlobalConfig();
+        expect(response.serverConfig.builtinPlugins).toEqual(['music', 'sites']);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
     describe('Model Provider env', () => {
       describe('OPENAI_MODEL_LIST', () => {
         it('custom deletion, addition, and renaming of models', async () => {
@@ -147,18 +164,13 @@ describe('configRouter', () => {
         });
       });
 
-      it('should enable the default DeepSeek provider without a server API key', async () => {
-        const originalApiKey = process.env.DEEPSEEK_API_KEY;
-        delete process.env.DEEPSEEK_API_KEY;
-
-        const response = await router.getGlobalConfig();
-
-        expect(response.serverConfig.aiProvider?.deepseek?.enabled).toBe(true);
-
-        if (originalApiKey === undefined) {
-          delete process.env.DEEPSEEK_API_KEY;
-        } else {
-          process.env.DEEPSEEK_API_KEY = originalApiKey;
+      it('enables the configured default Qingzhou provider without a server API key', async () => {
+        vi.stubEnv('NEXUS_API_KEY', undefined);
+        try {
+          const response = await router.getGlobalConfig();
+          expect(response.serverConfig.aiProvider?.nexus?.enabled).toBe(true);
+        } finally {
+          vi.unstubAllEnvs();
         }
       });
     });

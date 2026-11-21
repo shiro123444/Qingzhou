@@ -4,6 +4,7 @@ import { memo, useMemo } from 'react';
 
 import { type ActionKeys } from '@/features/ChatInput';
 import { ChatInput } from '@/features/Conversation';
+import CreatePresentationAction from '@/features/PresentationDelivery/CreateAction';
 import { useModelSupportImageOutput } from '@/hooks/useModelSupportImageOutput';
 import { useAgentStore } from '@/store/agent';
 import { agentSelectors } from '@/store/agent/selectors';
@@ -41,6 +42,7 @@ const MainChatInput = memo(() => {
   return (
     <ChatInput
       skipScrollMarginWithList
+      extraActionItems={[{ key: 'create-presentation', children: <CreatePresentationAction /> }]}
       isConfigLoading={isAgentConfigLoading}
       leftActions={leftActions}
       rightActions={rightActions}

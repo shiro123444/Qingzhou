@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import type {
   TaskDetailActivity,
   TaskDetailActivityAuthor,
@@ -10,6 +12,7 @@ import type {
   WorkspaceData,
 } from '@lobechat/types';
 import { TRPCError } from '@trpc/server';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import { AgentModel } from '@/database/models/agent';
 import { BriefModel } from '@/database/models/brief';
@@ -17,7 +20,11 @@ import { TaskModel } from '@/database/models/task';
 import { TaskTopicModel } from '@/database/models/taskTopic';
 import { TopicModel } from '@/database/models/topic';
 import { UserModel } from '@/database/models/user';
+import { agentWakeJobs } from '@/database/schemas/agentWake';
+import { tasks as taskTable } from '@/database/schemas/task';
 import type { LobeChatDatabase } from '@/database/type';
+import { isNativeAgentRuntimeEnabled } from '@/server/runtime/tasks/mode';
+import { taskWakeVersion } from '@/server/runtime/tasks/wakeIdentity';
 
 import { AiAgentService } from '../aiAgent';
 import { BriefService } from '../brief';
@@ -256,9 +263,32 @@ export class TaskService {
     if (status === 'completed' || status === 'failed' || status === 'canceled')
       extra.completedAt = new Date();
     if (errorMsg) extra.error = errorMsg;
+    if (isNativeAgentRuntimeEnabled())
+      extra.context = sql`coalesce(${taskTable.context}, '{}'::jsonb) || jsonb_build_object('scheduler', coalesce(${taskTable.context}->'scheduler', '{}'::jsonb) || ${JSON.stringify({ nativeGeneration: randomUUID() })}::jsonb)`;
 
     const task = await this.taskModel.updateStatus(resolved.id, status, extra);
     if (!task) throw new TRPCError({ code: 'NOT_FOUND', message: 'Task not found' });
+    if (isNativeAgentRuntimeEnabled()) {
+      // A user control action retires earlier intents, including uncertain ones, without replaying them.
+      // A later start receives a new generation and a new occurrence identity.
+      await this.db
+        .update(agentWakeJobs)
+        .set({
+          status: 'cancelled',
+          leaseOwner: null,
+          leaseUntil: null,
+          errorCode: 'superseded_by_user_control',
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(agentWakeJobs.userId, this.userId),
+            sql`${agentWakeJobs.payload}->>'taskId' = ${task.id}`,
+            sql`${agentWakeJobs.payload}->>'version' is distinct from ${taskWakeVersion(task)}`,
+            inArray(agentWakeJobs.status, ['queued', 'claimed', 'dispatched', 'unknown']),
+          ),
+        );
+    }
 
     // Stamp the schedule run-count window each time the user (re)starts a
     // scheduled task. The cron dispatcher itself flips a task running →

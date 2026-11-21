@@ -7,7 +7,7 @@ import {
 } from './document-tools';
 
 export const presentationToolOptions = z.object({
-  search: z.boolean().default(false),
+  search: z.boolean().default(true),
   skillIds: z.array(z.string().min(1).max(160)).max(12).default([]),
 });
 export interface PresentationContextServices {

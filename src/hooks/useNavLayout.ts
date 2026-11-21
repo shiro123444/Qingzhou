@@ -2,10 +2,15 @@ import { HomeIcon, SearchIcon } from 'lucide-react';
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { builtinPluginForPath, isBuiltinPluginEnabled } from '@/config/builtinPlugins';
 import { getRouteById } from '@/config/routes';
 import { useGlobalStore } from '@/store/global';
 import { SidebarTabKey } from '@/store/global/initialState';
-import { featureFlagsSelectors, useServerConfigStore } from '@/store/serverConfig';
+import {
+  builtinPluginSelectors,
+  featureFlagsSelectors,
+  useServerConfigStore,
+} from '@/store/serverConfig';
 
 export interface NavItem {
   hidden?: boolean;
@@ -36,6 +41,7 @@ export const useNavLayout = (): NavLayout => {
   const { t } = useTranslation('common');
   const toggleCommandMenu = useGlobalStore((s) => s.toggleCommandMenu);
   const { showMarket, hideGitHub } = useServerConfigStore(featureFlagsSelectors);
+  const enabledPlugins = useServerConfigStore(builtinPluginSelectors.enabled);
 
   const topNavItems = useMemo(
     () =>
@@ -82,8 +88,11 @@ export const useNavLayout = (): NavLayout => {
           title: t('tab.channels'),
           url: '/channels',
         },
-      ] as NavItem[],
-    [t, toggleCommandMenu],
+      ].filter((item) => {
+        const plugin = item.url && builtinPluginForPath(item.url);
+        return !plugin || isBuiltinPluginEnabled(plugin, enabledPlugins);
+      }) as NavItem[],
+    [t, toggleCommandMenu, enabledPlugins],
   );
 
   const bottomMenuItems = useMemo(

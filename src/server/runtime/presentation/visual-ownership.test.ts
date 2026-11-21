@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { recordCanvasPlacement } from './canvas-command';
+import { canvasAtoms } from '../../../../packages/utils/src/presentationAnnotation';
+import { parseString } from '../../../../packages/file-loaders/src/utils/parser-utils';
 
 import type { PresentationSlidePlan } from '../../../../packages/runtime-contracts/src';
 import { renderSemanticBlocks } from './semantic-blocks';
@@ -38,6 +41,41 @@ async function fixture(): Promise<PresentationSlidePlan> {
 }
 
 describe('visual representation ownership', () => {
+  it('allows deliberate overlap only between manually arranged objects', async () => {
+    const slide = await fixture();
+    slide.metadata = { ...slide.metadata, canvasArrangements: [['atom-a', 'visual-1']] };
+    const text =
+      '<text data-canvas-object="atom-a" x="60" y="160" font-size="24">Selected title</text>';
+    slide.svg = slide.svg.replace('</svg>', text + '</svg>');
+    const collision = 'Text overlaps content block visual-1';
+    expect(inspectVisualOccupancy(slide)).toContain(collision);
+    expect(inspectVisualOccupancy(slide, new Map(), true)).not.toContain(collision);
+    slide.svg = slide.svg.replace('</svg>', text.replace('atom-a', 'atom-b') + '</svg>');
+    expect(inspectVisualOccupancy(slide, new Map(), true)).toContain(collision);
+  });
+
+  it('retains a dropped title over a diagram across retries and still flags unrelated collisions', async () => {
+    const slide = await fixture();
+    const label = '<text x="65" y="155" font-size="24">Dropped title</text>';
+    slide.svg = slide.svg.replace('</svg>', label + '</svg>');
+    const index = canvasAtoms(parseString(slide.svg).documentElement).findIndex(
+      (el) => el.textContent === 'Dropped title',
+    );
+    const id = 'svg:' + index;
+    slide.metadata = { ...slide.metadata, canvasSelection: { requestId: 'drop', ids: [id] } };
+    expect(recordCanvasPlacement(slide, 'other', [id])).toBe(slide);
+    const placed = recordCanvasPlacement(slide, 'drop', [id]);
+    expect(recordCanvasPlacement(placed, 'drop', [id])).toBe(placed);
+    const issue = 'Text overlaps content block visual-1';
+    expect(inspectVisualOccupancy(placed, new Map(), true)).not.toContain(issue);
+    expect(inspectVisualOccupancy(placed)).toContain(issue);
+    const unrelated = {
+      ...placed,
+      svg: placed.svg.replace('</svg>', label.replace('Dropped', 'Other') + '</svg>'),
+    };
+    expect(inspectVisualOccupancy(unrelated, new Map(), true)).toContain(issue);
+  });
+
   it('detects translated multiline card labels over a native diagram', async () => {
     const slide = await fixture();
     slide.svg = slide.svg.replace(

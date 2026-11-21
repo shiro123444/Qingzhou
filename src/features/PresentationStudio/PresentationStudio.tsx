@@ -1,6 +1,6 @@
 import { Button, Flexbox, Icon, Tag } from '@lobehub/ui';
 import { Dropdown, Spin } from 'antd';
-import { FlaskConical } from 'lucide-react';
+import { ArrowLeft, FlaskConical } from 'lucide-react';
 import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -16,7 +16,12 @@ import type {
   PresentationJob,
   PresentationJobInput,
 } from '../../../packages/runtime-contracts/src/index';
+import {
+  getPresentationStylePreset,
+  type PresentationStyleId,
+} from '../../../packages/runtime-contracts/src/presentation-style-presets';
 import PresentationAgentFlow from './AgentFlow';
+import { StudioGlass } from './StudioGlass';
 import type { OutlineSlide } from './AgentFlow/OutlineWorkspace';
 import {
   createPresentationAgentClient,
@@ -33,7 +38,6 @@ import { defaultPresentationDemoClient } from './demo/presentationDemoClient';
 import type { UseJobPollingOptions } from './hooks/useJobPolling';
 import { usePresentationPresence } from './hooks/usePresentationPresence';
 import { usePresentationStudio } from './hooks/usePresentationStudio';
-import PresentationComposer from './PresentationComposer';
 import PresentationGenerationWorkspace from './PresentationGenerationWorkspace';
 import PresentationJobList from './PresentationJobList';
 import PresentationProgress from './PresentationProgress';
@@ -80,7 +84,12 @@ export interface PresentationStudioProps {
   /** Job ids persisted by the backend to restore on mount. */
   initialJobIds?: string[];
   initialTopic?: string;
+  onJobSubmitted?: (origin: NonNullable<PresentationJob['chatOrigin']>, jobId: string) => void;
   pollIntervalMs?: number;
+  prepareChatRequest?: (
+    title: string,
+    content: string,
+  ) => Promise<NonNullable<PresentationJob['chatOrigin']>>;
   /**
    * Optional slot prompt resolver (C-99). Used by the default HTTP retry
    * adapter to supply prompts directly into the request body without storing
@@ -111,6 +120,8 @@ export const PresentationStudio = memo<PresentationStudioProps>(
     initialJobIds,
     initialTopic: initialTopicProp = '',
     pollIntervalMs,
+    prepareChatRequest,
+    onJobSubmitted,
     resolveSlotPrompt,
     showAnnotationBar = false,
     showInspector = true,
@@ -173,21 +184,20 @@ export const PresentationStudio = memo<PresentationStudioProps>(
     const resubmitting = store((s) => s.resubmitting);
     const { t } = useTranslation('common');
     const showLeftPanel = useGlobalStore(systemStatusSelectors.showLeftPanel);
-    const [showQuickComposer, setShowQuickComposer] = useState(false);
+    const [styleWorkspaceId, setStyleWorkspaceId] = useState<PresentationStyleId>();
     const [selectedTemplate, setSelectedTemplate] = useState<PresentationTemplateSummary | null>(
       null,
     );
     const [creating, setCreating] = useState(false);
     const [initialTopic, setInitialTopic] = useState(initialTopicProp || '');
+    const [creationSessionKey, setCreationSessionKey] = useState(0);
     const presentationAgentClient = useMemo(
       () => agentClient ?? createPresentationAgentClient(),
       [agentClient],
     );
     const handleTemplateSelection = useCallback((template: PresentationTemplateSummary | null) => {
       setSelectedTemplate(template);
-      // Template learning belongs to the conversation. Selecting or importing one
-      // from the compact creator returns to the Agent workspace immediately.
-      if (template) setShowQuickComposer(false);
+      if (template) setStyleWorkspaceId(undefined);
     }, []);
 
     // C-66: generation UI consumes the selected job's stream status only.
@@ -232,10 +242,55 @@ export const PresentationStudio = memo<PresentationStudioProps>(
         jobOrder.map((id) => jobsById[id]).filter((job): job is PresentationJob => Boolean(job)),
       [jobOrder, jobsById],
     );
+    const recentWorks = useMemo(
+      () =>
+        jobs
+          .filter((job) => job.state === 'completed')
+          .toSorted((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+          .slice(0, 3)
+          .map((job) => {
+            const ids = job.artifactIds ?? [];
+            const snapshots = currentSlideArtifacts(
+              ids
+                .map((id) => artifacts[id])
+                .filter((item): item is ArtifactSnapshot => Boolean(item)),
+            );
+            const first = snapshots.find((item) => Number(item.metadata?.slideNumber) === 1);
+            const firstId =
+              first?.artifactId ??
+              ids.findLast((id) => /:slide:(?:slide-)?1$/u.test(id)) ??
+              ids.find((id) => id.includes(':slide:'));
+            return {
+              jobId: job.jobId,
+              title: jobTitles[job.jobId] || job.title || t('presentationGallery.untitled'),
+              cover: firstId
+                ? `/api/runtime/presentation/artifacts/${encodeURIComponent(firstId)}?raw=true`
+                : undefined,
+            };
+          }),
+      [jobs, artifacts, jobTitles, t],
+    );
     const jobState = selectedJob?.state;
 
     const createJob = store((s) => s.createJob);
     const createJobWithTemplate = async (input: PresentationJobInput) => {
+      let origin: PresentationJob['chatOrigin'];
+      try {
+        origin = await prepareChatRequest?.(
+          input.title,
+          t('presentationDelivery.request', { title: input.title }),
+        );
+      } catch {
+        store.setState({
+          clientError: {
+            code: 'CHAT_DELIVERY_UNAVAILABLE',
+            message: t('presentationDelivery.bindError'),
+          },
+        });
+        return null;
+      }
+      if (origin) input = { ...input, options: { ...input.options, chatOrigin: origin } };
+      const preset = getPresentationStylePreset(styleWorkspaceId);
       const jobId = await createJob(
         selectedTemplate
           ? {
@@ -243,9 +298,21 @@ export const PresentationStudio = memo<PresentationStudioProps>(
               options: { ...input.options, templateVersionId: selectedTemplate.versionId },
               template: selectedTemplate.templateId,
             }
-          : input,
+          : preset
+            ? {
+                ...input,
+                options: {
+                  ...input.options,
+                  styleWorkspaceId: preset.id,
+                  style: preset.visualStyle + ' · ' + preset.id,
+                },
+              }
+            : input,
       );
-      if (jobId) updatePresentationLocation(jobId);
+      if (jobId) {
+        updatePresentationLocation(jobId);
+        if (origin) onJobSubmitted?.(origin, jobId);
+      }
       return jobId;
     };
     const cancelJob = store((s) => s.cancelJob);
@@ -320,20 +387,37 @@ export const PresentationStudio = memo<PresentationStudioProps>(
       [selectedJobArtifacts],
     );
 
-    const selectedArtifact =
-      selectedJobArtifacts.find((a) => a.artifactId === selectedArtifactId) ??
-      slideArtifacts.find(
-        (a) =>
-          a.metadata?.slideNumber ===
-          (selectedArtifactId ? artifacts[selectedArtifactId]?.metadata?.slideNumber : undefined),
-      ) ??
-      selectedJobArtifacts.find((a) => a.status === 'ready') ??
-      selectedJobArtifacts[0];
-
-    const effectiveSelectedArtifactId = selectedArtifact?.artifactId ?? selectedArtifactId;
-
+    const requestedArtifact = selectedArtifactId ? artifacts[selectedArtifactId] : undefined;
+    const inThisJob =
+      selectedArtifactId &&
+      selectedJob &&
+      (selectedJob.artifactIds?.includes(selectedArtifactId) ||
+        requestedArtifact?.metadata?.jobId === selectedJob.jobId ||
+        selectedArtifactId.startsWith(selectedJob.jobId + ':'));
+    const wasSlide =
+      requestedArtifact?.type === 'svg' ||
+      requestedArtifact?.metadata?.artifactRole === 'slide' ||
+      selectedArtifactId?.includes(':slide:');
+    const requestedSlideId =
+      inThisJob && wasSlide
+        ? (requestedArtifact?.metadata?.slideId ?? selectedArtifactId.split(':slide:')[1])
+        : undefined;
+    const requestedNumber =
+      inThisJob && wasSlide ? Number(requestedArtifact?.metadata?.slideNumber) : NaN;
+    // A page keeps its logical identity while a revision replaces its artifact.
     const selectedSlide =
-      slideArtifacts.find((a) => a.artifactId === effectiveSelectedArtifactId) ?? slideArtifacts[0];
+      slideArtifacts.find((item) => item.artifactId === selectedArtifactId) ??
+      slideArtifacts.find(
+        (item) => requestedSlideId && item.metadata?.slideId === requestedSlideId,
+      ) ??
+      slideArtifacts.find((item) => Number(item.metadata?.slideNumber) === requestedNumber) ??
+      slideArtifacts[0];
+    const selectedArtifact =
+      (inThisJob && wasSlide ? selectedSlide : undefined) ??
+      selectedJobArtifacts.find((item) => item.artifactId === selectedArtifactId) ??
+      selectedJobArtifacts.find((item) => item.status === 'ready') ??
+      selectedJobArtifacts[0];
+    const effectiveSelectedArtifactId = selectedArtifact?.artifactId ?? selectedArtifactId;
 
     const busyState =
       pendingAction === 'cancel' || pendingAction === 'retry' ? pendingAction : null;
@@ -368,7 +452,21 @@ export const PresentationStudio = memo<PresentationStudioProps>(
     }, [artifacts, jobsById, selectedJobId]);
 
     const handleExport = (artifactId: string, format: PresentationExportFormat) => {
-      exportArtifact(artifactId, format);
+      void exportArtifact(artifactId, format).then((result) => {
+        if (!result?.uri) return;
+        const url = new URL(result.uri, window.location.href);
+        if (
+          url.origin !== window.location.origin ||
+          !['https:', 'http:', 'blob:'].includes(url.protocol)
+        )
+          return;
+        const download = document.createElement('a');
+        download.href = url.href;
+        download.download = '';
+        document.body.append(download);
+        download.click();
+        download.remove();
+      });
     };
 
     const handleResubmit = async () => {
@@ -376,7 +474,11 @@ export const PresentationStudio = memo<PresentationStudioProps>(
       setCreating(true);
       try {
         const jobId = await resubmitLastInput();
-        if (jobId) selectJob(jobId);
+        if (jobId) {
+          selectJob(jobId);
+          const origin = store.getState().jobs[jobId]?.chatOrigin;
+          if (origin) onJobSubmitted?.(origin, jobId);
+        }
       } finally {
         setCreating(false);
       }
@@ -413,17 +515,26 @@ export const PresentationStudio = memo<PresentationStudioProps>(
       !exporting &&
       ((jobState === 'completed' && selectedReady) ||
         ((jobState === 'failed' || jobState === 'cancelled') && hasReadyDeck));
+    const handleBackToPresentations = () => {
+      selectJob(null);
+      dismissError();
+      dismissExport();
+    };
     const handleNewPresentation = () => {
       localStorage.removeItem('qingzhou:presentation:planning:active');
       const location = new URL(window.location.href);
       location.searchParams.delete('planningThreadId');
       window.history.replaceState(null, '', location);
       selectJob(null);
-      setShowQuickComposer(false);
       setSelectedTemplate(null);
+      setStyleWorkspaceId(undefined);
       setInitialTopic('');
       dismissError();
       dismissExport();
+    };
+    const handleBackToPresentationHome = () => {
+      handleNewPresentation();
+      setCreationSessionKey((current) => current + 1);
     };
 
     const templatePicker = (
@@ -461,26 +572,25 @@ export const PresentationStudio = memo<PresentationStudioProps>(
             <Spin size="large" />
             <p className={styles.emptyDescription}>正在恢复演示文稿任务…</p>
           </div>
-        ) : showQuickComposer ? (
-          <Flexbox horizontal align="center" gap={8} justify="center">
-            <Button type="text" onClick={() => setShowQuickComposer(false)}>
-              {t('presentationConversation.backToPlanning')}
-            </Button>
-            {templatePicker}
-          </Flexbox>
         ) : (
           <div className={styles.emptyArea} data-testid="studio-empty-state">
             <div className={styles.emptyHeader}>
               <Flexbox horizontal align="center" gap={8}>
+                <Button
+                  aria-label={t('back')}
+                  className={styles.emptyBack}
+                  data-testid="presentation-creator-back"
+                  icon={<Icon icon={ArrowLeft} size={16} />}
+                  type="text"
+                  onClick={handleBackToPresentationHome}
+                >
+                  {t('back')}
+                </Button>
                 {!showLeftPanel && (
                   <div data-testid="presentation-sidebar-reopen">
                     <ToggleLeftPanelButton />
                   </div>
                 )}
-                <Button type="text" onClick={() => setShowQuickComposer(true)}>
-                  {t('presentationConversation.quickCreate')}
-                </Button>
-                {templatePicker}
               </Flexbox>
               {jobs.length > 0 && (
                 <Dropdown
@@ -510,8 +620,14 @@ export const PresentationStudio = memo<PresentationStudioProps>(
               defaultNotebookId={defaultNotebookId}
               defaultSourceVersionIds={defaultSourceVersionIds}
               initialTopic={initialTopic}
+              key={creationSessionKey}
+              recentWorks={recentWorks}
               selectedTemplate={selectedTemplate ?? undefined}
+              styleWorkspaceId={styleWorkspaceId}
+              templatePicker={templatePicker}
+              onOpenWork={selectJob}
               onOutlineAiRewrite={handleOutlineAiRewrite}
+              onStyleChange={setStyleWorkspaceId}
               onCreate={async (input) => {
                 if (creating) return;
                 setCreating(true);
@@ -535,107 +651,9 @@ export const PresentationStudio = memo<PresentationStudioProps>(
         ? ((generatingJob as Record<string, unknown>).activity as string)
         : undefined;
 
-    return (
-      <div
-        className={className ? `${styles.studio} ${className}` : styles.studio}
-        data-testid="presentation-studio"
-      >
-        <header aria-label="Presentation studio header" className={styles.srOnly}>
-          <h1 className={styles.title}>PPT 工作台</h1>
-          {transportMode === 'demo' ? (
-            <Tag
-              className={styles.demoBadge}
-              color="gold"
-              data-testid="presentation-demo-badge"
-              icon={<Icon icon={FlaskConical} size={12} />}
-            >
-              Demo data — fake transport, no real provider
-            </Tag>
-          ) : (
-            <Tag color="default" data-testid="presentation-transport-badge">
-              运行时连接
-              <span className={styles.srOnly}>Runtime HTTP transport</span>
-            </Tag>
-          )}
-        </header>
-
-        <div className={styles.noticeHost} data-testid="presentation-notice-host">
-          {/* Overlay notices keep the canvas from shifting. Export-origin client
-              errors stay on the dedicated export bubble. */}
-          {clientError && !(exportError && clientError.code === exportError.code) ? (
-            clientError.code === 'PROVIDER_UNAVAILABLE' ? (
-              <StudioNotice
-                key="provider-unavailable"
-                resetKey={clientError}
-                testId="presentation-provider-unavailable"
-                tone="warning"
-                action={
-                  <Flexbox gap={8}>
-                    <Button
-                      aria-busy={creating || resubmitting}
-                      aria-label="Resubmit the last presentation request"
-                      data-testid="presentation-provider-resubmit"
-                      disabled={creating || resubmitting}
-                      loading={creating || resubmitting}
-                      size="small"
-                      onClick={() => {
-                        void handleResubmit();
-                      }}
-                    >
-                      Try again
-                    </Button>
-                    <Button
-                      aria-label="Focus the presentation creator"
-                      size="small"
-                      onClick={() => {
-                        document.getElementById('presentation-composer-title')?.focus();
-                      }}
-                    >
-                      Edit request
-                    </Button>
-                  </Flexbox>
-                }
-                description={
-                  <span id="presentation-provider-unavailable-description">
-                    演示文稿生成服务暂未就绪，你的草稿已保存在左侧表单中，请稍后重试。
-                    <span style={{ display: 'none' }}>
-                      Presentation generation is unavailable because the PPT provider is not
-                      configured on this deployment. Your request is kept in the composer — check
-                      the provider configuration or contact the administrator, then try again. No
-                      progress is shown because no job was created.
-                    </span>
-                  </span>
-                }
-                title={
-                  <span>
-                    演示文稿生成服务当前不可用
-                    <span style={{ display: 'none' }}>
-                      Presentation generation is currently unavailable
-                    </span>
-                  </span>
-                }
-                onClose={dismissError}
-              />
-            ) : (
-              <StudioNotice
-                description={clientError.message}
-                key={`client-${clientError.code}`}
-                resetKey={clientError}
-                testId="presentation-client-error"
-                tone="error"
-                title={
-                  <span>
-                    运行时错误: {clientError.code}
-                    <span style={{ display: 'none' }}>
-                      Presentation runtime error: {clientError.code}
-                    </span>
-                  </span>
-                }
-                onClose={dismissError}
-              />
-            )
-          ) : null}
-
+    const exportFeedback =
+      exportError || exported ? (
+        <div className={styles.noticeHost}>
           {exportError ? (
             <StudioNotice
               key={`export-error-${exportError.artifactId}-${exportError.format}`}
@@ -700,8 +718,143 @@ export const PresentationStudio = memo<PresentationStudioProps>(
             />
           ) : null}
         </div>
+      ) : null;
 
-        {selectedJob && (
+    const content = (
+      <div
+        className={className ? `${styles.studio} ${className}` : styles.studio}
+        data-testid="presentation-studio"
+      >
+        <header aria-label="Presentation studio header" className={styles.srOnly}>
+          <h1 className={styles.title}>PPT 工作台</h1>
+          {transportMode === 'demo' ? (
+            <Tag
+              className={styles.demoBadge}
+              color="gold"
+              data-testid="presentation-demo-badge"
+              icon={<Icon icon={FlaskConical} size={12} />}
+            >
+              Demo data — fake transport, no real provider
+            </Tag>
+          ) : (
+            <Tag color="default" data-testid="presentation-transport-badge">
+              运行时连接
+              <span className={styles.srOnly}>Runtime HTTP transport</span>
+            </Tag>
+          )}
+        </header>
+
+        <div className={styles.noticeHost} data-testid="presentation-notice-host">
+          {/* Overlay notices keep the canvas from shifting. Export-origin client
+              errors stay on the dedicated export bubble. */}
+          {clientError && !(exportError && clientError.code === exportError.code) ? (
+            clientError.code === 'PROVIDER_UNAVAILABLE' ? (
+              <StudioNotice
+                key="provider-unavailable"
+                resetKey={clientError}
+                testId="presentation-provider-unavailable"
+                tone="warning"
+                action={
+                  <Flexbox gap={8}>
+                    <Button
+                      aria-busy={creating || resubmitting}
+                      aria-label="Resubmit the last presentation request"
+                      data-testid="presentation-provider-resubmit"
+                      disabled={creating || resubmitting}
+                      loading={creating || resubmitting}
+                      size="small"
+                      onClick={() => {
+                        void handleResubmit();
+                      }}
+                    >
+                      Try again
+                    </Button>
+                    <Button
+                      aria-label="Focus the presentation creator"
+                      size="small"
+                      onClick={(event) => {
+                        const studio = event.currentTarget.closest(
+                          '[data-testid="presentation-studio"]',
+                        );
+                        const outline = studio?.querySelector(
+                          '[data-testid="presentation-agent-outline"]',
+                        );
+                        const titleInput = () =>
+                          document.querySelector<HTMLElement>(
+                            'textarea[aria-label$="页标题"]:not(:disabled)',
+                          );
+                        if (outline) {
+                          const lessonInput = outline.querySelector<HTMLElement>(
+                            '[data-testid="lesson-workspace"] textarea:not(:disabled)',
+                          );
+                          const active =
+                            titleInput() ?? (lessonInput?.closest('[hidden]') ? null : lessonInput);
+                          if (active) active.focus();
+                          else {
+                            const first = outline.querySelector<HTMLButtonElement>(
+                              '[data-testid="outline-overview"] button',
+                            );
+                            first?.focus();
+                            first?.click();
+                            requestAnimationFrame(() => titleInput()?.focus());
+                          }
+                        } else {
+                          studio
+                            ?.querySelector<HTMLElement>(
+                              '[data-testid="presentation-chat-input-adapter"] [contenteditable="true"], [data-testid="presentation-chat-input-adapter"] textarea',
+                            )
+                            ?.focus();
+                        }
+                      }}
+                    >
+                      Edit request
+                    </Button>
+                  </Flexbox>
+                }
+                description={
+                  <span id="presentation-provider-unavailable-description">
+                    生成服务暂时不可用。你可以继续编辑当前大纲或对话，稍后重试。
+                    <span style={{ display: 'none' }}>
+                      Presentation generation is unavailable because the PPT provider is not
+                      configured on this deployment. Your outline and conversation are preserved.
+                      Check the provider configuration or contact the administrator, then try again.
+                      No progress is shown because no job was created.
+                    </span>
+                  </span>
+                }
+                title={
+                  <span>
+                    演示文稿生成服务当前不可用
+                    <span style={{ display: 'none' }}>
+                      Presentation generation is currently unavailable
+                    </span>
+                  </span>
+                }
+                onClose={dismissError}
+              />
+            ) : (
+              <StudioNotice
+                description={clientError.message}
+                key={`client-${clientError.code}`}
+                resetKey={clientError}
+                testId="presentation-client-error"
+                tone="error"
+                title={
+                  <span>
+                    运行时错误: {clientError.code}
+                    <span style={{ display: 'none' }}>
+                      Presentation runtime error: {clientError.code}
+                    </span>
+                  </span>
+                }
+                onClose={dismissError}
+              />
+            )
+          ) : null}
+        </div>
+        {!showCompletedWorkspace && exportFeedback}
+
+        {selectedJob && !showCompletedWorkspace && (
           <CollaborationPanel
             job={selectedJob}
             key={selectedJob.jobId}
@@ -713,22 +866,6 @@ export const PresentationStudio = memo<PresentationStudioProps>(
           <div className={`${styles.conversationMain} ${styles.conversationMainFill}`}>
             {emptyState ? (
               <div className={styles.emptyShell} data-testid="presentation-empty-shell">
-                <div className={showQuickComposer ? styles.columnMain : styles.srOnly}>
-                  <Button
-                    aria-label="Focus the presentation creator"
-                    className={styles.srOnly}
-                    size="small"
-                    onClick={() => document.getElementById('presentation-composer-title')?.focus()}
-                  >
-                    开始创建
-                  </Button>
-                  <PresentationComposer
-                    defaultLanguage={defaultLanguage}
-                    defaultNotebookId={defaultNotebookId}
-                    defaultSourceVersionIds={defaultSourceVersionIds}
-                    onCreate={createJobWithTemplate}
-                  />
-                </div>
                 {emptyState}
               </div>
             ) : showGenerationWorkspace && selectedJob ? (
@@ -754,12 +891,6 @@ export const PresentationStudio = memo<PresentationStudioProps>(
                     titles={jobTitles}
                     onDelete={handleDeleteJob}
                     onSelect={selectJob}
-                  />
-                  <PresentationComposer
-                    defaultLanguage={defaultLanguage}
-                    defaultNotebookId={defaultNotebookId}
-                    defaultSourceVersionIds={defaultSourceVersionIds}
-                    onCreate={createJobWithTemplate}
                   />
                   <ArtifactPanel
                     artifacts={selectedJobArtifacts}
@@ -797,9 +928,10 @@ export const PresentationStudio = memo<PresentationStudioProps>(
                   activity={liveActivity}
                   activityHistory={generationProgressByJob[selectedJob.jobId]?.activityHistory}
                   canExport={canExport}
+                  dataError={clientError?.message}
                   dismissSlotError={dismissSlotError}
                   effectiveSelectedArtifactId={effectiveSelectedArtifactId}
-                  exported={exported}
+                  exportFeedback={exportFeedback}
                   exporting={exporting}
                   jobTitles={jobTitles}
                   jobs={jobs}
@@ -812,9 +944,18 @@ export const PresentationStudio = memo<PresentationStudioProps>(
                   showInspector={showInspector}
                   showSidebarReopen={!showLeftPanel}
                   slideArtifacts={slideArtifacts}
+                  collaboration={
+                    <CollaborationPanel
+                      job={selectedJob}
+                      key={selectedJob.jobId}
+                      store={store}
+                      tabId={presenceTabId}
+                    />
+                  }
                   retrySlot={async (...args) => {
                     await retrySlot(...args);
                   }}
+                  onBack={handleBackToPresentations}
                   onCancel={cancelJob}
                   onDeleteJob={handleDeleteJob}
                   onExport={handleExport}
@@ -838,12 +979,6 @@ export const PresentationStudio = memo<PresentationStudioProps>(
                     titles={jobTitles}
                     onDelete={handleDeleteJob}
                     onSelect={selectJob}
-                  />
-                  <PresentationComposer
-                    defaultLanguage={defaultLanguage}
-                    defaultNotebookId={defaultNotebookId}
-                    defaultSourceVersionIds={defaultSourceVersionIds}
-                    onCreate={createJobWithTemplate}
                   />
                   <PresentationProgress
                     busyState={busyState}
@@ -900,6 +1035,7 @@ export const PresentationStudio = memo<PresentationStudioProps>(
         </div>
       </div>
     );
+    return <StudioGlass>{content}</StudioGlass>;
   },
 );
 

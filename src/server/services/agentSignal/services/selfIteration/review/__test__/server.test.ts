@@ -46,6 +46,13 @@ vi.mock('@/server/modules/ModelRuntime', () => ({
   initModelRuntimeFromDB: mocks.initModelRuntimeFromDB,
 }));
 
+vi.mock('@/server/services/agentSignal/modelConfig', () => ({
+  resolveAgentSignalModelConfig: vi.fn(async () => ({
+    model: 'agent-model',
+    provider: 'agent-provider',
+  })),
+}));
+
 vi.mock('../../execute', async (importOriginal) => ({
   ...(await importOriginal<typeof ToolFirstRuntimeModule>()),
   executeSelfIteration: mocks.executeSelfIteration,

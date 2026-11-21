@@ -78,6 +78,7 @@ describe('PresentationStudio Full-Width Centered Agent Flow (A-1 / A-2 / A-3 / C
     // 1. Verify Full-width Centered Empty Shell is rendered instead of a 3-column grid
     const emptyShell = screen.getByTestId('presentation-empty-shell');
     expect(emptyShell).toBeInTheDocument();
+    expect(await screen.findByTestId('presentation-creator-back')).toBeInTheDocument();
 
     const agentFlow = await screen.findByTestId('presentation-agent-flow');
     expect(agentFlow).toBeInTheDocument();
@@ -107,6 +108,59 @@ describe('PresentationStudio Full-Width Centered Agent Flow (A-1 / A-2 / A-3 / C
     });
   }, 60000);
 
+  it('returns from planning to the PPT home without leaving the module or deleting works', async () => {
+    localStorage.setItem('qingzhou:presentation:planning:active', 'restored-thread');
+    window.history.replaceState(null, '', '/presentation?planningThreadId=restored-thread');
+    const deletePresentationJob = vi.fn();
+    const agentClient = {
+      getSession: vi.fn(async () => ({
+        collaboration: { automaticAttempts: 0, decisions: [], mode: 'adaptive' as const },
+        command: { messages: [{ content: '正在规划的季度汇报', role: 'user' as const }] },
+        heartbeatAt: t0,
+        recoveryAttempts: 0,
+        requestId: 'restore-1',
+        state: 'waiting_input' as const,
+        threadId: 'restored-thread',
+        updatedAt: t0,
+      })),
+      outline: vi.fn(),
+      turn: vi.fn(() => new Promise<never>(() => {})),
+    };
+    const client = {
+      cancelPresentationJob: vi.fn(),
+      createPresentationJob: vi.fn(),
+      deletePresentationJob,
+      exportArtifact: vi.fn(),
+      getArtifact: vi.fn(),
+      getPresentationJob: vi.fn(async () => null),
+      listPresentationJobs: vi.fn(async () => [completedJob([])]),
+      retryPresentationJob: vi.fn(),
+      subscribePresentationJob: vi.fn(),
+    };
+
+    render(
+      <PresentationStudio agentClient={agentClient} client={client as never} pollIntervalMs={50} />,
+    );
+
+    expect(await screen.findByText('正在规划的季度汇报')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByTestId('presentation-agent-flow')).toHaveAttribute('data-stage', 'intake');
+      expect(localStorage.getItem('qingzhou:presentation:planning:active')).not.toBeNull();
+    });
+
+    fireEvent.click(screen.getByTestId('presentation-creator-back'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('presentation-agent-flow')).toHaveAttribute('data-stage', 'topic');
+      expect(screen.queryByText('正在规划的季度汇报')).not.toBeInTheDocument();
+      expect(localStorage.getItem('qingzhou:presentation:planning:active')).toBeNull();
+    });
+    expect(window.location.pathname).toBe('/presentation');
+    expect(new URLSearchParams(window.location.search).has('planningThreadId')).toBe(false);
+    expect(screen.getByRole('button', { name: '我的作品' })).toBeInTheDocument();
+    expect(deletePresentationJob).not.toHaveBeenCalled();
+  });
+
   it('renders completed PPT editor shell with real SVG canvas when selected job is completed', async () => {
     const client = {
       cancelPresentationJob: vi.fn(),
@@ -134,8 +188,10 @@ describe('PresentationStudio Full-Width Centered Agent Flow (A-1 / A-2 / A-3 / C
     });
 
     expect(screen.getByTestId('presentation-completed-tag')).toHaveTextContent('已完成');
-    expect(screen.getByRole('button', { name: /Continue prompting AI/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Quick export presentation/i })).toBeInTheDocument();
+    expect(screen.getByTestId('presentation-back-to-home')).toBeInTheDocument();
+    expect(screen.queryByTestId('presentation-editor-ai')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('presentation-conversation')).not.toBeInTheDocument();
+    expect(screen.getByTestId('presentation-editor-export')).toBeInTheDocument();
     expect(screen.getByTestId('slide-preview-image')).toBeInTheDocument();
     expect(screen.getByTestId('slide-navigator-grid')).toBeInTheDocument();
     expect(screen.queryByTestId('presentation-empty-shell')).not.toBeInTheDocument();

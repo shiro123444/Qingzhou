@@ -24,12 +24,13 @@ export interface SlideNavigatorProps {
 export const SlideNavigator = memo<SlideNavigatorProps>(
   ({ className, compact = false, hasSelection, onSelect, selectedArtifactId, slides }) => {
     const selectable = slides.filter((slide) => slide.status === 'ready');
+    const tabStop =
+      selectable.find((slide) => slide.artifactId === selectedArtifactId) ?? selectable[0];
 
     const handleKeyDown = useCallback(
       (event: React.KeyboardEvent<HTMLDivElement>) => {
-        if (selectable.length === 0) return;
-        const currentIndex = selectable.findIndex((s) => s.artifactId === selectedArtifactId);
-        const nextIndex = selectable.length === 0 ? -1 : currentIndex;
+        if (selectable.length === 0 || event.altKey || event.ctrlKey || event.metaKey) return;
+        const nextIndex = selectable.findIndex((slide) => slide.artifactId === selectedArtifactId);
 
         let targetIndex = -1;
         if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
@@ -41,12 +42,17 @@ export const SlideNavigator = memo<SlideNavigatorProps>(
               : (nextIndex - 1 + selectable.length) % selectable.length;
         }
 
+        if (event.key === 'Home') targetIndex = 0;
+        if (event.key === 'End') targetIndex = selectable.length - 1;
         if (targetIndex >= 0) {
           event.preventDefault();
+          event.currentTarget
+            .querySelectorAll<HTMLElement>('[role=option][data-ready=true]')
+            [targetIndex]?.focus({ preventScroll: compact });
           onSelect(selectable[targetIndex].artifactId);
         }
       },
-      [onSelect, selectable, selectedArtifactId],
+      [compact, onSelect, selectable, selectedArtifactId],
     );
 
     return (
@@ -89,7 +95,7 @@ export const SlideNavigator = memo<SlideNavigatorProps>(
             className={styles.grid}
             data-testid="slide-navigator-grid"
             role="listbox"
-            tabIndex={0}
+            tabIndex={tabStop ? -1 : 0}
             onKeyDown={handleKeyDown}
           >
             {slides.map((slide, index) => {
@@ -106,7 +112,7 @@ export const SlideNavigator = memo<SlideNavigatorProps>(
                   data-testid={`slide-navigator-item-${slide.artifactId}`}
                   key={slide.artifactId}
                   role="option"
-                  tabIndex={ready ? 0 : -1}
+                  tabIndex={slide === tabStop ? 0 : -1}
                   title={
                     compact
                       ? String(slide.metadata?.title ?? slide.name ?? `Slide ${index + 1}`)

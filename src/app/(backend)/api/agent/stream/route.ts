@@ -4,6 +4,7 @@ import { type NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 
 import { createStreamEventManager } from '@/server/modules/AgentRuntime';
+import { isNativeAgentRuntimeEnabled } from '@/server/runtime/tasks/mode';
 
 const log = debug('api-route:agent:stream');
 const timing = debug('lobe-server:agent-runtime:timing');
@@ -13,6 +14,23 @@ const timing = debug('lobe-server:agent-runtime:timing');
  * Provides real-time Agent execution event stream for clients
  */
 export async function GET(request: NextRequest) {
+  if (isNativeAgentRuntimeEnabled()) {
+    const { checkAuth } = await import('@/app/(backend)/middleware/auth');
+    const { NativeAgentStore } = await import('@/server/runtime/tasks/store');
+    return checkAuth(async (authenticatedRequest, { serverDB, userId }) => {
+      const operationId = new URL(authenticatedRequest.url).searchParams.get('operationId');
+      if (!operationId)
+        return NextResponse.json({ error: 'operationId parameter is required' }, { status: 400 });
+      const checkpoint = await new NativeAgentStore(serverDB).checkpoint(operationId);
+      if (checkpoint?.userId !== userId)
+        return NextResponse.json({ error: 'Operation not found' }, { status: 404 });
+      return createAgentStream(authenticatedRequest);
+    })(request, { params: Promise.resolve({}) });
+  }
+  return createAgentStream(request);
+}
+
+async function createAgentStream(request: Request) {
   // Initialize stream event manager (uses InMemory singleton in local dev, Redis in production)
   const streamManager = createStreamEventManager();
 

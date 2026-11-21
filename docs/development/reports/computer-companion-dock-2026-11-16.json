@@ -1,0 +1,69 @@
+{
+  "artifacts": "output/computer-dock-validation",
+  "coverage": [
+    "Real layout space; no chat overlap",
+    "Collapse returns 276 CSS pixels to the workspace at 1728px viewport",
+    "Independent spring head and eye tracking and natural blink",
+    "Actual avatar pixels change with pointer; static after awareness off",
+    "Existing autofocus recovered after lazy mount",
+    "1200ms pointer dwell, coarse focus and account/Bot isolation",
+    "No task requests from pointer and focus",
+    "Normal-message and explicit Computer-task attention forwarding",
+    "Strict semantic schema, 30s expiry, no raw coordinates or input content",
+    "Native bot status distinct from Computer use",
+    "Real container browser input, saved result, control return and revocation",
+    "Glass lens, pull cord, streaming Markdown, narrow/dark/reduced-motion rendering"
+  ],
+  "date": "2026-11-16T03:41:44.652596+00:00",
+  "documentation": "docs/development/computer-companion-ui.md",
+  "liveTests": 1,
+  "mainProject": {
+    "success": true,
+    "layout": {
+      "center": {
+        "x": 321,
+        "y": 9,
+        "width": 1054,
+        "height": 1102
+      },
+      "rail": {
+        "x": 1375,
+        "y": 17,
+        "width": 336,
+        "height": 1086
+      },
+      "overlap": false,
+      "collapsedGain": 276
+    },
+    "gazeRendered": true,
+    "disabledGazeStatic": true,
+    "focusHint": true,
+    "taskRequests": 0,
+    "faults": []
+  },
+  "notes": [
+    "No new model requests or native worker startup in this UI verification.",
+    "Local UI hints are predictions; the Agent receives them with the next explicit message, not as execution permission."
+  ],
+  "regressionTests": 51,
+  "scope": "Docked current-Bot sidebar, 3D pointer gaze and ephemeral semantic UI attention",
+  "verdict": "passed",
+  "checks": {
+    "typescript": "passed",
+    "eslint": "passed",
+    "stylelint": "passed",
+    "diffWhitespace": "passed"
+  },
+  "cleanup": {
+    "testServicesStopped": true,
+    "testVm": "stopped",
+    "listeningPorts": {
+      "3010": false,
+      "9876": false,
+      "55432": false,
+      "19000": false,
+      "16379": false,
+      "8791": false
+    }
+  }
+}

@@ -6,35 +6,28 @@ import { cx } from 'antd-style';
 import {
   ArrowDown,
   ArrowUp,
-  AudioLines,
-  ChevronDown,
   Disc3,
   Heart,
   Library,
   ListMusic,
   ListPlus,
-  Music2,
   Pause,
   Play,
-  Puzzle,
-  Repeat2,
   Search,
-  Shuffle,
-  SkipBack,
-  SkipForward,
   TextQuote,
   Trash2,
   Upload,
-  Volume2,
-  VolumeX,
 } from 'lucide-react';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 
+import { BotMentionButton } from '@/features/BotSurface/context';
+import { MotionGlyph } from '@/features/GlassMotion/MotionGlyph';
 import { useAudioEngine, useMusicPlayer } from '@/features/MusicPlayer/context';
 import { MAX_MUSIC_QUEUE_LENGTH, type RepeatMode } from '@/features/MusicPlayer/engine';
 import { formatTime, MAX_LRC_BYTES } from '@/features/MusicPlayer/lyrics';
+import MusicArtwork from '@/features/MusicPlayer/MusicArtwork';
 import { musicTheme } from '@/features/MusicPlayer/musicTheme';
 import MusicTrackList from '@/features/MusicPlayer/MusicTrackList';
 import { useMusicPluginState } from '@/features/MusicPlayer/plugins/context';
@@ -48,10 +41,8 @@ import KugouAccount, { type KugouAccountHandle } from './KugouAccount';
 import KugouLibrary, { type KugouLibrarySection, librarySectionLabels } from './KugouLibrary';
 import { libraryStyles } from './library.style';
 import { styles } from './style';
+import ViewTabs, { type StudioView } from './ViewTabs';
 
-const views = ['player', 'library', 'queue', 'plugins'] as const;
-type StudioView = (typeof views)[number];
-const viewIcons = { library: Library, player: AudioLines, plugins: Puzzle, queue: ListMusic };
 const kugouSections = ['discover', 'liked', 'created', 'collected', 'album'] as const;
 const kugouSectionIcons = {
   album: Disc3,
@@ -250,46 +241,13 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
           <div className={styles.brand}>
             {navigation}
             <span aria-hidden className={styles.brandIcon}>
-              <Icon icon={Music2} size={18} />
+              <MotionGlyph name="music" size={18} />
             </span>
             <h1>{t('title')}</h1>
           </div>
-          <div aria-label={t('viewNavigation')} className={styles.tabs} role="tablist">
-            {views.map((item) => {
-              const label = t(item === 'player' ? 'nowPlaying' : item);
-              return (
-                <button
-                  aria-controls={'music-view-' + item}
-                  aria-label={label}
-                  aria-selected={view === item}
-                  className={styles.tab}
-                  id={'music-tab-' + item}
-                  key={item}
-                  role="tab"
-                  tabIndex={view === item ? 0 : -1}
-                  onClick={() => setView(item)}
-                  onKeyDown={(event) => {
-                    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-                    event.preventDefault();
-                    const index = views.indexOf(item);
-                    const next =
-                      event.key === 'Home'
-                        ? 0
-                        : event.key === 'End'
-                          ? views.length - 1
-                          : (index + (event.key === 'ArrowRight' ? 1 : -1) + views.length) %
-                            views.length;
-                    setView(views[next]);
-                    document.getElementById('music-tab-' + views[next])?.focus();
-                  }}
-                >
-                  <Icon aria-hidden icon={viewIcons[item]} size={16} />
-                  <span>{label}</span>
-                </button>
-              );
-            })}
-          </div>
+          <ViewTabs value={view} onChange={setView} />
           <div className={styles.headerActions}>
+            <BotMentionButton />
             <Button
               className={styles.uploadButton}
               disabled={!s.userId}
@@ -306,7 +264,8 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
               title={t('closeStudio')}
               to="/"
             >
-              <Icon aria-hidden icon={ChevronDown} size={20} />
+              <MotionGlyph name="collapse" size={18} />
+              <span>{t('miniPlayer')}</span>
             </Link>
           </div>
         </header>
@@ -356,11 +315,7 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
         >
           <section aria-label={t('nowPlaying')} className={styles.player}>
             <div aria-hidden className={styles.cover}>
-              {active?.coverUrl ? (
-                <img alt="" decoding="async" key={active.coverUrl} src={active.coverUrl} />
-              ) : (
-                <Icon icon={Music2} size={{ size: 88, strokeWidth: 1.25 }} />
-              )}
+              <MusicArtwork coverUrl={active?.coverUrl} />
             </div>
             <div className={styles.trackInfo}>
               <h2 className={styles.trackTitle} title={active?.name}>
@@ -405,7 +360,7 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
                 disabled={!s.queue.length}
                 onClick={() => engine.setShuffle(!s.shuffle)}
               >
-                <Icon aria-hidden icon={Shuffle} size={20} />
+                <MotionGlyph name="shuffle" size={20} />
               </button>
               <button
                 aria-label={t('previous')}
@@ -413,7 +368,7 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
                 disabled={!s.queue.length}
                 onClick={() => engine.previous()}
               >
-                <Icon aria-hidden icon={SkipBack} size={22} />
+                <MotionGlyph name="previous" size={22} />
               </button>
               <button
                 aria-label={t(playing ? 'pause' : 'play')}
@@ -423,9 +378,9 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
                 onClick={() => (playing ? engine.pause() : engine.play())}
               >
                 {playing ? (
-                  <Icon aria-hidden fill="currentColor" icon={Pause} size={24} />
+                  <MotionGlyph name="pause" size={24} />
                 ) : (
-                  <Icon aria-hidden fill="currentColor" icon={Play} size={24} />
+                  <MotionGlyph name="play" size={24} />
                 )}
               </button>
               <button
@@ -434,10 +389,10 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
                 disabled={!s.queue.length}
                 onClick={() => engine.next()}
               >
-                <Icon aria-hidden icon={SkipForward} size={22} />
+                <MotionGlyph name="next" size={22} />
               </button>
               <label className={styles.repeatControl} data-active={s.repeat !== 'sequence'}>
-                <Icon aria-hidden icon={Repeat2} size={20} />
+                <MotionGlyph name="repeat" size={20} />
                 <select
                   aria-label={t('repeat')}
                   value={s.repeat}
@@ -456,15 +411,15 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
                 className={styles.queuePosition}
                 onClick={() => setView('queue')}
               >
-                <Icon aria-hidden icon={ListMusic} size={16} />
+                <MotionGlyph name="tasks" size={16} />
                 {queueIndex >= 0 ? queueIndex + 1 : '—'} / {queueTotal}
               </button>
               <span className={styles.status}>{t(s.status)}</span>
               <label className={styles.volume}>
                 {s.volume === 0 ? (
-                  <Icon aria-hidden icon={VolumeX} size={16} />
+                  <MotionGlyph name="volume" size={16} />
                 ) : (
-                  <Icon aria-hidden icon={Volume2} size={16} />
+                  <MotionGlyph name="volume" size={16} />
                 )}
                 <input
                   aria-label={t('volume')}
@@ -622,7 +577,7 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
                   className={styles.search}
                   maxLength={200}
                   placeholder={t(source === 'kugou' ? 'searchKugou' : 'search')}
-                  prefix={<Icon aria-hidden icon={Search} size={16} />}
+                  prefix={<MotionGlyph name="search" size={16} />}
                   type="search"
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
@@ -640,7 +595,9 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
             )}
             {!loading && displayedTracks.length === 0 && (
               <div className={styles.emptyCollection}>
-                <Icon aria-hidden icon={Music2} size={{ size: 40, strokeWidth: 1.5 }} />
+                <span aria-hidden className={styles.emptyArtwork}>
+                  <MusicArtwork />
+                </span>
                 <h3>
                   {view === 'queue'
                     ? t('emptyQueue')
@@ -680,11 +637,7 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
                     {String(index + 1).padStart(2, '0')}
                   </span>
                   <span aria-hidden className={styles.trackArt}>
-                    {track.coverUrl ? (
-                      <img alt="" decoding="async" loading="lazy" src={track.coverUrl} />
-                    ) : (
-                      <Icon icon={Music2} size={20} />
-                    )}
+                    <MusicArtwork coverUrl={track.coverUrl} />
                   </span>
                   <div className={styles.rowInfo}>
                     <span className={styles.name} title={track.name}>
@@ -735,11 +688,7 @@ export default function MusicStudio({ navigation }: { navigation?: ReactNode }) 
                       {String((s.playlist?.startIndex ?? 0) + index + 1).padStart(2, '0')}
                     </span>
                     <span aria-hidden className={styles.trackArt}>
-                      {track.coverUrl ? (
-                        <img alt="" decoding="async" loading="lazy" src={track.coverUrl} />
-                      ) : (
-                        <Icon icon={Music2} size={20} />
-                      )}
+                      <MusicArtwork coverUrl={track.coverUrl} />
                     </span>
                     <div className={styles.rowInfo}>
                       <span className={styles.name} title={track.name}>

@@ -95,6 +95,8 @@ export interface GeneralAgentConfig {
    * When not provided, defaults to [createSecurityBlacklistGlobalAudit()]
    */
   globalInterventionAudits?: GlobalInterventionAuditConfig[];
+  /** Host tools whose `always` review cannot be bypassed by headless tasks. */
+  mandatoryInterventionTools?: string[];
   modelRuntimeConfig?: {
     /**
      * Compression model configuration

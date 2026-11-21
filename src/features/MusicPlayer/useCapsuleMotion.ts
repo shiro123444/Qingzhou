@@ -48,7 +48,11 @@ export function useCapsuleMotion(
       if (
         element
           .getAnimations({ subtree: true })
-          .some((animation) => animation.pending || animation.playState === 'running')
+          .some(
+            (animation) =>
+              animation.effect?.getTiming().iterations !== Infinity &&
+              (animation.pending || animation.playState === 'running'),
+          )
       ) {
         frame = requestAnimationFrame(settle);
         return;

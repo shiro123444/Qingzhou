@@ -1,12 +1,17 @@
 import { parseString } from '../../../../packages/file-loaders/src/utils/parser-utils';
 import type { PresentationPlan } from '../../../../packages/runtime-contracts/src';
+import { bindApprovedGraphDirections } from './approved-graph-directions';
+import type { CapabilityCapsule } from './capability-memory';
 import { deckVisualSystemSchema, renderDeckVisualFrame } from './deck-visual-system';
+import { appendDesignEvidence, designCompilationEvidence } from './design-evidence';
+import { compileLearnedPageLayout } from './learned-page-layout';
 import {
   renderScientificDiagram,
   renderSemanticBlocks,
   semanticAuthoringSvg,
   semanticBlockSchema,
 } from './semantic-blocks';
+import { storyboardPageCapsules } from './storyboard-compatibility';
 import type { TemplateApplication } from './templates';
 import { measureSlideText } from './text-measurement';
 import type { PresentationVisualReview } from './visual-critic';
@@ -87,20 +92,110 @@ export function stampLockedTemplateChrome(
 export async function stabilizePresentationVisuals(
   plan: PresentationPlan,
   template?: TemplateApplication,
+  capsules: CapabilityCapsule[] = [],
+  stage: 'pre-review' | 'post-repair' | 'export' = 'pre-review',
+  targetSlideIds?: ReadonlySet<string>,
+  exactObjectSlideIds?: ReadonlySet<string>,
 ): Promise<PresentationPlan> {
   const master = deckVisualSystemSchema.safeParse(plan.designSpec?.deckVisualSystem);
   const slides = await Promise.all(
     plan.slides.map(async (slide) => {
+      if (targetSlideIds && !targetSlideIds.has(slide.slideId)) return slide;
+      // Respect a confirmed manual placement across later edits to other pages.
+      // A new layout that changes the anchor naturally invalidates the override.
+      const placement = slide.metadata?.canvasPosition as
+        { id?: string; x?: number; y?: number } | undefined;
+      const retainsPlacement =
+        exactObjectSlideIds?.has(slide.slideId) ||
+        (placement &&
+          Array.isArray(slide.metadata?.contentBlocks) &&
+          slide.metadata.contentBlocks.some(
+            (block) =>
+              block?.id === placement.id &&
+              block.rect?.x === placement.x &&
+              block.rect?.y === placement.y,
+          ));
+      let freshlyCompiled = false;
+      let compilation: Awaited<ReturnType<typeof compileLearnedPageLayout>>;
+      let skipReason: string | undefined;
+      if (
+        !retainsPlacement &&
+        capsules.length &&
+        master.success &&
+        master.data.schemaVersion === 3 &&
+        !plan.designSpec?.lessonPlan
+      ) {
+        const role = (slide.metadata?.visualDirection as { role?: string } | undefined)?.role;
+        const approvedContent = Array.isArray(slide.metadata?.outline)
+          ? (slide.metadata.outline as string[])
+          : undefined;
+        const authoredBlocks = bindApprovedGraphDirections(
+          slide.metadata?.contentBlocks,
+          approvedContent,
+        );
+        const compiled = await compileLearnedPageLayout({
+          svg: slide.svg,
+          rawBlocks: authoredBlocks,
+          imageSizes: new Map(
+            Object.entries(
+              (slide.metadata?.imageDimensions ?? {}) as Record<
+                string,
+                { width: number; height: number }
+              >,
+            ),
+          ),
+          pageNumber: slide.order,
+          deckTitle: plan.title,
+          totalPages: plan.slides.length,
+          approvedContent,
+          title: String(slide.metadata?.title ?? ''),
+          capsules: storyboardPageCapsules(
+            plan.designSpec?.layoutCompatibility,
+            slide.slideId,
+            capsules,
+            authoredBlocks,
+          ),
+          onSkip: (reason) => {
+            skipReason = reason;
+          },
+          system: master.data,
+          role: role === 'cover' || slide.order === 1 ? 'cover' : undefined,
+        });
+        freshlyCompiled = Boolean(compiled);
+        compilation = compiled;
+        slide = {
+          ...slide,
+          svg: compiled?.svg ?? slide.svg,
+          metadata: {
+            ...slide.metadata,
+            compiledDesign: compiled?.receipt,
+            ...(authoredBlocks !== slide.metadata?.contentBlocks
+              ? { contentBlocks: authoredBlocks }
+              : {}),
+            ...(compiled ? { contentBlocks: compiled.blocks, capabilityUses: compiled.uses } : {}),
+          },
+        };
+      }
       const blocks = slide.metadata?.contentBlocks;
       let svg = slide.svg;
       if (Array.isArray(blocks) && blocks.length) {
-        const editable = semanticAuthoringSvg(svg, blocks);
+        const editable = freshlyCompiled ? svg : semanticAuthoringSvg(svg, blocks);
         svg = (await renderSemanticBlocks(editable, blocks)).svg;
       }
+      if (slide.metadata?.compiledDesign) {
+        // Migrate early compiled drafts to the upstream native-export contract.
+        // This changes identifiers only, preserving their authored geometry.
+        const document = parseString(svg);
+        Array.from(document.getElementsByTagName('rect')).forEach((rect, index) => {
+          if (rect.getAttribute('data-pptx-role') === 'background' && !rect.getAttribute('id'))
+            rect.setAttribute('id', `learned-background-${index}`);
+        });
+        svg = document.toString();
+      }
       if (master.success && slide.metadata?.deckVisualSystemId) {
-        const role = (slide.metadata.visualDirection as { role?: string } | undefined)?.role;
+        const role = (slide.metadata?.visualDirection as { role?: string } | undefined)?.role;
         svg = renderDeckVisualFrame(svg, master.data, {
-          title: String(slide.metadata.title ?? ''),
+          title: String(slide.metadata?.title ?? ''),
           role:
             role === 'cover' || role === 'section' || role === 'closing'
               ? role
@@ -116,9 +211,31 @@ export async function stabilizePresentationVisuals(
           template,
           (slide.metadata?.visualDirection as { archetypeId?: string } | undefined)?.archetypeId,
         );
-      return reconcileEmbeddedVisualAnnotations(
+      const result = reconcileEmbeddedVisualAnnotations(
         reconcileNativeVisualAssets(svg === slide.svg ? slide : { ...slide, svg }),
       );
+      return !retainsPlacement &&
+        capsules.length &&
+        master.success &&
+        master.data.schemaVersion === 3 &&
+        !plan.designSpec?.lessonPlan
+        ? {
+            ...result,
+            metadata: {
+              ...result.metadata,
+              designCompilation: appendDesignEvidence(
+                result.metadata?.designCompilation,
+                designCompilationEvidence({
+                  capsules,
+                  stage,
+                  svg: result.svg,
+                  compiled: compilation,
+                  skipReason,
+                }),
+              ),
+            },
+          }
+        : result;
     }),
   );
   return slides.every((slide, index) => slide === plan.slides[index]) ? plan : { ...plan, slides };

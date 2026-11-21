@@ -65,7 +65,8 @@ export const getTestDB = async (): Promise<LobeChatDatabase> => {
 
     if (!skipSql) {
       for (const stmt of migration.sql) {
-        await testClientDB.execute(sql.raw(stmt));
+        // Migration chunks can contain multiple commands, which prepared queries reject.
+        await pglite.exec(stmt);
       }
     }
 

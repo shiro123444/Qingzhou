@@ -6,6 +6,8 @@ import { TaskModel } from '@/database/models/task';
 import { getServerDB } from '@/database/server';
 import { appEnv } from '@/envs/app';
 import { qstashClient } from '@/libs/qstash';
+import { isNativeAgentRuntimeEnabled } from '@/server/runtime/tasks/mode';
+import { NativeWakeStore } from '@/server/runtime/tasks/wakeStore';
 import { runScheduleTick } from '@/server/services/taskRunner/scheduleTick';
 
 const log = debug('lobe-server:workflows:task:schedule-dispatch');
@@ -83,6 +85,10 @@ export async function scheduleDispatch(c: Context) {
       });
     }
 
+    if (isNativeAgentRuntimeEnabled()) {
+      await new NativeWakeStore(db).seedScanners();
+      return c.json({ success: true, dispatched: 0, due: due.length, managedBy: 'native-worker' });
+    }
     const dispatched = await fanout(due);
 
     return c.json({

@@ -3,22 +3,21 @@ import nodePath from 'node:path';
 import type { PluginBundle, PluginProfile } from '@lobechat/cordis-runtime';
 
 import {
-  type AtomicPlugin,
+  type AtomicPluginModule,
   type AtomicRuntime,
   createAtomicRuntimeFromProfile,
 } from '../atomic-runtime';
+import { assertBuiltinPluginEnabled } from '../builtin-plugins';
 import type { MultimodalChatPort } from '../presentation/multimodal-chat-provider';
 import type { SkillsPluginOptions } from '../skills-plugin';
-import { createSiteSkillsPlugin } from './composition';
 import { SiteError } from './contracts';
-import { createSitesPlugin } from './plugin';
 import type { SiteSource } from './sources';
 import { SiteStore } from './store';
 
 export interface SitesRuntimeOptions {
   bundles?: Readonly<Record<string, PluginBundle>>;
   /** Trusted modules are mounted only when selected by the profile. */
-  plugins?: Readonly<Record<string, AtomicPlugin>>;
+  plugins?: Readonly<Record<string, AtomicPluginModule>>;
   profile?: PluginProfile;
   skills?: SkillsPluginOptions;
   sources?: SiteSource[];
@@ -46,10 +45,21 @@ export function createSitesRuntime(options: SitesRuntimeOptions) {
     );
   // Factories only register lazy callbacks. AtomicRuntime mounts on its pending
   // promise, after this assignment, so every nested invocation uses this host.
-  const modules: Record<string, AtomicPlugin> = {
+  const modules: Record<string, AtomicPluginModule> = {
     ...options.plugins,
-    sites: createSitesPlugin(options.store, undefined, options.sources, () => runtime),
-    skills: createSiteSkillsPlugin(() => runtime, options.store, options.skills),
+    sites: async () =>
+      (await import('./plugin')).createSitesPlugin(
+        options.store,
+        undefined,
+        options.sources,
+        () => runtime,
+      ),
+    skills: async () =>
+      (await import('./composition')).createSiteSkillsPlugin(
+        () => runtime,
+        options.store,
+        options.skills,
+      ),
   };
   const runtime: AtomicRuntime = createAtomicRuntimeFromProfile({
     bundles: { ...SITES_RUNTIME_BUNDLES, ...options.bundles },
@@ -77,30 +87,27 @@ export async function createProductionSitesRuntime(
   if (profile !== 'sites' && profile !== 'education')
     throw new SiteError('SITE_PROFILE_INVALID', 'Choose sites or education');
   if (profile === 'sites') return createSitesRuntime(options);
-  const [{ createTeachingPlugin }, { createContentPlugin }] = await Promise.all([
-    import('../teaching/atomic-plugin'),
-    import('../content/atomic-plugin'),
-  ]);
   return createSitesRuntime({
     ...options,
     plugins: {
-      teaching: createTeachingPlugin({
-        chat: (ctx) => {
-          const provider = ctx.services?.sitesChat as MultimodalChatPort | undefined;
-          if (
-            !provider?.providerId ||
-            typeof provider.chat !== 'function' ||
-            !provider.manifest?.model
-          )
-            throw new SiteError(
-              'SITE_AGENT_UNAVAILABLE',
-              'Select an enabled model in Qingzhou first',
-              503,
-            );
-          return provider;
-        },
-      }),
-      content: createContentPlugin(),
+      teaching: async () =>
+        (await import('../teaching/atomic-plugin')).createTeachingPlugin({
+          chat: (ctx) => {
+            const provider = ctx.services?.sitesChat as MultimodalChatPort | undefined;
+            if (
+              !provider?.providerId ||
+              typeof provider.chat !== 'function' ||
+              !provider.manifest?.model
+            )
+              throw new SiteError(
+                'SITE_AGENT_UNAVAILABLE',
+                'Select an enabled model in Qingzhou first',
+                503,
+              );
+            return provider;
+          },
+        }),
+      content: async () => (await import('../content/atomic-plugin')).createContentPlugin(),
     },
     profile: {
       bundles: ['sites'],
@@ -124,6 +131,7 @@ export async function createProductionSitesRuntime(
 }
 
 export function getSitesRuntime() {
+  assertBuiltinPluginEnabled('sites');
   if (active) return active;
   const initialization = createProductionSitesRuntime({
     store: getSitesStore(),
@@ -135,6 +143,14 @@ export function getSitesRuntime() {
         ? [{ id: 'blog' as const, name: '清舟博客', url: process.env.CORDIS_BLOG_URL }]
         : []),
     ],
+  }).then(async (host) => {
+    try {
+      await host.runtime.ready();
+      return host;
+    } catch (error) {
+      await host.runtime.dispose();
+      throw error;
+    }
   });
   active = initialization;
   // A failed initialization must not poison the process or clear a newer host.

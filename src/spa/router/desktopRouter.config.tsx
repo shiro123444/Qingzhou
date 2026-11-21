@@ -6,6 +6,7 @@ import {
   BusinessDesktopRoutesWithMainLayout,
   BusinessDesktopRoutesWithoutMainLayout,
 } from '@/business/client/BusinessDesktopRoutes';
+import { builtinPluginElement } from '@/features/BuiltinPlugins';
 import { dynamicElement, dynamicLayout, ErrorBoundary, redirectElement } from '@/utils/router';
 
 const agentChatElement = dynamicElement(() => import('@/routes/(main)/agent'), 'Desktop > Chat');
@@ -646,7 +647,11 @@ export const desktopRoutes: RouteObject[] = [
       },
 
       {
-        element: dynamicElement(() => import('@/routes/(main)/sites'), 'Desktop > Sites'),
+        element: builtinPluginElement(
+          'sites',
+          () => import('@/routes/(main)/sites'),
+          'Desktop > Sites',
+        ),
         path: 'sites',
       },
       // Runtime routes
@@ -663,14 +668,19 @@ export const desktopRoutes: RouteObject[] = [
 
       // Music workspace
       {
-        element: dynamicElement(() => import('@/routes/(main)/music'), 'Desktop > Music'),
+        element: builtinPluginElement(
+          'music',
+          () => import('@/routes/(main)/music'),
+          'Desktop > Music',
+        ),
         path: 'music',
       },
       // PresentationStudio routes
       {
         children: [
           {
-            element: dynamicElement(
+            element: builtinPluginElement(
+              'presentation',
               () => import('@/routes/(main)/presentation'),
               'Desktop > Presentation > Studio',
             ),
@@ -758,7 +768,11 @@ export const desktopRoutes: RouteObject[] = [
   ...BusinessDesktopRoutesWithoutMainLayout,
 
   {
-    element: dynamicElement(() => import('@/routes/share/sites/[siteId]'), 'Desktop > Public Blog'),
+    element: builtinPluginElement(
+      'sites',
+      () => import('@/routes/share/sites/[siteId]'),
+      'Desktop > Public Blog',
+    ),
     path: '/sites/view/:siteId',
   },
   // Share topic route (outside main layout)

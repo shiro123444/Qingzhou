@@ -1,0 +1,103 @@
+{
+  "artifacts": {
+    "actualApp": "output/qingzhou-motion-home.jpg",
+    "musicDesktop": "output/qingzhou-motion-validation/music-player-desktop.png",
+    "musicMobile": "output/qingzhou-motion-validation/music-player-mobile.png",
+    "computerAndCompanion": "output/qingzhou-motion-validation"
+  },
+  "checks": {
+    "typecheck": "passed",
+    "eslint": "passed",
+    "stylelint": "passed",
+    "format": "passed",
+    "diffWhitespace": "passed"
+  },
+  "date": "2026-11-16",
+  "notes": [
+    "26 unique component regression cases and 2 real browser integration workflows passed",
+    "Initial music test precondition expired because the 30s audio fixture naturally ended; gesture now explicitly starts playback before testing drag",
+    "Continuous playback meter animations no longer keep the finite optical morph loop running",
+    "Arabic and other shaping-dependent words remain joined",
+    "All new product strings follow existing i18n; current account language and theme unchanged",
+    "Chrome main preview signed into the existing local account; its restored song remains paused",
+    "No native worker or model request started"
+  ],
+  "parameters": {
+    "weightWave": {
+      "letters": [260, 22],
+      "focus": [150, 22],
+      "spread": 0.13,
+      "idleSweep": false
+    },
+    "readAlong": {
+      "lead": [520, 40],
+      "trail": [210, 26],
+      "line": [600, 48],
+      "opacity": [300, 30],
+      "paddingEm": 0.16,
+      "clock": "Existing streaming deltas or real lyric timestamps; plain LRC follows actual line"
+    },
+    "record": {
+      "cruiseDegreesPerSecond": 200,
+      "spinUpSeconds": 0.22,
+      "spinDownSeconds": 0.2,
+      "audioEngine": "Existing owned-account engine; no sample player clock or autoplay added"
+    }
+  },
+  "references": [
+    {
+      "name": "Weight wave",
+      "url": "https://designbookmark.com/motion-src/weight-wave/index.html",
+      "sha256": "80cd361cda6a206ce4d39e2d7635560737cf33faeca5de02880177b63db26546"
+    },
+    {
+      "name": "Read along",
+      "url": "https://designbookmark.com/motion-src/read-along/index.html",
+      "sha256": "9ccb7585303e01fc3248a3c3b77df1ec1688f2a3b713bb246a5e5ae6e5ca91a2"
+    },
+    {
+      "name": "Shared motion tokens",
+      "url": "https://designbookmark.com/motion-src/shared/tokens.css",
+      "sha256": "9fea8652582a0c0ceb2cf9bdb9126a15dfad3719e1b4f5e526fc4ed51ad6de63"
+    },
+    {
+      "name": "Glass player v2",
+      "url": "https://kokonutui.com/r/liquid-glass-card.json",
+      "sha256": "343fc98e2ded03f66e30518830bf5e65c3f228cf6bf550985cd0605dc66690ec"
+    }
+  ],
+  "scope": [
+    "Shared navigation weight wave and shaped motion glyphs",
+    "Minimal Bot rail and confirmed computer status headline",
+    "Real streaming text and timestamped lyrics Read along",
+    "Glass record mini player, genuine audio state, retained drag and account boundaries"
+  ],
+  "services": "Main local preview and computer provider remain available; isolated test containers and fixture servers cleaned up",
+  "skill": {
+    "name": "frontend-design",
+    "installed": "/Users/july/.agents/skills/frontend-design/SKILL.md",
+    "command": "npx --yes skills add https://github.com/anthropics/skills --skill frontend-design --agent codex --global --yes"
+  },
+  "verification": {
+    "regression": {
+      "passed": 23,
+      "failed": 0,
+      "report": "output/qingzhou-motion-regression.json"
+    },
+    "capsule": {
+      "passed": 3,
+      "failed": 0,
+      "report": "output/qingzhou-motion-capsule.json"
+    },
+    "computerLive": {
+      "passed": 1,
+      "failed": 0,
+      "report": "output/qingzhou-motion-computer-live.json"
+    },
+    "musicLive": {
+      "passed": 1,
+      "failed": 0,
+      "report": "output/qingzhou-motion-music-live.json"
+    }
+  }
+}

@@ -4,6 +4,7 @@ import { type MarkdownProps } from '@lobehub/ui';
 import { type ReactNode, useMemo, useState } from 'react';
 
 import { HtmlPreviewDrawer } from '@/components/HtmlPreview';
+import { StreamingWord, streamWords } from '@/features/GlassMotion/StreamingReply';
 import { useUserStore } from '@/store/user';
 import { userGeneralSettingsSelectors } from '@/store/user/selectors';
 
@@ -30,6 +31,7 @@ export const useChatMarkdown = ({
   enableStream = true,
 }: UseChatMarkdownOptions): {
   drawer: ReactNode;
+  streamMotion: boolean;
   markdownProps: Partial<MarkdownProps>;
 } => {
   const { transitionMode } = useUserStore(userGeneralSettingsSelectors.config);
@@ -51,18 +53,18 @@ export const useChatMarkdown = ({
   const markdownProps = useMemo(
     () =>
       ({
-        animated,
+        animated: false,
         citations,
         componentProps: {
           html: {
             onExpand: (content: string) => setDrawerContent(content),
           },
         },
-        components,
+        components: animated ? { ...components, span: StreamingWord } : components,
         enableCustomFootnotes: true,
         enableHtmlPreview: true,
         enableStream,
-        rehypePlugins,
+        rehypePlugins: animated ? [...rehypePlugins, streamWords] : rehypePlugins,
         remarkPlugins,
         showFootnotes:
           !!citations && citations.length > 0 && citations.every((item) => item.title !== item.url),
@@ -70,13 +72,20 @@ export const useChatMarkdown = ({
     [animated, citations, components, enableStream],
   );
 
-  const drawer = drawerContent ? (
-    <HtmlPreviewDrawer
-      content={drawerContent}
-      open={!!drawerContent}
-      onClose={() => setDrawerContent(null)}
-    />
-  ) : null;
+  const drawer = useMemo(
+    () =>
+      drawerContent ? (
+        <HtmlPreviewDrawer
+          content={drawerContent}
+          open={!!drawerContent}
+          onClose={() => setDrawerContent(null)}
+        />
+      ) : null,
+    [drawerContent],
+  );
 
-  return useMemo(() => ({ drawer, markdownProps }), [drawer, markdownProps]);
+  return useMemo(
+    () => ({ drawer, markdownProps, streamMotion: animated }),
+    [drawer, markdownProps, animated],
+  );
 };

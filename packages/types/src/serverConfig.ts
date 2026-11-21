@@ -52,13 +52,18 @@ export interface ServerModelProviderConfig {
 export type ServerLanguageModel = Partial<Record<GlobalLLMProviderKey, ServerModelProviderConfig>>;
 
 export interface GlobalServerConfig {
+  agentComputerEnabled?: boolean;
   /**
    * Agent Gateway URL for WebSocket-based agent execution.
    * When set, the SPA can offload agent execution to the server and receive
    * events via the Gateway instead of running the agent loop client-side.
    */
   agentGatewayUrl?: string;
+  /** Native background execution uses the application's authenticated event stream. */
+  agentRuntimeMode?: 'native';
   aiProvider: ServerLanguageModel;
+  /** Deployment-selected native plugins. Absent retains compatibility with older servers. */
+  builtinPlugins?: string[];
   defaultAgent?: PartialDeep<UserDefaultAgent>;
   disableEmailPassword?: boolean;
   enableBusinessFeatures?: boolean;
@@ -70,8 +75,8 @@ export interface GlobalServerConfig {
   enableKlavis?: boolean;
   enableLobehubSkill?: boolean;
   enableMagicLink?: boolean;
-  enableMcpProxy?: boolean;
   enableMarketTrustedClient?: boolean;
+  enableMcpProxy?: boolean;
   enableUploadFileToServer?: boolean;
   enableVisualUnderstanding?: boolean;
   image?: PartialDeep<UserImageConfig>;

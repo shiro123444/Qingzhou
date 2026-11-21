@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { PresentationPlan } from '../../../../packages/runtime-contracts/src';
+import { createDeckVisualSystem } from './deck-visual-system';
 import { pptMasterProjectLock } from './ppt-master-project';
 
 describe('PPT Master export theme', () => {
@@ -29,5 +30,15 @@ describe('PPT Master export theme', () => {
     expect(lock).toContain('- body: 24');
     expect(lock).toContain('- caption: 16');
     expect(lock).toContain('- viewBox: 0 0 960 540');
+    const master = createDeckVisualSystem({
+      notebookId: 'test',
+      sourceVersionIds: [],
+      title: plan.title,
+      options: { styleWorkspaceId: 'academic-research' },
+    });
+    const styled = pptMasterProjectLock({ ...plan, designSpec: { deckVisualSystem: master } });
+    expect(styled).toContain('- display_title: 36');
+    expect(styled).toContain('- title: 32');
+    expect(styled).toContain('- label: 16');
   });
 });

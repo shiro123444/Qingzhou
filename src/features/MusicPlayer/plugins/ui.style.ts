@@ -8,6 +8,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
   lyrics: css`
     scrollbar-width: none;
 
+    isolation: isolate;
     position: absolute;
     inset-block: 12px 0;
     inset-inline: 0;

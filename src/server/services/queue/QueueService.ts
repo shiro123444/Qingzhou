@@ -1,3 +1,5 @@
+import type { LobeChatDatabase } from '@/database/type';
+
 import { type QueueServiceImpl } from './impls';
 import { createQueueServiceModule, LocalQueueServiceImpl } from './impls';
 import { type HealthCheckResult, type QueueMessage, type QueueStats } from './types';
@@ -9,12 +11,13 @@ import { type HealthCheckResult, type QueueMessage, type QueueStats } from './ty
  * Execution modes:
  * - Local mode (default): LocalQueueServiceImpl with setTimeout for async step execution
  * - Queue mode (AGENT_RUNTIME_MODE=queue): QStashQueueServiceImpl for production
+ * - Native mode (AGENT_RUNTIME_MODE=native): durable PostgreSQL jobs, executed by a Cordis worker
  */
 export class QueueService {
   private impl: QueueServiceImpl;
 
-  constructor() {
-    this.impl = createQueueServiceModule();
+  constructor(options?: { db?: LobeChatDatabase; userId?: string }) {
+    this.impl = createQueueServiceModule(options);
   }
 
   /**

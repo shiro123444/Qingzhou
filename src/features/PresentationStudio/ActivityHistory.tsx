@@ -27,6 +27,23 @@ const styles = createStaticStyles(({ css, cssVar }) => ({
   `,
 }));
 
+export function ActivityHistoryList({ history }: { history?: { id: string; text: string }[] }) {
+  const { t } = useTranslation('common');
+  return (
+    <ol
+      aria-label={t('presentationTemplates.activityHistory')}
+      className={styles.list}
+      data-testid="presentation-activity-history"
+    >
+      {history?.length ? (
+        [...history].reverse().map((item) => <li key={item.id}>{item.text}</li>)
+      ) : (
+        <li>{t('presentationTemplates.waitingForActivity')}</li>
+      )}
+    </ol>
+  );
+}
+
 export default function ActivityHistory({
   children,
   history,
@@ -40,19 +57,7 @@ export default function ActivityHistory({
       placement="bottomRight"
       title={t('presentationTemplates.activityHistory')}
       trigger={['click']}
-      content={
-        <ol
-          aria-label={t('presentationTemplates.activityHistory')}
-          className={styles.list}
-          data-testid="presentation-activity-history"
-        >
-          {history?.length ? (
-            [...history].reverse().map((item) => <li key={item.id}>{item.text}</li>)
-          ) : (
-            <li>{t('presentationTemplates.waitingForActivity')}</li>
-          )}
-        </ol>
-      }
+      content={<ActivityHistoryList history={history} />}
     >
       {children}
     </Popover>

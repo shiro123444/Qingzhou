@@ -4,8 +4,10 @@ import debug from 'debug';
 import { BriefModel } from '@/database/models/brief';
 import { TaskModel } from '@/database/models/task';
 import { getServerDB } from '@/database/server';
+import type { LobeChatDatabase } from '@/database/type';
 import { setTaskSchedulerExecutionCallback } from '@/server/services/taskScheduler';
 
+import type { RunTaskParams } from './index';
 import { TaskRunnerService } from './index';
 
 const log = debug('task-runner:heartbeat-tick');
@@ -14,16 +16,11 @@ const TERMINAL_STATUSES = new Set(['canceled', 'completed', 'failed']);
 const isTerminal = (status: string) => TERMINAL_STATUSES.has(status);
 
 export type HeartbeatTickOutcome =
-  | { ran: true; taskIdentifier: string }
+  | { ran: true; taskIdentifier: string; operationId?: string }
   | { ran: false; reason: HeartbeatTickSkipReason };
 
 export type HeartbeatTickSkipReason =
-  | 'human-waiting'
-  | 'in-flight'
-  | 'mode-changed'
-  | 'no-interval'
-  | 'not-found'
-  | 'terminal';
+  'human-waiting' | 'in-flight' | 'mode-changed' | 'no-interval' | 'not-found' | 'terminal';
 
 /**
  * Run a heartbeat tick — invoked by both the LocalScheduler `setTimeout`
@@ -36,8 +33,11 @@ export type HeartbeatTickSkipReason =
 export async function runHeartbeatTick(
   taskId: string,
   userId: string,
+  options: Pick<RunTaskParams, 'nativeWakeId' | 'nativeWakeLease' | 'guard'> & {
+    db?: LobeChatDatabase;
+  } = {},
 ): Promise<HeartbeatTickOutcome> {
-  const db = await getServerDB();
+  const db = options.db ?? (await getServerDB());
 
   const taskModel = new TaskModel(db, userId);
   const task = await taskModel.findById(taskId);
@@ -66,7 +66,18 @@ export async function runHeartbeatTick(
 
   const runner = new TaskRunnerService(db, userId);
   try {
-    await runner.runTask({ taskId });
+    const result = await runner.runTask({
+      taskId,
+      ...(options.nativeWakeId
+        ? {
+            nativeWakeId: options.nativeWakeId,
+            nativeWakeLease: options.nativeWakeLease,
+            guard: options.guard,
+          }
+        : {}),
+    });
+    if (options.nativeWakeId)
+      return { ran: true, taskIdentifier: task.identifier, operationId: result.operationId };
   } catch (e) {
     // Concurrent tick / manual run already running this task — treat as a
     // graceful skip. runTask's own rollback only fires when *it* set running,

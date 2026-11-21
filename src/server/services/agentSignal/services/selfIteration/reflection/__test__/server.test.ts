@@ -17,6 +17,13 @@ vi.mock('@/server/modules/ModelRuntime', () => ({
   initModelRuntimeFromDB: mocks.initModelRuntimeFromDB,
 }));
 
+vi.mock('@/server/services/agentSignal/modelConfig', () => ({
+  resolveAgentSignalModelConfig: vi.fn(async () => ({
+    model: 'agent-model',
+    provider: 'agent-provider',
+  })),
+}));
+
 const payload = {
   agentId: 'agent-1',
   reason: 'tool_failed',
@@ -59,10 +66,16 @@ describe('createServerSelfReflectionPolicyOptions', () => {
     const runtime = await options.runtimeFactory?.createRuntime({ context, payload, source });
 
     expect(mocks.initModelRuntimeFromDB).toHaveBeenCalledOnce();
+    expect(mocks.initModelRuntimeFromDB).toHaveBeenCalledWith(
+      expect.anything(),
+      'user-1',
+      'agent-provider',
+      undefined,
+    );
     expect(runtime).toEqual(
       expect.objectContaining({
         executeSelfIteration: expect.any(Function),
-        model: expect.any(String),
+        model: 'agent-model',
         modelRuntime: expect.objectContaining({ chat: expect.any(Function) }),
         tools: expect.objectContaining({
           getEvidenceDigest: expect.any(Function),

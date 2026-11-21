@@ -1,6 +1,6 @@
-import { ActionIcon, Flexbox } from '@lobehub/ui';
+import { Flexbox } from '@lobehub/ui';
 import { createStaticStyles } from 'antd-style';
-import { PanelRightCloseIcon } from 'lucide-react';
+import { PanelToggle } from '@/features/GlassMotion/PanelToggle';
 import { lazy, memo } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -154,10 +154,12 @@ const AgentWorkingSidebar = memo(() => {
               </button>
             )}
           </div>
-          <ActionIcon
-            icon={PanelRightCloseIcon}
+          <PanelToggle
+            expanded={true}
+            side="right"
+            label={t('toggleRightPanel.title', { ns: 'hotkey' })}
             size={DESKTOP_HEADER_ICON_SMALL_SIZE}
-            onClick={() => toggleRightPanel(false)}
+            onToggle={() => toggleRightPanel(false)}
           />
         </Flexbox>
         <Flexbox className={styles.body} width={'100%'}>

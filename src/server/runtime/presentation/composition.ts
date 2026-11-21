@@ -57,6 +57,8 @@ export type PresentationRuntimeGenerationHandler = (
 ) => Promise<PresentationGenerationHttpResponse>;
 
 export interface PresentationRuntimeCompositionOptions {
+  /** Artifact store used by the asynchronous `/jobs` generation bridge. */
+  readonly agentRoutingFingerprint?: string;
   readonly atomicRuntime?: AtomicRuntime;
   readonly capability?: PresentationGenerationCapability;
   readonly capabilityMemory?: CapabilityMemory;
@@ -64,7 +66,6 @@ export interface PresentationRuntimeCompositionOptions {
   readonly collaborationHook?: PresentationCollaborationHook;
   readonly contentCompiler?: PresentationContentCompiler;
   readonly contextFactory?: PresentationGenerationContextFactory;
-  /** Artifact store used by the asynchronous `/jobs` generation bridge. */
   readonly generationArtifactStore?: PresentationArtifactStore;
   readonly generationCapability?: PresentationGenerationCapability;
   readonly generationContextFactory?: PresentationGenerationContextFactory;
@@ -75,6 +76,8 @@ export interface PresentationRuntimeCompositionOptions {
   readonly jobRepository?: PresentationJobRepository;
   readonly journalCache?: ScopedPresentationJobEventJournalCache;
   readonly journalLoader?: PresentationJobEventJournalLoader;
+  readonly layoutDiagnosisChat?: MultimodalChatPort;
+  readonly outlineChatPort?: MultimodalChatPort;
   readonly multimodalChatPort?: MultimodalChatPort;
   readonly now?: () => string;
   readonly planningContextFactory?: PlanningContextFactory;
@@ -324,10 +327,13 @@ export const createPresentationRuntimeComposition = (
           if (existing) return existing;
           const port = createPresentationGenerationPort(
             {
+              agentRoutingFingerprint: compositionOptions.agentRoutingFingerprint,
+              layoutDiagnosisChat: compositionOptions.layoutDiagnosisChat,
               atomicRuntime: compositionOptions.atomicRuntime,
               collaborationHook: compositionOptions.collaborationHook,
               executionLimiter,
               contentCompiler: compositionOptions.contentCompiler,
+              outlineCapability,
               capabilityMemory: compositionOptions.capabilityMemory,
               capabilitySelector: compositionOptions.capabilitySelector,
               prepareCapabilityLibrary: compositionOptions.prepareCapabilityLibrary,
@@ -394,12 +400,15 @@ export const createPresentationRuntimeComposition = (
   }
 
   const conversationCapability = compositionOptions.multimodalChatPort
-    ? createPresentationConversationCapability({ chat: compositionOptions.multimodalChatPort })
+    ? createPresentationConversationCapability({
+        chat: compositionOptions.multimodalChatPort,
+        teachingMemory: compositionOptions.teachingMemory,
+      })
     : undefined;
   const outlineCapability = compositionOptions.multimodalChatPort
     ? createPresentationOutlineCapability({
         atomicRuntime: compositionOptions.atomicRuntime ?? null,
-        chat: compositionOptions.multimodalChatPort,
+        chat: compositionOptions.outlineChatPort ?? compositionOptions.multimodalChatPort,
         teachingMemory: compositionOptions.teachingMemory,
       })
     : undefined;

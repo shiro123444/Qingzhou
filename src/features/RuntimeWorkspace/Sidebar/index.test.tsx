@@ -4,7 +4,6 @@ import { describe, expect, it, vi } from 'vitest';
 import { useRuntimeStore } from '@/store/runtime';
 
 import Sidebar from './index';
-import { styles } from './style';
 
 describe('RuntimeWorkspace Sidebar (C-112-05)', () => {
   it('renders runs and allows collapsing and expanding with 44x44px keyboard-accessible trigger', () => {
@@ -36,7 +35,7 @@ describe('RuntimeWorkspace Sidebar (C-112-05)', () => {
     expect(collapseBtn).toBeInTheDocument();
     expect(collapseBtn).toHaveAttribute('aria-label', '收起侧栏');
 
-    // Click to collapse
+    collapseBtn.focus();
     fireEvent.click(collapseBtn);
     expect(onCollapsedChange).toHaveBeenCalledWith(true);
     expect(sidebar).toHaveAttribute('data-collapsed', 'true');
@@ -46,27 +45,15 @@ describe('RuntimeWorkspace Sidebar (C-112-05)', () => {
 
     // 44x44px expand button is present on narrow edge, keyboard reachable with aria-label
     const expandBtn = screen.getByTestId('workspace-sidebar-expand-btn');
-    expect(expandBtn).toBeInTheDocument();
+    expect(expandBtn).toBe(collapseBtn);
+    expect(expandBtn).toHaveFocus();
     expect(expandBtn).toHaveAttribute('aria-label', '展开侧栏');
     expect(expandBtn).toHaveAttribute('tabIndex', '0');
 
     // Keyboard action (Enter) or click restores sidebar
-    fireEvent.click(expandBtn);
+    fireEvent.keyDown(expandBtn, { key: 'Enter' });
     expect(onCollapsedChange).toHaveBeenCalledWith(false);
     expect(sidebar).toHaveAttribute('data-collapsed', 'false');
     expect(screen.getByText(/Runs \(1\)/)).toBeInTheDocument();
-  });
-
-  it('provides style contract with 150-300ms transition and reduced-motion rules', () => {
-    expect(styles.sidebar).toBeDefined();
-    expect(styles.sidebarCollapsed).toBeDefined();
-    expect(styles.expandButton).toBeDefined();
-    expect(styles.collapseButton).toBeDefined();
-    expect(styles.expandedContent).toBeDefined();
-    expect(styles.collapsedBar).toBeDefined();
-
-    // Check style class names are strings
-    expect(typeof styles.expandButton).toBe('string');
-    expect(typeof styles.sidebarCollapsed).toBe('string');
   });
 });

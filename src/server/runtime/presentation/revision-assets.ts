@@ -27,6 +27,7 @@ import {
   isRasterVisual,
   readContentIntents,
   readVisualAssetBindings,
+  requestsImageReuse,
   type VisualAssetBinding,
   type VisualRequirement,
   visualRequirements,
@@ -490,7 +491,12 @@ class RevisionAssetPlanner implements PresentationRevisionAssetPlanner {
     const revisionContent =
       (input.jobInput.options?.contentRevision as { content?: string } | undefined)?.content ??
       input.revision.content;
-    const reuseOnly = /不重新生图|不再生图|不要重新生成|仅(?:复用|使用已有)/u.test(revisionContent);
+    const reuseOnly =
+      requestsImageReuse(revisionContent) ||
+      (input.revision.requestId === 'initial-assets' &&
+        (requestsImageReuse(input.jobInput.prompt) ||
+          (input.jobInput.options?.visualEnrichment as { mode?: string } | undefined)?.mode ===
+            'off'));
     const preservedOrigins = new Map<string, VisualAssetBinding['origin']>();
     if (input.revision.requestId === 'initial-assets' && reuseOnly && !checkpoint.intents) {
       const preparedSlots = (input.jobInput.options?.generatedImageSlots ?? []) as PlacedAsset[];
@@ -521,6 +527,16 @@ class RevisionAssetPlanner implements PresentationRevisionAssetPlanner {
             : [];
         const ref =
           existing?.assetRefs[0].ref ??
+          (visual.kind === 'source-figure' &&
+          reusableRefs.has(visual.id) &&
+          preparedSlots.some(
+            (slot) =>
+              slot.state === 'ready' &&
+              slot.slideId === slideId &&
+              slot.assetRefs?.some((asset) => asset.ref === visual.id),
+          )
+            ? visual.id
+            : undefined) ??
           (new Set(sourceRefs).size === 1 ? sourceRefs[0] : undefined);
         if (!ref) continue;
         preserved.push({ action: 'reuse', slideId, slotId: visual.id, ref });

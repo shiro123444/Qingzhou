@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from 'node:util';
+
 import type { AgentRuntimeContext } from '@lobechat/agent-runtime';
 import debug from 'debug';
 
@@ -7,6 +9,28 @@ import type { LobeChatDatabase } from '@/database/type';
 import { hookDispatcher } from './hooks';
 
 const log = debug('lobe-server:human-intervention-handler');
+
+/** The persisted pending call is authoritative; a client can reference it, never substitute a tool. */
+export function resolvePendingApproval(state: any, submitted: any) {
+  const pending = state.pendingToolsCalling?.find((tool: any) => tool.id === submitted?.id);
+  if (!pending) throw new Error('Approval does not match a pending tool');
+  for (const field of ['identifier', 'apiName'])
+    if (submitted[field] !== undefined && submitted[field] !== pending[field])
+      throw new Error('Approval tool identity changed');
+  if (submitted.arguments !== undefined && submitted.arguments !== pending.arguments) {
+    let same = false;
+    try {
+      same = isDeepStrictEqual(
+        JSON.parse(submitted.arguments),
+        JSON.parse(pending.arguments ?? '{}'),
+      );
+    } catch {
+      // Invalid JSON is a changed/unreviewed argument, never an approval fallback.
+    }
+    if (!same) throw new Error('Approval arguments changed; review the current tool call');
+  }
+  return structuredClone(pending);
+}
 
 export interface InterventionInput {
   approvedToolCall?: any;
@@ -42,6 +66,38 @@ export class HumanInterventionHandler {
     private readonly serverDB: LobeChatDatabase,
     private readonly messageModel: MessageModel,
   ) {}
+
+  /** Read-only admission check before a durable approval command is accepted. */
+  async validate(state: any, input: InterventionInput): Promise<InterventionInput> {
+    if (state.status !== 'waiting_for_human' || !input.toolMessageId)
+      throw new Error('Intervention is not a current pending review');
+    const pending = await this.pendingToolMessage(state, input.toolMessageId);
+    if (input.approvedToolCall) {
+      const approvedToolCall = resolvePendingApproval(state, input.approvedToolCall);
+      if (approvedToolCall.id !== pending.id)
+        throw new Error('Approval tool message does not match');
+      return { ...input, approvedToolCall };
+    }
+    if (input.humanInput) {
+      const response = input.humanInput.response ?? input.humanInput.selection;
+      const question =
+        (pending.identifier === 'qingzhou-system-capabilities' && pending.apiName === 'ask') ||
+        (pending.identifier === 'lobe-user-interaction' && pending.apiName === 'askUserQuestion');
+      if (
+        !question ||
+        (input.humanInput.toolCallId !== undefined && input.humanInput.toolCallId !== pending.id) ||
+        !response ||
+        typeof response !== 'object' ||
+        Array.isArray(response)
+      )
+        throw new Error('Human input does not match a pending question');
+      return {
+        ...input,
+        humanInput: { response: structuredClone(response), toolCallId: pending.id },
+      };
+    } else if (!input.rejectionReason) throw new Error('Intervention decision is missing');
+    return input;
+  }
 
   async process(state: any, intervention: InterventionInput): Promise<InterventionResult> {
     const { humanInput, approvedToolCall, rejectAndContinue, rejectionReason, toolMessageId } =
@@ -148,6 +204,11 @@ export class HumanInterventionHandler {
       return { newState: state, nextContext: undefined };
     }
 
+    approvedToolCall = resolvePendingApproval(state, approvedToolCall);
+    const persisted = await this.pendingToolMessage(state, toolMessageId);
+    if (persisted.id !== approvedToolCall.id)
+      throw new Error('Approval tool message does not match');
+
     await this.messageModel.updateMessagePlugin(toolMessageId, {
       intervention: { status: 'approved' },
     });
@@ -202,6 +263,7 @@ export class HumanInterventionHandler {
       log('reject requires toolMessageId, got undefined');
       return { newState: state, nextContext: undefined };
     }
+    const rejectedToolCallId = (await this.pendingToolMessage(state, toolMessageId)).id;
 
     const rejectionContent = rejectionReason
       ? `User reject this tool calling with reason: ${rejectionReason}`
@@ -216,7 +278,6 @@ export class HumanInterventionHandler {
     // pendingToolsCalling. pendingToolsCalling holds ChatToolPayload[] whose
     // id === tool_call_id; the mapping lives in messagePlugins (plugin id
     // === message id, toolCallId is a separate column).
-    const rejectedToolCallId = await this.lookupToolCallId(toolMessageId);
 
     const newState = structuredClone(state);
     newState.lastModified = new Date().toISOString();
@@ -301,15 +362,19 @@ export class HumanInterventionHandler {
     return { newState, nextContext: undefined };
   }
 
-  private async lookupToolCallId(toolMessageId: string): Promise<string | undefined> {
-    try {
-      const plugin = await this.serverDB.query.messagePlugins.findFirst({
-        where: (mp: any, { eq }: any) => eq(mp.id, toolMessageId),
-      });
-      return (plugin as any)?.toolCallId ?? undefined;
-    } catch (error) {
-      log('failed to look up tool plugin: %O', error);
-      return undefined;
-    }
+  private async pendingToolMessage(state: any, toolMessageId: string) {
+    if (!state.metadata?.userId) throw new Error('Approval owner is missing');
+    const plugin = await this.serverDB.query.messagePlugins.findFirst({
+      where: (mp: any, { and, eq }: any) =>
+        and(eq(mp.id, toolMessageId), eq(mp.userId, state.metadata.userId)),
+    });
+    const pending = state.pendingToolsCalling?.find((tool: any) => tool.id === plugin?.toolCallId);
+    if (
+      !pending ||
+      plugin?.identifier !== pending.identifier ||
+      plugin?.apiName !== pending.apiName
+    )
+      throw new Error('Intervention tool message does not match a pending tool');
+    return pending;
   }
 }

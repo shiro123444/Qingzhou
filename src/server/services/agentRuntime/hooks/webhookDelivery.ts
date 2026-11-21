@@ -33,6 +33,7 @@ export async function deliverWebhook(
 ): Promise<void> {
   assertStepLease?.();
   const { url, delivery = 'fetch' } = webhook;
+  if (delivery === 'native') throw new WebhookDeliveryError('WEBHOOK_FAILED');
   const resolvedUrl = url.startsWith('http')
     ? url
     : urlJoin(process.env.INTERNAL_APP_URL || process.env.APP_URL || '', url);

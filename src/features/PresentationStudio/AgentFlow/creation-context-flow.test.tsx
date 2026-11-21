@@ -38,7 +38,12 @@ it('carries teaching intent from the first conversation into the actual lesson w
   const client: PresentationAgentClient = {
     outline: vi.fn(),
     turn: vi.fn(async () => ({
-      brief: { topic: '实验预测', audience: '本科生' },
+      brief: {
+        topic: '实验预测',
+        audience: '本科生',
+        teachingContext: { active: true, course: '物理', query: '预测实验', useMemory: true },
+        teachingSelection: { course: '物理', ids: [] },
+      },
       message: '规划好了',
       phase: 'outline' as const,
       slides: [{ id: 's1', title: '实验预测', keyPoints: ['先预测，再揭示'] }],
@@ -47,15 +52,16 @@ it('carries teaching intent from the first conversation into the actual lesson w
   render(
     <PresentationAgentFlow agentClient={client} onCreate={vi.fn()} onOutlineAiRewrite={vi.fn()} />,
   );
-  fireEvent.click(screen.getByText('presentationCreation.lesson'));
+  expect(screen.queryByText('presentationCreation.lesson')).not.toBeInTheDocument();
+  expect(screen.queryByText('presentationTeaching.title')).not.toBeInTheDocument();
   fireEvent.change(screen.getByLabelText('creative request'), {
     target: { value: '先让学生预测，再展示实验结果' },
   });
   fireEvent.click(screen.getByRole('button', { name: 'Send request' }));
   expect(await screen.findByTestId('lesson-workspace')).toBeInTheDocument();
   expect(screen.getByRole('textbox')).toHaveValue('先让学生预测，再展示实验结果');
-  expect(vi.mocked(client.turn).mock.calls[0][0].messages.at(-1)?.content).toContain(
-    '创作场景：备课',
+  expect(vi.mocked(client.turn).mock.calls[0][0].messages.at(-1)?.content).toBe(
+    '先让学生预测，再展示实验结果',
   );
   expect(client.outline).not.toHaveBeenCalled();
 });

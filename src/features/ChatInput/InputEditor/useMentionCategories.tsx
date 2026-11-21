@@ -1,8 +1,10 @@
 import { Avatar, Icon } from '@lobehub/ui';
 import { SkillsIcon } from '@lobehub/ui/icons';
 import { Bot, MessageSquareText, Users, Wrench } from 'lucide-react';
-import { useMemo } from 'react';
+import { use, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 
+import { BotSurfaceContext } from '@/features/BotSurface/context';
 import { useChatStore } from '@/store/chat';
 import { topicSelectors } from '@/store/chat/selectors';
 import { useGlobalStore } from '@/store/global';
@@ -21,6 +23,8 @@ const MAX_TOPIC_LABEL = 50;
 type MenuOptionWithMetadata = { key: string; metadata?: Record<string, unknown> };
 
 export const useMentionCategories = (): MentionCategory[] => {
+  const surface = use(BotSurfaceContext);
+  const { t } = useTranslation('chat');
   const currentAgentId = useAgentId();
   const allAgents = useHomeStore(homeAgentListSelectors.allAgents);
 
@@ -43,7 +47,7 @@ export const useMentionCategories = (): MentionCategory[] => {
     // --- Agents (non-group only) ---
     if (!isGroupChat) {
       const items = allAgents
-        .filter((a) => a.type === 'agent' && a.id !== currentAgentId)
+        .filter((a) => a.type === 'agent' && a.id !== currentAgentId && a.id !== surface?.agentId)
         .slice(0, MAX_AGENT_ITEMS)
         .map((agent) => ({
           icon: (
@@ -67,7 +71,7 @@ export const useMentionCategories = (): MentionCategory[] => {
           id: 'agent',
           icon: <Icon icon={Bot} size={16} />,
           items,
-          label: 'Agents',
+          label: t('agents'),
         });
       }
     }
@@ -86,9 +90,33 @@ export const useMentionCategories = (): MentionCategory[] => {
           id: 'member',
           icon: <Icon icon={Users} size={16} />,
           items,
-          label: 'Members',
+          label: t('botMention.members'),
         });
       }
+    }
+
+    if (surface) {
+      const id = isGroupChat ? 'member' : 'agent';
+      const category: MentionCategory = categories.find((c) => c.id === id) ?? {
+        id,
+        icon: <Icon icon={Bot} size={16} />,
+        items: [],
+        label: t(isGroupChat ? 'botMention.members' : 'agents'),
+      };
+      if (!categories.includes(category)) categories.unshift(category);
+      category.items.unshift({
+        key: 'companion-bot',
+        label: surface.name,
+        icon: <Icon icon={Bot} size={20} />,
+        metadata: {
+          id: surface.agentId,
+          type: isGroupChat
+            ? 'askCompanion'
+            : surface.agentId === currentAgentId
+              ? 'selfCompanion'
+              : 'agent',
+        },
+      });
     }
 
     // --- Topics ---
@@ -117,7 +145,7 @@ export const useMentionCategories = (): MentionCategory[] => {
           id: 'topic',
           icon: <Icon icon={MessageSquareText} size={16} />,
           items,
-          label: 'Topics',
+          label: t('botMention.topics'),
         });
       }
     }
@@ -139,7 +167,7 @@ export const useMentionCategories = (): MentionCategory[] => {
             type: 'skill' as const,
           },
         })),
-        label: 'Skills',
+        label: t('botMention.skills'),
       });
     }
 
@@ -160,12 +188,14 @@ export const useMentionCategories = (): MentionCategory[] => {
             type: 'tool' as const,
           },
         })),
-        label: 'Tools',
+        label: t('botMention.tools'),
       });
     }
 
     return categories;
   }, [
+    surface,
+    t,
     allAgents,
     currentAgentId,
     topics,

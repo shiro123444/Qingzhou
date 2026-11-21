@@ -358,6 +358,8 @@ export class AgentActionImpl {
         action: action as any,
         data,
         operationId: messageOpId,
+        stepIndex: operation.metadata.stepCount,
+        toolMessageId: data?.toolMessageId,
       });
 
       // Clear human intervention state

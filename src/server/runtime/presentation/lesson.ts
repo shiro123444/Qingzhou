@@ -186,6 +186,7 @@ function stripBoardSpace(svg: string): string {
 export function bindLessonPlan(
   plan: PresentationPlan,
   input: PresentationJobInput,
+  editableSlideIds?: ReadonlySet<string>,
 ): PresentationPlan {
   const lesson = readLessonPlan(input);
   if (!lesson) return plan;
@@ -208,6 +209,7 @@ export function bindLessonPlan(
       const { beat, frame } = stages[index];
       if (slide.slideId !== `slide-${index + 1}`)
         throw invalid('Lesson stage identity changed during rendering');
+      if (editableSlideIds && !editableSlideIds.has(slide.slideId)) return slide;
       return {
         ...slide,
         svg:

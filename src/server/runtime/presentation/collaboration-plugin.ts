@@ -98,39 +98,54 @@ export function createPresentationDecision(
   id: string,
   createdAt: string,
 ): PresentationDecision {
-  const labels = {
-    quality: [
-      '有几处版式需要取舍',
-      '自动检查仍发现需要修正的页面。已保留资料、大纲和草稿；可以继续修复，也可以补充你希望保留的风格或布局。',
-    ],
-    provider: [
-      '模型服务暂时没有完成这一步',
-      '已完成的内容已保存。可以继续重试，或补充制作要求后再继续；不会把空响应当成完成。',
-    ],
-    input: [
-      '这里需要补充一个决定',
-      '当前步骤需要你的信息或偏好。已保留完成的步骤，补充要求后可从这里继续。',
-    ],
-    conflict: [
-      '继续前需要确认任务方向',
-      '任务版本或运行状态发生了变化。先保留当前草稿，请选择继续修复或补充接下来的要求。',
-    ],
+  const copy = {
+    quality: {
+      detail: '有几处版式需要修正，当前草稿已保留。',
+      reviseLabel: '补充后继续',
+      title: '版式需要取舍',
+    },
+    provider: {
+      detail: '这一步未完成，当前进度已保留。',
+      reviseLabel: '补充后继续',
+      title: '需要恢复制作',
+    },
+    input: {
+      detail: '补充一个决定即可继续。',
+      reviseLabel: '提交后继续',
+      title: '需要你的决定',
+    },
+    conflict: {
+      detail: '确认继续方向，当前草稿已保留。',
+      reviseLabel: '确认后继续',
+      title: '确认继续方向',
+    },
   } as const;
+  const retryOption = {
+    id: 'retry',
+    label: '自动修复',
+    description: '沿用当前草稿重试。',
+  } as const;
+  const reviseOption = {
+    id: 'revise',
+    label: copy[category].reviseLabel,
+    description: '补充具体取舍、风格或内容要求。',
+  } as const;
+  const deferOption = {
+    id: 'defer',
+    label: '稍后决定',
+    description: '保留问题和进度，返回时继续。',
+  } as const;
+
   return {
     id,
     createdAt,
     category,
-    title: labels[category][0],
-    detail: labels[category][1],
+    title: copy[category].title,
+    detail: copy[category].detail,
     status: 'pending',
-    options: [
-      {
-        id: 'retry',
-        label: '自动修复并继续',
-        description: '沿用资料、大纲和已完成页面，再检查当前步骤。',
-      },
-      { id: 'revise', label: '按我的补充继续', description: '填写具体取舍、风格或内容要求。' },
-      { id: 'defer', label: '暂存，稍后决定', description: '保留问题和进度，返回时继续。' },
-    ],
+    options:
+      category === 'quality' || category === 'provider'
+        ? [retryOption, reviseOption, deferOption]
+        : [reviseOption, deferOption],
   };
 }

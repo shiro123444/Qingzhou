@@ -1,9 +1,11 @@
 import type { TaskStatus } from '@lobechat/types';
-import { Icon, Text, Tooltip } from '@lobehub/ui';
+import { Text } from '@lobehub/ui';
 import { createStaticStyles, cx } from 'antd-style';
-import { PanelRightClose, PanelRightOpen } from 'lucide-react';
-import { memo } from 'react';
+import { memo, useId } from 'react';
 import { useTranslation } from 'react-i18next';
+
+import { PanelGlyph } from '@/features/GlassMotion/PanelToggle';
+import { panelMotionStyle } from '@/features/GlassMotion/panelMotion';
 
 import TaskStatusIcon from '../features/TaskStatusIcon';
 
@@ -75,6 +77,20 @@ const styles = createStaticStyles(({ css, cssVar }) => ({
     flex-direction: column;
     flex-shrink: 0;
 
+    overflow: hidden auto;
+    transition: width var(--qz-panel-resize);
+    @media (prefers-reduced-motion: reduce) {
+      transition: none;
+    }
+    > button {
+      border: 0;
+      background: transparent;
+      font: inherit;
+    }
+    > button:focus-visible {
+      outline: 2px solid ${cssVar.colorPrimary};
+      outline-offset: -2px;
+    }
     max-height: 100%;
     margin-inline-start: auto;
     padding-inline: 8px;
@@ -108,41 +124,38 @@ const HiddenColumnsPanel = memo<HiddenColumnsPanelProps>(
   ({ collapsed, columns, onRestore, onToggleCollapsed }) => {
     const { t } = useTranslation('chat');
 
+    const listId = useId();
     if (columns.length === 0) return null;
 
     const title = t('taskList.kanban.hiddenColumns');
 
-    if (collapsed) {
-      return (
-        <div
-          className={styles.panel}
-          style={{ width: HIDDEN_PANEL_WIDTH.collapsed }}
-          onClick={() => onToggleCollapsed(false)}
-        >
-          <Tooltip title={title}>
-            <div className={styles.collapsedHeader}>
-              <Icon icon={PanelRightOpen} size={16} />
-              <Text className={styles.verticalLabel} type={'secondary'}>
-                {title}
-              </Text>
-            </div>
-          </Tooltip>
-        </div>
-      );
-    }
-
     return (
-      <div className={styles.panel} style={{ width: HIDDEN_PANEL_WIDTH.expanded }}>
-        <div className={styles.header} onClick={() => onToggleCollapsed(true)}>
-          <Text fontSize={13} weight={500}>
+      <div
+        className={styles.panel}
+        style={{
+          ...panelMotionStyle,
+          width: collapsed ? HIDDEN_PANEL_WIDTH.collapsed : HIDDEN_PANEL_WIDTH.expanded,
+        }}
+      >
+        <button
+          aria-controls={listId}
+          aria-expanded={!collapsed}
+          className={collapsed ? styles.collapsedHeader : styles.header}
+          title={title}
+          type="button"
+          onClick={() => onToggleCollapsed(!collapsed)}
+        >
+          <PanelGlyph expanded={!collapsed} side="right" />
+          <Text className={collapsed ? styles.verticalLabel : undefined} fontSize={13}>
             {title}
           </Text>
-          <Text className={styles.count} fontSize={12}>
-            {columns.length}
-          </Text>
-          <Icon icon={PanelRightClose} size={16} />
-        </div>
-        <div className={styles.list}>
+          {!collapsed && (
+            <Text className={styles.count} fontSize={12}>
+              {columns.length}
+            </Text>
+          )}
+        </button>
+        <div id={listId} hidden={collapsed} className={collapsed ? undefined : styles.list}>
           {columns.map((column) => (
             <div
               className={cx(styles.card)}

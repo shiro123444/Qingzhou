@@ -118,6 +118,40 @@ describe('closed beveled glass geometry', () => {
     }
   });
 
+  it('traces a broad lens independently from depth with smooth shoulder normals', () => {
+    const lens: RoundedGlassGeometry = {
+      ...geometry,
+      bevel: 24,
+      profile: 'lens',
+      size: [400, 900, 6],
+      radius: 24,
+    };
+    for (const depth of [0.1, 0.5, 2, 6, 12, 20, 23.9, 24.1, 60]) {
+      const x = 200 - depth;
+      const entry = intersectGlass(orthographicRay(x, 0, 40), lens)!;
+      expect(entry).not.toBeNull();
+      expect(entry.entering).toBe(true);
+      expect(entry.point[2]).toBeGreaterThanOrEqual(1.05);
+      expect(entry.point[2]).toBeLessThanOrEqual(3.001);
+      expect(length3(entry.normal)).toBeCloseTo(1, 10);
+      const exit = intersectGlass(
+        { origin: add3(entry.point, [0, 0, -0.001]), direction: [0, 0, -1] },
+        lens,
+      )!;
+      expect(exit.entering).toBe(false);
+      expect(exit.point[2]).toBeCloseTo(-entry.point[2], 3);
+    }
+    for (const depth of [0.001, 23.999, 24.001]) {
+      const hit = intersectGlass(orthographicRay(200 - depth, 0, 40), lens)!;
+      expect(Math.abs(hit.normal[0])).toBeLessThan(1e-6);
+    }
+    // The broad shoulder refracts at 12px, beyond the old thickness/2 limit.
+    expect(intersectGlass(orthographicRay(188, 0, 40), lens)!.normal[0]).toBeGreaterThan(0.1);
+    const side = intersectGlass({ origin: [220, 0, 0], direction: [-1, 0, 0] }, lens)!;
+    expect(side.point[0]).toBeCloseTo(200, 3);
+    expect(side.normal).toEqual([1, 0, 0]);
+  });
+
   it('validates finite geometry and honors ray distance limits', () => {
     expect(intersectGlass(orthographicRay(0, 0, 40), geometry, { maxDistance: 20 })).toBeNull();
     for (const override of [

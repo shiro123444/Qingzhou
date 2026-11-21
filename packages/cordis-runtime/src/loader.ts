@@ -2,15 +2,57 @@ import { Context, type Plugin } from '@lobechat/cordis-foundation';
 
 import { type PluginBundle, type PluginProfile, resolveProfile } from './profile';
 
-export interface ProfileModule {
-  /** A trusted plugin implementation; no path imports or evaluation from configuration. */
-  plugin: Plugin;
+export interface ProfileModuleManifest {
+  /** Surface can offer an explicit question to the current companion; grants no tool capabilities. */
+  botMention?: boolean;
+  id: string;
+  /** Required profile entry IDs. Native service injection still controls activation. */
+  requires?: readonly string[];
+  version: string;
 }
+
+/** Implementations and loaders are supplied by trusted application code, never configuration. */
+export type ProfileModule = { manifest?: ProfileModuleManifest } & (
+  { load: () => Plugin | Promise<Plugin>; plugin?: never } | { load?: never; plugin: Plugin }
+);
 
 export interface ProfileDefinition {
   bundles: Readonly<Record<string, PluginBundle>>;
   modules: Readonly<Record<string, ProfileModule>>;
   profile: PluginProfile;
+}
+
+/** Inspect and validate the selected graph without importing or applying any plugin. */
+export function describeProfile(definition: ProfileDefinition) {
+  const entries = resolveProfile(definition.profile, definition.bundles).map((entry) => {
+    const module = Object.hasOwn(definition.modules, entry.use)
+      ? definition.modules[entry.use]
+      : undefined;
+    if (!module) throw new Error(`CORDIS_PROFILE_MODULE_NOT_FOUND: ${entry.use}`);
+    if (typeof module.load !== 'function' && !module.plugin)
+      throw new Error(`CORDIS_PROFILE_MODULE_INVALID: ${entry.use}`);
+    if (module.load && module.plugin)
+      throw new Error(`CORDIS_PROFILE_MODULE_INVALID: ${entry.use}`);
+    const manifest = module.manifest && structuredClone(module.manifest);
+    if (manifest && (manifest.id !== entry.id || !manifest.version.trim()))
+      throw new Error(`CORDIS_PROFILE_MANIFEST_INVALID: ${entry.id}`);
+    return { ...entry, ...(manifest ? { manifest } : {}) };
+  });
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+  const visit = (id: string) => {
+    if (visiting.has(id)) throw new Error(`CORDIS_PROFILE_DEPENDENCY_CYCLE: ${id}`);
+    if (visited.has(id)) return;
+    const entry = byId.get(id);
+    if (!entry) throw new Error(`CORDIS_PROFILE_DEPENDENCY_MISSING: ${id}`);
+    visiting.add(id);
+    for (const dependency of entry.manifest?.requires ?? []) visit(dependency);
+    visiting.delete(id);
+    visited.add(id);
+  };
+  for (const entry of entries) visit(entry.id);
+  return entries;
 }
 
 /** One isolated native plugin generation, pinned until its accepted calls have drained. */
@@ -23,23 +65,22 @@ export class LoadedProfile {
 
   constructor(definition: ProfileDefinition) {
     // Resolve getters/config snapshots before allocating any native resources.
-    const entries = resolveProfile(definition.profile, definition.bundles).map((entry) => {
-      const module = Object.hasOwn(definition.modules, entry.use)
-        ? definition.modules[entry.use]
-        : undefined;
-      if (!module) throw new Error(`CORDIS_PROFILE_MODULE_NOT_FOUND: ${entry.use}`);
-      return { ...entry, plugin: module.plugin };
-    });
+    const entries = describeProfile(definition).map((entry) => ({
+      ...entry,
+      load: definition.modules[entry.use].load,
+      plugin: definition.modules[entry.use].plugin,
+    }));
     const native = new Context();
     this.native = native;
     try {
       const children: Array<{ id: string; fiber: ReturnType<Context['plugin']> }> = [];
-      const fibers = entries.map(({ id, plugin, config }) =>
+      const fibers = entries.map(({ id, plugin, load, config }) =>
         // A unique wrapper gives each entry its own native plugin identity, even if
         // two entries use the same module with different configs.
         native.plugin({
           async apply(ctx) {
-            const child = ctx.plugin(plugin, config);
+            const implementation = load ? await load() : plugin!;
+            const child = ctx.plugin(implementation, config);
             children.push({ fiber: child, id });
             await child;
           },
@@ -125,7 +166,10 @@ export class CordisProfileLoader {
       modules: Object.fromEntries(
         Object.entries(definition.modules).map(([name, module]) => [
           name,
-          { plugin: module.plugin },
+          {
+            ...(module.load ? { load: module.load } : { plugin: module.plugin! }),
+            ...(module.manifest ? { manifest: structuredClone(module.manifest) } : {}),
+          },
         ]),
       ),
       profile: structuredClone(definition.profile),

@@ -26,7 +26,7 @@ export const presentationVectorOperations = (): AtomicOperation[] => [
     name: 'presentation.formula.render',
     description:
       'Render validated LaTeX into self-contained vector paths while retaining editable source.',
-    input: semanticBlockSchema.options[0],
+    input: semanticBlockSchema.innerType().options[0],
     execute: async (input) => ({
       svg: await (await import('./formula-renderer')).renderFormula(input),
       source: input,
@@ -38,7 +38,7 @@ export const presentationVectorOperations = (): AtomicOperation[] => [
       'Measure the minimum width and height for a scientific diagram, including plot legends, before assigning its page rectangle.',
     input: z
       .object({
-        block: semanticBlockSchema.options[1],
+        block: semanticBlockSchema.innerType().options[1],
         width: z.number().finite().min(280).max(960),
       })
       .strict(),
@@ -48,7 +48,7 @@ export const presentationVectorOperations = (): AtomicOperation[] => [
     name: 'presentation.diagram.render',
     description:
       'Render scientific plot or graph data deterministically with explicit illustrative or sourced provenance.',
-    input: semanticBlockSchema.options[1],
+    input: semanticBlockSchema.innerType().options[1],
     execute: (input) => ({ svg: renderScientificDiagram(input), source: input }),
   },
 ];

@@ -30,9 +30,12 @@ export const renderNativeTemplatePages: TemplatePageRenderer = async (bytes, pag
     const file = path.join(directory, 'source.pptx');
     await writeFile(file, bytes, { mode: 0o600 });
     await run(
-      process.platform === 'win32'
-        ? 'C:/Program Files/LibreOffice/program/soffice.com'
-        : 'libreoffice',
+      process.env.PRESENTATION_OFFICE_COMMAND ??
+        (process.platform === 'win32'
+          ? 'C:/Program Files/LibreOffice/program/soffice.com'
+          : process.platform === 'darwin'
+            ? '/Applications/LibreOffice.app/Contents/MacOS/soffice'
+            : 'libreoffice'),
       [
         `-env:UserInstallation=${pathToFileURL(path.join(directory, 'profile')).href}`,
         '--headless',

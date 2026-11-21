@@ -1,3 +1,5 @@
+import { lensProfile } from '../lens';
+
 export type Vec2 = readonly [number, number];
 export type Vec3 = readonly [number, number, number];
 
@@ -8,9 +10,11 @@ export interface Ray {
 
 /** World axes: x right, y down, z toward the viewer. One unit is one CSS pixel. */
 export interface RoundedGlassGeometry {
-  /** Radius of the rounded front/back edge, limited by radius and half-depth. */
+  /** XY shoulder width; spherical bevels additionally clamp to half-depth. */
   bevel: number;
   center: Vec3;
+  /** A visual height field on a closed slab; omitted retains the spherical reference model. */
+  profile?: 'lens';
   /** Outer XY corner radius. */
   radius: number;
   /** Full width, height and depth of a closed volume. */
@@ -68,6 +72,36 @@ export const evaluateGlassSurface = (point: Vec3, geometry: RoundedGlassGeometry
   const p = subtract3(point, geometry.center);
   const half = scale3(geometry.size, 0.5);
   const outerRadius = Math.min(geometry.radius, half[0], half[1]);
+  if (geometry.profile === 'lens' && geometry.bevel > 0) {
+    const qx = Math.abs(p[0]) - half[0] + outerRadius;
+    const qy = Math.abs(p[1]) - half[1] + outerRadius;
+    const cornerX = Math.max(qx, 0);
+    const cornerY = Math.max(qy, 0);
+    const cornerLength = Math.hypot(cornerX, cornerY);
+    const xy = cornerLength + Math.min(Math.max(qx, qy), 0) - outerRadius;
+    const signX = p[0] < 0 ? -1 : 1;
+    const signY = p[1] < 0 ? -1 : 1;
+    const outward: Vec2 =
+      cornerLength > 0
+        ? [(signX * cornerX) / cornerLength, (signY * cornerY) / cornerLength]
+        : qx > qy
+          ? [signX, 0]
+          : [0, signY];
+    const profile = lensProfile(-xy, geometry.bevel);
+    const z = Math.abs(p[2]) - half[2] * profile.height;
+    // Global Lipschitz bound, including the maximum quintic derivative (1.875).
+    // Conservative on either side of the surface: oblique rays cannot skip thin walls.
+    const bound = Math.hypot(1, (half[2] * 0.65 * 1.875) / geometry.bevel);
+    const normal: Vec3 =
+      xy > z
+        ? [outward[0], outward[1], 0]
+        : normalize3([
+            outward[0] * half[2] * profile.slope,
+            outward[1] * half[2] * profile.slope,
+            p[2] < 0 ? -1 : 1,
+          ]);
+    return { distance: Math.max(xy, z) / bound, normal };
+  }
   const bevel = Math.min(geometry.bevel, outerRadius, half[2]);
   const radius = outerRadius - bevel;
   const qx = Math.abs(p[0]) - (half[0] - bevel - radius);

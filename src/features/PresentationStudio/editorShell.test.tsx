@@ -31,7 +31,7 @@ const slide = (artifactId: string, n: number): ArtifactSnapshot => ({
 });
 
 describe('PresentationStudio completed editor shell (C-106)', () => {
-  it('renders the top Chinese toolbar with AI iteration, regenerate, and quick export when completed', async () => {
+  it('renders back navigation, regenerate, and quick export without AI modification', async () => {
     const retryPresentationJob = vi.fn();
     const exportArtifact = vi.fn(async () => ({
       artifactId: 'slide-1',
@@ -70,9 +70,15 @@ describe('PresentationStudio completed editor shell (C-106)', () => {
     });
 
     expect(screen.getByTestId('presentation-completed-tag')).toHaveTextContent('已完成');
-    expect(screen.getByRole('button', { name: /Continue prompting AI/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Retry presentation job/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Quick export presentation/i })).toBeInTheDocument();
+    expect(screen.getByTestId('presentation-back-to-home')).toBeInTheDocument();
+    expect(screen.queryByTestId('presentation-editor-ai')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('presentation-conversation')).not.toBeInTheDocument();
+    expect(screen.getByTestId('presentation-completed-workspace')).toHaveAttribute(
+      'data-focused',
+      'true',
+    );
+    expect(screen.getByTestId('presentation-editor-more')).toBeInTheDocument();
+    expect(screen.getByTestId('presentation-editor-export')).toBeInTheDocument();
 
     // Slide canvas & preview are present with real SVG
     expect(screen.getByTestId('slide-preview-image')).toHaveAttribute(
@@ -82,28 +88,19 @@ describe('PresentationStudio completed editor shell (C-106)', () => {
     expect(screen.getByTestId('slide-navigator-grid')).toBeInTheDocument();
     expect(screen.getByTestId('artifact-panel-list')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: /Quick export presentation/i }));
+    fireEvent.click(screen.getByTestId('presentation-editor-export'));
     await waitFor(() => {
       expect(exportArtifact).toHaveBeenCalledWith('deck-pptx', 'pptx');
     });
 
-    fireEvent.click(screen.getByRole('button', { name: /Retry presentation job/i }));
+    fireEvent.click(screen.getByTestId('presentation-editor-more'));
+    fireEvent.click(await screen.findByRole('menuitem', { name: /regenerate|重新生成演示文稿/i }));
     expect(retryPresentationJob).toHaveBeenCalledWith('job-done');
   }, 15000);
 
-  it('opens the same stage composer from the header AI button and can send after collapse', async () => {
-    const sendPresentationMessage = vi.fn(async (_jobId: string, input: { content: string }) => ({
-      ...completedJob(['slide-1']),
-      messages: [
-        {
-          content: input.content,
-          createdAt: t0,
-          requestId: 'req-1',
-          status: 'queued',
-          target: { type: 'deck' },
-        },
-      ],
-    }));
+  it('returns to the creator without resetting its draft state', async () => {
+    window.history.replaceState(null, '', '/presentation?jobId=job-done');
+    localStorage.setItem('qingzhou:presentation:planning:active', 'preserved-draft');
     const client = {
       cancelPresentationJob: vi.fn(),
       createPresentationJob: vi.fn(),
@@ -113,7 +110,6 @@ describe('PresentationStudio completed editor shell (C-106)', () => {
         jobId === 'job-done' ? completedJob(['slide-1']) : null,
       ),
       retryPresentationJob: vi.fn(),
-      sendPresentationMessage,
       subscribePresentationJob: vi.fn(),
     };
 
@@ -122,26 +118,29 @@ describe('PresentationStudio completed editor shell (C-106)', () => {
         client={client as never}
         initialJobIds={['job-done']}
         pollIntervalMs={50}
+        agentClient={
+          {
+            getSession: async (threadId: string) => ({
+              command: { messages: [] },
+              requestId: 'restore-1',
+              state: 'idle',
+              threadId,
+            }),
+          } as never
+        }
       />,
     );
 
     await waitFor(() => {
       expect(screen.getByTestId('presentation-editor-toolbar')).toBeInTheDocument();
     });
+    fireEvent.click(screen.getByTestId('presentation-back-to-home'));
 
-    fireEvent.click(screen.getByRole('button', { name: /Continue prompting AI/i }));
-    expect(screen.getByTestId('presentation-conversation')).toHaveAttribute('data-open', 'true');
-    expect(screen.getAllByTestId('presentation-conversation-input')).toHaveLength(1);
-
-    fireEvent.change(screen.getByTestId('presentation-conversation-input'), {
-      target: { value: '配色调整为科技蓝，精简第二页' },
-    });
-    fireEvent.click(screen.getByTestId('presentation-conversation-send'));
     await waitFor(() => {
-      expect(sendPresentationMessage).toHaveBeenCalledWith(
-        'job-done',
-        expect.objectContaining({ content: '配色调整为科技蓝，精简第二页' }),
-      );
+      expect(screen.getByTestId('presentation-empty-shell')).toBeInTheDocument();
     });
+    expect(screen.queryByTestId('presentation-editor-toolbar')).not.toBeInTheDocument();
+    expect(window.location.search).not.toContain('jobId');
+    expect(localStorage.getItem('qingzhou:presentation:planning:active')).toBe('preserved-draft');
   }, 15000);
 });

@@ -9,6 +9,27 @@ import {
 } from './visual-storyboard';
 
 const scope = { sessionId: 'session', userId: 'user' };
+it('invalidates the storyboard when indexed layout geometry changes under the same capability identity', () => {
+  const capsule = {
+    id: 'capsule-reference',
+    kind: 'layout',
+    name: 'Source',
+    rules: [],
+    source: { sourceDigest: 'same-source' },
+    designReference: {
+      slots: [{ id: 'title', kind: 'title', box: { x: 0.05, y: 0.05, width: 0.9, height: 0.1 } }],
+    },
+  };
+  const input = {
+    title: '资料复核',
+    notebookId: 'notes',
+    sourceVersionIds: [],
+    options: { learnedCapabilities: { capsules: [capsule] } },
+  };
+  const before = presentationStoryboardInputFingerprint(input);
+  capsule.designReference.slots[0].box.x = 0.08;
+  expect(presentationStoryboardInputFingerprint(input)).not.toBe(before);
+});
 const component = {
   box: { height: 0.3, width: 0.2, x: 0.72, y: 0.62 },
   containsText: false,
@@ -163,6 +184,33 @@ const chatPort = (
     supportsVision: true,
   },
   providerId: 'vision',
+});
+
+it('changes storyboard cache binding and request identity for a new role model without changing the outline', async () => {
+  const chat = chatPort([], { inputFingerprint: undefined });
+  const planner = createPresentationVisualStoryboardPlanner({ chat });
+  const firstInput = {
+    ...jobInput,
+    options: { ...jobInput.options, agentRoutingFingerprint: 'planning-model-a' },
+  };
+  const secondInput = {
+    ...jobInput,
+    options: { ...jobInput.options, agentRoutingFingerprint: 'planning-model-b' },
+  };
+  const first = await planner.plan({ jobInput: firstInput, template }, { scope });
+  const second = await planner.plan({ jobInput: secondInput, template }, { scope });
+  expect(first.inputFingerprint).toBe(presentationStoryboardInputFingerprint(firstInput));
+  expect(second.inputFingerprint).toBe(presentationStoryboardInputFingerprint(secondInput));
+  expect(second.inputFingerprint).not.toBe(first.inputFingerprint);
+  const calls = vi.mocked(chat.chat).mock.calls;
+  expect(calls[1][1].idempotencyKey).not.toBe(calls[0][1].idempotencyKey);
+  expect(secondInput.options.outline).toEqual(firstInput.options.outline);
+  expect(presentationStoryboardInputFingerprint(jobInput)).toBe(
+    presentationStoryboardInputFingerprint({
+      ...jobInput,
+      options: { ...jobInput.options, agentRoutingFingerprint: undefined },
+    }),
+  );
 });
 
 it('accepts the contract/binding envelope the prompt documents', async () => {
@@ -483,6 +531,70 @@ it('does not inherit unrequested cover photography into a shared native master',
   expect(board.slides[0].compositionIntent).toContain('没有已批准的视觉需求');
   expect(board.slides[0].compositionIntent).not.toContain('city photograph');
   expect(board.slides[0].componentIds).toEqual([]);
+});
+
+it('preserves authored full-page composition instead of replacing it with the legacy master instruction', async () => {
+  const authoredInput = {
+    ...jobInput,
+    options: {
+      ...jobInput.options,
+      deckVisualSystem: { id: 'authored', schemaVersion: 3 },
+      learnedCapabilities: {
+        capsules: [
+          {
+            id: 'source-layout',
+            kind: 'layout',
+            name: 'Observed layout',
+            rules: ['Use observed anchors'],
+            source: { sourceDigest: 'observed-digest' },
+            designReference: {
+              slots: [
+                {
+                  id: 'source-title',
+                  kind: 'title',
+                  box: { x: 0.08, y: 0.06, width: 0.84, height: 0.12 },
+                },
+              ],
+            },
+          },
+        ],
+      },
+      contentIntents: {
+        slides: [1, 2].map((page) => ({
+          slideId: `slide-${page}`,
+          claim: '当前汇报',
+          formulas: [],
+          visualKind: 'none',
+          visualReason: '无需插画',
+          visuals: [],
+        })),
+      },
+    },
+  };
+  const compositionIntent =
+    '完整画幅采用不对称标题构图，保留左侧主标题和右侧留白，不添加统一页眉。';
+  const model = chatPort(
+    [],
+    { inputFingerprint: presentationStoryboardInputFingerprint(authoredInput) },
+    { compositionIntent },
+  );
+  const board = await createPresentationVisualStoryboardPlanner({ chat: model }).plan(
+    { jobInput: authoredInput, template },
+    { scope },
+  );
+  expect(board.slides[0].compositionIntent).toBe(compositionIntent);
+  expect(board.slides[0].componentIds).toEqual([]);
+  const delivered = JSON.parse(
+    String(
+      vi.mocked(model.chat).mock.calls[0][0].messages.find((message) => message.role === 'user')!
+        .content,
+    ),
+  );
+  expect(delivered.selectedDesignReferences[0]).toMatchObject({
+    id: 'source-layout',
+    source: { sourceDigest: 'observed-digest' },
+    designReference: { slots: [{ id: 'source-title', box: { x: 0.08 } }] },
+  });
 });
 
 it('refuses baked or unknown components instead of letting the model invent reusable assets', async () => {

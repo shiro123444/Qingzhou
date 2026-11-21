@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import type { MusicAccountService } from './account-service';
 import { MusicError } from './contracts';
+import { assertMusicRequestOrigin } from './request-origin';
 
 const command = z.discriminatedUnion('operation', [
   z.object({ operation: z.enum(['status', 'start', 'disconnect']) }).strict(),
@@ -38,12 +39,7 @@ export function accountErrorResponse(error: unknown, request: Request) {
 }
 export async function handleMusicAccount(request: Request, service: MusicAccountService) {
   try {
-    const origin = request.headers.get('origin');
-    if (
-      (origin && origin !== new URL(request.url).origin) ||
-      request.headers.get('sec-fetch-site') === 'cross-site'
-    )
-      throw new MusicError('MUSIC_FORBIDDEN', 403);
+    assertMusicRequestOrigin(request);
     if (request.headers.get('content-type')?.split(';')[0].trim() !== 'application/json')
       throw new MusicError('MUSIC_INVALID', 400);
     if (Number(request.headers.get('content-length')) > 2048)

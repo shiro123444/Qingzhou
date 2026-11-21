@@ -14,7 +14,8 @@ class AgentRuntimeService {
       data: request.data,
       operationId: request.operationId,
       reason: request.reason,
-      stepIndex: 0, // Default to 0 since it's not provided in the request type
+      stepIndex: request.stepIndex ?? 0,
+      toolMessageId: request.toolMessageId,
     });
   }
 }

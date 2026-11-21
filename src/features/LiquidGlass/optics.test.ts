@@ -40,9 +40,9 @@ describe('generateGlassMaps', () => {
   it('agrees with an independent Snell-angle trace to the rear plane', () => {
     const map = generateGlassMaps(options);
     const depth = 3.5;
-    const remaining = 1 - depth / 8;
-    const frontHeight = 10 * Math.sqrt(1 - remaining ** 2);
-    const incidence = Math.atan((10 * remaining) / (8 * Math.sqrt(1 - remaining ** 2)));
+    const t = depth / 10;
+    const frontHeight = 10 * (0.35 + 0.65 * (6 * t ** 5 - 15 * t ** 4 + 10 * t ** 3));
+    const incidence = Math.atan(0.65 * 30 * t ** 2 * (1 - t) ** 2);
     const transmission = Math.asin(Math.sin(incidence) / 1.45);
     const expectedShift = frontHeight * Math.tan(incidence - transmission);
     const actual = offsetAt(map, 190, 3);
@@ -109,7 +109,7 @@ describe('generateGlassMaps', () => {
     const map = generateGlassMaps(geometry);
     expect(map.width).toBeGreaterThanOrEqual(1);
     expect(map.height).toBeGreaterThanOrEqual(1);
-    expect(Math.max(map.width, map.height)).toBeLessThanOrEqual(512);
+    expect(Math.max(map.width, map.height)).toBeLessThanOrEqual(1024);
     expect(map.displacement.length).toBe(map.width * map.height * 4);
     expect(map.highlight.length).toBe(map.displacement.length);
     expect(Number.isFinite(map.scale)).toBe(true);
@@ -125,13 +125,19 @@ describe('generateGlassMaps', () => {
 
   it('retains physical dimensions and circular corners when texture resolution is reduced', () => {
     const full = generateGlassMaps({ height: 80, radius: 20, width: 400 });
-    const large = generateGlassMaps({ height: 160, radius: 40, thickness: 20, width: 800 });
-    expect(large.width).toBe(512);
+    const large = generateGlassMaps({
+      height: 160,
+      radius: 40,
+      thickness: 20,
+      width: 1600,
+      bezel: 10,
+    });
+    expect(large.width).toBe(1024);
     expect(large.height).toBe(102);
     // Both samples are about 3.5 CSS pixels from their respective straight top edge.
-    // Doubling thickness while keeping the physical 8px bezel strengthens refraction;
+    // Doubling thickness while keeping the physical 10px bezel strengthens refraction;
     // shrinking the texture must not shrink the lens or its sampling displacement.
-    expect(offsetAt(large, 256, 2).y).toBeGreaterThan(offsetAt(full, 200, 3).y);
+    expect(offsetAt(large, 512, 2).y).toBeGreaterThan(offsetAt(full, 200, 3).y);
     expect(offsetAt(large, 0, 0)).toEqual({ x: 0, y: 0 });
   });
 

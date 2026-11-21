@@ -1,5 +1,4 @@
 import { AGENT_SIGNAL_SOURCE_TYPES } from '@lobechat/agent-signal/source';
-import { DEFAULT_MINI_SYSTEM_AGENT_ITEM } from '@lobechat/const';
 
 import { AgentSignalReviewContextModel } from '@/database/models/agentSignal/reviewContext';
 import type { LobeChatDatabase } from '@/database/type';
@@ -7,6 +6,7 @@ import { initModelRuntimeFromDB } from '@/server/modules/ModelRuntime';
 import { learningMutationAuthority } from '@/server/runtime/improvement/mutation-authority';
 import { executeBudgetedSignal } from '@/server/runtime/improvement/signal-budget';
 import { AGENT_SIGNAL_DEFAULTS } from '@/server/services/agentSignal/constants';
+import { resolveAgentSignalModelConfig } from '@/server/services/agentSignal/modelConfig';
 import { runMemoryActionAgent } from '@/server/services/agentSignal/policies/analyzeIntent/actions/userMemory';
 import { redisSourceEventStore } from '@/server/services/agentSignal/store/adapters/redis/sourceEventStore';
 import { SkillManagementDocumentService } from '@/server/services/skillManagement';
@@ -415,17 +415,23 @@ export class SelfFeedbackIntentServerRuntimeFactory implements SelfFeedbackInten
     payload,
     source,
   }: Parameters<SelfFeedbackIntentRuntimeFactory['createRuntime']>[0]) {
+    const modelConfig = await resolveAgentSignalModelConfig(
+      this.input.db,
+      this.input.userId,
+      payload.agentId,
+    );
     const modelRuntime = await initModelRuntimeFromDB(
       this.input.db,
       this.input.userId,
-      DEFAULT_MINI_SYSTEM_AGENT_ITEM.provider,
+      modelConfig.provider,
       process.env.QINGZHOU_HARNESS_LEARNING_ENABLED === '1' ? { singleDispatch: true } : undefined,
     );
 
     return {
       executeSelfIteration: (input: Parameters<typeof executeSelfIteration>[0]) =>
         executeBudgetedSignal(this.input.db, input),
-      model: DEFAULT_MINI_SYSTEM_AGENT_ITEM.model,
+      model: modelConfig.model,
+      provider: modelConfig.provider,
       modelRuntime,
       tools: createIntentRuntimeTools({
         agentId: payload.agentId,

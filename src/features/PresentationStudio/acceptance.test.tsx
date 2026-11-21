@@ -14,6 +14,7 @@ import type {
   PresentationJobEvent,
 } from '../../services/runtime/client';
 import { createPresentationDemoClient } from './demo/presentationDemoClient';
+import { confirmTestOutline, outlineTestClient } from './outlineTestClient';
 import PresentationStudio from './PresentationStudio';
 import type { PresentationStreamClient } from './store/presentationStore';
 
@@ -22,14 +23,13 @@ const readStyleSource = (relative: string): string =>
 
 const FIXTURE = 'src/features/PresentationStudio';
 
-// Intake conversation has its own suite; these cases exercise the job lifecycle.
-vi.mock('./AgentFlow', () => ({ default: () => null }));
-
 // C-112 persists the active job and stream cursor in sessionStorage so a
 // route re-entry can resume work. Keep acceptance cases isolated from one
 // another; each case owns its persistence scenario explicitly.
 beforeEach(() => {
   window.sessionStorage.clear();
+  window.localStorage.clear();
+  window.history.replaceState(null, '', '/presentation');
 });
 
 describe('PresentationStudio acceptance (C-58 phase 1)', () => {
@@ -42,10 +42,12 @@ describe('PresentationStudio acceptance (C-58 phase 1)', () => {
     expect(screen.getByTestId('presentation-demo-badge')).toHaveTextContent(
       'Demo data — fake transport',
     );
-    expect(screen.getByTestId('presentation-composer')).toBeInTheDocument();
-    expect(
-      screen.getByRole('button', { name: /Focus the presentation creator/i }),
-    ).toBeInTheDocument();
+    expect(screen.getByTestId('presentation-agent-flow')).toBeInTheDocument();
+    expect(screen.queryByTestId('presentation-style-academic-research')).not.toBeInTheDocument();
+    const styleTrigger = screen.getByRole('button', { name: 'presentationGallery.styles' });
+    fireEvent.click(styleTrigger);
+    expect(styleTrigger).toHaveAttribute('aria-expanded', 'true');
+    expect(await screen.findByTestId('presentation-style-academic-research')).toBeInTheDocument();
   }, 15000);
 
   it('shows an honest HTTP badge when using the real transport seam', () => {
@@ -59,14 +61,18 @@ describe('PresentationStudio acceptance (C-58 phase 1)', () => {
 
   it('wires demo mode explicitly: no client + transportMode=demo runs the demo flow with the demo badge', async () => {
     // The default demo transport drives interactive timings (1.2s queued + 2.4s running).
-    render(<PresentationStudio pollIntervalMs={50} transportMode="demo" />);
+    render(
+      <PresentationStudio
+        agentClient={outlineTestClient}
+        initialTopic={'Explicit demo deck'}
+        pollIntervalMs={50}
+        transportMode="demo"
+      />,
+    );
 
     expect(screen.getByTestId('presentation-demo-badge')).toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText('Presentation title'), {
-      target: { value: 'Explicit demo deck' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
+    await confirmTestOutline();
 
     await waitFor(
       () => {
@@ -75,8 +81,8 @@ describe('PresentationStudio acceptance (C-58 phase 1)', () => {
       { timeout: 8000 },
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /Export presentation artifact/i }));
-    const menuItem = await screen.findByText('Export 矢量切片 (.svg)');
+    fireEvent.click(screen.getByTestId('presentation-editor-more'));
+    const menuItem = await screen.findByRole('menuitem', { name: 'SVG (.svg)' });
     fireEvent.click(menuItem.closest('li') ?? menuItem);
 
     await waitFor(() => {
@@ -114,12 +120,17 @@ describe('PresentationStudio acceptance (C-58 phase 1)', () => {
       queuedMs: 150,
       runningMs: 150,
     });
-    render(<PresentationStudio client={client} pollIntervalMs={50} transportMode="demo" />);
+    render(
+      <PresentationStudio
+        agentClient={outlineTestClient}
+        initialTopic={'Q3 Report'}
+        client={client}
+        pollIntervalMs={50}
+        transportMode="demo"
+      />,
+    );
 
-    fireEvent.change(screen.getByLabelText('Presentation title'), {
-      target: { value: 'Q3 Report' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
+    await confirmTestOutline();
 
     // queued
     await waitFor(() => {
@@ -153,8 +164,8 @@ describe('PresentationStudio acceptance (C-58 phase 1)', () => {
     );
 
     // export is enabled for a completed job with a ready artifact
-    fireEvent.click(screen.getByRole('button', { name: /Export presentation artifact/i }));
-    const menuItem = await screen.findByText('Export 矢量切片 (.svg)');
+    fireEvent.click(screen.getByTestId('presentation-editor-more'));
+    const menuItem = await screen.findByRole('menuitem', { name: 'SVG (.svg)' });
     fireEvent.click(menuItem.closest('li') ?? menuItem);
 
     await waitFor(() => {
@@ -165,12 +176,17 @@ describe('PresentationStudio acceptance (C-58 phase 1)', () => {
 
   it('supports cancel while running and keeps exports unavailable after cancel', async () => {
     const client = createPresentationDemoClient({ queuedMs: 120, runningMs: 60000 });
-    render(<PresentationStudio client={client} pollIntervalMs={50} transportMode="demo" />);
+    render(
+      <PresentationStudio
+        agentClient={outlineTestClient}
+        initialTopic={'Long deck'}
+        client={client}
+        pollIntervalMs={50}
+        transportMode="demo"
+      />,
+    );
 
-    fireEvent.change(screen.getByLabelText('Presentation title'), {
-      target: { value: 'Long deck' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
+    await confirmTestOutline();
 
     await waitFor(
       () => {
@@ -198,12 +214,17 @@ describe('PresentationStudio acceptance (C-58 phase 1)', () => {
 
   it('shows interrupted creation and retry without the legacy diagnostic panels', async () => {
     const client = createPresentationDemoClient({ fail: true, queuedMs: 90, runningMs: 90 });
-    render(<PresentationStudio client={client} pollIntervalMs={40} transportMode="demo" />);
+    render(
+      <PresentationStudio
+        agentClient={outlineTestClient}
+        initialTopic={'Broken deck'}
+        client={client}
+        pollIntervalMs={40}
+        transportMode="demo"
+      />,
+    );
 
-    fireEvent.change(screen.getByLabelText('Presentation title'), {
-      target: { value: 'Broken deck' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
+    await confirmTestOutline();
 
     await waitFor(
       () => {
@@ -225,12 +246,17 @@ describe('PresentationStudio acceptance (C-58 phase 1)', () => {
 
   it('exposes accessible landmarks and keyboard contract for the studio shell', async () => {
     const client = createPresentationDemoClient({ queuedMs: 60, runningMs: 60000 });
-    render(<PresentationStudio client={client} pollIntervalMs={50} transportMode="demo" />);
+    render(
+      <PresentationStudio
+        agentClient={outlineTestClient}
+        initialTopic={'Accessible deck'}
+        client={client}
+        pollIntervalMs={50}
+        transportMode="demo"
+      />,
+    );
 
-    fireEvent.change(screen.getByLabelText('Presentation title'), {
-      target: { value: 'Accessible deck' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
+    await confirmTestOutline();
 
     await waitFor(
       () => {
@@ -241,7 +267,6 @@ describe('PresentationStudio acceptance (C-58 phase 1)', () => {
       { timeout: 3000 },
     );
 
-    expect(screen.getByRole('region', { name: /Presentation creator/i })).toBeInTheDocument();
     expect(screen.getByRole('listbox', { name: /Presentation job list/i })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: /Slide navigator/i })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: /Slide preview/i })).toBeInTheDocument();
@@ -258,7 +283,7 @@ describe('PresentationStudio acceptance (C-58 phase 1)', () => {
     const workspaceStyles = readStyleSource(path.join(FIXTURE, 'CompletedWorkspace', 'style.ts'));
     const navigatorStyles = readStyleSource(path.join(FIXTURE, 'SlideNavigator', 'style.ts'));
     const panelStyles = readStyleSource(path.join(FIXTURE, 'ArtifactPanel', 'style.ts'));
-    const composerStyles = readStyleSource(path.join(FIXTURE, 'PresentationComposer', 'style.ts'));
+    const composerStyles = readStyleSource(path.join(FIXTURE, 'AgentFlow', 'style.ts'));
     const progressStyles = readStyleSource(path.join(FIXTURE, 'PresentationProgress', 'style.ts'));
 
     // The stage owns the viewport; its overview grid adapts to available width.
@@ -400,16 +425,15 @@ describe('PresentationStudio real-chain and E2E acceptance (C-104)', () => {
 
     const { container } = render(
       <PresentationStudio
+        agentClient={outlineTestClient}
+        initialTopic={'Finance Deck'}
         client={client}
         pollIntervalMs={50}
         resolveSlotPrompt={resolveSlotPrompt}
       />,
     );
 
-    fireEvent.change(screen.getByLabelText('Presentation title'), {
-      target: { value: 'Finance Deck' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
+    await confirmTestOutline();
 
     await waitFor(
       () => {
@@ -488,12 +512,16 @@ describe('PresentationStudio real-chain and E2E acceptance (C-104)', () => {
       ),
     });
 
-    render(<PresentationStudio client={client} pollIntervalMs={50} />);
+    render(
+      <PresentationStudio
+        agentClient={outlineTestClient}
+        initialTopic={'Diagram Deck'}
+        client={client}
+        pollIntervalMs={50}
+      />,
+    );
 
-    fireEvent.change(screen.getByLabelText('Presentation title'), {
-      target: { value: 'Diagram Deck' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
+    await confirmTestOutline();
 
     await waitFor(
       () => {
@@ -568,14 +596,11 @@ describe('PresentationStudio real-chain and E2E acceptance (C-104)', () => {
   }, 15000);
 
   it('verifies selected-job isolation for slots, retry actions, and thumbnails', async () => {
-    let callCount = 0;
-    const createPresentationJob = vi.fn(async (): Promise<PresentationJob> => {
-      callCount += 1;
-      return callCount === 1 ? mockJob('job-a', 'running') : mockJob('job-b', 'running');
-    });
-
     const client: PresentationStreamClient = baseStreamClient({
-      createPresentationJob,
+      getPresentationJob: vi.fn(async (id) => ({
+        ...mockJob(id, 'running'),
+        title: id === 'job-a' ? 'Job A' : 'Job B',
+      })),
       subscribePresentationJob: vi.fn((jobId: string) =>
         (async function* () {
           if (jobId === 'job-a') {
@@ -603,11 +628,10 @@ describe('PresentationStudio real-chain and E2E acceptance (C-104)', () => {
       ),
     });
 
-    render(<PresentationStudio client={client} pollIntervalMs={50} />);
-
-    // Create Job A
-    fireEvent.change(screen.getByLabelText('Presentation title'), { target: { value: 'Job A' } });
-    fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
+    render(
+      <PresentationStudio initialJobIds={['job-a', 'job-b']} client={client} pollIntervalMs={50} />,
+    );
+    fireEvent.click(await screen.findByTestId('presentation-job-job-a'));
 
     await waitFor(
       () => {
@@ -617,11 +641,7 @@ describe('PresentationStudio real-chain and E2E acceptance (C-104)', () => {
     );
     expect(screen.queryByTestId('slot-slide-1-slot-b1')).not.toBeInTheDocument();
 
-    // Create Job B
-    fireEvent.change(screen.getByLabelText('Presentation title'), { target: { value: 'Job B' } });
-    fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
-
-    // Job B is now created and selected
+    fireEvent.click(screen.getByTestId('presentation-job-job-b'));
     await waitFor(
       () => {
         expect(screen.getByTestId('slot-slide-1-slot-b1')).toBeInTheDocument();
@@ -673,16 +693,15 @@ describe('PresentationStudio real-chain and E2E acceptance (C-104)', () => {
 
     const { container } = render(
       <PresentationStudio
+        agentClient={outlineTestClient}
+        initialTopic={'Auth Test'}
         client={client}
         pollIntervalMs={50}
         resolveSlotPrompt={() => 'Generate chart image'}
       />,
     );
 
-    fireEvent.change(screen.getByLabelText('Presentation title'), {
-      target: { value: 'Auth Test' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
+    await confirmTestOutline();
 
     await waitFor(
       () => {
@@ -718,12 +737,16 @@ describe('PresentationStudio real-chain and E2E acceptance (C-104)', () => {
       createPresentationJob,
     });
 
-    render(<PresentationStudio client={client} pollIntervalMs={50} />);
+    render(
+      <PresentationStudio
+        agentClient={outlineTestClient}
+        initialTopic={'Executive Overview'}
+        client={client}
+        pollIntervalMs={50}
+      />,
+    );
 
-    fireEvent.change(screen.getByLabelText('Presentation title'), {
-      target: { value: 'Executive Overview' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
+    await confirmTestOutline();
 
     await waitFor(
       () => {
@@ -761,12 +784,16 @@ describe('PresentationStudio real-chain and E2E acceptance (C-104)', () => {
       ),
     });
 
-    render(<PresentationStudio client={client} pollIntervalMs={50} />);
+    render(
+      <PresentationStudio
+        agentClient={outlineTestClient}
+        initialTopic={'Cancel Test Deck'}
+        client={client}
+        pollIntervalMs={50}
+      />,
+    );
 
-    fireEvent.change(screen.getByLabelText('Presentation title'), {
-      target: { value: 'Cancel Test Deck' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
+    await confirmTestOutline();
 
     await waitFor(
       () => {
@@ -821,6 +848,8 @@ describe('PresentationStudio real-chain and E2E acceptance (C-104)', () => {
 
     render(
       <PresentationStudio
+        agentClient={outlineTestClient}
+        initialTopic={'Reconnect Deck'}
         client={client}
         pollIntervalMs={50}
         streamReconnectOptions={{
@@ -831,10 +860,7 @@ describe('PresentationStudio real-chain and E2E acceptance (C-104)', () => {
       />,
     );
 
-    fireEvent.change(screen.getByLabelText('Presentation title'), {
-      target: { value: 'Reconnect Deck' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
+    await confirmTestOutline();
 
     await waitFor(
       () => {

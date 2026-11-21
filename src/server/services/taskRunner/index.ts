@@ -11,6 +11,10 @@ import { BriefModel } from '@/database/models/brief';
 import { TaskModel } from '@/database/models/task';
 import { TaskTopicModel } from '@/database/models/taskTopic';
 import type { LobeChatDatabase } from '@/database/type';
+import { isNativeAgentRuntimeEnabled } from '@/server/runtime/tasks/mode';
+import { taskWakeVersion } from '@/server/runtime/tasks/wakeScheduling';
+import type { NativeExecutionGuard } from '@/server/runtime/tasks/worker';
+import { AgentRuntimeService } from '@/server/services/agentRuntime';
 import { AiAgentService } from '@/server/services/aiAgent';
 import { TaskLifecycleService } from '@/server/services/taskLifecycle';
 
@@ -21,6 +25,9 @@ const log = debug('task-runner');
 export interface RunTaskParams {
   continueTopicId?: string;
   extraPrompt?: string;
+  guard?: NativeExecutionGuard;
+  nativeWakeId?: string;
+  nativeWakeLease?: { id: string; owner: string };
   taskId: string;
 }
 
@@ -56,6 +63,7 @@ export class TaskRunnerService {
   }
 
   async runTask(params: RunTaskParams): Promise<RunTaskResult> {
+    params.guard?.assertHeld();
     const { taskId: idOrIdentifier, continueTopicId, extraPrompt } = params;
 
     const task = await this.taskModel.resolve(idOrIdentifier);
@@ -174,6 +182,10 @@ export class TaskRunnerService {
       log('runTask: %s (continue=%s)', taskIdentifier, continueTopicId);
 
       const result = await aiAgentService.execAgent({
+        signal: params.guard?.signal,
+        nativeWakeId: params.nativeWakeId,
+        ...(isNativeAgentRuntimeEnabled() ? { nativeTaskVersion: taskWakeVersion(task) } : {}),
+        ...(isNativeAgentRuntimeEnabled() ? { autoStart: false } : {}),
         ...(isSlug ? { slug: agentRef } : { agentId: agentRef }),
         additionalPluginIds: pluginIds,
         ...(typeof taskConfig.model === 'string' && { model: taskConfig.model }),
@@ -224,6 +236,14 @@ export class TaskRunnerService {
       }
 
       await this.taskModel.updateHeartbeat(task.id);
+      if (isNativeAgentRuntimeEnabled()) {
+        params.guard?.assertHeld();
+        if (!result.success) throw new Error(result.error || result.message);
+        await new AgentRuntimeService(this.db, this.userId).startExecution({
+          operationId: result.operationId,
+          nativeWakeLease: params.nativeWakeLease,
+        });
+      }
 
       return {
         ...result,
@@ -231,7 +251,7 @@ export class TaskRunnerService {
         taskIdentifier: task.identifier,
       };
     } catch (error) {
-      if (weSetRunning) {
+      if (weSetRunning && !params.nativeWakeId) {
         try {
           const failedTask = await this.taskModel.resolve(idOrIdentifier);
           if (failedTask && failedTask.status === 'running') {

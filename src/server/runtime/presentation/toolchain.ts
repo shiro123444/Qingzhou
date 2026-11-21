@@ -11,6 +11,7 @@ export interface PresentationToolchain {
   convert: (
     workspacePath: string,
     signal?: AbortSignal,
+    nativeData?: boolean,
   ) => Promise<readonly PresentationWorkerArtifact[]>;
   qualityCheck: (workspacePath: string, signal?: AbortSignal) => Promise<PresentationQualityReport>;
 }
@@ -19,6 +20,7 @@ export interface PresentationToolchainOptions {
   allowedRunnerIds: readonly string[];
   convertArgs?: readonly string[];
   convertScriptPath: string;
+  exportFontMap?: Readonly<Record<string, string>>;
   maxOutputBytes?: number;
   pptMasterRoot: string;
   providerCommand: readonly string[];
@@ -45,6 +47,16 @@ export class PresentationToolchainError extends Error {
   ) {
     super(message, { cause });
     this.name = 'PresentationToolchainError';
+  }
+}
+
+/** Expose only page numbers from the checker; its raw output contains the author's text. */
+export class NativeSlideQualityError extends PresentationToolchainError {
+  constructor(slides: number[], textBounds: boolean) {
+    super(
+      'PRESENTATION_QUALITY_FAILED',
+      `PowerPoint 导出前检查发现第 ${slides.join('、')} 页${textBounds ? '有文字超出排版区域' : '未通过文件检查'}。`,
+    );
   }
 }
 
@@ -109,11 +121,25 @@ export class PptMasterToolchain implements PresentationToolchain {
 
   qualityCheck(workspacePath: string, signal?: AbortSignal): Promise<PresentationQualityReport> {
     return this.run('quality', workspacePath, signal).then((result) => {
-      if (result.exitCode !== 0)
+      if (result.exitCode !== 0) {
+        const report = result.stdout ?? '';
+        const slides = [
+          ...new Set(
+            Array.from(report.matchAll(/^\[ERROR\] (\d{1,4})\.svg - Failed\s*$/gmu), (match) =>
+              Number(match[1]),
+            ).filter((number) => number > 0),
+          ),
+        ];
+        if (slides.length)
+          throw new NativeSlideQualityError(
+            slides,
+            /\[ERROR\] <text>[^\n]*data-pptx-bounds/u.test(report),
+          );
         throw new PresentationToolchainError(
           'PRESENTATION_QUALITY_FAILED',
           'Quality checker failed',
         );
+      }
       try {
         const output = result.stdout?.trim();
         if (!output) return { passed: true };
@@ -139,8 +165,9 @@ export class PptMasterToolchain implements PresentationToolchain {
   async convert(
     workspacePath: string,
     signal?: AbortSignal,
+    nativeData?: boolean,
   ): Promise<readonly PresentationWorkerArtifact[]> {
-    const result = await this.run('convert', workspacePath, signal);
+    const result = await this.run('convert', workspacePath, signal, nativeData);
     if (result.exitCode !== 0)
       throw new PresentationToolchainError(
         'PRESENTATION_WORKER_FAILED',
@@ -162,7 +189,7 @@ export class PptMasterToolchain implements PresentationToolchain {
         artifactId: `${workspacePath}:${index}`,
         bytes:
           artifact.type === 'pptx' || artifact.path.toLowerCase().endsWith('.pptx')
-            ? preserveSvgTextLayout(artifact.bytes)
+            ? preserveSvgTextLayout(artifact.bytes, this.options.exportFontMap)
             : new Uint8Array(artifact.bytes),
         mimeType:
           artifact.mimeType ??
@@ -179,6 +206,7 @@ export class PptMasterToolchain implements PresentationToolchain {
     kind: 'quality' | 'convert',
     workspacePath: string,
     signal?: AbortSignal,
+    nativeData = false,
   ): Promise<PresentationRunnerResult> {
     if (signal?.aborted)
       throw new PresentationToolchainError(
@@ -205,6 +233,7 @@ export class PptMasterToolchain implements PresentationToolchain {
               'fade',
               // Source-document charts retain their original labels and pixels.
               '--no-image-optimize',
+              ...(nativeData ? ['--native-charts-and-tables'] : []),
               ...(this.options.convertArgs ?? []),
             ]
           : []),

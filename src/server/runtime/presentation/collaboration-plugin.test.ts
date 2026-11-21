@@ -296,6 +296,28 @@ describe('presentation collaboration hook', () => {
     expect(f.snapshot().job.messages[0].content).toBe('保留原图，表格统一蓝色');
   });
 
+  it('offers automatic repair only for recoverable quality or provider decisions', () => {
+    const inputDecision = createPresentationDecision('input', 'input-1', '2026-10-15T00:00:00Z');
+    const conflictDecision = createPresentationDecision(
+      'conflict',
+      'conflict-1',
+      '2026-10-15T00:00:00Z',
+    );
+    const qualityDecision = createPresentationDecision(
+      'quality',
+      'quality-1',
+      '2026-10-15T00:00:00Z',
+    );
+
+    expect(inputDecision.options.map((option) => option.id)).toEqual(['revise', 'defer']);
+    expect(conflictDecision.options.map((option) => option.id)).toEqual(['revise', 'defer']);
+    expect(qualityDecision.options.map((option) => option.id)).toEqual([
+      'retry',
+      'revise',
+      'defer',
+    ]);
+  });
+
   it('cancellation during a background delay prevents another model call', async () => {
     vi.useFakeTimers();
     const f = fixture();

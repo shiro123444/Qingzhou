@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import type {
@@ -84,16 +84,16 @@ const mockSlots: PresentationSlotState[] = [
 ];
 
 describe('CompletedWorkspace', () => {
-  it('enters Slide Focus Mode by default with 16:9 preview and bottom paginator', () => {
+  it('enters a borderless focused stage with back navigation and no AI composer', () => {
     const onSelectArtifact = vi.fn();
     const onExport = vi.fn();
+    const onBack = vi.fn();
 
     render(
       <CompletedWorkspace
         canExport={true}
         dismissSlotError={vi.fn()}
         effectiveSelectedArtifactId="slide-1"
-        exported={null}
         exporting={false}
         jobTitles={{ 'job-done': 'AI 演示文稿' }}
         resolveArtifactUri={() => 'https://example.com/asset.png'}
@@ -107,20 +107,31 @@ describe('CompletedWorkspace', () => {
           ...mockSlides,
           { ...mockSlides[0], artifactId: 'deck-pptx', type: 'pptx' },
         ]}
+        onBack={onBack}
         onExport={onExport}
         onRetryJob={vi.fn()}
         onSelectArtifact={onSelectArtifact}
       />,
     );
 
-    // Top capsule floating bar
+    expect(screen.getByTestId('presentation-completed-workspace')).toHaveAttribute(
+      'data-focused',
+      'true',
+    );
     expect(screen.getByTestId('presentation-editor-toolbar')).toBeInTheDocument();
     expect(screen.getByTestId('presentation-completed-tag')).toHaveTextContent('已完成');
     expect(screen.getByText('AI 演示文稿')).toBeInTheDocument();
     expect(screen.queryByText('商务科技')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Continue prompting AI' })).toHaveTextContent('');
-    expect(screen.getByRole('button', { name: '全景网格' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Quick export presentation/i })).toBeInTheDocument();
+    expect(screen.queryByTestId('presentation-editor-ai')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('presentation-conversation')).not.toBeInTheDocument();
+    const back = screen.getByTestId('presentation-back-to-home');
+    expect(back).toHaveTextContent(/back|返回/i);
+    expect(
+      within(screen.getByTestId('presentation-editor-toolbar')).getAllByRole('button'),
+    ).toHaveLength(3);
+    expect(screen.getByTestId('presentation-editor-export')).toBeInTheDocument();
+    fireEvent.click(back);
+    expect(onBack).toHaveBeenCalledOnce();
 
     // Central 16:9 preview
     expect(screen.getByTestId('slide-preview-image')).toHaveAttribute(
@@ -133,12 +144,76 @@ describe('CompletedWorkspace', () => {
     expect(screen.getByRole('button', { name: '上一页' })).toBeDisabled();
     expect(screen.getByRole('button', { name: '下一页' })).toBeEnabled();
 
+    // Editing the assistant chat and navigating the canvas have independent keys.
+    fireEvent.keyDown(window, { key: 'ArrowRight' });
+    expect(onSelectArtifact).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId('slide-preview-image'));
+    expect(screen.getByTestId('presentation-architecture-drawer')).toHaveAttribute(
+      'data-open',
+      'false',
+    );
+    fireEvent.keyDown(screen.getByTestId('spatial-canvas'), { key: 'ArrowRight' });
+    expect(onSelectArtifact).toHaveBeenCalledWith('slide-2');
+    onSelectArtifact.mockClear();
+
     // Navigate to next slide
     fireEvent.click(screen.getByRole('button', { name: '下一页' }));
     expect(onSelectArtifact).toHaveBeenCalledWith('slide-2');
   });
 
-  it('toggles Panorama Lightbox Mode with Bento grid and returns to Focus Mode on card click', () => {
+  it('starts full-window playback on the current page and returns to its camera and selection', async () => {
+    const onSelectArtifact = vi.fn();
+    render(
+      <CompletedWorkspace
+        canExport
+        dismissSlotError={vi.fn()}
+        effectiveSelectedArtifactId="slide-2"
+        exporting={false}
+        jobTitles={{}}
+        retryPendingKeys={{}}
+        retrySlot={vi.fn()}
+        selectedJob={mockJob}
+        selectedJobArtifacts={mockSlides}
+        selectedJobSlots={[]}
+        selectedSlide={mockSlides[1]}
+        slideArtifacts={mockSlides}
+        onExport={vi.fn()}
+        onRetryJob={vi.fn()}
+        onSelectArtifact={onSelectArtifact}
+      />,
+    );
+    const cameraScale = screen.getByTestId('spatial-canvas').dataset.scale;
+    const present = screen.getByRole('button', {
+      name: /presentationCanvas.present|Present slideshow|Play slideshow|放映幻灯片/i,
+    });
+    present.focus();
+    fireEvent.click(present);
+    const show = screen.getByTestId('deck-playback');
+    expect(show).toHaveAttribute('aria-modal', 'true');
+    expect(within(show).getByText('2 / 3')).toBeInTheDocument();
+    expect(within(show).getByRole('img')).toHaveAttribute('src', mockSlides[1].uri);
+    fireEvent.keyDown(show, { key: 'ArrowRight' });
+    expect(within(show).getByText('3 / 3')).toBeInTheDocument();
+    expect(
+      within(show).getByRole('button', { name: /presentationCanvas.next|Next slide|下一页/i }),
+    ).toBeDisabled();
+    fireEvent.keyDown(show, { key: 'ArrowRight' });
+    expect(within(show).getByText('3 / 3')).toBeInTheDocument();
+    fireEvent.keyDown(show, { key: 'Home' });
+    expect(
+      within(show).getByRole('button', {
+        name: /presentationCanvas.previous|Previous slide|上一页/i,
+      }),
+    ).toBeDisabled();
+    fireEvent.keyDown(show, { key: 'Escape' });
+    expect(screen.queryByTestId('deck-playback')).not.toBeInTheDocument();
+    expect(screen.getByTestId('slide-page-counter')).toHaveTextContent('02 / 03');
+    expect(screen.getByTestId('spatial-canvas').dataset.scale).toBe(cameraScale);
+    expect(onSelectArtifact).not.toHaveBeenCalled();
+    expect(present).toHaveFocus();
+  });
+
+  it('toggles Panorama Lightbox Mode with Bento grid and returns to Focus Mode on card click', async () => {
     const onSelectArtifact = vi.fn();
 
     render(
@@ -146,7 +221,6 @@ describe('CompletedWorkspace', () => {
         canExport={true}
         dismissSlotError={vi.fn()}
         effectiveSelectedArtifactId="slide-1"
-        exported={null}
         exporting={false}
         jobTitles={{ 'job-done': 'AI 演示文稿' }}
         retryPendingKeys={{}}
@@ -166,7 +240,10 @@ describe('CompletedWorkspace', () => {
     );
 
     // Toggle to Panorama Bento Grid
-    fireEvent.click(screen.getByRole('button', { name: '全景网格' }));
+    fireEvent.click(screen.getByTestId('presentation-editor-more'));
+    fireEvent.click(
+      await screen.findByRole('menuitem', { name: /gridView|Slide overview|全景网格/i }),
+    );
     expect(screen.getByTestId('presentation-bento-grid')).toBeInTheDocument();
     expect(screen.getByTestId('bento-card-slide-1')).toBeInTheDocument();
     expect(screen.getByTestId('bento-card-slide-2')).toBeInTheDocument();
@@ -179,13 +256,12 @@ describe('CompletedWorkspace', () => {
     expect(screen.getByTestId('slide-preview')).toBeInTheDocument();
   });
 
-  it('opens Architecture and Assets drawer showing 3 sections strictly for current slide', () => {
+  it('opens Architecture and Assets drawer showing 3 sections strictly for current slide', async () => {
     render(
       <CompletedWorkspace
         canExport={true}
         dismissSlotError={vi.fn()}
         effectiveSelectedArtifactId="slide-1"
-        exported={null}
         exporting={false}
         jobTitles={{ 'job-done': 'AI 演示文稿' }}
         resolveArtifactUri={() => 'https://example.com/asset.png'}
@@ -209,7 +285,12 @@ describe('CompletedWorkspace', () => {
     expect(drawer).toHaveAttribute('data-open', 'false');
 
     // Click "架构与资产" button in header
-    fireEvent.click(screen.getByRole('button', { name: '查看架构与资产' }));
+    fireEvent.click(screen.getByTestId('presentation-editor-more'));
+    fireEvent.click(
+      await screen.findByRole('menuitem', {
+        name: /assetsOpen|architecture and assets|查看架构与资产/i,
+      }),
+    );
     expect(drawer).toHaveAttribute('data-open', 'true');
 
     // 3 sections present
@@ -226,8 +307,13 @@ describe('CompletedWorkspace', () => {
     // Speaker notes content for slide 1
     expect(screen.getByText(/欢迎大家参加本次关于人工智能/)).toBeInTheDocument();
 
-    // Close drawer
+    const strip = screen.getByRole('button', { name: '展开胶卷' });
+    fireEvent.click(strip);
+    expect(drawer).toHaveAttribute('data-open', 'true');
+    // Closing the drawer must not close the strip or strand focus in the hidden drawer.
     fireEvent.click(screen.getByRole('button', { name: '关闭抽屉' }));
+    expect(strip).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByTestId('presentation-editor-more')).toHaveFocus();
     expect(drawer).toHaveAttribute('data-open', 'false');
   });
 
@@ -239,7 +325,6 @@ describe('CompletedWorkspace', () => {
         canExport={true}
         dismissSlotError={vi.fn()}
         effectiveSelectedArtifactId="slide-1"
-        exported={null}
         exporting={false}
         jobTitles={{ 'job-done': 'AI 演示文稿' }}
         retryPendingKeys={{}}
@@ -258,7 +343,7 @@ describe('CompletedWorkspace', () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /Quick export presentation/i }));
+    fireEvent.click(screen.getByTestId('presentation-editor-export'));
     expect(onExport).toHaveBeenCalledWith('deck-pptx', 'pptx');
   });
 
@@ -268,7 +353,6 @@ describe('CompletedWorkspace', () => {
         canExport={true}
         dismissSlotError={vi.fn()}
         effectiveSelectedArtifactId="slide-1"
-        exported={null}
         exporting={false}
         jobTitles={{ 'job-done': 'AI 演示文稿' }}
         retryPendingKeys={{}}
@@ -299,7 +383,7 @@ describe('CompletedWorkspace', () => {
     expect(screen.getByTestId('slide-navigator-item-slide-1')).not.toHaveTextContent('ready');
   });
 
-  it('opens a single in-flow composer from the header and the stage command bar', async () => {
+  it('keeps direct canvas annotation without rendering a general AI composer', () => {
     const onSend = vi.fn(async () => true);
 
     render(
@@ -307,20 +391,15 @@ describe('CompletedWorkspace', () => {
         canExport={true}
         dismissSlotError={vi.fn()}
         effectiveSelectedArtifactId="slide-1"
-        exported={null}
         exporting={false}
         jobTitles={{ 'job-done': 'AI 演示文稿' }}
         retryPendingKeys={{}}
         retrySlot={vi.fn()}
         selectedJob={{ ...mockJob, versionId: 'v1' }}
+        selectedJobArtifacts={mockSlides}
         selectedJobSlots={mockSlots}
         selectedSlide={mockSlides[0]}
         slideArtifacts={mockSlides}
-        selectedJobArtifacts={[
-          ...mockSlides,
-          { ...mockSlides[0], artifactId: 'deck-pptx', type: 'pptx' },
-        ]}
-        onCancel={vi.fn(async () => undefined)}
         onExport={vi.fn()}
         onRetryJob={vi.fn()}
         onSelectArtifact={vi.fn()}
@@ -329,57 +408,36 @@ describe('CompletedWorkspace', () => {
     );
 
     expect(screen.getByTestId('slide-command-bar')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '标注修改' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '上一页' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: '下一页' })).toBeEnabled();
-    expect(screen.queryByTestId('presentation-conversation')).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Continue prompting AI' }));
-    expect(screen.getByTestId('presentation-conversation')).toHaveAttribute('data-open', 'true');
-    expect(screen.getAllByTestId('presentation-conversation-input')).toHaveLength(1);
-
-    fireEvent.click(screen.getByTestId('presentation-conversation-trigger'));
+    expect(screen.queryByTestId('presentation-editor-ai')).not.toBeInTheDocument();
     expect(screen.queryByTestId('presentation-conversation')).not.toBeInTheDocument();
     expect(screen.queryByTestId('presentation-conversation-input')).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByTestId('presentation-conversation-trigger'));
-    expect(screen.getByTestId('presentation-conversation')).toHaveAttribute('data-open', 'true');
-    expect(screen.getAllByTestId('presentation-conversation-input')).toHaveLength(1);
-
-    fireEvent.change(screen.getByTestId('presentation-conversation-input'), {
-      target: { value: '把第二页配色改成科技蓝' },
-    });
-    fireEvent.click(screen.getByTestId('presentation-conversation-send'));
-    await waitFor(() => {
-      expect(onSend).toHaveBeenCalledWith(
-        'job-done',
-        expect.objectContaining({ content: '把第二页配色改成科技蓝' }),
+    const readPage = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 404 }));
+    try {
+      fireEvent.click(
+        screen.getByRole('button', { name: /Annotate slide|presentationCanvas.annotate|标注修改/ }),
       );
-    });
-
-    fireEvent.click(screen.getByTestId('presentation-conversation-collapse'));
-    expect(screen.queryByTestId('presentation-conversation')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Continue prompting AI' }));
-    fireEvent.change(screen.getByTestId('presentation-conversation-input'), {
-      target: { value: '再改一次标题' },
-    });
-    fireEvent.click(screen.getByTestId('presentation-conversation-send'));
-    await waitFor(() => {
-      expect(onSend).toHaveBeenCalledWith(
-        'job-done',
-        expect.objectContaining({ content: '再改一次标题' }),
+      const dock = screen.getByTestId('annotation-dock');
+      expect(screen.getByTestId('spatial-canvas')).not.toContainElement(dock);
+      fireEvent.click(
+        within(dock).getByRole('button', {
+          name: /presentationAnnotation.cancel|退出标注|Exit annotation/i,
+        }),
       );
-    });
+      expect(onSend).not.toHaveBeenCalled();
+    } finally {
+      readPage.mockRestore();
+    }
   });
 
-  it('keeps retained previews readable with a generation status while regeneration is running', () => {
+  it('keeps retained previews readable with a generation status while regeneration is running', async () => {
     render(
       <CompletedWorkspace
         activity="第 1 页 · 第 1 张素材 · 正在处理素材的透明背景"
         canExport={true}
         dismissSlotError={vi.fn()}
         effectiveSelectedArtifactId="slide-1"
-        exported={null}
         exporting={false}
         jobTitles={{ 'job-done': 'AI 演示文稿' }}
         resolveArtifactUri={() => 'https://example.com/asset.png'}
@@ -412,7 +470,10 @@ describe('CompletedWorkspace', () => {
       '第 1 页 · 第 1 张素材 · 正在处理素材的透明背景',
     );
 
-    fireEvent.click(screen.getByTestId('presentation-completed-tag'));
+    fireEvent.click(screen.getByTestId('presentation-editor-more'));
+    fireEvent.click(
+      await screen.findByRole('menuitem', { name: /activityHistory|activity history|活动记录/i }),
+    );
     expect(screen.getByTestId('presentation-activity-history')).toHaveTextContent(
       '第 1 页 · 第 1 张素材 · 绘画已完成',
     );
@@ -420,7 +481,11 @@ describe('CompletedWorkspace', () => {
       '第 1 页 · 第 1 张素材 · 正在处理素材的透明背景',
     );
 
-    fireEvent.click(screen.getByRole('button', { name: '全景网格' }));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: /close/i }));
+    fireEvent.click(screen.getByTestId('presentation-editor-more'));
+    fireEvent.click(
+      await screen.findByRole('menuitem', { name: /gridView|Slide overview|全景网格/i }),
+    );
     expect(screen.getAllByTestId('slide-generation-overlay')).toHaveLength(mockSlides.length);
   });
 
@@ -490,7 +555,6 @@ describe('CompletedWorkspace', () => {
         canExport={true}
         dismissSlotError={vi.fn()}
         effectiveSelectedArtifactId="slide-1"
-        exported={null}
         exporting={false}
         jobTitles={{ 'job-done': 'AI 演示文稿' }}
         retryPendingKeys={{}}
@@ -529,7 +593,6 @@ describe('CompletedWorkspace', () => {
         canExport={true}
         dismissSlotError={vi.fn()}
         effectiveSelectedArtifactId="slide-1"
-        exported={null}
         exporting={false}
         jobTitles={{ 'job-done': 'AI 演示文稿' }}
         retryPendingKeys={{}}

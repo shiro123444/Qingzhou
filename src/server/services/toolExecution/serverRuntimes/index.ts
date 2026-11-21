@@ -13,6 +13,7 @@ import { agentManagementRuntime } from './agentManagement';
 import { briefRuntime } from './brief';
 import { calculatorRuntime } from './calculator';
 import { cloudSandboxRuntime } from './cloudSandbox';
+import { computerRuntime } from './computer';
 import { credsRuntime } from './creds';
 import { knowledgeBaseRuntime } from './knowledgeBase';
 import { lobeAgentRuntime } from './lobeAgent';
@@ -49,6 +50,7 @@ const registerRuntimes = (runtimes: ServerRuntimeRegistration[]) => {
 
 // Register all server runtimes
 registerRuntimes([
+  computerRuntime,
   webBrowsingRuntime,
   cloudSandboxRuntime,
   calculatorRuntime,

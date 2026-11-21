@@ -85,3 +85,42 @@ it('lets an unsuccessful activation retry without resetting the application', as
   await screen.findByText('ready');
   expect(load).toHaveBeenCalledTimes(2);
 });
+
+it('releases activated audio on plugin disable and waits for a new request before reactivation', async () => {
+  const first = session();
+  const second = session();
+  const load = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+  const page = (enabled: boolean, active: boolean) => (
+    <LazyMusicSession active={active} enabled={enabled} load={load} userId="alice" />
+  );
+  const view = render(page(true, true));
+  await waitFor(() => expect(first.plugins.start).toHaveBeenCalledTimes(1));
+  view.rerender(page(false, true));
+  expect(first.engine.dispose).toHaveBeenCalledTimes(1);
+  expect(first.plugins.stop).toHaveBeenCalledTimes(1);
+  view.rerender(page(true, false));
+  expect(load).toHaveBeenCalledTimes(1);
+  view.rerender(page(true, true));
+  await waitFor(() => expect(second.plugins.start).toHaveBeenCalledTimes(1));
+  view.unmount();
+  expect(first.engine.dispose).toHaveBeenCalledTimes(1);
+  expect(second.engine.dispose).toHaveBeenCalledTimes(1);
+});
+
+it('discards a pending session if the plugin is disabled before its import completes', async () => {
+  const runtime = session();
+  let resolve!: (value: MusicSession) => void;
+  const load = vi.fn(
+    () =>
+      new Promise<MusicSession>((done) => {
+        resolve = done;
+      }),
+  );
+  const view = render(<LazyMusicSession active enabled load={load} userId="alice" />);
+  view.rerender(<LazyMusicSession active enabled={false} load={load} userId="alice" />);
+  await act(async () => resolve(runtime as unknown as MusicSession));
+  expect(runtime.plugins.start).not.toHaveBeenCalled();
+  expect(runtime.engine.setAccount).not.toHaveBeenCalled();
+  expect(runtime.engine.dispose).toHaveBeenCalledTimes(1);
+  expect(runtime.plugins.stop).toHaveBeenCalledTimes(1);
+});

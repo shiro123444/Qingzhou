@@ -10,6 +10,7 @@ import {
   adjudicateVisualReviewStatus,
   createPresentationVisualCritic,
   type PresentationVisualReview,
+  projectVisualReviewContract,
   retainUnresolvedVisualIssues,
   retryTransientVisualReview,
 } from './visual-critic';
@@ -224,6 +225,15 @@ it.each([true, false])(
       chat: vi.fn(async (request, context) => {
         expect(context.trustedImages!.urls.length).toBeLessThanOrEqual(6);
         const text = JSON.stringify(request.messages);
+        const userParts = request.messages.find((m: { role: string }) => m.role === 'user')!
+          .content as {
+          type: string;
+          text?: string;
+        }[];
+        const payload = JSON.parse(userParts.find((p) => p.type === 'text')!.text!);
+        expect(payload.reviewScope.totalSlides).toBe(9);
+        expect(payload.reviewScope.slides).toHaveLength(9);
+        expect(payload.reviewScope.reviewedSlideIds.length).toBeLessThanOrEqual(4);
         const ids = [...text.matchAll(/待复核成品：(slide-\d+)/gu)].map((match) => match[1]);
         observed.push(...ids);
         const issues = ids.includes('slide-7')
@@ -374,7 +384,7 @@ it.each([false, true])(
     if (sharedMaster) {
       expect(payload.designProgram).toBeUndefined();
       expect(payload.referenceStructures).toHaveLength(designProgram.archetypes.length);
-      expect(payload.deckPolicy).toContain('当前任务事实 > deckVisualSystem');
+      expect(payload.deckPolicy).toContain('compiledDesign');
     } else {
       expect(payload.designProgram).toEqual(designProgram);
     }
@@ -561,4 +571,60 @@ it('compares artwork against its own family evidence and accepts a targeted cuto
   expect(get).toHaveBeenCalledWith(scope, 'middle-reference');
   expect(get).not.toHaveBeenCalledWith(scope, 'unrelated-cover');
   expect(get).not.toHaveBeenCalledWith(scope, 'unrelated-closing');
+});
+
+it('reviews compiled native facts without restoring provisional card and decoration instructions', () => {
+  const contract = projectVisualReviewContract({
+    slideId: 'flow',
+    order: 1,
+    svg: '',
+    metadata: {
+      compiledDesign: {
+        schemaVersion: 1,
+        layoutCapsuleId: `capsule-${'a'.repeat(40)}`,
+        slotIds: ['observed-process-slot'],
+      },
+      outline: ['原始关系与必要标签必须保留'],
+      visualDirection: {
+        role: 'process',
+        compositionIntent: 'Restore rounded cards, decorative bars and repeated captions',
+      },
+      contentBlocks: [
+        {
+          id: 'graph',
+          kind: 'scientific-diagram',
+          spec: {
+            type: 'graph',
+            nodes: [
+              { id: 'a', label: '输入' },
+              { id: 'b', label: '输出' },
+            ],
+            edges: [{ from: 'a', to: 'b' }],
+          },
+        },
+      ],
+      visualRequirements: [
+        {
+          id: 'graph',
+          renderer: 'native',
+          kind: 'scientific-diagram',
+          brief: 'Every node MUST be in a card',
+          annotations: [{ label: '必要标注' }],
+        },
+      ],
+    },
+  });
+  expect(JSON.stringify(contract)).not.toContain('rounded cards');
+  expect(JSON.stringify(contract)).not.toContain('Every node MUST');
+  expect(contract.approvedContent).toEqual(['原始关系与必要标签必须保留']);
+  expect(contract.visualRequirements[0].annotations).toEqual([{ label: '必要标注' }]);
+  expect(contract.contentBlocks).toHaveLength(1);
+  expect(
+    projectVisualReviewContract({
+      slideId: 'legacy',
+      order: 1,
+      svg: '',
+      metadata: { visualDirection: { compositionIntent: 'Keep reference identity' } },
+    }).visualDirection,
+  ).toMatchObject({ compositionIntent: 'Keep reference identity' });
 });

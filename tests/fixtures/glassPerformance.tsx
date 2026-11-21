@@ -134,7 +134,7 @@ const originalDraw = WebGL2RenderingContext.prototype.drawArrays;
 WebGL2RenderingContext.prototype.drawArrays = function (...args: Parameters<typeof originalDraw>) {
   const start = performance.now();
   Reflect.apply(originalDraw, this, args);
-  recordDraw(this.canvas, start);
+  if (!this.getParameter(this.FRAMEBUFFER_BINDING)) recordDraw(this.canvas, start);
 };
 const recordUpload = (context: WebGL2RenderingContext, args: unknown[]) => {
   // Count actual atlas pixels, not storage allocation. The direct player and shared

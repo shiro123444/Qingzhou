@@ -61,6 +61,9 @@ import { signOperationJwt, signUserJWT } from '@/libs/trpc/utils/internalJwt';
 import type { EvalContext, ServerAgentToolsContext } from '@/server/modules/Mecha';
 import { createServerAgentToolsEngine } from '@/server/modules/Mecha';
 import type { ServerUserMemoryConfig } from '@/server/modules/Mecha/ContextEngineering/types';
+import { isNativeAgentRuntimeEnabled } from '@/server/runtime/tasks/mode';
+import { NativeAgentStore } from '@/server/runtime/tasks/store';
+import { NATIVE_THREAD_CALLBACK } from '@/server/runtime/tasks/wakeHooks';
 import { AgentService } from '@/server/services/agent';
 import { AgentDocumentsService } from '@/server/services/agentDocuments';
 import type { AgentRuntimeServiceOptions } from '@/server/services/agentRuntime';
@@ -86,6 +89,7 @@ import {
   SystemCapabilityIdentifier,
   SystemCapabilityManifest,
 } from '@/server/services/toolExecution/systemCapabilityManifest';
+import { formatUiAttention, type UiAttention } from '@/types/uiAttention';
 
 import { resolveDeviceAccessPolicy } from './deviceAccessPolicy';
 import { buildAllowedBuiltinTools, isDeviceToolIdentifier } from './deviceToolRegistry';
@@ -157,6 +161,8 @@ interface InternalExecAgentParams extends ExecAgentParams {
   botContext?: ChatTopicBotContext;
   /** Bot platform context for injecting platform capabilities (e.g. markdown support) */
   botPlatformContext?: BotPlatformContext;
+  /** Owned Computer entry; does not persist changes to the assistant's normal chat config. */
+  computerTask?: boolean;
   /** Cron job ID that triggered this execution (if trigger is 'cron') */
   cronJobId?: string;
   /** Disable only local-system while preserving other tools. Useful for signal-only evals. */
@@ -187,6 +193,8 @@ interface InternalExecAgentParams extends ExecAgentParams {
   initialStepCount?: number;
   /** Maximum steps for the agent operation */
   maxSteps?: number;
+  nativeTaskVersion?: string;
+  nativeWakeId?: string;
   /** Parent message ID to continue from. Only takes effect when resume is true */
   parentMessageId?: string;
   queueRetries?: number;
@@ -203,7 +211,8 @@ interface InternalExecAgentParams extends ExecAgentParams {
    * message.
    */
   resumeApproval?: {
-    decision: 'approved' | 'rejected' | 'rejected_continue';
+    decision: 'approved' | 'rejected' | 'rejected_continue' | 'answered';
+    response?: Record<string, unknown>;
     parentMessageId: string;
     rejectionReason?: string;
     toolCallId: string;
@@ -225,6 +234,7 @@ interface InternalExecAgentParams extends ExecAgentParams {
   title?: string;
   /** Topic creation trigger source ('cron' | 'chat' | 'api' | 'task') */
   trigger?: string;
+  uiAttention?: UiAttention;
   /**
    * User intervention configuration
    * Use { approvalMode: 'headless' } for async tasks that should never wait for human approval
@@ -241,6 +251,63 @@ interface InternalExecAgentParams extends ExecAgentParams {
  * - Cron jobs / scheduled tasks
  */
 export class AiAgentService {
+  private async resumeNativeApproval(params: InternalExecAgentParams): Promise<ExecAgentResult> {
+    const approval = params.resumeApproval!;
+    const topicId = params.appContext?.topicId;
+    if (!topicId || (params.parentMessageId && params.parentMessageId !== approval.parentMessageId))
+      throw new Error('Native approval requires the original topic and tool message');
+    const topic = await this.topicModel.findById(topicId);
+    const pointer = topic?.metadata?.runningOperation;
+    if (!pointer || pointer.transport !== 'native')
+      throw new Error('Pending native operation not found');
+    const checkpoint = await new NativeAgentStore(this.db).checkpoint(pointer.operationId);
+    const state = checkpoint?.state;
+    if (
+      checkpoint?.userId !== this.userId ||
+      !state ||
+      state.metadata?.topicId !== topicId ||
+      (params.agentId && state.metadata?.agentId !== params.agentId) ||
+      (params.appContext?.threadId ?? null) !== (state.metadata?.threadId ?? null)
+    )
+      throw new Error('Native approval scope mismatch');
+    const action =
+      approval.decision === 'answered'
+        ? 'input'
+        : approval.decision === 'approved'
+          ? 'approve'
+          : approval.decision === 'rejected_continue'
+            ? 'reject_continue'
+            : 'reject';
+    const scheduled = await this.agentRuntimeService.processHumanIntervention({
+      operationId: pointer.operationId,
+      stepIndex: state.stepCount,
+      action,
+      toolMessageId: approval.parentMessageId,
+      ...(action === 'input'
+        ? { humanInput: { toolCallId: approval.toolCallId, response: approval.response } }
+        : action === 'approve'
+          ? { approvedToolCall: { id: approval.toolCallId } }
+          : {
+              rejectionReason: approval.rejectionReason || 'Tool call rejected by user',
+              rejectAndContinue: action === 'reject_continue',
+            }),
+    });
+    return {
+      agentId: state.metadata.agentId,
+      assistantMessageId: pointer.assistantMessageId,
+      autoStarted: true,
+      createdAt: state.createdAt,
+      message: 'Native operation resumed',
+      messageId: scheduled.messageId,
+      operationId: pointer.operationId,
+      status: 'created',
+      success: true,
+      timestamp: new Date().toISOString(),
+      topicId,
+      transport: 'native',
+      userMessageId: approval.parentMessageId,
+    };
+  }
   private readonly userId: string;
   private readonly db: LobeChatDatabase;
   private readonly agentDocumentsService: AgentDocumentsService;
@@ -300,6 +367,10 @@ export class AiAgentService {
    *   → AgentRuntimeService.createOperation(...)
    */
   async execAgent(params: InternalExecAgentParams): Promise<ExecAgentResult> {
+    if (isNativeAgentRuntimeEnabled() && params.resumeApproval)
+      return this.resumeNativeApproval(params);
+    if (params.resumeApproval?.decision === 'answered')
+      throw new Error('Structured background answers require native execution');
     const {
       additionalPluginIds,
       agentId,
@@ -394,11 +465,21 @@ export class AiAgentService {
     const sourceSystemRole = agentConfig.systemRole ?? '';
     const sourceAgentConfig = structuredClone(agentConfig);
     const promptSegments: HarnessPromptSegment[] = [{ kind: 'author', content: sourceSystemRole }];
+    const attentionHint =
+      !params.resume && (params.clientRuntime === 'web' || params.clientRuntime === 'desktop')
+        ? formatUiAttention(params.uiAttention)
+        : undefined;
+    if (attentionHint) {
+      promptSegments.push({ kind: 'task', content: attentionHint });
+      agentConfig.systemRole = composeHarnessPrompt(promptSegments);
+    }
     const resolvedAgentId = agentConfig.id;
 
     // Apply per-call model/provider overrides (e.g. from task.config)
     if (modelOverride) agentConfig.model = modelOverride;
     if (providerOverride) agentConfig.provider = providerOverride;
+    if (params.computerTask)
+      agentConfig.chatConfig = { ...agentConfig.chatConfig, enableAgentMode: true };
 
     log(
       'execAgent: got agent config for %s (id: %s), model: %s, provider: %s',
@@ -745,6 +826,7 @@ export class AiAgentService {
       // Seed topic.metadata.runningOperation so heteroIngest can validate the operation.
       await this.topicModel.updateMetadata(topicId, {
         runningOperation: {
+          transport: 'gateway',
           assistantMessageId: assistantMsg.id,
           operationId,
           scope: appContext?.scope ?? undefined,
@@ -800,6 +882,7 @@ export class AiAgentService {
       }
 
       return {
+        transport: 'gateway',
         agentId: resolvedAgentId,
         assistantMessageId: assistantMsg.id,
         autoStarted: true,
@@ -952,6 +1035,8 @@ export class AiAgentService {
 
       try {
         const docs = await this.agentDocumentsService.getAgentDocuments(resolvedAgentId);
+        // Snapshot the JSON wire representation used by persisted runs.
+        // eslint-disable-next-line unicorn/prefer-structured-clone
         pinnedAgentDocuments = JSON.parse(JSON.stringify(docs));
         hasAgentDocuments = docs.length > 0;
       } catch {
@@ -1102,7 +1187,14 @@ export class AiAgentService {
       // (LOBE-8768). Centralising the check at the ingest layer means
       // every future manifest source automatically inherits the wall.
       const isManifestIngestAllowed = (identifier: string): boolean =>
-        canUseDevice || !isDeviceToolIdentifier(identifier);
+        (canUseDevice || !isDeviceToolIdentifier(identifier)) &&
+        !(
+          isNativeAgentRuntimeEnabled() &&
+          installedPlugins.some(
+            (plugin) =>
+              plugin.identifier === identifier && plugin.customParams?.mcp?.type === 'stdio',
+          )
+        );
 
       // Start with the scoped manifest map (pluginIds + defaultToolIds)
       const manifestMap = toolsEngine.getEnabledPluginManifests(pluginIds);
@@ -1165,7 +1257,8 @@ export class AiAgentService {
       //
       // When DEVICE_GATEWAY is configured AND the caller is a web client, we
       // leave executor unset so tools route via RemoteDevice proxy.
-      const shouldDispatchToClient = clientRuntime === 'desktop' || !gatewayConfigured;
+      const shouldDispatchToClient =
+        !isNativeAgentRuntimeEnabled() && (clientRuntime === 'desktop' || !gatewayConfigured);
       if (shouldDispatchToClient) {
         // Tools that declare `executors` including `'client'` in their
         // manifest are dispatched to the client when a desktop caller is
@@ -1181,6 +1274,32 @@ export class AiAgentService {
           if (plugin.customParams?.mcp?.type === 'stdio' && manifestMap.has(plugin.identifier)) {
             toolExecutorMap[plugin.identifier] = 'client';
           }
+        }
+      }
+      if (isNativeAgentRuntimeEnabled()) {
+        const unavailable = new Set(
+          installedPlugins
+            .filter((plugin) => plugin.customParams?.mcp?.type === 'stdio')
+            .map((plugin) => plugin.identifier),
+        );
+        for (const [id, manifest] of Object.entries(toolManifestMap)) {
+          if (
+            manifest.executors?.includes('client') &&
+            !manifest.executors.includes('server') &&
+            !canUseDevice
+          )
+            unavailable.add(id);
+        }
+        tools = tools?.filter(
+          (tool: any) => !unavailable.has(tool.function?.name?.split('____')[0]),
+        );
+        toolsResult.enabledToolIds = toolsResult.enabledToolIds?.filter(
+          (id: string) => !unavailable.has(id),
+        );
+        for (const id of unavailable) {
+          delete toolManifestMap[id];
+          delete toolSourceMap[id];
+          delete toolExecutorMap[id];
         }
       }
 
@@ -1891,6 +2010,7 @@ export class AiAgentService {
 
     if (!pinnedAgentDocuments) {
       try {
+        // eslint-disable-next-line unicorn/prefer-structured-clone
         pinnedAgentDocuments = JSON.parse(
           JSON.stringify(await this.agentDocumentsService.getAgentDocuments(resolvedAgentId)),
         );
@@ -1939,12 +2059,15 @@ export class AiAgentService {
         deviceSystemInfo: Object.keys(deviceSystemInfo).length > 0 ? deviceSystemInfo : undefined,
         userTimezone,
         appContext: {
+          nativeWakeId: params.nativeWakeId,
+          nativeTaskVersion: params.nativeTaskVersion,
           agentId: resolvedAgentId,
           defaultTaskAssigneeAgentId: appContext?.defaultTaskAssigneeAgentId,
           documentId: appContext?.documentId,
           groupId: appContext?.groupId,
           scope: appContext?.scope,
-          sourceMessageId: userMessageRecord?.id ?? parentMessageId ?? undefined,
+          sourceMessageId:
+            appContext?.sourceMessageId ?? userMessageRecord?.id ?? parentMessageId ?? undefined,
           taskId: operationTaskId,
           threadId: appContext?.threadId,
           topicId,
@@ -1984,24 +2107,33 @@ export class AiAgentService {
       log('execAgent: created operation %s (autoStarted: %s)', operationId, result.autoStarted);
 
       // Persist running operation to topic metadata for reconnect after page reload
-      await this.topicModel.updateMetadata(topicId, {
-        runningOperation: {
+      if (isNativeAgentRuntimeEnabled()) {
+        await new NativeAgentStore(this.db).attachConversation(operationId, this.userId, {
+          topicId,
           assistantMessageId: assistantMessageRecord.id,
-          operationId,
           scope: appContext?.scope ?? undefined,
-          threadId: appContext?.threadId ?? undefined,
-        },
-      });
+          threadId: appContext?.threadId,
+        });
+      } else
+        await this.topicModel.updateMetadata(topicId, {
+          runningOperation: {
+            assistantMessageId: assistantMessageRecord.id,
+            operationId,
+            scope: appContext?.scope ?? undefined,
+            threadId: appContext?.threadId ?? undefined,
+          },
+        });
 
       // Generate a short-lived JWT for Gateway WebSocket authentication
       let gatewayToken: string | undefined;
       try {
-        gatewayToken = await signUserJWT(this.userId);
+        if (!isNativeAgentRuntimeEnabled()) gatewayToken = await signUserJWT(this.userId);
       } catch {
         log('execAgent: failed to sign gateway JWT, gateway auth will be unavailable');
       }
 
       return {
+        ...(isNativeAgentRuntimeEnabled() ? { transport: 'native' as const } : {}),
         agentId: resolvedAgentId,
         assistantMessageId: assistantMessageRecord.id,
         autoStarted: result.autoStarted,
@@ -2212,7 +2344,12 @@ export class AiAgentService {
     // Use headless mode to skip human approval in async task execution
     const result = await this.execAgent({
       agentId,
-      appContext: { groupId, threadId: thread.id, topicId },
+      appContext: {
+        groupId,
+        threadId: thread.id,
+        topicId,
+        ...(isNativeAgentRuntimeEnabled() ? { sourceMessageId: parentMessageId } : {}),
+      },
       autoStart: true,
       hooks: threadHooks,
       parentOperationId,
@@ -2417,7 +2554,7 @@ export class AiAgentService {
   ): AgentHook[] {
     let accumulatedToolCalls = 0;
 
-    return [
+    const hooks: AgentHook[] = [
       {
         handler: async (event) => {
           const state = event.finalState;
@@ -2530,6 +2667,16 @@ export class AiAgentService {
         type: 'onComplete' as const,
       },
     ];
+    return isNativeAgentRuntimeEnabled()
+      ? hooks.map((hook) => ({
+          ...hook,
+          webhook: {
+            url: NATIVE_THREAD_CALLBACK,
+            delivery: 'native' as const,
+            body: { threadId, startedAt, sourceMessageId },
+          },
+        }))
+      : hooks;
   }
 
   /**

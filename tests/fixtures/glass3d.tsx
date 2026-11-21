@@ -15,10 +15,12 @@ export interface Glass3dOptions {
   chromaticAberration?: number;
   double?: boolean;
   environmentOnly?: boolean;
+  finish?: number;
   layers?: number;
+  lens?: boolean;
   overlay?: 'half' | 'none' | 'opaque' | 'transparent';
   ownForeground?: boolean;
-  source?: 'gray-grid' | 'grid' | 'solid';
+  source?: 'gray-grid' | 'grid' | 'impulse' | 'solid';
   upper?: 'blue' | 'orange';
 }
 
@@ -78,7 +80,7 @@ function prepare(options: Glass3dOptions) {
   context.clearRect(0, 0, atlas.width, atlas.height);
   context.fillStyle = fill(baseColor);
   context.fillRect(0, 0, 512, 320);
-  if (options.source !== 'solid') {
+  if (options.source !== 'solid' && options.source !== 'impulse') {
     for (let x = 0; x < 512; x += 16) {
       context.fillStyle =
         options.source === 'gray-grid'
@@ -92,6 +94,12 @@ function prepare(options: Glass3dOptions) {
     }
     context.fillStyle = '#e9f5e2';
     for (let y = 0; y < 320; y += 24) context.fillRect(0, y, 512, 2);
+  }
+  if (options.source === 'impulse') {
+    context.fillStyle = '#000';
+    context.fillRect(0, 0, 512, 320);
+    context.fillStyle = '#fff';
+    context.fillRect(240, 0, 1, 320);
   }
   context.fillStyle = fill(aboveColor);
   context.fillRect(512, 0, 512, 320);
@@ -119,7 +127,8 @@ function prepare(options: Glass3dOptions) {
   const volumes: GlassVolume[] = [
     {
       absorption: options.absorption ? [0.005, 0.012, 0.02] : [0, 0, 0],
-      bevel: 6,
+      bevel: options.lens ? 20 : 6,
+      profile: options.lens ? 'lens' : undefined,
       center: [240, 130, 36],
       id: 'capsule',
       ior: 1.45,
@@ -191,6 +200,7 @@ function prepare(options: Glass3dOptions) {
     planes: options.environmentOnly ? [] : planes,
     source: atlas,
     sourceBlur: options.blur,
+    surfaceFinish: options.finish,
     sourceVersion: ++version,
     target,
     viewport,

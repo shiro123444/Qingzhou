@@ -12,6 +12,8 @@ import debug from 'debug';
 import pMap from 'p-map';
 import { z } from 'zod';
 
+import { BUILTIN_PLUGIN_IDS, type BuiltinPluginId } from '@/config/builtinPlugins';
+import { AgentModel } from '@/database/models/agent';
 import { MessageModel } from '@/database/models/message';
 import { TaskModel } from '@/database/models/task';
 import { TaskTopicModel } from '@/database/models/taskTopic';
@@ -22,8 +24,11 @@ import { serverDatabase } from '@/libs/trpc/lambda/middleware';
 import { AgentRuntimeService } from '@/server/services/agentRuntime';
 import { AiAgentService } from '@/server/services/aiAgent';
 import { AiChatService } from '@/server/services/aiChat';
+import { readBotActivity } from '@/server/services/botSurface/activity';
+import { requestBot } from '@/server/services/botSurface/mention';
 import { HeterogeneousAgentService } from '@/server/services/heterogeneousAgent';
 import { TaskLifecycleService } from '@/server/services/taskLifecycle';
+import { uiAttentionSchema } from '@/types/uiAttention';
 
 const log = debug('lobe-server:ai-agent-router');
 
@@ -125,6 +130,7 @@ const ExecAgentSchema = z
   .object({
     /** The agent ID to run (either agentId or slug is required) */
     agentId: z.string().optional(),
+    uiAttention: uiAttentionSchema.optional(),
     /** Application context for message storage */
     appContext: z
       .object({
@@ -171,7 +177,8 @@ const ExecAgentSchema = z
      */
     resumeApproval: z
       .object({
-        decision: z.enum(['approved', 'rejected', 'rejected_continue']),
+        decision: z.enum(['approved', 'rejected', 'rejected_continue', 'answered']),
+        response: z.record(z.string(), z.unknown()).optional(),
         /** ID of the pending `role='tool'` message this decision targets. */
         parentMessageId: z.string(),
         /** Optional user-supplied rejection reason (only meaningful for rejected variants). */
@@ -423,6 +430,26 @@ const heteroAgentProcedure = heteroAuthedProcedure.use(serverDatabase).use(async
 });
 
 export const aiAgentRouter = router({
+  botPresence: authedProcedure
+    .use(serverDatabase)
+    .input(z.object({ agentId: z.string().min(1).max(256) }).strict())
+    .query(async ({ ctx, input }) => {
+      if (!(await new AgentModel(ctx.serverDB, ctx.userId).existsById(input.agentId)))
+        throw new TRPCError({ code: 'NOT_FOUND' });
+      return readBotActivity(ctx.serverDB, ctx.userId, input.agentId);
+    }),
+  mentionBot: authedProcedure
+    .use(serverDatabase)
+    .input(
+      z
+        .object({
+          agentId: z.string().min(1),
+          prompt: z.string().trim().min(1).max(8000),
+          source: z.enum(BUILTIN_PLUGIN_IDS as [BuiltinPluginId, ...BuiltinPluginId[]]).optional(),
+        })
+        .strict(),
+    )
+    .mutation(({ ctx, input }) => requestBot(ctx.serverDB, ctx.userId, input)),
   /**
    * Create Thread for client-side task execution in Group mode
    *
@@ -620,6 +647,7 @@ export const aiAgentRouter = router({
       resumeApproval,
       trigger,
       userInterventionConfig,
+      uiAttention,
     } = input;
 
     log('execAgent: identifier=%s, prompt=%s', agentId || slug, prompt.slice(0, 50));
@@ -627,6 +655,7 @@ export const aiAgentRouter = router({
     try {
       return await ctx.aiAgentService.execAgent({
         agentId,
+        uiAttention,
         appContext,
         autoStart,
         clientRuntime,

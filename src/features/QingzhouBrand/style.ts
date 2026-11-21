@@ -1,19 +1,10 @@
 import { createStaticStyles, keyframes } from 'antd-style';
 
 const turn = keyframes`to { transform: rotate(360deg); }`;
-const cabinSwing = keyframes`
-  0%, 100% { transform: rotate(-2deg); }
-  50% { transform: rotate(2deg); }
-`;
 const counterTurn = keyframes`to { transform: rotate(-360deg); }`;
-const boatDrift = keyframes`
-  0%, 100% { transform: translateY(0) rotate(-2deg); }
-  50% { transform: translateY(-2px) rotate(2deg); }
-`;
 const settle = keyframes`
-  0% { transform: rotate(-12deg); }
-  35% { transform: rotate(6deg); }
-  70% { transform: rotate(-3deg); }
+  0% { transform: rotate(-3deg); }
+  60% { transform: rotate(1deg); }
   100% { transform: rotate(0); }
 `;
 const ripple = keyframes`
@@ -91,25 +82,26 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     min-height: 560px;
 
-    mask-image: linear-gradient(to bottom, #000 65%, transparent 100%);
+    mask-image: linear-gradient(to bottom, #000 0, #000 140px, transparent 300px);
 
     @media (width <= 600px) {
       inset-block: -10px 0;
       inset-inline: 0;
       min-height: 300px;
+
+      mask-image: linear-gradient(to bottom, #000 0, #000 100px, transparent 240px);
     }
   `,
   ferris: css`
-    --qz-wheel-duration: 96s;
-    --qz-wheel-surface: ${cssVar.colorBgContainer};
+    --qz-wheel-duration: 160s;
 
     position: absolute;
     inset-block-start: 0;
-    inset-inline-end: -52px;
+    inset-inline-end: -12px;
 
-    width: min(64%, 460px);
+    width: min(54%, 340px);
 
-    opacity: 0.58;
+    opacity: 0.3;
 
     mask-image: linear-gradient(to right, transparent, #000 35%);
 
@@ -124,15 +116,15 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     }
 
     &[data-variant='presentation'] {
-      --qz-wheel-duration: 112s;
+      --qz-wheel-duration: 180s;
 
       inset-block-start: clamp(10px, 3vh, 34px);
       inset-inline-end: clamp(28px, 7vw, 112px);
 
       width: min(58vw, 820px);
 
-      opacity: 0.55;
-      filter: saturate(0.9);
+      opacity: 0.32;
+      filter: saturate(0.85);
 
       mask-image: linear-gradient(to bottom, #000 0%, #000 74%, transparent 100%);
     }
@@ -141,7 +133,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       inset-block-start: 5px;
       inset-inline-end: -30px;
       width: 220px;
-      opacity: 0.25;
+      opacity: 0.2;
 
       * {
         animation: none !important;
@@ -167,17 +159,35 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       }
     }
   `,
+  wheelWash: css`
+    position: absolute;
+    inset-block-end: 6%;
+    inset-inline: 8%;
+
+    width: 84%;
+    height: auto;
+  `,
   rotor: css`
-    transform-origin: 320px 278px;
+    position: absolute;
+    inset: 0;
+    transform-origin: 50% 40%;
     animation: ${turn} var(--qz-wheel-duration) linear infinite;
   `,
-  cabin: css`
-    transform-origin: 0 0;
-    animation: ${counterTurn} var(--qz-wheel-duration) linear infinite;
+  cabinAnchor: css`
+    position: absolute;
+    transform: translate(-50%, -7.35%);
+    display: block;
+    width: 11.5625%;
   `,
-  cabinSwing: css`
-    transform-origin: 0 0;
-    animation: ${cabinSwing} 7s ease-in-out var(--qz-cabin-delay, 0s) infinite;
+  cabin: css`
+    transform-origin: 50% 7.35%;
+
+    display: block;
+
+    width: 100%;
+    height: auto;
+
+    animation: ${counterTurn} var(--qz-wheel-duration) linear infinite;
   `,
   presentationMist: css`
     position: absolute;
@@ -189,8 +199,8 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     color: ${cssVar.colorTextSecondary};
 
-    opacity: 0.46;
-    object-fit: cover;
+    opacity: 0.18;
+    object-fit: contain;
     object-position: center bottom;
 
     mask-image: linear-gradient(to bottom, transparent 0%, #000 22%, #000 100%);
@@ -240,11 +250,11 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       visibility 0.8s ease;
 
     &[data-active='true'] [data-qz-ferris] {
-      opacity: 0.62;
+      opacity: 0.4;
     }
 
     &[data-stage='intake'] {
-      opacity: 0.62;
+      opacity: 0.4;
     }
 
     &[data-stage='outline'],
@@ -272,13 +282,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     min-width: 0;
 
     &:focus-within [data-qz-leaf] {
-      animation: ${settle} 1.4s ease-out both;
-    }
-
-    &:focus-within [data-testid='chat-input'] {
-      box-shadow:
-        0 0 0 1px rgb(77 169 164 / 20%),
-        0 10px 28px rgb(69 150 160 / 5%);
+      animation: ${settle} 0.7s ease-out both;
     }
   `,
   ornaments: css`
@@ -289,12 +293,6 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     z-index: 2;
     inset: 0;
 
-    svg {
-      display: block;
-      width: 100%;
-      height: auto;
-    }
-
     @media (prefers-reduced-motion: reduce) {
       * {
         animation: none !important;
@@ -303,62 +301,33 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
   `,
   leafPendant: css`
     position: absolute;
-    inset-block-start: -18px;
-    inset-inline-end: 24px;
-    transform-origin: 50% 0;
+    inset-block-start: -30px;
+    inset-inline-end: 22px;
+    transform-origin: 78% 18%;
 
-    width: 27px;
+    display: block;
 
-    color: ${cssVar.colorTextSecondary};
+    width: 46px;
+    height: auto;
 
-    opacity: 0.68;
-
-    &::before {
-      content: '';
-
-      position: absolute;
-      inset-block-start: -10px;
-      inset-inline-start: 52%;
-
-      width: 1px;
-      height: 14px;
-
-      background: linear-gradient(transparent, rgb(83 157 160 / 38%));
-    }
+    opacity: 0.85;
 
     @media (width <= 600px) {
-      inset-block-start: -14px;
-      inset-inline-end: 20px;
-      width: 22px;
+      inset-block-start: -25px;
+      inset-inline-end: 16px;
+      width: 40px;
     }
   `,
-  waterline: css`
-    position: absolute;
-    inset-block-end: -6px;
-    inset-inline-start: 28px;
+  harbor: css`
+    pointer-events: none;
+    display: block;
+    width: 96px;
+    margin-block-end: 4px;
 
-    width: 72px;
-    height: 8px;
-    border-block-end: 1px solid rgb(70 175 188 / 18%);
-    border-radius: 50%;
-
-    color: ${cssVar.colorTextSecondary};
-
-    opacity: 0.65;
-
-    svg {
-      position: absolute;
-      inset-block-end: 1px;
-      inset-inline-start: 22px;
-      transform-origin: 50% 90%;
-
-      width: 23px;
-
-      animation: ${boatDrift} 6s ease-in-out infinite;
-    }
-
-    @media (width <= 600px) {
-      display: none;
+    img {
+      display: block;
+      width: 100%;
+      height: auto;
     }
   `,
 }));

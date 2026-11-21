@@ -29,6 +29,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as businessModelRuntime from '@/business/server/model-runtime';
 import * as aiProviderDatabase from '@/database/models/aiProvider';
 
+import { LobeNexusAI } from '../../../../packages/model-runtime/src/providers/nexus';
 import {
   buildPayloadFromKeyVaults,
   initModelRuntimeFromDB,
@@ -82,6 +83,30 @@ describe('initModelRuntimeWithUserPayload method', () => {
     expect(() => singleDispatchOptions(ModelProvider.Google)).toThrow(
       'HARNESS_PROVIDER_SINGLE_DISPATCH_UNSUPPORTED',
     );
+  });
+  it('dispatches a retriable Nexus chat failure only once when constrained by a learning budget', async () => {
+    const fetcher = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: { message: 'temporary outage' } }), {
+          status: 503,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+    );
+    const runtime = new LobeNexusAI({
+      apiKey: 'fixture-key',
+      baseURL: 'https://relay.example.test/v1',
+      fetch: fetcher,
+      ...singleDispatchOptions(ModelProvider.Nexus),
+    });
+    expect(runtime.client.maxRetries).toBe(0);
+    await expect(
+      runtime.chat({
+        model: 'remote-model',
+        messages: [{ role: 'user', content: 'test' }],
+        stream: true,
+      }),
+    ).rejects.toBeDefined();
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
   it('preserves Nexus user credentials and model despite unrelated chat environment values', async () => {
     vi.stubEnv('ANTHROPIC_AUTH_TOKEN', 'deployment-chat-key');

@@ -421,12 +421,21 @@ export class TaskModel {
    * without disturbing other namespaces under context.
    */
   async updateContext(id: string, partial: Record<string, unknown>): Promise<TaskItem | null> {
-    const task = await this.findById(id);
-    if (!task) return null;
-
-    const current = (task.context as Record<string, unknown>) || {};
-    const context = merge(current, partial);
-    return this.update(id, { context });
+    return this.db.transaction(async (tx) => {
+      const [task] = await tx
+        .select()
+        .from(tasks)
+        .where(and(eq(tasks.id, id), eq(tasks.createdByUserId, this.userId)))
+        .for('update');
+      if (!task) return null;
+      const context = merge((task.context as Record<string, unknown>) || {}, partial);
+      const [updated] = await tx
+        .update(tasks)
+        .set({ context })
+        .where(and(eq(tasks.id, id), eq(tasks.createdByUserId, this.userId)))
+        .returning();
+      return updated as TaskItem;
+    });
   }
 
   // ========== Checkpoint ==========

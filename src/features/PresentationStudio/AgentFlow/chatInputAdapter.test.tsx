@@ -32,6 +32,23 @@ describe('PresentationChatInput & DragUploadZone (A-2 / A-3)', () => {
     expect(screen.getByTestId('presentation-chat-input-adapter')).toBeInTheDocument();
   });
 
+  it('keeps visual design actions in the same composer action row', () => {
+    render(
+      <PresentationChatInput
+        extraActionItems={[
+          {
+            alwaysDisplay: true,
+            children: <button type="button">设计风格</button>,
+            key: 'presentation-style',
+          },
+        ]}
+        onSend={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: '设计风格' })).toBeInTheDocument();
+  });
+
   it('infers correct reference kinds from filenames and mimeTypes', () => {
     expect(
       inferReferenceKind(

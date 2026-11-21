@@ -1,8 +1,3 @@
-import {
-  appendAccountJournal,
-  ownedLearningDirectory,
-  withAccountData,
-} from '../learning-lifecycle/files';
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { link, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
@@ -16,7 +11,13 @@ import type {
   PresentationPlanningSession,
   RuntimeScope,
 } from '../../../../packages/runtime-contracts/src';
+import {
+  appendAccountJournal,
+  ownedLearningDirectory,
+  withAccountData,
+} from '../learning-lifecycle/files';
 import type { ArtifactInput, PresentationArtifactStore, StoredArtifact } from './artifact-store';
+import { deliveryFromArtifacts, readChatOrigin } from './chat-delivery';
 import { PRESENTATION_PRESENCE_TTL_MS } from './collaboration-plugin';
 import {
   acquirePresentationExecutionLease,
@@ -24,6 +25,7 @@ import {
 } from './execution-lease';
 import { type PresentationJobEvent, PresentationJobEventJournal } from './job-event-journal';
 import type { PresentationRevisionAssetResult } from './revision-assets';
+import type { PresentationStageHandoff } from './stage-handoff';
 
 export interface StoredPresentationJob {
   draftCheckpoint?: { fingerprint: string; slides: PresentationPlan['slides'] };
@@ -34,6 +36,7 @@ export interface StoredPresentationJob {
   preparedAssets?: Record<string, PresentationRevisionAssetResult>;
   revisionCheckpoint?: { requestId: string; completedSlideIds: string[] };
   scope?: RuntimeScope;
+  stageHandoffs?: Record<string, PresentationStageHandoff>;
 }
 
 export interface PresentationPresenceTab {
@@ -244,9 +247,12 @@ export class FilePresentationStorage
     const jobs = await Promise.all(
       files
         .filter((f) => /^[a-f0-9]{64}\.json$/.test(f))
-        .map(
-          async (file) => (await this.read<StoredPresentationJob>(path.join(directory, file)))?.job,
-        ),
+        .map(async (file) => {
+          const record = await this.read<StoredPresentationJob>(path.join(directory, file));
+          if (!record?.job) return;
+          record.job.chatOrigin ??= readChatOrigin(record.input);
+          return record.job;
+        }),
     );
     return jobs
       .filter((job): job is PresentationJob => !!job)
@@ -257,6 +263,41 @@ export class FilePresentationStorage
     const record = await this.read<StoredPresentationJob>(this.path(scope, 'jobs', jobId));
     if (!record) return null;
     const { scope: _scope, ...stored } = record;
+    stored.job.chatOrigin ??= readChatOrigin(stored.input);
+    const version = stored.job.versionId;
+    if (stored.job.state === 'completed' && version && !stored.job.delivery) {
+      // Read only published artifacts from this owned job and version. Earlier
+      // releases persisted these immutable refs without the compact chat receipt.
+      const revision = stored.job.revisions?.find((item) => item.versionId === version);
+      const ids = revision?.artifactIds ?? stored.job.artifactIds ?? [];
+      const artifacts: ArtifactSnapshot[] = [];
+      for (const id of ids) {
+        const prefix = `${jobId}:${version}:`;
+        if (!id.startsWith(prefix + 'artifact:') && !id.startsWith(prefix + 'slide:')) continue;
+        const artifact = await this.read<ArtifactSnapshot>(this.path(scope, 'artifacts', id));
+        if (
+          !artifact ||
+          artifact.artifactId !== id ||
+          artifact.metadata?.versionId !== version ||
+          (artifact.metadata?.jobId && artifact.metadata.jobId !== jobId)
+        )
+          continue;
+        if (
+          artifact.type === 'pptx' ||
+          (artifact.type === 'svg' && Number(artifact.metadata.slideNumber) === 1)
+        )
+          artifacts.push({
+            artifactId: id,
+            type: artifact.type,
+            status: artifact.status,
+            createdAt: artifact.createdAt,
+            metadata: { slideNumber: artifact.metadata.slideNumber },
+          });
+        if (artifacts.some((a) => a.type === 'pptx') && artifacts.some((a) => a.type === 'svg'))
+          break;
+      }
+      if (artifacts.length) stored.job.delivery = deliveryFromArtifacts(version, artifacts);
+    }
     return stored;
   }
 

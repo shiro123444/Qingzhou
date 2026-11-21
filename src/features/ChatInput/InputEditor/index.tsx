@@ -9,10 +9,11 @@ import { combineKeys } from '@lobehub/ui';
 import { css, cx } from 'antd-style';
 import Fuse from 'fuse.js';
 import { KEY_ESCAPE_COMMAND } from 'lexical';
-import { memo, type ReactNode, useCallback, useEffect, useMemo, useRef } from 'react';
+import { memo, type ReactNode, use, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useHotkeysContext } from 'react-hotkeys-hook';
 
 import { usePasteFile, useUploadFiles } from '@/components/DragUploadZone';
+import { BotSurfaceContext } from '@/features/BotSurface/context';
 import { useEnterToSend } from '@/hooks/useEnterToSend';
 import { useIMECompositionEvent } from '@/hooks/useIMECompositionEvent';
 import { chatService } from '@/services/chat';
@@ -85,7 +86,18 @@ const InputEditor = memo<{
   const shouldSendOnEnter = useEnterToSend();
 
   // --- Category-based mention system ---
-  const categories = useMentionCategories();
+  const surface = use(BotSurfaceContext);
+  const fullCategories = useMentionCategories();
+  const companionOnly = !!(disableMention && surface?.plugin);
+  const categories = useMemo(
+    () =>
+      companionOnly
+        ? fullCategories
+            .map((c) => ({ ...c, items: c.items.filter((i) => i.key === 'companion-bot') }))
+            .filter((c) => c.items.length)
+        : fullCategories,
+    [companionOnly, fullCategories],
+  );
   const stateRef = useRef<MentionMenuState>({ isSearch: false, matchingString: '' });
   const categoriesRef = useRef(categories);
   categoriesRef.current = categories;
@@ -118,7 +130,7 @@ const InputEditor = memo<{
       if (search?.matchingString) {
         stateRef.current = { isSearch: true, matchingString: search.matchingString };
         const [localFileItems, mentionItems] = await Promise.all([
-          searchLocalFiles(search.matchingString),
+          companionOnly ? [] : searchLocalFiles(search.matchingString),
           Promise.resolve(fuse.search(search.matchingString).map((r) => r.item)),
         ]);
 
@@ -127,12 +139,14 @@ const InputEditor = memo<{
       stateRef.current = { isSearch: false, matchingString: '' };
       return [...allMentionItems];
     },
-    [allMentionItems, fuse, searchLocalFiles],
+    [allMentionItems, companionOnly, fuse, searchLocalFiles],
   );
 
   const MentionMenuComp = useMemo(() => createMentionMenu(stateRef, categoriesRef), []);
 
-  const enableMention = !disableMention && (allMentionItems.length > 0 || enableLocalFileMention);
+  const enableMention = companionOnly
+    ? allMentionItems.length > 0
+    : !disableMention && (allMentionItems.length > 0 || enableLocalFileMention);
   const heterogeneousName = heterogeneousType
     ? (HETEROGENEOUS_TYPE_LABELS[heterogeneousType] ?? heterogeneousType)
     : undefined;
@@ -250,6 +264,7 @@ const InputEditor = memo<{
 
   // --- Stable mentionOption & slashOption to prevent infinite re-render on paste ---
   const mentionMarkdownWriter = useCallback((mention: any) => {
+    if (mention.metadata?.type === 'selfCompanion') return '@' + mention.label;
     if (mention.metadata?.type === 'topic') {
       return `<refer_topic name="${mention.metadata.topicTitle}" id="${mention.metadata.topicId}" />`;
     }
@@ -263,26 +278,36 @@ const InputEditor = memo<{
     return `<mention name="${mention.label}" id="${mention.metadata.id}" />`;
   }, []);
 
-  const mentionOnSelect = useCallback((editor: any, option: any) => {
-    if (option.metadata?.type === 'topic') {
-      editor.dispatchCommand(INSERT_REFER_TOPIC_COMMAND, {
-        topicId: option.metadata.topicId as string,
-        topicTitle: String(option.metadata.topicTitle ?? option.label),
-      });
-    } else if (option.metadata?.type === 'skill' || option.metadata?.type === 'tool') {
-      const payload: InsertActionTagPayload = {
-        category: option.metadata.actionCategory as 'skill' | 'tool',
-        label: String(option.label),
-        type: String(option.metadata.actionType),
-      };
-      editor.dispatchCommand(INSERT_ACTION_TAG_COMMAND, payload);
-    } else {
-      editor.dispatchCommand(INSERT_MENTION_COMMAND, {
-        label: String(option.label),
-        metadata: option.metadata,
-      });
-    }
-  }, []);
+  const mentionOnSelect = useCallback(
+    (editor: any, option: any) => {
+      if (
+        option.metadata?.type === 'askCompanion' ||
+        (companionOnly && option.key === 'companion-bot')
+      ) {
+        surface?.open();
+        return;
+      }
+      if (option.metadata?.type === 'topic') {
+        editor.dispatchCommand(INSERT_REFER_TOPIC_COMMAND, {
+          topicId: option.metadata.topicId as string,
+          topicTitle: String(option.metadata.topicTitle ?? option.label),
+        });
+      } else if (option.metadata?.type === 'skill' || option.metadata?.type === 'tool') {
+        const payload: InsertActionTagPayload = {
+          category: option.metadata.actionCategory as 'skill' | 'tool',
+          label: String(option.label),
+          type: String(option.metadata.actionType),
+        };
+        editor.dispatchCommand(INSERT_ACTION_TAG_COMMAND, payload);
+      } else {
+        editor.dispatchCommand(INSERT_MENTION_COMMAND, {
+          label: String(option.label),
+          metadata: option.metadata,
+        });
+      }
+    },
+    [surface, companionOnly],
+  );
 
   const mentionOption = useMemo(
     () =>

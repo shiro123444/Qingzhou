@@ -4,6 +4,7 @@ import { memo } from 'react';
 import { LOADING_FLAT } from '@/const/message';
 import MarkdownMessage from '@/features/Conversation/Markdown';
 import ContentLoading from '@/features/Conversation/Messages/components/ContentLoading';
+import { StreamingReply } from '@/features/GlassMotion/StreamingReply';
 
 import { dataSelectors, useConversationStore } from '../../../store';
 import { normalizeThinkTags, processWithArtifact } from '../../../utils/markdown';
@@ -33,7 +34,7 @@ const MessageContent = memo<MessageContentProps>(
     const hasTools = hasToolsOverride ?? storeHasTools;
 
     const message = normalizeThinkTags(processWithArtifact(content ?? ''));
-    const { drawer, markdownProps } = useMarkdown(id, disableStreaming);
+    const { drawer, markdownProps, streamMotion } = useMarkdown(id, disableStreaming);
 
     if (!content && !hasTools) return <ContentLoading id={id} />;
 
@@ -49,9 +50,14 @@ const MessageContent = memo<MessageContentProps>(
       content && (
         <>
           {drawer}
-          <MarkdownMessage {...markdownProps} className={cx(isToolSingleLine && styles.pWithTool)}>
-            {message}
-          </MarkdownMessage>
+          <StreamingReply streaming={streamMotion}>
+            <MarkdownMessage
+              {...markdownProps}
+              className={cx(isToolSingleLine && styles.pWithTool)}
+            >
+              {message}
+            </MarkdownMessage>
+          </StreamingReply>
         </>
       )
     );

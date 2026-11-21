@@ -132,6 +132,7 @@ export interface SelfReflectionRuntimeConfig {
   model: string;
   /** Model runtime used by the self-iteration runtime. */
   modelRuntime: Pick<ModelRuntime, 'chat'>;
+  provider?: string;
   /** Source-scoped safe tools exposed to the self-iteration runtime. */
   tools: ToolSet;
 }
@@ -368,6 +369,7 @@ const runSharedSelfReflection = async ({
     maxSteps: runtime.maxSteps ?? 10,
     mode: 'reflection',
     model: runtime.model,
+    ...(runtime.provider ? { provider: runtime.provider } : {}),
     modelRuntime: runtime.modelRuntime,
     sourceId: source.sourceId,
     tools: runtime.tools,

@@ -46,6 +46,20 @@ const plan = (svg: string): PresentationPlan => ({
   designSpec: { contentPolicyVersion: 1 },
   slides: [{ slideId: 'slide-1', order: 1, svg }],
 });
+it('blocks a recoverable learned-layout failure while allowing explicitly unsupported complex pages', () => {
+  const candidate = plan(
+    '<svg viewBox="0 0 960 540"><text x="48" y="60" font-size="32">材料复核</text></svg>',
+  );
+  candidate.slides[0].metadata = {
+    designCompilation: [{ status: 'skipped', reason: 'content-exceeds-source-capacity' }],
+  };
+  expect(inspectPresentationContent(candidate).passed).toBe(false);
+  expect(() => assertPresentationPublishable(candidate)).toThrow('内容质量');
+  candidate.slides[0].metadata = {
+    designCompilation: [{ status: 'skipped', reason: 'complex-image-composition' }],
+  };
+  expect(inspectPresentationContent(candidate).passed).toBe(true);
+});
 const chat = (responses: unknown[]): MultimodalChatPort => ({
   providerId: 'test',
   manifest: {
@@ -272,6 +286,58 @@ describe('semantic presentation content', () => {
     for (const label of ['曲线 f(tx+(1-t)y)', '割线 tf(x)+(1-t)f(y)', '参考基线'])
       expect(svg).toContain(label);
     expect(svg).toContain('<polyline');
+  });
+
+  it('spaces native y ticks by actual plot height and marks explicit samples without fitting', () => {
+    for (const height of [184, 320]) {
+      const block = semanticBlockSchema.parse({
+        id: 'compact-samples',
+        kind: 'scientific-diagram',
+        provenance: { kind: 'illustrative' },
+        rect: { height, width: 378, x: 0, y: 0 },
+        spec: {
+          type: 'plot',
+          xLabel: 'time',
+          yLabel: 'value',
+          xRange: [0, 2],
+          yRange: [0, 12],
+          series: [
+            {
+              label: 'observations',
+              points: [
+                [0, 2],
+                [1, 10],
+                [2, 3],
+              ],
+            },
+            {
+              label: 'reference',
+              points: [
+                [1, 0],
+                [1, 12],
+              ],
+            },
+          ],
+        },
+        title: 'Discrete observations',
+      });
+      const svg = renderScientificDiagram(
+        block as Extract<typeof block, { kind: 'scientific-diagram' }>,
+      );
+      const doc = parseString(`<svg>${svg}</svg>`);
+      const ticks = Array.from(doc.getElementsByTagName('text')).filter(
+        (node) => node.getAttribute('text-anchor') === 'end',
+      );
+      expect(ticks[0].textContent).toBe('0');
+      expect(ticks.at(-1)!.textContent).toBe('12');
+      const ys = ticks.map((node) => Number(node.getAttribute('y')));
+      expect(ys.slice(1).every((y, i) => ys[i] - y >= 22)).toBe(true);
+      expect(ticks).toHaveLength(height === 184 ? 3 : 5);
+      expect(doc.getElementsByTagName('circle')).toHaveLength(3);
+      expect(
+        doc.getElementsByTagName('polyline')[0].getAttribute('points')!.split(' '),
+      ).toHaveLength(3);
+    }
   });
 
   it('rejects a process graph when a native radar chart was requested', async () => {
@@ -775,9 +841,12 @@ describe('semantic presentation content', () => {
     });
     expect(invalid.success).toBe(false);
     if (!invalid.success)
-      expect(invalid.error.issues.map((i) => i.code)).toEqual(
-        expect.arrayContaining(['too_small', 'unrecognized_keys']),
-      );
+      expect(invalid.error.issues.map((i) => i.code)).toContain('unrecognized_keys');
+    // Compact inline graphs can now use 96px viewports. Plots still enforce
+    // their 180px minimum at the renderer, independently of the shared rect.
+    await expect(
+      renderSemanticBlocks(svg, [{ ...block, rect: { ...block.rect, height: 160 } }]),
+    ).rejects.toThrow('180');
     const rendered = await renderSemanticBlocks(svg, [block]);
     expect(rendered.svg).not.toContain('非运行结果');
     expect(rendered.svg).toContain('<polyline');

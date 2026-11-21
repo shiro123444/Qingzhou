@@ -197,9 +197,12 @@ export const createGatewayEventHandler = (
      * Defaults to `operationId` when the caller does not distinguish the two.
      */
     gatewayOperationId?: string;
+    transport?: 'native' | 'gateway';
     operationId: string;
   },
 ) => {
+  const emitSource = (input: Parameters<typeof emitClientAgentSignalSourceEvent>[0]) =>
+    params.transport === 'native' ? Promise.resolve() : emitClientAgentSignalSourceEvent(input);
   const { context, operationId } = params;
   const gatewayOperationId = params.gatewayOperationId ?? operationId;
 
@@ -297,7 +300,7 @@ export const createGatewayEventHandler = (
             }
           }
 
-          void emitClientAgentSignalSourceEvent({
+          void emitSource({
             payload: {
               agentId: context.agentId,
               ...(currentAssistantMessageId
@@ -446,9 +449,9 @@ export const createGatewayEventHandler = (
         const data = event.data as StepCompleteData | undefined;
 
         // Refresh on execution_complete to ensure final step state is consistent
-        if (data?.phase === 'execution_complete') {
+        if (data?.phase === 'execution_complete' || params.transport === 'native') {
           enqueue(async () => {
-            void emitClientAgentSignalSourceEvent({
+            void emitSource({
               payload: {
                 agentId: context.agentId,
                 operationId,
@@ -466,7 +469,7 @@ export const createGatewayEventHandler = (
 
       case 'agent_runtime_end': {
         enqueue(async () => {
-          void emitClientAgentSignalSourceEvent({
+          void emitSource({
             payload: {
               agentId: context.agentId,
               ...(currentAssistantMessageId
@@ -497,7 +500,7 @@ export const createGatewayEventHandler = (
           const messageError = toChatMessageError(event.data);
           const errorMessage = messageError.message;
 
-          void emitClientAgentSignalSourceEvent({
+          void emitSource({
             payload: {
               agentId: context.agentId,
               errorMessage,

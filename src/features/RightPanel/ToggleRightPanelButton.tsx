@@ -2,8 +2,7 @@
 
 import { HotkeyEnum } from '@lobechat/const/hotkeys';
 import { type ActionIconProps } from '@lobehub/ui';
-import { ActionIcon } from '@lobehub/ui';
-import { PanelRightClose, PanelRightOpen } from 'lucide-react';
+import { PanelToggle } from '@/features/GlassMotion/PanelToggle';
 import { type ReactNode } from 'react';
 import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -51,9 +50,12 @@ const ToggleRightPanelButton = memo<ToggleRightPanelButtonProps>(
 
     if (hideWhenExpanded && expand) return null;
     return (
-      <ActionIcon
+      <PanelToggle
         active={showActive ? expand : undefined}
-        icon={icon || (expand ? PanelRightClose : PanelRightOpen)}
+        icon={icon}
+        side="right"
+        expanded={Boolean(expand)}
+        label={typeof title === 'string' ? title : t('toggleRightPanel.title', { ns: 'hotkey' })}
         id={TOGGLE_BUTTON_ID}
         size={size || DESKTOP_HEADER_ICON_SIZE}
         title={title || t('toggleRightPanel.title', { ns: 'hotkey' })}
@@ -61,7 +63,7 @@ const ToggleRightPanelButton = memo<ToggleRightPanelButtonProps>(
           hotkey,
           placement: 'bottom',
         }}
-        onClick={handleClick}
+        onToggle={handleClick}
       />
     );
   },

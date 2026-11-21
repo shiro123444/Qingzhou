@@ -48,6 +48,20 @@ afterAll(async () => {
 });
 
 describe('authenticated music routes', () => {
+  it('blocks commands and media for a disabled plugin before creating its provider', async () => {
+    vi.stubEnv('QINGZHOU_PLUGINS', 'sites');
+    try {
+      const request = new Request('https://app.test', { headers: { authorization: 'test-alice' } });
+      const context = { params: Promise.resolve({ id: 'one' }) };
+      expect((await GET(request, context)).status).toBe(404);
+      expect((await HEAD(request, context)).status).toBe(404);
+      expect((await COVER(request, context)).status).toBe(404);
+      expect((await POST(request, { params: Promise.resolve({}) })).status).toBe(404);
+      expect(createMusicProvider).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
   it('rejects anonymous commands and media before constructing account services', async () => {
     expect(
       (
@@ -96,6 +110,25 @@ describe('authenticated music routes', () => {
       ).status,
     ).toBe(403);
     expect(provider.cover).toHaveBeenCalledTimes(1);
+  });
+  it('loads the owned library through the SPA proxy using its public Host and Origin', async () => {
+    const response = await POST(
+      new Request('http://localhost:3010/api/runtime/music', {
+        method: 'POST',
+        headers: {
+          'authorization': 'test-alice',
+          'content-type': 'application/json',
+          'host': 'localhost:9876',
+          'origin': 'http://localhost:9876',
+          'sec-fetch-site': 'same-origin',
+        },
+        body: JSON.stringify({ operation: 'music.search', input: { source: 'library' } }),
+      }),
+      { params: Promise.resolve({}) },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ success: true, result: { tracks: [] } });
+    expect(provider.search).toHaveBeenCalledWith('', 20, expect.any(AbortSignal), 'library');
   });
   it('reads promised route params and preserves HEAD and Range', async () => {
     const request = new Request('https://app.test/api/runtime/music/tracks/one/stream', {

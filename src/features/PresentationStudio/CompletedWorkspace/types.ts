@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react';
+
 import type {
   ArtifactSnapshot,
   PresentationExportFormat,
@@ -13,15 +15,18 @@ export interface CompletedWorkspaceProps {
   activity?: string;
   activityHistory?: { id: string; text: string }[];
   canExport: boolean;
+  collaboration?: ReactNode;
+  dataError?: string;
   defaultLanguage?: string;
   defaultNotebookId?: string;
   defaultSourceVersionIds?: string[];
   dismissSlotError: (jobId: string, slideId: string, slotId: string) => void;
   effectiveSelectedArtifactId: string | null;
-  exported: { artifactId: string; format: PresentationExportFormat; uri?: string } | null;
+  exportFeedback?: ReactNode;
   exporting: boolean | string | null;
   jobs?: PresentationJob[];
   jobTitles: Record<string, string>;
+  onBack?: () => void;
   onCancel?: (jobId: string) => Promise<void>;
   onDeleteJob?: (jobId: string) => Promise<void> | void;
   onExport: (artifactId: string, format: PresentationExportFormat) => void;

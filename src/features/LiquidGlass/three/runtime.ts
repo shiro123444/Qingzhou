@@ -1,7 +1,8 @@
+import { lensWidth } from '../lens';
 import { watchGlassPreferences } from '../preferences';
 import { styles as fallbackStyles } from '../style';
 import { type Vec3 } from './geometry';
-import { captureDelay, GlassFrameBudget } from './performance';
+import { captureDelay, GlassFrameBudget, sharedPixelRatio } from './performance';
 import { type GlassVolume } from './raytrace';
 import { createGlassRenderer, type GlassRenderer, type GlassRenderPlane } from './renderer';
 import { resolveSceneDepths } from './scene';
@@ -115,7 +116,7 @@ function start() {
 
   const makeRenderer = () =>
     createGlassRenderer({
-      maxPixels: 100_000,
+      maxPixels: 4_000_000,
       onContextLost: () => {
         controller?.abort();
         deactivateAll();
@@ -178,7 +179,8 @@ function start() {
           center: [rect.x + rect.width / 2, rect.y + rect.height / 2, front - thickness / 2],
           size: [rect.width, rect.height, thickness],
           radius: Math.min(radius, rect.width / 2, rect.height / 2),
-          bevel: Math.min(thickness / 2, 6, radius),
+          bevel: lensWidth(rect.width, rect.height, radius),
+          profile: 'lens',
           ior: 1.45,
           absorption: [0.00045, 0.00045, 0.00045],
         },
@@ -258,7 +260,10 @@ function start() {
       });
     }
     const environment = themeEnvironment();
+    const interacting =
+      now < interactionUntil || !!document.querySelector('[data-qz-glass-morphing="true"]');
     const signature = JSON.stringify([
+      interacting,
       sourceVersion,
       environment,
       visible.map(({ volume }) => volume),
@@ -276,15 +281,21 @@ function start() {
       sourceBlur: item.kind === 'capsule' ? 5 : item.kind === 'shell' ? 0 : 3,
       chromaticAberration: item.kind === 'capsule' ? 0.025 : 0.01,
       sourceVersion,
+      surfaceFinish: item.kind === 'shell' ? 0 : 1,
       viewport: { width: innerWidth, height: innerHeight },
-      pixelRatio: Math.min(
-        devicePixelRatio,
-        1.5,
-        Math.sqrt(
-          (item.kind === 'capsule' ? budget.capsulePixels() : budget.sharedPixels()) /
-            (item.bounds.width * item.bounds.height),
-        ),
-      ),
+      pixelRatio:
+        item.kind === 'capsule'
+          ? Math.min(
+              devicePixelRatio,
+              1.5,
+              Math.sqrt(budget.capsulePixels() / (item.bounds.width * item.bounds.height)),
+            )
+          : sharedPixelRatio(
+              item.bounds.width * item.bounds.height,
+              budget.sharedPixels(),
+              interacting,
+              devicePixelRatio,
+            ),
       environmentTop: environment.top,
       environmentBottom: environment.bottom,
     });
@@ -294,6 +305,10 @@ function start() {
         target.positioned = true;
         element.style.position = 'relative';
       }
+      const computed = getComputedStyle(element);
+      canvas.style.inset = `-${computed.borderTopWidth} -${computed.borderRightWidth} -${computed.borderBottomWidth} -${computed.borderLeftWidth}`;
+      canvas.style.width = `calc(100% + ${computed.borderLeftWidth} + ${computed.borderRightWidth})`;
+      canvas.style.height = `calc(100% + ${computed.borderTopWidth} + ${computed.borderBottomWidth})`;
       if (canvas.parentElement !== element) element.prepend(canvas);
       if (!element.classList.contains(styles.surface)) element.classList.add(styles.surface);
       if (element.dataset.qzRenderer !== 'webgl2') element.dataset.qzRenderer = 'webgl2';
@@ -329,7 +344,6 @@ function start() {
       }
     const secondary = visible.filter(({ kind }) => kind !== 'capsule');
     if (!secondary.length || sharedSignature === signature || !stagingContext) return;
-    const interacting = now < interactionUntil;
     if (!budget.shouldDrawShared(now, interacting, sharedSourceVersion !== sourceVersion)) {
       requestDraw();
       return;
@@ -447,7 +461,8 @@ function start() {
       frame = 0;
       draw(now);
       // CSS spring transforms do not emit resize/mutation events on every intermediate frame.
-      if (document.querySelector('[data-qz-glass-morphing="true"]')) requestDraw();
+      if (now < interactionUntil || document.querySelector('[data-qz-glass-morphing="true"]'))
+        requestDraw();
     });
   };
   function invalidate(content: boolean, element?: Element) {

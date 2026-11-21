@@ -3,6 +3,8 @@ import debug from 'debug';
 import { appEnv } from '@/envs/app';
 import { injectActiveTraceHeaders } from '@/libs/observability/traceparent';
 import { workflowClient } from '@/libs/qstash';
+import { isNativeAgentRuntimeEnabled } from '@/server/runtime/tasks/mode';
+import { NativeWakeStore, wakeHash } from '@/server/runtime/tasks/wakeStore';
 
 import type { AgentSignalWorkflowRunPayload } from './types';
 
@@ -42,7 +44,25 @@ const getWorkflowUrl = (path: string): string => {
  * - Upstash workflow trigger metadata including `workflowRunId`
  */
 export class AgentSignalWorkflow {
-  static triggerRun(payload: AgentSignalWorkflowRunPayload) {
+  static async triggerRun(payload: AgentSignalWorkflowRunPayload) {
+    if (isNativeAgentRuntimeEnabled()) {
+      const store = new NativeWakeStore(async () =>
+        (await import('@/database/server')).getServerDB(),
+      );
+      const workflowRunId = await store.enqueue({
+        kind: 'agent-signal',
+        userId: payload.userId,
+        key: wakeHash([
+          payload.userId,
+          payload.sourceEvent.sourceType,
+          payload.sourceEvent.scopeKey,
+          payload.sourceEvent.sourceId,
+        ]),
+        scopeKey: `signal:${payload.userId}:${payload.sourceEvent.scopeKey}`,
+        payload,
+      });
+      return { workflowRunId };
+    }
     const url = getWorkflowUrl(WORKFLOW_PATHS.run);
     const traceHeaders = new Headers();
 

@@ -1,7 +1,9 @@
-import { Icon } from '@lobehub/ui';
-import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
-import { memo, useCallback, useState } from 'react';
+import { memo, useCallback, useId, useState } from 'react';
 
+import { useTranslation } from 'react-i18next';
+
+import { PanelToggle } from '@/features/GlassMotion/PanelToggle';
+import { panelMotionStyle } from '@/features/GlassMotion/panelMotion';
 import { useRuntimeStore } from '@/store/runtime';
 
 import { RunItem } from './RunItem';
@@ -13,6 +15,8 @@ export interface SidebarProps {
 }
 
 export const Sidebar = memo<SidebarProps>(({ defaultCollapsed = false, onCollapsedChange }) => {
+  const id = useId();
+  const { t } = useTranslation('hotkey');
   const [collapsed, setCollapsed] = useState(defaultCollapsed);
   const runs = useRuntimeStore((s) => s.runs);
   const activeRunId = useRuntimeStore((s) => s.activeRunId);
@@ -32,63 +36,41 @@ export const Sidebar = memo<SidebarProps>(({ defaultCollapsed = false, onCollaps
     <aside
       className={collapsed ? `${styles.sidebar} ${styles.sidebarCollapsed}` : styles.sidebar}
       data-collapsed={collapsed ? 'true' : 'false'}
+      style={panelMotionStyle}
       data-testid="workspace-sidebar"
     >
-      {collapsed ? (
-        <div className={styles.collapsedBar}>
-          <button
-            aria-label="展开侧栏"
-            className={styles.expandButton}
-            data-testid="workspace-sidebar-expand-btn"
-            tabIndex={0}
-            title="展开侧栏"
-            type="button"
-            onClick={() => handleToggle(false)}
-          >
-            <Icon icon={PanelLeftOpen} size={18} />
-          </button>
-        </div>
-      ) : (
-        <div className={styles.expandedContent}>
-          <div className={styles.header}>
-            <div
-              style={{
-                alignItems: 'center',
-                display: 'flex',
-                justifyContent: 'space-between',
-                width: '100%',
-              }}
-            >
-              <span>Runs ({runList.length})</span>
-              <button
-                aria-label="收起侧栏"
-                className={styles.collapseButton}
-                data-testid="workspace-sidebar-collapse-btn"
-                tabIndex={0}
-                title="收起侧栏"
-                type="button"
-                onClick={() => handleToggle(true)}
-              >
-                <Icon icon={PanelLeftClose} size={16} />
-              </button>
-            </div>
-          </div>
-          <div className={styles.list}>
-            {runList.length === 0 ? (
-              <div className={styles.empty}>No runs recorded</div>
-            ) : (
-              runList.map((run) => (
-                <RunItem
-                  isActive={run.runId === activeRunId}
-                  key={run.runId}
-                  run={run}
-                  onSelect={setActiveRunId}
-                />
-              ))
-            )}
-          </div>
-        </div>
-      )}
+      <div className={collapsed ? styles.collapsedBar : styles.header}>
+        {!collapsed && <span>Runs ({runList.length})</span>}
+        <PanelToggle
+          side="left"
+          expanded={!collapsed}
+          aria-controls={id}
+          data-testid={
+            collapsed ? 'workspace-sidebar-expand-btn' : 'workspace-sidebar-collapse-btn'
+          }
+          label={
+            collapsed
+              ? t('toggleLeftPanel.expand', '展开侧栏')
+              : t('toggleLeftPanel.collapse', '收起侧栏')
+          }
+          size={{ blockSize: 44, size: 18, borderRadius: 12 }}
+          onToggle={() => handleToggle(!collapsed)}
+        />
+      </div>
+      <div id={id} hidden={collapsed} className={!collapsed ? styles.list : undefined}>
+        {runList.length === 0 ? (
+          <div className={styles.empty}>No runs recorded</div>
+        ) : (
+          runList.map((run) => (
+            <RunItem
+              isActive={run.runId === activeRunId}
+              key={run.runId}
+              run={run}
+              onSelect={setActiveRunId}
+            />
+          ))
+        )}
+      </div>
     </aside>
   );
 });

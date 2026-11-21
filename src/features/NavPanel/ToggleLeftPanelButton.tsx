@@ -2,19 +2,17 @@
 
 import { HotkeyEnum } from '@lobechat/const/hotkeys';
 import { type ActionIconProps } from '@lobehub/ui';
-import { ActionIcon } from '@lobehub/ui';
-import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { type ReactNode } from 'react';
 import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { DESKTOP_HEADER_ICON_SMALL_SIZE } from '@/const/layoutTokens';
+import { PanelToggle } from '@/features/GlassMotion/PanelToggle';
 import { useGlobalStore } from '@/store/global';
 import { systemStatusSelectors } from '@/store/global/selectors';
 import { useUserStore } from '@/store/user';
 import { settingsSelectors } from '@/store/user/selectors';
 
-export const TOGGLE_BUTTON_ID = 'toggle_left_panel_button';
+export const SIDEBAR_PANEL_ID = 'qz-sidebar';
 
 interface ToggleLeftPanelButtonProps {
   icon?: ActionIconProps['icon'];
@@ -32,25 +30,49 @@ const ToggleLeftPanelButton = memo<ToggleLeftPanelButtonProps>(
     const hotkey = useUserStore(settingsSelectors.getHotkeyById(HotkeyEnum.ToggleLeftPanel));
 
     const { t } = useTranslation(['chat', 'hotkey']);
+    const action = t(expand ? 'toggleLeftPanel.collapse' : 'toggleLeftPanel.expand', {
+      ns: 'hotkey',
+    });
+    const toggle = () => {
+      const focused = document.activeElement;
+      togglePanel();
+      requestAnimationFrame(() => {
+        if (
+          focused instanceof HTMLElement &&
+          focused.matches('[data-sidebar-toggle]') &&
+          (!focused.isConnected || focused.closest('[inert]'))
+        ) {
+          [...document.querySelectorAll<HTMLElement>('[data-sidebar-toggle]')]
+            .find((button) => !button.closest('[inert]') && button.getClientRects().length)
+            ?.focus({ preventScroll: true });
+        }
+      });
+    };
 
     return (
-      <ActionIcon
+      <PanelToggle
+        data-sidebar-toggle
         active={showActive ? expand : undefined}
-        icon={icon || (expand ? PanelLeftClose : PanelLeftOpen)}
-        id={TOGGLE_BUTTON_ID}
-        size={size || DESKTOP_HEADER_ICON_SMALL_SIZE}
-        title={title || t('toggleLeftPanel.title', { ns: 'hotkey' })}
-        aria-label={
-          typeof title === 'string' ? title : t('toggleLeftPanel.title', { ns: 'hotkey' })
-        }
+        aria-controls={SIDEBAR_PANEL_ID}
+        expanded={Boolean(expand)}
+        side="left"
+        label={typeof title === 'string' ? title : action}
+        size={size || { blockSize: 32, borderRadius: 10, size: 18 }}
+        title={title || action}
+        icon={icon}
         tooltipProps={{
           hotkey,
           placement: 'bottom',
         }}
-        onClick={() => togglePanel()}
+        onToggle={toggle}
       />
     );
   },
 );
+
+export const SidebarReopenButton = memo(() => {
+  const expand = useGlobalStore(systemStatusSelectors.showLeftPanel);
+  return expand ? null : <ToggleLeftPanelButton />;
+});
 
 export default ToggleLeftPanelButton;

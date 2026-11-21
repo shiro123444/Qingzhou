@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AiModelModel } from '@/database/models/aiModel';
 import { AiInfraRepos } from '@/database/repositories/aiInfra';
@@ -26,6 +26,42 @@ describe('aiModelRouter', () => {
   const mockCtx = {
     userId: 'test-user',
   };
+
+  beforeEach(() => {
+    vi.mocked(AiInfraRepos).mockImplementation(
+      () =>
+        ({
+          aiProviderModel: { getRemoteModelProviderIds: vi.fn().mockResolvedValue([]) },
+        }) as any,
+    );
+  });
+
+  it.each([true, false])(
+    'replaces the catalog on explicit cleanup or a remote-only refresh (explicit=%s)',
+    async (replace) => {
+      const sync = vi.fn().mockResolvedValue([]);
+      const append = vi.fn();
+      vi.mocked(AiModelModel).mockImplementation(
+        () => ({ replaceRemoteModels: sync, batchUpdateAiModels: append }) as any,
+      );
+      vi.mocked(AiInfraRepos).mockImplementation(
+        () =>
+          ({
+            aiProviderModel: {
+              getRemoteModelProviderIds: vi.fn().mockResolvedValue(replace ? [] : ['nexus']),
+            },
+          }) as any,
+      );
+      const caller = aiModelRouter.createCaller(mockCtx);
+      await caller.batchUpdateAiModels({
+        id: 'nexus',
+        models: [{ id: 'supported-model' }],
+        ...(replace && { replace: true }),
+      });
+      expect(sync).toHaveBeenCalledWith('nexus', [{ id: 'supported-model' }]);
+      expect(append).not.toHaveBeenCalled();
+    },
+  );
 
   it('should create ai model', async () => {
     const mockCreate = vi.fn().mockResolvedValue({ id: 'model-1' });

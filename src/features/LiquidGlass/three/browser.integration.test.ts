@@ -116,6 +116,53 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE)(
         }
       }
 
+      const lensSamples = await page.evaluate(() => {
+        const test = window.glass3dTest;
+        test.render({ lens: true, source: 'solid' });
+        return [
+          [160, 1],
+          [160, 7],
+          [160, 12],
+          [160, 20],
+          [160, 50],
+          [20, 50],
+          [300, 50],
+        ].map(([x, y]) => ({
+          actual: test.pixel(x, y),
+          expected: test.oracle(x, y),
+          point: [x, y],
+        }));
+      });
+      for (const sample of lensSamples) {
+        expect(sample.actual[3], JSON.stringify(sample)).toBe(255);
+        for (let channel = 0; channel < 3; channel++)
+          expect(
+            Math.abs(sample.actual[channel] - sample.expected[channel]),
+            JSON.stringify(sample),
+          ).toBeLessThan(5);
+      }
+      const coverage = await page.evaluate(() => {
+        const pixels = window.glass3dTest.frame();
+        let area = 0;
+        let asymmetry = 0;
+        for (let y = 0; y < 100; y++) {
+          for (let x = 0; x < 320; x++) {
+            const alpha = pixels[(y * 320 + x) * 4 + 3];
+            area += alpha / 255;
+            asymmetry = Math.max(asymmetry, Math.abs(alpha - pixels[(y * 320 + 319 - x) * 4 + 3]));
+          }
+        }
+        return { area, asymmetry };
+      });
+      // Subpixel corner coverage should preserve the rounded silhouette's area,
+      // rather than shaving a whole translucent ring off its straight/curved edges.
+      expect(Math.abs(coverage.area - (320 * 100 - (4 - Math.PI) * 50 ** 2))).toBeLessThan(8);
+      expect(coverage.asymmetry).toBeLessThanOrEqual(1);
+      await page.evaluate(() =>
+        window.glass3dTest.render({ lens: true, finish: 1, blur: 3, source: 'grid' }),
+      );
+      await page.screenshot({ path: '.data/music-m2-validation/glass-wide-lens.png' });
+
       const environmentSamples = await page.evaluate(() => {
         const test = window.glass3dTest;
         test.render({ double: true, environmentOnly: true, absorption: true });
@@ -269,11 +316,17 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE)(
         const bounded = test.frame();
         test.render({ blur: 12, boundedSources: true, source: 'solid' });
         const boundedSoft = test.frame();
+        // Canvas unpremultiplication magnifies a sub-byte colour error at nearly
+        // transparent outline pixels. Compare the visible premultiplied contribution.
+        const contribution = (frame: number[], index: number) =>
+          index % 4 === 3
+            ? frame[index]
+            : Math.round((frame[index] * frame[index - (index % 4) + 3]) / 255);
         let solidDifference = 0;
         for (let index = 0; index < bounded.length; index++)
           solidDifference = Math.max(
             solidDifference,
-            Math.abs(bounded[index] - boundedSoft[index]),
+            Math.abs(contribution(bounded, index) - contribution(boundedSoft, index)),
           );
         test.render({ blur: 5, source: 'grid' });
         const base = test.frame();
@@ -288,6 +341,15 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE)(
           transparent,
         };
       });
+      const impulse = await page.evaluate(() => {
+        const test = window.glass3dTest;
+        test.render({ source: 'impulse', blur: 5 });
+        return Array.from({ length: 20 }, (_, x) => test.pixel(160 + x, 50)[1]);
+      });
+      expect(impulse[0]).toBeGreaterThan(impulse[10] + 10);
+      for (let x = 1; x < impulse.length; x++)
+        expect(impulse[x], JSON.stringify(impulse)).toBeLessThanOrEqual(impulse[x - 1] + 1);
+
       expect(prefilter.softEnergy).toBeLessThan(prefilter.sharpEnergy * 0.8);
       expect(prefilter.sameOutline).toBe(true);
       expect(prefilter.solidDifference).toBeLessThanOrEqual(1);

@@ -170,7 +170,8 @@ export class AiInfraRepos {
   };
 
   private fetchBaseModels = async (providerId: string) => {
-    const builtinModels: AiProviderModelListItem[] = (await this.fetchBuiltinModels(providerId)) || [];
+    const builtinModels: AiProviderModelListItem[] =
+      (await this.fetchBuiltinModels(providerId)) || [];
     const platformModels = await this.fetchPlatformModelListByProviderId(providerId);
 
     return mergeArrayById(builtinModels, platformModels) as AiProviderModelListItem[];
@@ -216,24 +217,24 @@ export class AiInfraRepos {
     return list
       .filter((item) => item.enabled)
       .sort((a, b) => a.sort! - b.sort!)
-      .map(
-        (item): EnabledProvider => ({
-          id: item.id,
-          logo: item.logo,
-          name: item.name,
-          source: item.source,
-        }),
-      );
+      .map((item): EnabledProvider => ({
+        id: item.id,
+        logo: item.logo,
+        name: item.name,
+        source: item.source,
+      }));
   };
 
   /**
    * used in the chat page. to show the enabled models
    */
   getEnabledModels = async (filterEnabled: boolean = true) => {
-    const [providers, allModels] = await Promise.all([
+    const [providers, allModels, remoteProviderIds] = await Promise.all([
       this.getAiProviderList(),
       this.aiModelModel.getAllModels(),
+      this.aiProviderModel.getRemoteModelProviderIds(),
     ]);
+    const remoteProviders = new Set(remoteProviderIds);
     const platformModels = await this.fetchPlatformAllModels();
     const enabledProviders = providers.filter((item) => (filterEnabled ? item.enabled : true));
 
@@ -241,7 +242,18 @@ export class AiInfraRepos {
       enabledProviders,
       async (provider) => {
         const aiModels = await this.fetchBaseModels(provider.id);
+        const remoteIds = remoteProviders.has(provider.id)
+          ? new Set(
+              allModels
+                .filter(
+                  (model) =>
+                    model.providerId === provider.id && model.source === AiModelSourceEnum.Remote,
+                )
+                .map((model) => model.id),
+            )
+          : undefined;
         return (aiModels || [])
+          .filter((model) => !remoteIds || remoteIds.has(model.id))
           .map<EnabledAiModel & { enabled?: boolean | null }>((item) => {
             const platform = platformModels.find(
               (m) => m.id === item.id && m.providerId === provider.id,
@@ -298,6 +310,8 @@ export class AiInfraRepos {
     const appendedUserModels = allModels
       .filter((item) => {
         if (item.providerId === BRANDING_PROVIDER) return false;
+        if (remoteProviders.has(item.providerId) && item.source !== AiModelSourceEnum.Remote)
+          return false;
         if (builtinModelKeys.has(`${item.providerId}:${item.id}`)) return false;
         return filterEnabled ? enabledProviderIds.has(item.providerId) && item.enabled : true;
       })
@@ -452,11 +466,22 @@ export class AiInfraRepos {
       type?: string;
     },
   ) => {
-    const aiModels = await this.aiModelModel.getModelListByProviderId(providerId);
+    const [aiModels, remoteProviders] = await Promise.all([
+      this.aiModelModel.getModelListByProviderId(providerId),
+      this.aiProviderModel.getRemoteModelProviderIds(providerId),
+    ]);
 
     const defaultModels = await this.fetchBaseModels(providerId);
     // Not modifying search settings here doesn't affect usage, but done for data consistency on get
     let mergedModel = mergeArrayById(defaultModels, aiModels) as AiProviderModelListItem[];
+    if (remoteProviders.includes(providerId)) {
+      const remoteIds = new Set(
+        aiModels
+          .filter((model) => model.source === AiModelSourceEnum.Remote)
+          .map((model) => model.id),
+      );
+      mergedModel = mergedModel.filter((model) => remoteIds.has(model.id));
+    }
 
     // Model type (chat/video/image/embedding/tts/stt) should always come from builtin config,
     // because remote-fetched models from provider API (e.g. OpenAI /v1/models) don't return

@@ -13,6 +13,7 @@ import { AudioEngine } from '@/features/MusicPlayer/engine';
 import PlayerShell from '@/features/MusicPlayer/PlayerShell';
 import { useMusicPlugins } from '@/features/MusicPlayer/plugins/context';
 import { type MusicPluginHost } from '@/features/MusicPlayer/plugins/runtime';
+import { MusicActivationContext } from '@/features/MusicPlayer/session-context';
 import MusicStudio from '@/features/MusicStudio';
 import music from '@/locales/default/music';
 import { MusicClient } from '@/services/music/client';
@@ -95,40 +96,49 @@ function Fixture() {
             <div
               className={glassSurface}
               data-qz-glass="shell"
-              style={{ display: 'flex', flex: 1, flexDirection: 'column', minHeight: 0 }}
+              style={{
+                display: 'flex',
+                flex: 1,
+                flexDirection: 'column',
+                minHeight: 0,
+                overflow: 'hidden',
+                transform: 'translateZ(0)',
+              }}
             >
               <MusicPlayerProvider engine={engine} userId={userId}>
                 <PluginProbe />
-                <PlayerShell>
-                  <Routes>
-                    <Route element={<GlassLab />} path="/glass-lab" />
-                    <Route element={<MusicStudio />} path="/music" />
-                    <Route
-                      path="/chat"
-                      element={
-                        <>
-                          <h1>Chat workspace</h1>
-                          <div
-                            data-music-player-avoid="composer"
-                            style={{
-                              position: 'fixed',
-                              right: 20,
-                              bottom: 20,
-                              width: 'min(640px, calc(100vw - 40px))',
-                              height: 148,
-                              border: '1px solid #c8d8db',
-                              borderRadius: 24,
-                              background: '#f5f9f9',
-                            }}
-                          >
-                            Chat input
-                          </div>
-                        </>
-                      }
-                    />
-                    <Route element={<h1>Presentation workspace</h1>} path="/presentation" />
-                  </Routes>
-                </PlayerShell>
+                <MusicActivationContext value={{ error: false, ready: true, retry: () => {} }}>
+                  <PlayerShell>
+                    <Routes>
+                      <Route element={<GlassLab />} path="/glass-lab" />
+                      <Route element={<MusicStudio />} path="/music" />
+                      <Route
+                        path="/chat"
+                        element={
+                          <>
+                            <h1>Chat workspace</h1>
+                            <div
+                              data-music-player-avoid="composer"
+                              style={{
+                                position: 'fixed',
+                                right: 20,
+                                bottom: 20,
+                                width: 'min(640px, calc(100vw - 40px))',
+                                height: 148,
+                                border: '1px solid #c8d8db',
+                                borderRadius: 24,
+                                background: '#f5f9f9',
+                              }}
+                            >
+                              Chat input
+                            </div>
+                          </>
+                        }
+                      />
+                      <Route element={<h1>Presentation workspace</h1>} path="/presentation" />
+                    </Routes>
+                  </PlayerShell>
+                </MusicActivationContext>
               </MusicPlayerProvider>
             </div>
           </div>

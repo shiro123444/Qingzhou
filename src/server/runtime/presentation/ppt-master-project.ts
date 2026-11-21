@@ -1,4 +1,5 @@
 import type { PresentationPlan } from '../../../../packages/runtime-contracts/src';
+import { deckVisualSystemSchema } from './deck-visual-system';
 
 /** Native theme metadata derived from the authored SVG; slide content stays unchanged. */
 export const pptMasterProjectLock = (plan: PresentationPlan): string => {
@@ -14,6 +15,8 @@ export const pptMasterProjectLock = (plan: PresentationPlan): string => {
       .filter(([size]) => size >= 24 && size < title)
       .sort((a, b) => b[1] - a[1])[0]?.[0] ?? 24;
   const caption = [...counts].filter(([size]) => size < body).sort((a, b) => b[1] - a[1])[0]?.[0];
+  const master = deckVisualSystemSchema.safeParse(plan.designSpec?.deckVisualSystem);
+  const typography = master.success ? master.data.typography : undefined;
   const family = svg.match(/\bfont-family=(["'])([^\r\n<>]*?)\1/u)?.[2] || 'Arial';
   const viewBox = plan.slides[0]?.svg.match(/<svg\b[^>]+\bviewBox=["']([\d.\s-]+)["']/u)?.[1];
   const colors = [
@@ -42,8 +45,10 @@ export const pptMasterProjectLock = (plan: PresentationPlan): string => {
     '',
     '## typography',
     `- font_family: ${family}`,
-    `- title: ${title}`,
-    `- body: ${body}`,
+    `- title: ${typography?.title ?? title}`,
+    `- body: ${typography?.body ?? body}`,
+    ...(typography && title > typography.title ? [`- display_title: ${title}`] : []),
+    ...(typography ? [`- label: ${typography.label}`] : []),
     ...(caption ? [`- caption: ${caption}`] : []),
     '',
     '## pptx_structure',

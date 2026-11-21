@@ -516,7 +516,16 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
           undefined,
           { timeout: 60_000 },
         );
-      await waitForCapsuleGlass();
+      const waitForStudioGlass = () =>
+        page!.waitForFunction(
+          () =>
+            document.querySelector('[data-qz-glass="shell"]')?.getAttribute('data-qz-renderer') ===
+            'webgl2',
+          undefined,
+          { timeout: 60_000 },
+        );
+      await waitForStudioGlass();
+      expect(await page.locator('[data-testid="music-capsule"]').getAttribute('hidden')).toBe('');
       const studioGlass = await glassCanvases();
       expect(studioGlass.count).toBeGreaterThan(0);
       expect(studioGlass.count).toBeLessThanOrEqual(8);
@@ -527,8 +536,98 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
         path: '.data/music-m2-validation/glass-runtime-studio.png',
       });
 
+      // Selection is one persistent glass pane: it stretches in flight and can retarget.
+      await page.waitForFunction(() =>
+        [...document.querySelectorAll<HTMLImageElement>('[data-music-artwork="celadon"]')].every(
+          (image) => image.complete && image.naturalWidth > 0,
+        ),
+      );
+      const flight = await page.evaluate(async () => {
+        const drop = document.querySelector<HTMLElement>('[data-music-view-droplet]')!;
+        const start = drop.getBoundingClientRect();
+        drop.dataset.fixtureIdentity = 'persistent-view-droplet';
+        document.querySelector<HTMLButtonElement>('#music-tab-library')!.click();
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        const target = document.querySelector('#music-tab-library')!.getBoundingClientRect();
+        const animation = drop.getAnimations()[0];
+        if (!animation) throw new Error('Missing liquid view transition');
+        animation.pause();
+        let widest = 0;
+        let furthest = start.left;
+        for (const time of [40, 70, 100, 140]) {
+          animation.currentTime = time;
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+          const rect = drop.getBoundingClientRect();
+          widest = Math.max(widest, rect.width);
+          furthest = Math.max(furthest, rect.left);
+        }
+        return { widest, furthest, initial: start.width, target: target.width, start: start.left };
+      });
+      expect(flight.widest).toBeGreaterThan(Math.max(flight.initial, flight.target) + 2);
+      expect(flight.furthest).toBeGreaterThan(flight.start + 12);
+      await page.screenshot({
+        fullPage: true,
+        path: '.data/music-m2-validation/tabs-liquid-moving.png',
+      });
+      const interruption = await page.evaluate(async () => {
+        const drop = document.querySelector<HTMLElement>('[data-music-view-droplet]')!;
+        const before = drop.getBoundingClientRect();
+        document.querySelector<HTMLButtonElement>('#music-tab-queue')!.click();
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        const animation = drop.getAnimations()[0];
+        animation.pause();
+        animation.currentTime = 0;
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        const after = drop.getBoundingClientRect();
+        animation.play();
+        return Math.abs(before.left - after.left) + Math.abs(before.width - after.width);
+      });
+      expect(interruption).toBeLessThan(1);
+      const waitForViewGlass = () =>
+        page!.waitForFunction(() => {
+          const drop = document.querySelector<HTMLElement>('[data-music-view-droplet]')!;
+          const selected = document.querySelector('[role="tab"][aria-selected="true"]')!;
+          const a = drop.getBoundingClientRect();
+          const b = selected.getBoundingClientRect();
+          return (
+            drop.parentElement?.dataset.qzGlassMorphing === 'false' &&
+            Math.abs(a.left - b.left) < 1 &&
+            Math.abs(a.top - b.top) < 1 &&
+            Math.abs(a.width - b.width) < 1 &&
+            Math.abs(a.height - b.height) < 1
+          );
+        });
+      await waitForViewGlass();
+      expect(
+        await page.locator('[data-music-view-droplet]').getAttribute('data-fixture-identity'),
+      ).toBe('persistent-view-droplet');
+      await page.getByRole('tab', { name: music.queue, exact: true }).press('Home');
+      await waitForViewGlass();
+
       // Runtime preferences tear down GPU output, then rebuild one canvas per surviving owner.
       const runtimePreferences = await page.context().newCDPSession(page);
+      await runtimePreferences.send('Emulation.setEmulatedMedia', {
+        features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
+      });
+      await page.getByRole('tab', { name: music.library, exact: true }).click();
+      await waitForViewGlass();
+      expect(
+        await page.evaluate(
+          () => document.querySelector('[data-music-view-droplet]')!.getAnimations().length,
+        ),
+      ).toBe(0);
+      await page.evaluate(() => {
+        document.documentElement.dir = 'rtl';
+      });
+      await waitForViewGlass();
+      await page.getByRole('tab', { name: music.library, exact: true }).press('ArrowRight');
+      expect(await page.locator('#music-tab-player').getAttribute('aria-selected')).toBe('true');
+      await waitForViewGlass();
+      await page.evaluate(() => {
+        document.documentElement.dir = 'ltr';
+      });
+      await page.getByRole('tab', { name: music.nowPlaying, exact: true }).click();
+      await runtimePreferences.send('Emulation.setEmulatedMedia', { features: [] });
       for (const name of ['prefers-contrast', 'prefers-reduced-transparency']) {
         await runtimePreferences.send('Emulation.setEmulatedMedia', {
           features: [{ name, value: name === 'prefers-contrast' ? 'more' : 'reduce' }],
@@ -544,7 +643,7 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
           ),
         ).toBe('none');
         await runtimePreferences.send('Emulation.setEmulatedMedia', { features: [] });
-        await waitForCapsuleGlass();
+        await waitForStudioGlass();
         const recovered = await glassCanvases();
         expect(recovered.count).toBeLessThanOrEqual(8);
         expect(recovered.owners).toBe(recovered.count);
@@ -566,7 +665,12 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       );
       expect(await page.evaluate(() => window.musicTest.audio!.duration)).toBeGreaterThan(7.9);
       // Folding the global surface must never stop or recreate its audio engine.
-      await page.getByRole('button', { name: music.capsuleExpand, exact: true }).click();
+      await page.getByRole('link', { name: music.closeStudio, exact: true }).click();
+      await page.waitForFunction(() => location.pathname === '/');
+      await page.waitForFunction(
+        () =>
+          document.querySelector<HTMLElement>('[data-testid="music-capsule"]')?.hidden === false,
+      );
       await page.waitForFunction(
         () =>
           document
@@ -584,8 +688,6 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
           const rect = document.querySelector('[data-capsule-body]')!.getBoundingClientRect();
           return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom };
         });
-      await page.getByRole('link', { name: music.closeStudio, exact: true }).click();
-      await page.waitForFunction(() => location.pathname === '/');
       expect(await page.evaluate(() => window.musicTest.audio!.paused)).toBe(false);
       await page.getByRole('link', { name: 'Presentation', exact: true }).click();
       await page.waitForFunction(() => location.pathname === '/presentation');
@@ -622,6 +724,70 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
         fullPage: true,
         path: '.data/music-m2-validation/glass-runtime-dragged.png',
       });
+
+      // A clipped/transformed workspace and its editor overlay must not trap the player.
+      await page.evaluate(() => {
+        const blocker = document.createElement('div');
+        blocker.dataset.musicTestOccluder = '';
+        Object.assign(blocker.style, {
+          position: 'fixed',
+          inset: '0',
+          zIndex: '500',
+          background: '#e8efef',
+        });
+        document.querySelector('[data-qz-glass="shell"]')!.append(blocker);
+      });
+      const controlsOnTop = () =>
+        page!.evaluate(() =>
+          [...document.querySelectorAll<HTMLElement>('[data-capsule-body] button')]
+            .filter((button) => !button.closest('[inert]'))
+            .every((button) => {
+              const rect = button.getBoundingClientRect();
+              return button.contains(
+                document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2),
+              );
+            }),
+        );
+      expect(await controlsOnTop()).toBe(true);
+      await page.getByRole('button', { name: music.capsuleMore, exact: true }).click();
+      await page.waitForFunction(
+        () =>
+          document.querySelector<HTMLElement>('[data-testid="music-capsule"]')?.dataset
+            .qzGlassMorphing === 'false',
+      );
+      const panelOnTop = await page.evaluate(() => {
+        const panel = document.querySelector<HTMLElement>('[data-music-panel]')!;
+        panel.scrollTop = panel.scrollHeight;
+        const volume = panel.querySelector<HTMLInputElement>('[data-capsule-range="volume"]')!;
+        const rect = volume.getBoundingClientRect();
+        return volume.contains(
+          document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2),
+        );
+      });
+      expect(panelOnTop).toBe(true);
+      await page.getByRole('slider', { name: music.capsuleVolume, exact: true }).press('Home');
+      expect(await page.evaluate(() => window.musicTest.audio!.volume)).toBe(0);
+      await page.getByRole('slider', { name: music.capsuleVolume, exact: true }).press('End');
+      await page.screenshot({
+        fullPage: true,
+        path: '.data/music-m2-validation/capsule-layering.png',
+      });
+      expect(
+        await page.evaluate(() => {
+          const modal = document.createElement('div');
+          modal.dataset.musicTestModal = '';
+          Object.assign(modal.style, { position: 'fixed', inset: '0', zIndex: '1000' });
+          document.querySelector('[data-qz-glass-scene]')!.append(modal);
+          const rect = document.querySelector('[data-capsule-body]')!.getBoundingClientRect();
+          const above =
+            document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === modal;
+          modal.remove();
+          document.querySelector('[data-music-test-occluder]')!.remove();
+          return above;
+        }),
+      ).toBe(true);
+      await page.getByRole('button', { name: music.capsuleMore, exact: true }).click();
+
       const dragFrom = async (selector: string, dx: number, dy: number, hold = false) => {
         const rect = (await page!.locator(selector).boundingBox())!;
         const x = rect.x + rect.width / 2;
@@ -632,6 +798,15 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
         await page!.mouse.move(x + dx, y + dy, { steps: 10 });
         await page!.mouse.up();
       };
+      // Earlier visual and volume checks can outlive the short audio fixture.
+      // This gesture specifically verifies dragging an actively playing transport.
+      await page.evaluate(async () => {
+        window.musicTest.engine.seek(2000);
+        await window.musicTest.engine.play();
+      });
+      await page.waitForFunction(
+        () => window.musicTest.engine.store.getState().status === 'playing',
+      );
       await dragFrom('[data-capsule-body] button[aria-label="Floating player: pause"]', 50, 30);
       expect((await capsuleBounds()).left).toBeGreaterThan(dragged.left + 40);
       expect(await page.evaluate(() => window.musicTest.audio!.paused)).toBe(false);
@@ -1031,6 +1206,7 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
           ),
       );
       await page.screenshot({ fullPage: true, path: '.data/music-m2-validation/compact.png' });
+      await waitForViewGlass();
       expect(
         await page.evaluate(() =>
           [...document.querySelectorAll('[role="tab"]')].every((tab) => {
@@ -1042,8 +1218,10 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       expect(
         await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
       ).toBe(true);
-      await page.locator('[data-capsule-body]').press('ArrowLeft');
-      const beforeRefresh = await capsuleBounds();
+      expect(await page.locator('[data-testid="music-capsule"]').getAttribute('hidden')).toBe('');
+      const beforeRefresh = await page.evaluate(() =>
+        localStorage.getItem('qingzhou:music:dock:v1:alice'),
+      );
       await page.evaluate(() => window.musicTest.engine.flush());
       await page.getByRole('tab', { name: music.plugins, exact: true }).click();
       await page.getByRole('switch', { name: music.lyricsPlugin, exact: true }).click();
@@ -1061,7 +1239,10 @@ it.runIf(process.env.MUSIC_BROWSER_EXECUTABLE && process.env.MUSIC_TEST_MP3)(
       await page.waitForFunction(
         () => window.musicTest?.engine.store.getState().status === 'paused',
       );
-      expect(await capsuleBounds()).toEqual(beforeRefresh);
+      expect(await page.evaluate(() => localStorage.getItem('qingzhou:music:dock:v1:alice'))).toBe(
+        beforeRefresh,
+      );
+      expect(await page.locator('[data-testid="music-capsule"]').getAttribute('hidden')).toBe('');
       expect(
         await page.evaluate(() => ({
           count: window.musicTest.audioCount,

@@ -62,6 +62,7 @@ const reviewContext = {
 
 interface MockChatStep {
   content: string;
+  finishReason?: string;
   toolCalls?: MessageToolCall[];
   usage?: ModelUsage;
 }
@@ -75,7 +76,11 @@ const createMockModelRuntime = (steps: MockChatStep[]) => {
       chunk: [],
       toolsCalling: step.toolCalls ?? [],
     });
-    options?.callback?.onCompletion?.({ text: step.content, usage: step.usage });
+    options?.callback?.onCompletion?.({
+      text: step.content,
+      usage: step.usage,
+      finishReason: step.finishReason,
+    });
 
     return new Response('');
   });
@@ -141,6 +146,39 @@ const createMockTools = (writeResult?: ToolWriteResult): ToolSet => ({
 describe('executeSelfIteration', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('does not execute tool calls or report completion when the provider truncates the response', async () => {
+    const tools = createMockTools();
+    const { modelRuntime, chat } = createMockModelRuntime([
+      {
+        content: 'Incomplete plan',
+        finishReason: 'length',
+        toolCalls: [
+          {
+            id: 'truncated',
+            type: 'function',
+            function: { name: 'agent-signal-self-iteration____writeMemory', arguments: '{}' },
+          },
+        ],
+      },
+    ]);
+    const result = await executeSelfIteration({
+      agentId: 'agent-1',
+      userId: 'user-1',
+      context: reviewContext,
+      sourceId: 'truncated',
+      mode: 'reflection',
+      maxSteps: 10,
+      model: 'remote-model',
+      provider: 'custom-provider',
+      modelRuntime,
+      tools,
+    });
+    expect(result.status).toBe(ReviewRunStatus.Failed);
+    expect(chat).toHaveBeenCalledOnce();
+    expect(tools.writeMemory).not.toHaveBeenCalled();
+    expect(result.writeOutcomes).toEqual([]);
   });
 
   it('offers source-bound harness proposals in the existing reflection loop without applying them', async () => {

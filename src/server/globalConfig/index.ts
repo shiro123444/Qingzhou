@@ -11,6 +11,8 @@ import { langfuseEnv } from '@/envs/langfuse';
 import { toolsEnv } from '@/envs/tools';
 import { parseSSOProviders } from '@/libs/better-auth/utils/server';
 import { parseSystemAgent } from '@/server/globalConfig/parseSystemAgent';
+import { getEnabledBuiltinPlugins } from '@/server/runtime/builtin-plugins';
+import { isNativeAgentRuntimeEnabled } from '@/server/runtime/tasks/mode';
 import { type GlobalServerConfig } from '@/types/serverConfig';
 import { cleanObject } from '@/utils/object';
 
@@ -31,6 +33,11 @@ export const getServerGlobalConfig = async () => {
   const { DEFAULT_AGENT_CONFIG } = getAppConfig();
 
   const config: GlobalServerConfig = {
+    ...(isNativeAgentRuntimeEnabled() ? { agentRuntimeMode: 'native' as const } : {}),
+    ...(isNativeAgentRuntimeEnabled() && process.env.QINGZHOU_COMPUTER_ENABLED === '1'
+      ? { agentComputerEnabled: true }
+      : {}),
+    builtinPlugins: getEnabledBuiltinPlugins(),
     aiProvider: await genServerAiProvidersConfig({
       ...(ENABLE_BUSINESS_FEATURES
         ? {

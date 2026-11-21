@@ -14,6 +14,9 @@ import type {
   RuntimeScope,
 } from '../../../../packages/runtime-contracts/src';
 import { reviseAnnotation } from './annotation';
+import { bindApprovedGraphDirections } from './approved-graph-directions';
+import { approvedPointSeries } from './approved-point-series';
+import { approvedReportColumns, describesReportTable, readApprovedReportRows } from './approved-report-data';
 import { overlayAssetAnnotations } from './asset-annotations';
 import { normalizeCapabilityUses } from './capability-composition';
 import type { CapabilityCapsule } from './capability-memory';
@@ -39,6 +42,12 @@ import {
   renderDeckVisualFrame,
 } from './deck-visual-system';
 import {
+  appendDesignEvidence,
+  designCompilationEvidence,
+  designReferencePayload,
+} from './design-evidence';
+import { compileLearnedPageLayout } from './learned-page-layout';
+import {
   LESSON_RENDERING_INSTRUCTIONS,
   prepareLessonDraft,
   publicLessonStages,
@@ -59,13 +68,21 @@ import {
   type RevisionAssetIntent,
   validateAssetPlacement,
 } from './revision-assets';
+import { isEditableScatter, replaceScatterPoints } from './scatter-chart';
 import {
   renderSemanticBlocks,
   SEMANTIC_BLOCK_FORMAT,
   semanticAuthoringSvg,
+  semanticBlockSchema,
 } from './semantic-blocks';
 import { recoverSemanticSlideLayout } from './semantic-layout-recovery';
 import { composePresentationAssets } from './slide-asset-placement';
+import { audienceSpeakerNotes } from './speaker-notes';
+import {
+  diagnoseStoryboardLayout,
+  isExhaustedLearnedLayout,
+  storyboardPageCapsules,
+} from './storyboard-compatibility';
 import { completeStructuredJson } from './structured-json-chat';
 import { type TemplateApplication, templatePlannerInstructions } from './templates';
 import { presentationVisualDirectionSchema } from './visual-direction';
@@ -75,11 +92,13 @@ export interface GLMPresentationPlannerOptions {
   readonly chatPort: GLMMultimodalChatPort;
   readonly defaultSlideCount?: number;
   readonly fallbackChatPort?: GLMMultimodalChatPort;
+  readonly layoutDiagnosisChat?: GLMMultimodalChatPort;
   readonly systemPrompt?: string;
 }
 
 const DEFAULT_SYSTEM_PROMPT = `You are an expert AI presentation designer and slide architect.
 Generate high quality, visually balanced SVG slides for the presentation.
+Speaker notes are audience-facing narration. Preserve the approved facts, but never include revision logs, implementation details, JSON specifications or commentary about making the deck. Editable content sources are stored separately in metadata.contentBlocks.
 Use PPT-compatible inline SVG attributes: no <g opacity>, <style>, class, foreignObject, mask, textPath, script, or external assets. Apply opacity on individual shapes. Use <text>/<tspan> for text and Arial or Microsoft YaHei as the final font fallback.
 Template page screenshots and images inside reference layouts are for visual observation only. Never copy their hrefs into the output. Use only the explicitly provided generated assets or preserved images for each slide.
 If a requested raster asset has not been provided yet, reserve a plain shape region and describe the needed asset in slide metadata for the asset preparation step. Do not invent image URLs or pretend a vector drawing is the requested photograph.
@@ -348,6 +367,7 @@ const validatePlacedAssets = (
 export class GLMPresentationPlanner implements PresentationPlanner {
   private readonly chatPort: GLMMultimodalChatPort;
   private readonly fallbackChatPort?: GLMMultimodalChatPort;
+  private readonly layoutDiagnosisChat?: GLMMultimodalChatPort;
   private readonly defaultSlideCount: number;
   private readonly systemPrompt: string;
 
@@ -357,6 +377,7 @@ export class GLMPresentationPlanner implements PresentationPlanner {
     }
     this.chatPort = options.chatPort;
     this.fallbackChatPort = options.fallbackChatPort;
+    this.layoutDiagnosisChat = options.layoutDiagnosisChat;
     this.defaultSlideCount = options.defaultSlideCount ?? 8;
     this.systemPrompt = options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
   }
@@ -388,11 +409,21 @@ export class GLMPresentationPlanner implements PresentationPlanner {
       const composed: PresentationSlidePlan[] = [];
       for (const [pageIndex, page] of outline.entries()) {
         const pageId = `slide-${pageIndex + 1}`;
-        const resumed = Array.isArray(context.resumeSlides)
+        const resumeCandidate = Array.isArray(context.resumeSlides)
           ? (context.resumeSlides as PresentationSlidePlan[]).find(
               (s) => s.slideId === pageId && s.order === pageIndex + 1,
             )
           : undefined;
+        const lastCompilation = Array.isArray(resumeCandidate?.metadata?.designCompilation)
+          ? resumeCandidate.metadata.designCompilation.at(-1)
+          : undefined;
+        // A cached generic recovery must not bypass the learned author path after
+        // its asset pipeline has been repaired. Keep valid compiled checkpoints.
+        const resumed =
+          readDeckVisualSystem(input)?.schemaVersion === 3 &&
+          lastCompilation?.reason === 'semantic-layout-recovery'
+            ? undefined
+            : resumeCandidate;
         if (resumed) {
           const cached = validatePresentationPlan({
             planId: 'checkpoint',
@@ -521,6 +552,9 @@ export class GLMPresentationPlanner implements PresentationPlanner {
       }));
       userPrompt = `请修改以下原稿页面，保留没有要求修改的内容、图片和布局。只返回这些页面，不添加其他页面。保持 slideId。当前只处理原稿页号 ${selectedSlides.map((slide) => slide.order).join('、')}；整稿修改要求中明确指向其他页号的文字、数字和图注不适用于当前页，不得复制过来。若当前页没有被要求修改，保持它已有的事实与可见文字。公式与图形已恢复为空锚点和contentBlocks源；修改源与rect，由服务端重绘，不要在空锚点中手绘路径。\n修改要求：${revision.content}\n画幅：${aspectRatio}\n原稿：${JSON.stringify(editableSlides)}\n返回 ${selectedSlides.length} 页完整 SVG 与contentBlocks的 JSON PresentationPlan。`;
     }
+    if (selectedSlides && context.userContentRevision)
+      userPrompt +=
+        '\n如用户指定修改标题或正文，请在该页返回 revisedOutline 对象。title 是最终标题，keyPoints 是修改后完整的正文要点数组。只提供用户要求修改的字段，保留事实和未涉及的要点。可见 SVG 与这些字段必须一致。';
     const deckVisualSystem = readDeckVisualSystem(input);
     if (context.template && !deckVisualSystem) {
       userPrompt += `\n\n${templatePlannerInstructions(context.template as TemplateApplication)}`;
@@ -552,7 +586,7 @@ export class GLMPresentationPlanner implements PresentationPlanner {
       : ((inputOptions.learnedCapabilities as { capsules?: CapabilityCapsule[] } | undefined)
           ?.capsules ?? []);
     if (learnedCapsules.length)
-      userPrompt += `\n已学模板能力：${JSON.stringify(learnedCapsules.map(({ id, kind, name, rules, layout, recipe }) => ({ id, kind, name, rules: rules.slice(0, 6), layout, recipe })))}\n可以组合不同来源的布局与渲染方法，但颜色、字体、画风遵守整稿视觉规范。在每页 metadata.capabilityUses 记录实际采用的 {capsuleId, reason}，说明设计位置与用途；未使用的能力不记录。`;
+      userPrompt += `\n已学模板能力：${JSON.stringify(designReferencePayload(learnedCapsules))}\n可以组合不同来源的布局与渲染方法，但颜色、字体、画风遵守整稿视觉规范。在每页 metadata.capabilityUses 记录实际采用的 {capsuleId, reason}，说明设计位置与用途；未使用的能力不记录。`;
     const autonomousDirection = presentationVisualDirectionSchema.safeParse(
       inputOptions.visualDirection,
     );
@@ -569,7 +603,7 @@ export class GLMPresentationPlanner implements PresentationPlanner {
         if (selectedSlides) return selectedSlides.some((slide) => slide.slideId === slideId);
         return true;
       });
-      userPrompt += `\n\n整稿视觉故事板（只组合内容区的布局与素材，页眉字体等由整稿规范管理）：${JSON.stringify({ ...(teachingStages.length || deckVisualSystem ? {} : { deckRationale: visualStoryboard.deckRationale, rhythm: visualStoryboard.rhythm }), slides: deckVisualSystem ? relevantDirections.map((direction: any) => ({ slideId: direction.slideId, role: direction.role, assetMode: direction.assetMode, archetypeId: direction.archetypeId, layoutId: direction.layoutId, componentIds: direction.componentIds, compositionIntent: direction.compositionIntent, continuity: direction.continuity })) : relevantDirections })}`;
+      userPrompt += `\n\n整稿视觉故事板（按页面任务安排布局、素材、字体层级与阅读节奏）：${JSON.stringify({ ...(teachingStages.length || deckVisualSystem ? {} : { deckRationale: visualStoryboard.deckRationale, rhythm: visualStoryboard.rhythm }), slides: deckVisualSystem ? relevantDirections.map((direction: any) => ({ slideId: direction.slideId, role: direction.role, assetMode: direction.assetMode, archetypeId: direction.archetypeId, layoutId: direction.layoutId, componentIds: direction.componentIds, compositionIntent: direction.compositionIntent, continuity: direction.continuity })) : relevantDirections })}`;
     }
     if (deckVisualSystem)
       userPrompt += `\n${deckVisualInstructions(
@@ -670,8 +704,11 @@ export class GLMPresentationPlanner implements PresentationPlanner {
             relevantImageHrefs.has(presentationAssetHref(image.ref)),
         )
       : [];
-    const trustedImages = trustedInputs.length
-      ? createTrustedChatImages(trustedInputs, scope)
+    // Keep all owned dimensions available to deterministic layout. The model's
+    // six-image viewing budget must not discard media needed by later pages.
+    const visionInputs = trustedInputs.slice(0, 6);
+    const trustedImages = visionInputs.length
+      ? createTrustedChatImages(visionInputs, scope)
       : undefined;
     const imageSizes = new Map<string, { width: number; height: number }>();
     if (trustedInputs.length) {
@@ -687,7 +724,7 @@ export class GLMPresentationPlanner implements PresentationPlanner {
     }
     trustedImages?.urls.forEach((url, index) => {
       contentParts.push({
-        text: `以下图片是已验证的真实资产 ${presentationAssetHref(trustedInputs[index].ref)}，请观察主体、色彩、留白与比例后排版。`,
+        text: `以下图片是已验证的真实资产 ${presentationAssetHref(visionInputs[index].ref)}，请观察主体、色彩、留白与比例后排版。`,
         type: 'text',
       });
       contentParts.push({ image_url: { url }, type: 'image_url' });
@@ -783,10 +820,23 @@ export class GLMPresentationPlanner implements PresentationPlanner {
             const outlineIndex =
               (context.pageIndex as number | undefined) ??
               (originalSlide ? Math.max(0, originalSlide.order - 1) : idx);
-            const outlinePage = Array.isArray(input.options?.outline)
+            const originalOutline = Array.isArray(input.options?.outline)
               ? input.options.outline[outlineIndex]
               : undefined;
+            const changes =
+              originalSlide && context.userContentRevision ? s?.revisedOutline : undefined;
+            const revisedTitle = typeof changes?.title === 'string' ? changes.title.trim() : '';
+            const revisedPoints =
+              Array.isArray(changes?.keyPoints) &&
+              changes.keyPoints.every((point: unknown) => typeof point === 'string' && point.trim())
+                ? (changes.keyPoints as string[])
+                : undefined;
+            const outlinePage = originalOutline && {
+              ...originalOutline,
+              ...(revisedPoints ? { keyPoints: revisedPoints } : {}),
+            };
             const slideTitle =
+              (revisedTitle || undefined) ??
               (typeof outlinePage?.title === 'string' ? outlinePage.title : undefined) ??
               (typeof s?.title === 'string' && s.title.trim()
                 ? s.title.trim()
@@ -834,21 +884,105 @@ export class GLMPresentationPlanner implements PresentationPlanner {
               normalizeSvg(s?.svg, slideId, aspectRatio),
               permittedRefs,
             );
-            const normalized = contentIntents.length
+            const readableSvg = contentIntents.length
               ? promoteReadablePlainText(normalizedSvg)
               : normalizedSvg;
+            const intent = contentIntents.find((item) => item.slideId === slideId);
+            const approvedRows = readApprovedReportRows(outlinePage?.keyPoints ?? []);
+            const tableRequirement = visualRequirements(intent).find(
+              (visual) =>
+                visual.required && isNativeVisual(visual) && describesReportTable(visual.brief),
+            );
+            let authorBlocks = bindApprovedGraphDirections(s?.contentBlocks, outlinePage?.keyPoints);
+            if (approvedRows && tableRequirement) {
+              const blocks = Array.isArray(authorBlocks) ? authorBlocks : [];
+              const existing = semanticBlockSchema.safeParse(
+                blocks.find((block) => block?.id === tableRequirement.id),
+              );
+              const authoredTable =
+                existing.success &&
+                existing.data.kind === 'scientific-diagram' &&
+                existing.data.spec.type === 'table'
+                  ? existing.data
+                  : undefined;
+              const grounded = {
+                kind: 'scientific-diagram',
+                id: tableRequirement.id,
+                title: authoredTable?.title ?? '数据表',
+                provenance: {
+                  ...authoredTable?.provenance,
+                  kind: 'source',
+                  reference: '已确认大纲',
+                },
+                rect: authoredTable?.rect ?? { x: 48, y: 120, width: 420, height: 216 },
+                spec: {
+                  type: 'table',
+                  fontSize: 20,
+                  columns: approvedReportColumns(approvedRows),
+                  rows: approvedRows.map(({ row }) => row),
+                },
+              };
+              authorBlocks = [
+                ...blocks.filter((block) => block?.id !== tableRequirement.id),
+                grounded,
+              ];
+            }
+            const samples = approvedPointSeries(outlinePage?.keyPoints ?? []);
+            if (samples && Array.isArray(authorBlocks)) {
+              const plots = authorBlocks
+                .map((raw) => semanticBlockSchema.safeParse(raw))
+                .flatMap((item) =>
+                  item.success && isEditableScatter(item.data) && item.data.spec.series.length === 1
+                    ? [item.data]
+                    : [],
+                );
+              if (plots.length === 1) {
+                const plot = plots[0];
+                authorBlocks = authorBlocks.map((raw) =>
+                  raw?.id === plot.id ? replaceScatterPoints(plot, [samples]) : raw,
+                );
+              }
+            }
+            let designSkipReason: string | undefined;
+            const compiledDesign = !teachingStages.length
+              ? await compileLearnedPageLayout({
+                  // Insert declared media before measuring learned slots. The old
+                  // asset plan supplies ownership, never final compiled geometry.
+                  svg: attachGeneratedAssets(
+                    readableSvg,
+                    slideAssets.filter((asset) => asset.layout),
+                  ),
+                  rawBlocks: authorBlocks,
+                  imageSizes,
+                  title: slideTitle,
+                  approvedContent: outlinePage?.keyPoints,
+                  pageNumber: outlineIndex + 1,
+                  deckTitle: input.title,
+                  totalPages: Array.isArray(input.options?.outline)
+                    ? input.options.outline.length
+                    : input.slideCount,
+                  capsules: storyboardPageCapsules(
+                    input.options?.layoutCompatibility,
+                    slideId,
+                    learnedCapsules,
+                    authorBlocks,
+                  ),
+                  onSkip: (reason) => {
+                    designSkipReason = reason;
+                  },
+                  system: deckVisualSystem,
+                  role: deckPageRole(input, slideId, outlineIndex + 1),
+                })
+              : undefined;
+            const normalized = compiledDesign?.svg ?? readableSvg;
+            const nativeBlocks = compiledDesign?.blocks ?? authorBlocks;
             let content!: Awaited<ReturnType<typeof renderSemanticBlocks>> & {
               overflowNotes?: string;
             };
             let layoutRecovered = false;
             try {
-              content = await renderSemanticBlocks(
-                normalized,
-                s?.contentBlocks,
-                contentIntents.find((intent) => intent.slideId === slideId),
-              );
+              content = await renderSemanticBlocks(normalized, nativeBlocks, intent);
             } catch (error) {
-              const intent = contentIntents.find((item) => item.slideId === slideId);
               const stage = teachingStages.find((item) => item.slideId === slideId);
               if (
                 intent &&
@@ -858,6 +992,10 @@ export class GLMPresentationPlanner implements PresentationPlanner {
               ) {
                 try {
                   content = await recoverSemanticSlideLayout({
+                    authoredFontFamily:
+                      deckVisualSystem?.schemaVersion === 3
+                        ? deckVisualSystem.fontFamily
+                        : undefined,
                     ...(deckVisualSystem
                       ? {
                           deckBody: deckBodyRegion(
@@ -869,7 +1007,7 @@ export class GLMPresentationPlanner implements PresentationPlanner {
                     aspectRatio,
                     boardSpace: stage?.boardSpace,
                     intent,
-                    rawBlocks: s?.contentBlocks,
+                    rawBlocks: nativeBlocks,
                     title: stage?.title ?? slideTitle,
                     visibleContent: stage?.visibleContent ?? outlinePage?.keyPoints,
                     imageRefs: [
@@ -912,6 +1050,8 @@ export class GLMPresentationPlanner implements PresentationPlanner {
             if (deckVisualSystem && missingUnplacedAsset && missingAssetIntent) {
               const native = visualRequirements(missingAssetIntent).some(isNativeVisual);
               const recovered = await recoverSemanticSlideLayout({
+                authoredFontFamily:
+                  deckVisualSystem?.schemaVersion === 3 ? deckVisualSystem.fontFamily : undefined,
                 aspectRatio,
                 intent: missingAssetIntent,
                 rawBlocks: content.blocks,
@@ -938,7 +1078,12 @@ export class GLMPresentationPlanner implements PresentationPlanner {
               layoutRecovered = true;
             }
             let composedSvg = restorePreservedImages(
-              attachGeneratedAssets(content.svg, slideAssets),
+              attachGeneratedAssets(
+                content.svg,
+                compiledDesign && !layoutRecovered
+                  ? slideAssets.map(({ layout: _layout, ...asset }) => asset)
+                  : slideAssets,
+              ),
               originalSlide?.svg,
               preservedRefs,
             );
@@ -973,6 +1118,8 @@ export class GLMPresentationPlanner implements PresentationPlanner {
                 !visualRequirements(currentIntent).some(isNativeVisual),
               );
               content = await recoverSemanticSlideLayout({
+                authoredFontFamily:
+                  deckVisualSystem?.schemaVersion === 3 ? deckVisualSystem.fontFamily : undefined,
                 ...(deckVisualSystem
                   ? {
                       deckBody: deckBodyRegion(
@@ -1031,7 +1178,6 @@ export class GLMPresentationPlanner implements PresentationPlanner {
             let svg = annotatedAssets.length
               ? overlayAssetAnnotations(composedSvg, svgViewBox(composedSvg), annotatedAssets)
               : composedSvg;
-            const intent = contentIntents.find((item) => item.slideId === slideId);
             const allBindings = [
               ...readVisualAssetBindings(originalSlide?.metadata?.visualAssets),
               ...slideAssets.flatMap((asset) => (asset.binding ? [asset.binding] : [])),
@@ -1081,6 +1227,8 @@ export class GLMPresentationPlanner implements PresentationPlanner {
                 if (parseAttempts < 2 || !required || !outlinePage?.keyPoints?.length) throw error;
                 const imageRefs = presentationImageRefs(svg);
                 const recovered = await recoverSemanticSlideLayout({
+                  authoredFontFamily:
+                    deckVisualSystem?.schemaVersion === 3 ? deckVisualSystem.fontFamily : undefined,
                   aspectRatio,
                   intent: required,
                   rawBlocks: content.blocks,
@@ -1167,14 +1315,35 @@ export class GLMPresentationPlanner implements PresentationPlanner {
                 return resultingRefs.includes(href) || resultingRefs.includes(`${href}?raw=true`);
               },
             );
+            const appliedDesign = layoutRecovered ? undefined : compiledDesign;
             return {
               metadata: {
                 ...originalSlide?.metadata,
                 ...s?.metadata,
                 capabilityUses: normalizeCapabilityUses(
-                  s?.metadata?.capabilityUses ?? originalSlide?.metadata?.capabilityUses,
+                  appliedDesign?.uses ??
+                    s?.metadata?.capabilityUses ??
+                    originalSlide?.metadata?.capabilityUses,
                   learnedCapsules,
                 ),
+                compiledDesign: appliedDesign?.receipt,
+                imageDimensions: Object.fromEntries(imageSizes),
+                ...(learnedCapsules.length
+                  ? {
+                      designCompilation: appendDesignEvidence(
+                        originalSlide?.metadata?.designCompilation,
+                        designCompilationEvidence({
+                          capsules: learnedCapsules,
+                          stage: revision ? 'repair' : 'author',
+                          svg,
+                          compiled: appliedDesign,
+                          skipReason: layoutRecovered
+                            ? 'semantic-layout-recovery'
+                            : designSkipReason,
+                        }),
+                      ),
+                    }
+                  : {}),
                 generatedAssetRefs,
                 visualAssets,
                 visualRequirements: visualRequirements(intent),
@@ -1204,9 +1373,11 @@ export class GLMPresentationPlanner implements PresentationPlanner {
               },
               notes:
                 [
-                  typeof s?.notes === 'string'
-                    ? s.notes
-                    : (originalSlide?.notes ?? outlinePage?.speakerNotes),
+                  audienceSpeakerNotes(
+                    typeof s?.notes === 'string'
+                      ? s.notes
+                      : (originalSlide?.notes ?? outlinePage?.speakerNotes),
+                  ),
                   ...visualAssets
                     .filter((asset) =>
                       ['scientific-illustration', 'scientific-diagram', 'chart'].includes(
@@ -1220,17 +1391,11 @@ export class GLMPresentationPlanner implements PresentationPlanner {
                   ...(intent?.formulas
                     .filter((f) => f.placement === 'notes')
                     .map((f) => `[备注公式 ${f.id}] ${f.latex}\n${f.explanation ?? ''}`) ?? []),
-                  ...(content.overflowNotes
-                    ? [`[画面放不下的讲解，字号未缩小]\n${content.overflowNotes}`]
-                    : []),
-                  ...(content.blocks.length
-                    ? [
-                        `[可编辑内容源]\n${content.blocks.map((block) => (block.kind === 'formula' ? `${block.id}: ${block.latex}` : `${block.id}: ${JSON.stringify(block.spec)}\n${JSON.stringify(block.provenance)}`)).join('\n')}`,
-                      ]
-                    : []),
+                  ...(content.overflowNotes ? [content.overflowNotes] : []),
                 ]
                   .filter((note) => note !== undefined)
-                  .join('\n\n') || (typeof s?.notes === 'string' ? s.notes : undefined),
+                  .join('\n\n') ||
+                audienceSpeakerNotes(typeof s?.notes === 'string' ? s.notes : undefined),
               order: idx + 1,
               slideId,
               svg,
@@ -1270,6 +1435,8 @@ export class GLMPresentationPlanner implements PresentationPlanner {
               continue;
             const imageRefs = presentationImageRefs(slide.svg);
             const recovered = await recoverSemanticSlideLayout({
+              authoredFontFamily:
+                deckVisualSystem?.schemaVersion === 3 ? deckVisualSystem.fontFamily : undefined,
               ...(deckVisualSystem
                 ? {
                     deckBody: deckBodyRegion(
@@ -1343,7 +1510,34 @@ export class GLMPresentationPlanner implements PresentationPlanner {
           }
           quality = inspectPresentationContent(fallbackPlan);
         }
-        if (!quality.passed) throw new PresentationPlanError(JSON.stringify(quality.issues));
+        if (!quality.passed) {
+          const layoutFailures = quality.issues.filter((issue) =>
+            isExhaustedLearnedLayout(issue.evidence),
+          );
+          const signal = (context.abortSignal ?? context.signal) as AbortSignal | undefined;
+          let advice: Awaited<ReturnType<typeof diagnoseStoryboardLayout>> | undefined;
+          if (this.layoutDiagnosisChat && parseAttempts === 1 && layoutFailures.length) {
+            try {
+              advice = await diagnoseStoryboardLayout(
+                this.layoutDiagnosisChat,
+                {
+                  failures: layoutFailures,
+                  compatibility: input.options?.layoutCompatibility,
+                },
+                {
+                  idempotencyKey: `layout-diagnosis:${context.idempotencyKey ?? 'author'}:${layoutFailures.map((issue) => issue.slideId).join(',')}`,
+                  scope,
+                  signal,
+                },
+              );
+            } catch {
+              signal?.throwIfAborted();
+            }
+          }
+          throw new PresentationPlanError(
+            JSON.stringify(advice ? { advice, issues: quality.issues } : quality.issues),
+          );
+        }
       }
 
       fallbackPlan.slides = await Promise.all(
@@ -1362,6 +1556,8 @@ export class GLMPresentationPlanner implements PresentationPlanner {
             )
               throw error;
             const recovered = await recoverSemanticSlideLayout({
+              authoredFontFamily:
+                deckVisualSystem?.schemaVersion === 3 ? deckVisualSystem.fontFamily : undefined,
               aspectRatio,
               boardSpace: stage.boardSpace,
               intent,

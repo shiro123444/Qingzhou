@@ -86,6 +86,11 @@ const STYLE_PROPERTIES = [
   'margin-left',
   'margin-right',
   'margin-top',
+  'mask-image',
+  'mask-mode',
+  'mask-position',
+  'mask-repeat',
+  'mask-size',
   'max-height',
   'max-width',
   'min-height',
@@ -491,7 +496,7 @@ export async function serializeGlassSource(source: HTMLElement, options: Snapsho
     const material = node.hasAttribute('data-qz-glass') || (node === source && foreground);
     const style = copyPresentation(node, clone, material);
     if (style.display === 'none' || style.visibility === 'hidden') return null;
-    if (exclude.has(node) && node !== source) {
+    if ((exclude.has(node) || node.hasAttribute('data-qz-glass-foreground')) && node !== source) {
       clone.style.visibility = 'hidden';
       clone.setAttribute('data-qz-source-placeholder', '');
       return clone;

@@ -249,14 +249,17 @@ describe('durable planning collaboration', () => {
       brief: { topic: '报告' },
       message: '面向谁汇报？',
       questionId: 'audience-1',
-      question: { prompt: '请选择受众' },
+      question: {
+        context: ['已读取 8 页资料', '当前缺少汇报对象'],
+        prompt: '请选择受众',
+      },
     }));
     await manager.start(scope, command, 'ask-audience');
     const session = await waitForState(manager, 'waiting_input');
     const next = create(repo, async () => completed);
-    expect((await next.read(scope, command.threadId))?.collaboration.decisions[0].detail).toBe(
-      '请选择受众',
-    );
+    const restored = (await next.read(scope, command.threadId))?.collaboration.decisions[0];
+    expect(restored?.detail).toBe('请选择受众');
+    expect(restored?.context).toEqual(['已读取 8 页资料', '当前缺少汇报对象']);
     await expect(
       next.answer(scope, command.threadId, {
         decisionId: 'audience-1',

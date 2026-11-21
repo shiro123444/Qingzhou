@@ -12,7 +12,7 @@ export class GlassFrameBudget {
   }
 
   sharedPixels() {
-    return 35_000 * this.sharedScale;
+    return 180_000 * this.sharedScale;
   }
 
   /** No cadence cap on the player. Lower its resolution before sacrificing interaction frames. */
@@ -51,3 +51,7 @@ export class GlassFrameBudget {
 /** Small dirty layers can update every refresh; slow captures are never queued concurrently. */
 export const captureDelay = (elapsed: number, previousDuration: number) =>
   Math.max(0, Math.min(100, Math.max(1000 / 60, previousDuration / 2)) - elapsed);
+
+/** Preserve edge detail on large panes; only moving panes use the adaptive budget. */
+export const sharedPixelRatio = (area: number, pixels: number, interacting: boolean, dpr = 1) =>
+  Math.min(dpr, interacting ? Math.max(0.75, Math.sqrt(pixels / area)) : 1);

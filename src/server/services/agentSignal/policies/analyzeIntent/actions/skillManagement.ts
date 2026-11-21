@@ -557,6 +557,7 @@ interface SkillDecisionAgentRuntimeInput {
   model: string;
   modelRuntime: Pick<ModelRuntime, 'chat'>;
   payload: SkillManagementSignalPayload;
+  provider?: string;
   tools: SkillDecisionToolset;
 }
 
@@ -657,7 +658,7 @@ export const runSkillDecisionAgentRuntime = async (input: SkillDecisionAgentRunt
       compressionConfig: { enabled: false },
       modelRuntimeConfig: {
         model: input.model,
-        provider: DEFAULT_MINI_SYSTEM_AGENT_ITEM.provider,
+        provider: input.provider ?? DEFAULT_MINI_SYSTEM_AGENT_ITEM.provider,
       },
       operationId: `agent-signal-skill-decision:${input.payload.messageId ?? 'message'}`,
     }),
@@ -812,7 +813,7 @@ export const runSkillDecisionAgentRuntime = async (input: SkillDecisionAgentRunt
       },
       modelRuntimeConfig: {
         model: input.model,
-        provider: DEFAULT_MINI_SYSTEM_AGENT_ITEM.provider,
+        provider: input.provider ?? DEFAULT_MINI_SYSTEM_AGENT_ITEM.provider,
       },
       operationId: `agent-signal-skill-decision:${input.payload.messageId ?? 'message'}`,
       operationToolSet: {
@@ -849,7 +850,7 @@ export const runSkillDecisionAgentRuntime = async (input: SkillDecisionAgentRunt
     let context: AgentRuntimeContext = {
       payload: {
         model: input.model,
-        provider: DEFAULT_MINI_SYSTEM_AGENT_ITEM.provider,
+        provider: input.provider ?? DEFAULT_MINI_SYSTEM_AGENT_ITEM.provider,
         tools,
       },
       phase: 'user_input',
@@ -1191,6 +1192,7 @@ class SkillManagementDecisionAgentService {
 
     const result = await runSkillDecisionAgentRuntime({
       model: this.modelConfig.model,
+      provider: this.modelConfig.provider,
       modelRuntime,
       payload: {
         ...input,

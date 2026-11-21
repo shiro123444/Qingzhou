@@ -1,5 +1,4 @@
 import { AGENT_SIGNAL_SOURCE_TYPES } from '@lobechat/agent-signal/source';
-import { DEFAULT_MINI_SYSTEM_AGENT_ITEM } from '@lobechat/const';
 
 import { AgentSignalReviewContextModel } from '@/database/models/agentSignal/reviewContext';
 import { BriefModel } from '@/database/models/brief';
@@ -9,6 +8,7 @@ import { learningMutationAuthority } from '@/server/runtime/improvement/mutation
 import { executeBudgetedSignal } from '@/server/runtime/improvement/signal-budget';
 import { createSignalHarnessProposals } from '@/server/runtime/improvement/signal-proposal';
 import { AGENT_SIGNAL_DEFAULTS } from '@/server/services/agentSignal/constants';
+import { resolveAgentSignalModelConfig } from '@/server/services/agentSignal/modelConfig';
 import { runMemoryActionAgent } from '@/server/services/agentSignal/policies/analyzeIntent/actions/userMemory';
 import {
   createDurableSelfReflectionAccumulator,
@@ -499,17 +499,23 @@ export class SelfReflectionServerRuntimeFactory implements SelfReflectionRuntime
     context,
     source,
   }: Parameters<SelfReflectionRuntimeFactory['createRuntime']>[0]) {
+    const modelConfig = await resolveAgentSignalModelConfig(
+      this.input.db,
+      this.input.userId,
+      this.input.agentId,
+    );
     const modelRuntime = await initModelRuntimeFromDB(
       this.input.db,
       this.input.userId,
-      DEFAULT_MINI_SYSTEM_AGENT_ITEM.provider,
+      modelConfig.provider,
       process.env.QINGZHOU_HARNESS_LEARNING_ENABLED === '1' ? { singleDispatch: true } : undefined,
     );
 
     return {
       executeSelfIteration: (input: Parameters<typeof executeSelfIteration>[0]) =>
         executeBudgetedSignal(this.input.db, input),
-      model: DEFAULT_MINI_SYSTEM_AGENT_ITEM.model,
+      model: modelConfig.model,
+      provider: modelConfig.provider,
       modelRuntime,
       tools: createReflectionRuntimeTools({
         agentId: this.input.agentId,

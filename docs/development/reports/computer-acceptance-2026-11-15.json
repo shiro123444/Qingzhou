@@ -1,0 +1,209 @@
+{
+  "artifactHashes": {
+    "regression.log": "72eb4e7bf9ff3a84963ab31431792244ced977732a91e8a64c2b6dd61bcf9031",
+    "type-check.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "eslint.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "prettier.log": "17aa973d3f004560237d9a95171210b0671deff23d61628eecf7322ff5938f20",
+    "teardown.log": "003692be70e652665a417665daae8df79c93b48b904b4c3d90cc102b4c7df41f",
+    "acceptance.log": "0348640cd48c5afdde8acefbe6f3553fa71b184e3b455041fd07030dcb800458"
+  },
+  "finishedAt": "2026-11-15T14:07:13.479Z",
+  "limitations": [
+    "Interactive browser stream/input console is not implemented; the browser tests cover real Chromium profile persistence and control fencing only.",
+    "This run does not enable Computer tools in the Agent approval chain or alter the primary database."
+  ],
+  "mode": ["--all", "--strict"],
+  "node": "v26.13.0",
+  "results": [
+    {
+      "id": "docker.ensure.non-root-isolation",
+      "status": "passed",
+      "ms": 188,
+      "evidence": {
+        "imageId": "sha256:4ede116aef9e7ff353b7690f9618b57e50925f7f1c40d792b9146c60547c099e",
+        "version": "29.5.2",
+        "user": "1000:1000",
+        "network": "none",
+        "readonlyRootfs": true
+      }
+    },
+    {
+      "id": "runtime.sql-cordis-http-docker",
+      "status": "passed",
+      "ms": 3335,
+      "evidence": {
+        "tests": 3,
+        "database": "isolated-in-memory-PGlite",
+        "provider": "real-loopback-HTTP",
+        "containers": "real-Docker"
+      }
+    },
+    {
+      "id": "docker.http.authentication-and-validation",
+      "status": "passed",
+      "ms": 3
+    },
+    {
+      "id": "docker.shell.persistence-and-idempotency",
+      "status": "passed",
+      "ms": 155
+    },
+    {
+      "id": "docker.sleep-wake.preserves-workspace",
+      "status": "passed",
+      "ms": 208
+    },
+    {
+      "id": "docker.control.human-fences-agent",
+      "status": "passed",
+      "ms": 105
+    },
+    {
+      "id": "docker.receipt.provider-restart-no-replay",
+      "status": "passed",
+      "ms": 370
+    },
+    {
+      "id": "docker.receipt.disconnected-client",
+      "status": "passed",
+      "ms": 1236
+    },
+    {
+      "id": "browser.chromium.real-profile-write",
+      "status": "passed",
+      "ms": 478,
+      "evidence": {
+        "chromium": true,
+        "cookieAndLocalStorage": true,
+        "network": "container-loopback-only"
+      }
+    },
+    {
+      "id": "browser.chromium.profile-survives-sleep-and-provider-restart",
+      "status": "passed",
+      "ms": 823
+    },
+    {
+      "id": "docker.shell.timeout-kills-descendants",
+      "status": "passed",
+      "ms": 3712,
+      "evidence": {
+        "exitCode": 137,
+        "descendantDidNotWrite": true
+      }
+    },
+    {
+      "id": "cleanup.provider-and-owned-containers",
+      "status": "passed",
+      "ms": 70,
+      "evidence": {
+        "providerStopped": true,
+        "removedContainers": 1,
+        "volumeRemoved": true
+      }
+    },
+    {
+      "id": "suite.docker-live",
+      "status": "passed",
+      "ms": 10927
+    },
+    {
+      "id": "model.gateway.live-model-catalog",
+      "status": "passed",
+      "ms": 612,
+      "evidence": {
+        "provider": "nexus",
+        "model": "deepseek-v4.1-flash",
+        "remoteModelCount": 11,
+        "baseURL": "https://cli.tinimodel.com/v1"
+      }
+    },
+    {
+      "id": "model.deepseek.live-completion",
+      "status": "passed",
+      "ms": 2735,
+      "evidence": {
+        "requestedModel": "deepseek-v4.1-flash",
+        "returnedModel": "workbuddy/deepseek-v4.1-flash",
+        "finishReason": "stop",
+        "usage": {
+          "completion_tokens": 23,
+          "completion_tokens_details": {
+            "reasoning_tokens": 8
+          },
+          "prompt_tokens": 61,
+          "prompt_tokens_details": {
+            "cache_write_tokens": 0,
+            "cached_tokens": 0
+          },
+          "total_tokens": 84
+        },
+        "nonceMatched": true
+      }
+    },
+    {
+      "id": "suite.model-live",
+      "status": "passed",
+      "ms": 3802
+    },
+    {
+      "id": "journal.expired-work-never-replayed",
+      "status": "passed",
+      "ms": 4
+    },
+    {
+      "id": "browser.interactive-takeover-console",
+      "status": "not-run",
+      "evidence": "Not implemented; Chromium profile and control protocol results do not constitute interactive takeover validation"
+    },
+    {
+      "id": "agent.computer-tools-approval-chain",
+      "status": "not-run",
+      "evidence": "Computer tools are not connected to the production Agent approval chain; the SQL live test uses a trusted test authority"
+    }
+  ],
+  "runId": "2026-11-15T14-06-58-744Z-ab449bb5",
+  "startedAt": "2026-11-15T14:06:58.745Z",
+  "verdict": "implemented-checks-passed-with-open-gaps",
+  "verification": {
+    "regression": {
+      "files": 14,
+      "passed": 94,
+      "exitCode": 0
+    },
+    "runtimeLive": {
+      "passed": 3,
+      "exitCode": 0,
+      "log": "runtime-live.log"
+    },
+    "typeCheck": {
+      "cordisBuild": true,
+      "wholeRepositoryTsgo": true,
+      "exitCode": 0
+    },
+    "eslint": {
+      "exitCode": 0
+    },
+    "prettier": {
+      "exitCode": 0
+    },
+    "diffCheck": {
+      "exitCode": 0
+    },
+    "strictAcceptance": {
+      "exitCode": 1,
+      "expected": true,
+      "reason": "Two product capabilities remain unimplemented; no executed check failed"
+    },
+    "teardown": {
+      "providerStopped": true,
+      "testContainersRemaining": 0,
+      "testVolumesRemaining": 0,
+      "colimaProfile": "qingzhou-test",
+      "colimaStatus": "Stopped",
+      "defaultDockerContext": "default",
+      "primaryWebDatabaseWorkerStarted": false,
+      "projectServicePortsListening": false
+    }
+  }
+}

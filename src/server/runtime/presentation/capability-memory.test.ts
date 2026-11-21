@@ -224,6 +224,47 @@ afterEach(async () => {
 });
 
 describe('durable presentation capability memory', () => {
+  it('keeps observed workspace geometry searchable when refreshing the linked visual profile', async () => {
+    const memory = new FileCapabilityCapsuleStore(root);
+    await memory.bindReferenceWorkspace(scope, {
+      workspaceId: 'source',
+      templateId: visual.templateId,
+      versionId: visual.versionId,
+      observedPages: [1],
+      sourceHash: 'a'.repeat(64),
+    });
+    const reference = await memory.importReference(scope, {
+      kind: 'layout',
+      name: '流程原型',
+      triggers: ['流程'],
+      palette: [],
+      rules: ['来源网格'],
+      source: {
+        workspaceKind: 'layout',
+        workspaceId: 'source/process.svg',
+        sourceDigest: 'b'.repeat(64),
+        evidencePages: [1],
+        aspectRatio: '16:9',
+      },
+      designReference: {
+        slots: [
+          { id: 'flow-slot', kind: 'object', box: { x: 0.1, y: 0.2, width: 0.8, height: 0.6 } },
+        ],
+      },
+    });
+    await memory.learn(scope, visual);
+    expect((await memory.candidates(scope, '流程')).map((c) => c.id)).toContain(reference.id);
+    expect((await memory.candidates(scope, '光斑光学量化')).map((c) => c.id)).toContain(
+      reference.id,
+    );
+    expect(await memory.search(scope, '光斑光学量化')).toEqual([]);
+    expect((await memory.candidates(scope, '光斑光学量化', '4:3')).map((c) => c.id)).not.toContain(
+      reference.id,
+    );
+    expect((await memory.compose(scope, [reference.id], true)).capsules[0].source.templateId).toBe(
+      visual.templateId,
+    );
+  });
   it('retires superseded observations from selection while retaining their historical evidence', async () => {
     const store = new FileCapabilityCapsuleStore(root);
     const original = await store.learn(scope, visual);
@@ -674,5 +715,46 @@ describe('durable presentation capability memory', () => {
     } finally {
       await runtime.dispose();
     }
+  });
+  it('keeps owned content pixels available when template reference pages fill the viewing quota', async () => {
+    const artifactStore = new InMemoryPresentationArtifactStore();
+    const refs = [
+      'current-page-original',
+      'template-page-1',
+      'template-page-2',
+      'template-page-3',
+      'template-page-4',
+    ];
+    for (const ref of refs)
+      await artifactStore.put(scope, {
+        artifactId: ref,
+        type: 'image',
+        mimeType: 'image/png',
+        name: ref,
+        bytes: new Uint8Array([1, 2, 3]),
+      });
+    const port = new PresentationGenerationPort(
+      {
+        artifactStore,
+        capability: {
+          execute: vi.fn(),
+          plan: vi.fn(),
+        } as unknown as PresentationGenerationCapability,
+        contextFactory: () => ({
+          plannerContext: {},
+          workerContext: {
+            convert: vi.fn(),
+            jobId: 'test',
+            qualityCheck: vi.fn(),
+            workspace: { path: '/tmp', write: vi.fn() },
+          },
+        }),
+      },
+      { ...scope, request: new Request('https://example.test') },
+    );
+    const images = await (
+      port as unknown as { readTrustedImages: (ids: string[]) => Promise<{ ref: string }[]> }
+    ).readTrustedImages(refs);
+    expect(images.map((image) => image.ref)).toEqual(refs);
   });
 });

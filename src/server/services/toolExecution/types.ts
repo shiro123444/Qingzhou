@@ -18,6 +18,8 @@ export interface ToolExecutionContext {
   agentId?: string;
   /** Server-owned deadline/ownership check, never accepted from a wire payload. */
   assertStepLease?: () => void;
+  /** Trusted runtime boundary. Never enabled by tool arguments or external channel senders. */
+  computerAllowed?: boolean;
   /** Current page document ID for page-scoped conversations */
   documentId?: string | null;
   /** Current group ID for group chat context */

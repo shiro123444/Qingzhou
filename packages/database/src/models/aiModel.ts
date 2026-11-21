@@ -8,7 +8,7 @@ import type {
 import { AiModelSourceEnum } from 'model-bank';
 
 import type { AiModelSelectItem, NewAiModelItem } from '../schemas';
-import { aiModels } from '../schemas';
+import { aiModels, aiProviders } from '../schemas';
 import type { LobeChatDatabase } from '../type';
 
 export class AiModelModel {
@@ -181,6 +181,55 @@ export class AiModelModel {
         target: [aiModels.id, aiModels.userId, aiModels.providerId],
       })
       .returning();
+  };
+
+  /** Replace only this account's provider catalog, preserving surviving user preferences atomically. */
+  replaceRemoteModels = async (providerId: string, models: AiProviderModelListItem[]) => {
+    // An empty/failed upstream response must not erase a working catalog.
+    if (this.isEmptyArray(models)) return [];
+    if (
+      models.some(
+        (model) => !model.id?.trim() || model.id !== model.id.trim() || model.id.length > 150,
+      )
+    )
+      throw new Error('Invalid remote model ID');
+    const unique = [...new Map(models.map((model) => [model.id, model])).values()];
+
+    return this.db.transaction(async (tx) => {
+      const scope = and(eq(aiProviders.id, providerId), eq(aiProviders.userId, this.userId));
+      const [provider] = await tx
+        .select({ settings: aiProviders.settings })
+        .from(aiProviders)
+        .where(scope);
+      if (!provider) throw new Error('Provider must be configured before synchronizing its models');
+      const existing = await tx
+        .select()
+        .from(aiModels)
+        .where(and(eq(aiModels.providerId, providerId), eq(aiModels.userId, this.userId)));
+      const previous = new Map(existing.map((model) => [model.id, model]));
+      const records = unique.map((model) => ({
+        ...model,
+        ...previous.get(model.id),
+        id: model.id,
+        providerId,
+        source: AiModelSourceEnum.Remote,
+        updatedAt: new Date(),
+        userId: this.userId,
+      }));
+
+      await tx
+        .delete(aiModels)
+        .where(and(eq(aiModels.providerId, providerId), eq(aiModels.userId, this.userId)));
+      const result = await tx.insert(aiModels).values(records).returning();
+      await tx
+        .update(aiProviders)
+        .set({
+          settings: { ...provider.settings, modelListSource: 'remote' },
+          updatedAt: new Date(),
+        })
+        .where(scope);
+      return result;
+    });
   };
 
   batchToggleAiModels = async (providerId: string, models: string[], enabled: boolean) => {

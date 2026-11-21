@@ -1,6 +1,16 @@
 import { z } from 'zod';
 
 const text = z.string().trim().min(1).max(2000);
+export const teachingContextSchema = z
+  .object({
+    active: z.boolean(),
+    course: z.string().trim().max(120).default(''),
+    query: z.string().trim().max(2000).default(''),
+    useMemory: z.boolean().default(true),
+  })
+  .strict();
+export type TeachingContext = z.infer<typeof teachingContextSchema>;
+
 export const teachingSelectionSchema = z
   .object({
     course: z.string().trim().max(120).default(''),

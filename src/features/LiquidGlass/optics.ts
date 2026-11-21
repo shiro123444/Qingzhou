@@ -1,5 +1,7 @@
+import { lensProfile, lensWidth } from './lens';
+
 export interface GlassMapOptions {
-  /** Width of the curved edge in CSS pixels, clamped to 6–12 (or half the smaller side). */
+  /** Width of the curved edge in CSS pixels, defaults to 8% of the short side, bounded to 10–24. */
   bezel?: number;
   height: number;
   /** Relative index of refraction: air is 1, glass defaults to 1.45. */
@@ -13,7 +15,7 @@ export interface GlassMapOptions {
 export interface GlassMaps {
   /** Opaque RGBA: R encodes horizontal sampling offset, G vertical, B is unused. */
   displacement: Uint8ClampedArray;
-  /** Texture dimensions, at most 512 per side; geometry remains in CSS pixels. */
+  /** Texture dimensions, at most 1024 per side; geometry remains in CSS pixels. */
   height: number;
   /** White RGBA reflection layer; the flat center and exterior are transparent. */
   highlight: Uint8ClampedArray;
@@ -22,7 +24,7 @@ export interface GlassMaps {
   width: number;
 }
 
-const MAX_MAP_SIZE = 512;
+const MAX_MAP_SIZE = 1024;
 const NEUTRAL = 128;
 const CHANNEL_SPAN = 254;
 
@@ -74,7 +76,7 @@ const roundedRectangle = (
  * https://developer.mozilla.org/en-US/docs/Web/SVG/Reference/Element/feDisplacementMap
  */
 export const generateGlassMaps = ({
-  bezel = 8,
+  bezel,
   height,
   ior = 1.45,
   radius,
@@ -84,6 +86,7 @@ export const generateGlassMaps = ({
   if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
     throw new RangeError('Glass dimensions must be finite and positive.');
   }
+  bezel ??= lensWidth(width, height, radius);
   if (!Number.isFinite(radius) || radius < 0 || !Number.isFinite(bezel) || bezel <= 0) {
     throw new RangeError('Glass radius must be nonnegative and bezel must be positive.');
   }
@@ -100,7 +103,7 @@ export const generateGlassMaps = ({
   const halfWidth = width / 2;
   const halfHeight = height / 2;
   const cornerRadius = Math.min(radius, halfWidth, halfHeight);
-  const edgeWidth = Math.min(Math.max(6, Math.min(12, bezel)), halfWidth, halfHeight);
+  const edgeWidth = Math.min(bezel, halfWidth, halfHeight);
   const eta = 1 / ior;
   const halfVectorLength = Math.hypot(0.3, 0.4, 1);
   let maxOffset = 0;
@@ -125,18 +128,14 @@ export const generateGlassMaps = ({
       const depth = -boundary.distance;
       if (depth <= 0 || depth >= edgeWidth) continue;
 
-      // A quarter ellipse joins the vertical outer edge to the flat front.
-      // z(d) = thickness * sqrt(1 - (1 - d / bezel)^2), with zero inner slope.
       const remaining = 1 - depth / edgeWidth;
-      const profile = Math.sqrt(1 - remaining * remaining);
-      const surfaceHeight = thickness * profile;
-      const slopeNumerator = thickness * remaining;
-      const slopeDenominator = edgeWidth * profile;
-      const normalLength = Math.hypot(slopeNumerator, slopeDenominator);
-      const radialNormal = slopeNumerator / normalLength;
-      const normalX = boundary.x * radialNormal;
-      const normalY = boundary.y * radialNormal;
-      const normalZ = slopeDenominator / normalLength;
+      const profile = lensProfile(depth, edgeWidth);
+      const surfaceHeight = thickness * profile.height;
+      const slope = thickness * profile.slope;
+      const normalLength = Math.hypot(slope, 1);
+      const normalX = (boundary.x * slope) / normalLength;
+      const normalY = (boundary.y * slope) / normalLength;
+      const normalZ = 1 / normalLength;
 
       // Incoming ray I=(0,0,-1); N points out of the glass. Snell gives
       // T = eta*I + (eta*cos(theta_i) - cos(theta_t))*N.
@@ -155,10 +154,7 @@ export const generateGlassMaps = ({
       const parallel = (normalZ - eta * cosTransmitted) / (normalZ + eta * cosTransmitted);
       const perpendicular = (eta * normalZ - cosTransmitted) / (eta * normalZ + cosTransmitted);
       const fresnel = (parallel * parallel + perpendicular * perpendicular) / 2;
-      const facingLight = Math.max(
-        0,
-        (-0.3 * normalX - 0.4 * normalY + normalZ) / halfVectorLength,
-      );
+      const facingLight = (1 + (-0.3 * normalX - 0.4 * normalY + normalZ) / halfVectorLength) / 2;
       const reflection = remaining * (0.6 * fresnel + 0.22 * facingLight ** 24);
       highlight[index + 3] = Math.round(255 * Math.min(1, reflection));
     }

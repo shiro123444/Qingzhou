@@ -25,3 +25,9 @@ generated source at `output/imagegen/qingzhou-presentation-mist.png`; it provide
 the restrained watercolor wash behind the Presentation Studio scene. The Ferris
 wheel itself uses deterministic extraction and native SVG animation without an
 external animation library.
+
+Current UI note: the watercolor wordmark remains in use. The composer leaf,
+empty-state boat and Ferris wheel cabins now use the sibling
+`../qingzhou-celadon/` material family; the original watercolor cutouts here remain
+available as source derivatives. Current wheel animation lives in
+`src/features/QingzhouBrand/FerrisWheel.tsx`.

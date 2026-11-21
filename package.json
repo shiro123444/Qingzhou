@@ -35,6 +35,7 @@
     "apps/desktop/src/main"
   ],
   "scripts": {
+    "agent:worker": "node --import tsx scripts/agentWorker.mts",
     "build": "bun run build:spa && bun run build:spa:copy && bun run build:next",
     "build:analyze": "cross-env NODE_OPTIONS=--max-old-space-size=81920 next experimental-analyze",
     "build:compact": "node scripts/buildCompact.mjs",
@@ -52,6 +53,11 @@
     "build-migrate-db": "bun run db:migrate",
     "build-sitemap": "tsx ./scripts/buildSitemapIndex/index.ts",
     "clean:node_modules": "bash -lc 'set -e; echo \"Removing all node_modules...\"; rm -rf node_modules; pnpm -r exec rm -rf node_modules; rm -rf apps/desktop/node_modules; echo \"All node_modules removed.\"'",
+    "computer:acceptance": "node --import tsx scripts/computerAcceptance.mts",
+    "computer:local": "node --env-file=.data/computer-provider/runtime.env --import tsx scripts/computerProvider.mts",
+    "computer:provider": "node --import tsx scripts/computerProvider.mts",
+    "computer:test": "TEST_SERVER_DB=0 NODE_OPTIONS=--no-experimental-webstorage vitest run --silent=passed-only src/server/runtime/computer/runtime.test.ts src/server/runtime/computer/remote.test.ts src/server/runtime/computer/docker/provider.test.ts src/server/services/agentComputer/model.test.ts src/server/routers/lambda/agentComputer.test.ts src/features/AgentComputer/Panel.test.tsx src/features/BackgroundActivity/index.test.tsx src/server/routers/lambda/backgroundActivity.test.ts src/server/services/backgroundActivity/index.test.ts src/server/services/backgroundActivity/operations.test.ts src/server/runtime/tasks/heartbeat.test.ts src/server/runtime/tasks/store.test.ts src/server/runtime/tasks/wake.test.ts src/server/services/aiAgent/nativeChat.test.ts src/server/runtime/computer/agent-tools.test.ts src/server/runtime/computer/manifest.test.ts src/server/services/agentComputer/start.test.ts",
+    "computer:test:approval": "TEST_SERVER_DB=0 NODE_OPTIONS=--no-experimental-webstorage vitest run --silent=passed-only src/server/modules/Mecha/AgentToolsEngine/__tests__/index.test.ts src/server/services/agentRuntime/__tests__/HumanInterventionHandler.test.ts src/server/services/agentRuntime/AgentRuntimeService.test.ts && cd packages/agent-runtime && NODE_OPTIONS=--no-experimental-webstorage ../../node_modules/.bin/vitest run --silent=passed-only src/agents/__tests__/GeneralChatAgent.test.ts",
     "db:generate": "drizzle-kit generate && npm run workflow:dbml",
     "db:migrate": "cross-env MIGRATION_DB=1 tsx ./scripts/migrateServerDB/index.ts",
     "db:studio": "drizzle-kit studio",
@@ -365,6 +371,7 @@
     "jsondiffpatch": "^0.7.3",
     "jsonl-parse-stringify": "^1.0.3",
     "klavis": "^2.15.0",
+    "konva": "10.9.0",
     "langfuse": "^3.38.6",
     "langfuse-core": "^3.38.6",
     "lexical": "0.42.0",

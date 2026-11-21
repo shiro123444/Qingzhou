@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
 
+import { isBuiltinPluginEnabled } from '@/config/builtinPlugins';
 import { AgentModel } from '@/database/models/agent';
 import { toolsEnv } from '@/envs/tools';
+import { getEnabledBuiltinPlugins } from '@/server/runtime/builtin-plugins';
 import { presentationAccountScope } from '@/server/runtime/presentation/account-workspace';
 import type { PresentationGenerationPort } from '@/server/runtime/presentation/generation-port';
 import { AgentService } from '@/server/services/agent';
@@ -23,7 +25,8 @@ export const systemCapabilitiesRuntime: ServerRuntimeRegistration = {
     );
     if (!agent?.plugins?.includes(SystemCapabilityIdentifier))
       throw new Error('System capabilities are not enabled for this agent');
-    const presentationConfigured = !!process.env.CORDIS_PPT_MASTER_ROOT;
+    const presentationEnabled = isBuiltinPluginEnabled('presentation', getEnabledBuiltinPlugins());
+    const presentationConfigured = presentationEnabled && !!process.env.CORDIS_PPT_MASTER_ROOT;
     let presentation: Promise<PresentationGenerationPort> | undefined;
     const loadPresentation = () => {
       assertActive();
@@ -169,6 +172,10 @@ export const systemCapabilitiesRuntime: ServerRuntimeRegistration = {
             },
           }
         : {}),
+      presentationEnabled,
+      presentationUnavailableReason: presentationEnabled
+        ? undefined
+        : 'The presentation plugin is disabled by host configuration.',
       ...(presentationConfigured ? { loadPresentation } : {}),
       saveSvg: async (svg) => {
         context.assertStepLease?.();

@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import type { AiProviderModelListItem } from 'model-bank';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -106,6 +106,11 @@ describe('AiModelModel', () => {
         id: 'aihubmix-2',
       });
 
+      // Both inserts may share a millisecond; make the ordering under test explicit.
+      await serverDB
+        .update(aiModels)
+        .set({ updatedAt: new Date(0) })
+        .where(and(eq(aiModels.id, 'qvq'), eq(aiModels.userId, userId)));
       const userGroups = await aiProviderModel.query();
       expect(userGroups).toHaveLength(2);
       expect(userGroups[0].id).toBe('aihubmix-2');

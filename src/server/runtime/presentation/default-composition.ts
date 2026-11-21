@@ -1,10 +1,18 @@
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import nodePath from 'node:path';
 
 import type { RuntimeScope } from '../../../../packages/runtime-contracts/src';
+import { assertBuiltinPluginEnabled } from '../builtin-plugins';
+import { currentPresentationAgentJob } from './agent-execution-context';
+import {
+  fingerprintPresentationAgentModelConfig,
+  loadPresentationAgentModelConfig,
+  type PresentationAgentModelSelection,
+} from './agent-model-config';
+import type { PresentationAgentRole } from './agent-model-routing';
 import { createPresentationArtifactAssetStoreBridge } from './asset-store';
 import { FileCapabilityCapsuleStore } from './capability-memory';
 import type {
@@ -21,6 +29,9 @@ import { createPresentationImageGenerationEventPublisher } from './image-event-b
 import { createImageGenerationCapability } from './image-generation-capability';
 import { createLocalCorpusSeeder } from './local-corpus';
 import { createResilientMultimodalChatPort } from './multimodal-chat-fallback';
+import type { MultimodalChatPort } from './multimodal-chat-provider';
+import { createPptMasterDesignLibrarySeeder } from './ppt-master-library';
+import { parseExportFontMap } from './pptx-text-layout';
 import type { ProductionProviderReadiness } from './production-command';
 import { PRODUCTION_PRESENTATION_ENV_KEYS } from './production-config';
 import {
@@ -58,9 +69,13 @@ const createDefaultGenerationContextFactory = (
     maxArtifacts: 64,
   });
   const scriptsRoot = nodePath.join(pptMasterRoot, 'skills', 'ppt-master', 'scripts');
+  const nativeData = existsSync(nodePath.join(scriptsRoot, 'stamp_native_fallbacks.py'));
   const toolchain = new PptMasterToolchain({
     allowedRunnerIds: [runnerId],
     convertScriptPath: nodePath.join(scriptsRoot, 'svg_to_pptx.py'),
+    // ppt-master normalizes Mac CJK faces to Windows fonts. Restore only the
+    // explicitly configured target aliases; authored styling stays intact.
+    exportFontMap: parseExportFontMap(process.env.CORDIS_PRESENTATION_EXPORT_FONT_MAP),
     providerCommand: [pythonCommand],
     pptMasterRoot,
     qualityScriptPath: nodePath.join(scriptsRoot, 'svg_quality_checker.py'),
@@ -83,8 +98,9 @@ const createDefaultGenerationContextFactory = (
     return {
       plannerContext: {},
       workerContext: {
-        convert: (path, signal) => toolchain.convert(path, signal),
+        convert: (path, signal, replaceData) => toolchain.convert(path, signal, replaceData),
         jobId,
+        nativeData,
         qualityCheck: (path, signal) => toolchain.qualityCheck(path, signal),
         workspace: {
           cleanup: () => rm(workspacePath, { force: true, recursive: true }),
@@ -153,10 +169,13 @@ const assemble = (): PresentationRuntimeComposition | undefined => {
     });
     const journalBindings = createPresentationRouteJournalBindings(journalCache);
 
-    const resolveChatConnection = async (scope: RuntimeScope) => {
+    const resolveChatConnection = async (
+      scope: RuntimeScope,
+      selection?: PresentationAgentModelSelection,
+    ) => {
       const { getServerDB } = await import('@/database/core/db-adaptor');
       const { resolveUserChatProvider } = await import('@/server/services/modelProvider');
-      return resolveUserChatProvider(await getServerDB(), scope.userId);
+      return resolveUserChatProvider(await getServerDB(), scope.userId, selection);
     };
     const multimodalChatPort = createResilientMultimodalChatPort(
       createUserChatProvider({
@@ -183,6 +202,31 @@ const assemble = (): PresentationRuntimeComposition | undefined => {
           manifest: Object.freeze({ ...scopedVisionChatPort.manifest, model: visionModel }),
         }
       : scopedVisionChatPort;
+
+    const agentModels = loadPresentationAgentModelConfig({
+      CORDIS_PRESENTATION_AGENT_MODELS: process.env.CORDIS_PRESENTATION_AGENT_MODELS,
+    });
+    const agentRoutingFingerprint = fingerprintPresentationAgentModelConfig(agentModels);
+    const agentChatPorts: Partial<Record<PresentationAgentRole, MultimodalChatPort>> = {};
+    for (const [role, selection] of Object.entries(agentModels)) {
+      const port = createResilientMultimodalChatPort(
+        createUserChatProvider({
+          fetcher: createPresentationChatFetch(globalThis.fetch),
+          requiresVision: role !== 'content' && role !== 'diagnosis',
+          resolve: (scope) => resolveChatConnection(scope, selection),
+        }),
+      );
+      agentChatPorts[role as PresentationAgentRole] = {
+        ...port,
+        providerId: selection.provider ?? port.providerId,
+        manifest: Object.freeze({
+          ...port.manifest,
+          providerId: selection.provider ?? port.providerId,
+          model: selection.model,
+          displayName: 'PPT ' + role,
+        }),
+      };
+    }
 
     const imageGenerationCapability = imageApiKey
       ? createImageGenerationCapability({
@@ -249,6 +293,15 @@ const assemble = (): PresentationRuntimeComposition | undefined => {
     const templateLibrary = new FilePresentationTemplateLibrary({
       root: nodePath.join(dataRoot, 'templates'),
     });
+    const seedDesignLibrary = createPptMasterDesignLibrarySeeder(root, capabilityMemory);
+    const seedLocalCorpus = process.env.CORDIS_PRESENTATION_LOCAL_CORPUS_USER_ID
+      ? createLocalCorpusSeeder({
+          sourceUserId: process.env.CORDIS_PRESENTATION_LOCAL_CORPUS_USER_ID,
+          library: templateLibrary,
+          store: artifactStore,
+          memory: capabilityMemory,
+        })
+      : undefined;
     const trialEvidence = new FileTrialEvidenceStore(nodePath.join(dataRoot, 'trial-evidence'));
     const trialLearning = new FileTrialLearningStore({
       root: nodePath.join(dataRoot, 'trial-learning'),
@@ -256,6 +309,25 @@ const assemble = (): PresentationRuntimeComposition | undefined => {
       storage: artifactStore,
     });
     const result = createProductionPresentationGenerationComposition({
+      agentChatPorts,
+      agentRoutingFingerprint,
+      onAgentExecution: async (receipt, context) => {
+        const directory = nodePath.join(dataRoot, 'agent-executions');
+        await mkdir(directory, { recursive: true, mode: 0o700 });
+        const scopeKey = createHash('sha256')
+          .update(context.scope.userId + '\0' + context.scope.sessionId)
+          .digest('hex');
+        await appendFile(
+          nodePath.join(directory, scopeKey + '.jsonl'),
+          JSON.stringify({
+            ...receipt,
+            at: new Date().toISOString(),
+            jobId: currentPresentationAgentJob(),
+            routingFingerprint: agentRoutingFingerprint,
+          }) + '\n',
+          { mode: 0o600 },
+        );
+      },
       trialLearning,
       trialWorkspace: createProductionTrialWorkspace({
         budgets: async () => {
@@ -282,14 +354,10 @@ const assemble = (): PresentationRuntimeComposition | undefined => {
       ),
       teachingMemory: new FileTeachingMemory(nodePath.join(dataRoot, 'teaching-memory')),
       capabilityMemory,
-      prepareCapabilityLibrary: process.env.CORDIS_PRESENTATION_LOCAL_CORPUS_USER_ID
-        ? createLocalCorpusSeeder({
-            sourceUserId: process.env.CORDIS_PRESENTATION_LOCAL_CORPUS_USER_ID,
-            library: templateLibrary,
-            store: artifactStore,
-            memory: capabilityMemory,
-          })
-        : undefined,
+      prepareCapabilityLibrary: async (scope) => {
+        await seedDesignLibrary(scope);
+        await seedLocalCorpus?.(scope);
+      },
       audioTranscriber,
       templateLibrary,
       artifactStore,
@@ -340,6 +408,7 @@ const registry = globalThis as typeof globalThis & {
 };
 /** Studio routes and channel tools share the same production assembly and scoped storage. */
 export const getDefaultPresentationComposition = () => {
+  assertBuiltinPluginEnabled('presentation');
   if (!registry.__qingzhouPresentationRuntime) {
     const composition = assemble();
     registry.__qingzhouPresentationRuntime = { composition, readiness, error: configurationError };

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { parseString } from '../../../../packages/file-loaders/src/utils/parser-utils';
 import { inspectPresentationContent } from './content-quality';
 import {
   assertDeckBodyFits,
@@ -177,7 +178,8 @@ describe('measured semantic layout recovery', () => {
     });
     expect(result.svg).toContain('data-report-table');
     expect(result.svg).toContain('录取68人');
-    expect(result.svg).toContain('等待学校审批');
+    // A retained phrase may span editable text runs after measured wrapping.
+    expect(parseString(result.svg).documentElement.textContent).toContain('等待学校审批');
     expect('overflowNotes' in result && result.overflowNotes).toBeTruthy();
   });
   it('measures long Chinese paragraphs with the same font as the shared master', async () => {

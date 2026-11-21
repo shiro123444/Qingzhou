@@ -512,11 +512,11 @@ export class RuntimeClientImpl implements RuntimeClient {
     return (await response.json()) as PresentationJob;
   }
 
-  async listPresentationJobs(): Promise<PresentationJob[]> {
+  async listPresentationJobs(chatOrigin?: PresentationJob['chatOrigin']): Promise<PresentationJob[]> {
     const headers = await this.prepareHeaders();
     const response = await this.fetcher(
       this.resolveUrl('/api/runtime/presentation/tools/presentation.job.list'),
-      { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: '{}' },
+      { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ chatOrigin }) },
     );
     if (!response.ok) throw new Error(`Failed to restore presentations (${response.status})`);
     // A body without a `jobs` array means "no saved works": returning undefined here made the store's

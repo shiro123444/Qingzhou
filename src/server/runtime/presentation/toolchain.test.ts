@@ -1,4 +1,4 @@
-import { resolve } from 'node:path';
+import path from 'node:path';
 
 import { strToU8, zipSync } from 'fflate';
 import { describe, expect, it, vi } from 'vitest';
@@ -39,8 +39,8 @@ describe('C-53 ppt-master toolchain', () => {
     expect(spawn).toHaveBeenCalledWith(
       expect.objectContaining({
         args: [
-          resolve('/opt/ppt-master/svg_quality_checker.py'),
-          resolve('/tmp/workspaces/job-1'),
+          path.resolve('/opt/ppt-master/svg_quality_checker.py'),
+          path.resolve('/tmp/workspaces/job-1'),
           '--canonical-authoring',
           '--stage',
           'final',
@@ -72,8 +72,8 @@ describe('C-53 ppt-master toolchain', () => {
     expect(spawn).toHaveBeenCalledWith(
       expect.objectContaining({
         args: [
-          resolve('/opt/ppt-master/svg_to_pptx.py'),
-          resolve('/tmp/workspaces/job-1'),
+          path.resolve('/opt/ppt-master/svg_to_pptx.py'),
+          path.resolve('/tmp/workspaces/job-1'),
           '--output',
           'exports/presentation.pptx',
           '--animation',
@@ -82,6 +82,10 @@ describe('C-53 ppt-master toolchain', () => {
         ],
         shell: false,
       }),
+    );
+    await toolchain.convert('/tmp/workspaces/job-1', undefined, true);
+    expect(spawn).toHaveBeenLastCalledWith(
+      expect.objectContaining({ args: expect.arrayContaining(['--native-charts-and-tables']) }),
     );
     expect(
       () => new PptMasterToolchain({ ...options(runner), qualityScriptPath: '/tmp/evil.py' }),
@@ -95,6 +99,13 @@ describe('C-53 ppt-master toolchain', () => {
     await expect(
       new PptMasterToolchain(options(bad.runner)).qualityCheck('/tmp/workspaces/job-1'),
     ).rejects.toMatchObject({ code: 'PRESENTATION_QUALITY_FAILED' });
+    const overflow = makeRunner({
+      exitCode: 1,
+      stdout: '[ERROR] 003.svg - Failed\n [ERROR] <text> private title exceeds data-pptx-bounds',
+    });
+    await expect(
+      new PptMasterToolchain(options(overflow.runner)).qualityCheck('/tmp/workspaces/job-1'),
+    ).rejects.toMatchObject({ message: 'PowerPoint 导出前检查发现第 3 页有文字超出排版区域。' });
     const malformed = makeRunner({ exitCode: 0, stdout: 'not-json' });
     await expect(
       new PptMasterToolchain(options(malformed.runner)).qualityCheck('/tmp/workspaces/job-1'),

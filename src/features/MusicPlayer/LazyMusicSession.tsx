@@ -12,10 +12,12 @@ const loadSession = async () => (await import('./session')).createMusicSession()
 export default function LazyMusicSession({
   active,
   children,
+  enabled = true,
   load = loadSession,
   userId,
 }: PropsWithChildren<{
   active: boolean;
+  enabled?: boolean;
   load?: () => Promise<MusicSession>;
   userId: string | null;
 }>) {
@@ -23,13 +25,18 @@ export default function LazyMusicSession({
   const [error, setError] = useState(false);
   const [attempt, setAttempt] = useState(0);
   // Once requested, navigation does not cancel playback or an in-flight activation.
-  const [requested, setRequested] = useState(active);
+  const [requested, setRequested] = useState(active && enabled);
   useEffect(() => {
-    if (active) setRequested(true);
-  }, [active]);
+    if (!enabled) setRequested(false);
+    else if (active) setRequested(true);
+  }, [active, enabled]);
 
   useEffect(() => {
-    if (!requested) return;
+    if (!enabled || !requested) {
+      setSession(null);
+      setError(false);
+      return;
+    }
     let current = true;
     let owned: MusicSession | undefined;
     setError(false);
@@ -54,27 +61,33 @@ export default function LazyMusicSession({
         owned.engine.dispose();
       }
     };
-  }, [requested, attempt, load]);
+  }, [requested, enabled, attempt, load]);
 
   useLayoutEffect(() => {
-    if (!session) return;
+    if (!enabled || !session) return;
     void session.engine.setAccount(userId);
     void session.plugins.start();
-  }, [session, userId]);
+  }, [session, userId, enabled]);
 
   useEffect(() => {
-    if (!session) return;
+    if (!enabled || !session) return;
     const flush = () => session.engine.flush();
     window.addEventListener('pagehide', flush);
     return () => window.removeEventListener('pagehide', flush);
-  }, [session]);
+  }, [session, enabled]);
 
   return (
     <MusicActivationContext
-      value={{ error, ready: !!session, retry: () => setAttempt((value) => value + 1) }}
+      value={{
+        error: enabled && error,
+        ready: enabled && !!session,
+        retry: () => setAttempt((value) => value + 1),
+      }}
     >
-      <MusicEngineProvider engine={session?.engine ?? null}>
-        <MusicPluginsProvider host={session?.plugins ?? null}>{children}</MusicPluginsProvider>
+      <MusicEngineProvider engine={enabled ? (session?.engine ?? null) : null}>
+        <MusicPluginsProvider host={enabled ? (session?.plugins ?? null) : null}>
+          {children}
+        </MusicPluginsProvider>
       </MusicEngineProvider>
     </MusicActivationContext>
   );

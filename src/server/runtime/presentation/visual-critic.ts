@@ -5,7 +5,11 @@ import { z } from 'zod';
 
 import { lessonPlanSchema, lessonStages } from '@/types/presentationLesson';
 
-import type { PresentationPlan, RuntimeScope } from '../../../../packages/runtime-contracts/src';
+import type {
+  PresentationPlan,
+  PresentationSlidePlan,
+  RuntimeScope,
+} from '../../../../packages/runtime-contracts/src';
 import type { PresentationArtifactStore } from './artifact-store';
 import {
   assertDeckVisualConsistency,
@@ -21,6 +25,48 @@ import {
 import { presentationImageRefs } from './revision-assets';
 import { completeStructuredJson } from './structured-json-chat';
 import type { TemplateApplication } from './templates';
+
+/** A storyboard is a proposal. Measured native compilation supersedes its
+ * container/decoration choices, while approved facts and relations remain hard. */
+export function projectVisualReviewContract(slide: PresentationSlidePlan) {
+  const receipt = slide.metadata?.compiledDesign as
+    { schemaVersion?: number; layoutCapsuleId?: string; slotIds?: string[] } | undefined;
+  const compiled =
+    receipt?.schemaVersion === 1 &&
+    /^capsule-[a-f\d]{40}$/u.test(receipt.layoutCapsuleId ?? '') &&
+    Array.isArray(receipt.slotIds);
+  const direction = slide.metadata?.visualDirection as
+    { role?: unknown; archetypeId?: unknown; familyId?: unknown } | undefined;
+  const blocks = Array.isArray(slide.metadata?.contentBlocks) ? slide.metadata.contentBlocks : [];
+  const requirements = Array.isArray(slide.metadata?.visualRequirements)
+    ? slide.metadata.visualRequirements
+    : [];
+  return {
+    slideId: slide.slideId,
+    visualDirection: compiled
+      ? {
+          role: direction?.role,
+          archetypeId: direction?.archetypeId,
+          familyId: direction?.familyId,
+        }
+      : direction,
+    compiledDesign: compiled ? receipt : undefined,
+    approvedContent: slide.metadata?.outline,
+    contentBlocks: blocks,
+    visualRequirements: compiled
+      ? requirements.map((visual) =>
+          visual.renderer === 'native' && blocks.some((block) => block.id === visual.id)
+            ? {
+                ...visual,
+                brief:
+                  'Required editable content and relationships are defined by contentBlocks and approvedContent. The measured compiler owns containers, typography and spacing.',
+              }
+            : visual,
+        )
+      : requirements,
+    visualAssets: slide.metadata?.visualAssets,
+  };
+}
 
 export const presentationVisualReviewSchema = z
   .object({
@@ -270,7 +316,11 @@ async function reviewWholeDeck(
     context.scope,
   );
   const ids = new Set(plan.slides.map((slide) => slide.slideId));
-  const fingerprint = createHash('sha256').update(bytes).digest('hex').slice(0, 20);
+  const fingerprint = createHash('sha256')
+    .update(bytes)
+    .update(String(plan.designSpec?.agentRoutingFingerprint ?? ''))
+    .digest('hex')
+    .slice(0, 20);
   return (
     await completeStructuredJson<PresentationVisualReview>({
       chat: options.chat,
@@ -324,13 +374,24 @@ export const createPresentationVisualCritic = (options: {
   readonly store: PresentationArtifactStore;
 }): PresentationVisualCritic => ({
   review: async ({ plan, template }, context) => {
+    const reviewDeckContext = plan.designSpec?.reviewDeckContext ?? {
+      totalSlides: plan.slides.length,
+      slides: plan.slides.map((s) => ({ slideId: s.slideId, order: s.order })),
+    };
     if (plan.slides.length > 4) {
       const batches: PresentationVisualReview[] = [];
       for (let offset = 0; offset < plan.slides.length; offset += 4) {
         context.signal?.throwIfAborted();
         batches.push(
           await createPresentationVisualCritic(options).review(
-            { plan: { ...plan, slides: plan.slides.slice(offset, offset + 4) }, template },
+            {
+              plan: {
+                ...plan,
+                designSpec: { ...plan.designSpec, reviewDeckContext },
+                slides: plan.slides.slice(offset, offset + 4),
+              },
+              template,
+            },
             context,
           ),
         );
@@ -412,13 +473,30 @@ export const createPresentationVisualCritic = (options: {
     ).filter((image): image is GLMServerImageInput => Boolean(image));
     const trusted = createTrustedChatImages([...referenceImages, ...renderedSlides], context.scope);
     const fingerprint = createHash('sha256')
-      .update(slides.map((slide) => slide.svg).join('\u0000'))
+      .update(
+        JSON.stringify({
+          protocolVersion: 2,
+          agentRoutingFingerprint: plan.designSpec?.agentRoutingFingerprint,
+          reviewDeckContext,
+          svg: slides.map((slide) => slide.svg),
+        }),
+      )
       .digest('hex')
       .slice(0, 20);
     const content: GLMChatContentPart[] = [
       {
         text: JSON.stringify({
           currentTask: { title: plan.title },
+          reviewScope: {
+            ...(reviewDeckContext as {
+              totalSlides: number;
+              slides: { slideId: string; order: number }[];
+            }),
+            reviewedSlideIds: slides.map((s) => s.slideId),
+            policy:
+              'storyboard仅包含本批次，整稿总数与页面顺序以totalSlides和slides为准；不能把本批次页数当总页数。封面不带正文页码是批准变体。',
+          },
+          learnedDesignReferences: plan.designSpec?.designSourceContract,
           designProgram: plan.designSpec?.deckVisualSystem
             ? undefined
             : template?.visual?.designProgram,
@@ -434,7 +512,9 @@ export const createPresentationVisualCritic = (options: {
             : undefined,
           deckVisualSystem: plan.designSpec?.deckVisualSystem,
           deckPolicy: plan.designSpec?.deckVisualSystem
-            ? '优先级：当前任务事实 > deckVisualSystem整稿规范 > 故事板内容区意图 > 模板结构参考。整稿规范是唯一的字体、标题、背景与装饰硬约束。referenceStructures和模板截图只提供内容区几何及信息密度证据，不是必须照搬的完整页面契约。不得要求恢复其他模板的天空背景、光晕、衬线字体或标题位置。封面/章节/尾页允许规范声明的深浅变体。若当前任务标题或本页内容明确包含机构名称，该名称是本次事实，不能仅因它也出现在模板中就判为旧机构残留；不确定时不要猜测。真实原图保留原始数据色彩，重点检查外部容器统一与可读性。'
+            ? (plan.designSpec.deckVisualSystem as { schemaVersion?: number }).schemaVersion === 3
+              ? '优先级：当前任务事实与approvedContent > 实际采用的Style和compiledDesign测量布局 > 可读性与关系完整性 > 故事板构想 > 中性模板原型。schemaVersion 3没有预制页眉、页脚、卡片或底板；编译后的容器与留白适配是实际设计，不得因缺少故事板中可选的强调条、卡片、重复标签就判重大缺陷。referenceStructures和模板截图只提供几何及容量参考。仍须逐项检查事实、必需文字、节点关系、行列、真实越界和遮挡。真实原图保留数据色彩。'
+              : '优先级：当前任务事实 > deckVisualSystem整稿规范 > 故事板内容区意图 > 模板结构参考。已保存的旧版整稿规范继续拥有页眉、字体与标题，不要求重建其他源模板。'
             : undefined,
           referencePolicy: template?.visual
             ? '对照实际模板截图审查信息承载能力：比较图表与正文占比、表格行列、阅读层次和重点。统一风格不等于固定一种空白页框。不能仅因没有越界就判定通过；报告主体缩成小图、长段落缺少结构、关键事实只在备注、尾页缺少明确收束均需指出。封面/章节留白可以合理。不要为追求密度虚构事实或要求复制旧品牌。'
@@ -442,11 +522,7 @@ export const createPresentationVisualCritic = (options: {
           semanticReviewRules:
             '检查公式排版与截断（formula）、科研图箭头坐标与论点一致性（scientific-semantics）、为塞内容而缩小正文（density）。所有生成素材还需检查背景：若能看到被画入图片的灰白棋盘格、透明预览网格，这是伪透明背景，应以artwork-style重大问题报告并让Image重绘完整自然背景，不能把整张白底概念插画误判为必须抠图。贴纸/装饰（kind sticker）：检查是否带白底方块、是否越出卡片边框或压住正文与公式；visualAssets 里 transparency 为 opaque 表示服务端已实测该图没有可用透明像素（渲染出来就是白底方块），这是缺陷；轻微出血不算缺陷，遮挡可读内容才算。由服务端矢量叠加的标注（visualRequirements[].annotations 声明的箭头、引线与标签）不是生图内容：图内箭头方向、引线或这些标签的拼写不要作为意见提出，只评判生图对象是否覆盖 brief 指定的部件与关系、风格、留白与越界。对照visualRequirements逐块检查renderer:image的科研图是否呈现brief指定对象、部件、必要图内标签和关系，而不是无关印象图；不得把概念图冒充论文原图或实测结果，也不要求普通概念图标注“示意图”。科学方向判断须先与本页已批准公式和visualRequirements核对；例如约束g≤0且λ≥0时，KKT驻点关系∇f+λ∇g=0，不能把相反方向误报为同向。检查生成插图、精确矢量图与公式混排时的遮挡、卡片内越界和留白。只报告有像素及结构证据的问题。',
           storyboard: plan.slides.map((slide) => ({
-            slideId: slide.slideId,
-            visualDirection: slide.metadata?.visualDirection,
-            contentBlocks: slide.metadata?.contentBlocks,
-            visualRequirements: slide.metadata?.visualRequirements,
-            visualAssets: slide.metadata?.visualAssets,
+            ...projectVisualReviewContract(slide),
             teaching: plan.designSpec?.lessonPlan
               ? (() => {
                   const { frame } = lessonStages(

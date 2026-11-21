@@ -1,6 +1,7 @@
 import debug from 'debug';
 import type { Context } from 'hono';
 
+import { isNativeAgentRuntimeEnabled } from '@/server/runtime/tasks/mode';
 import { runScheduleTick } from '@/server/services/taskRunner/scheduleTick';
 
 const log = debug('lobe-server:workflows:task:schedule-execute');
@@ -16,6 +17,7 @@ export interface ScheduleExecutePayload {
  * delegates to `runScheduleTick` which owns DB-state re-validation.
  */
 export async function scheduleExecute(c: Context) {
+  if (isNativeAgentRuntimeEnabled()) return c.json({ success: true, managedBy: 'native-worker' });
   try {
     const body = (await c.req.json()) as ScheduleExecutePayload;
     const { taskId, userId } = body;

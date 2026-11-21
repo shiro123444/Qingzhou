@@ -1,10 +1,12 @@
 'use client';
+import { type ChatInputActionsProps } from '@lobehub/editor/react';
 import { Button, Icon } from '@lobehub/ui';
 import { Paperclip } from 'lucide-react';
 import { memo, useCallback, useRef, useState } from 'react';
 import { MemoryRouter, useInRouterContext } from 'react-router-dom';
 
 import DragUploadZone from '@/components/DragUploadZone';
+import { BotMentionButton } from '@/features/BotSurface/context';
 import {
   type ActionKeys,
   type ChatInputEditor,
@@ -15,7 +17,6 @@ import ConversationChatInput from '@/features/Conversation/ChatInput';
 import { fileChatSelectors, useFileStore } from '@/store/file';
 import { ServerConfigStoreProvider } from '@/store/serverConfig/Provider';
 
-import { PresentationTools, type PresentationToolSelection } from './PresentationTools';
 import { type PresentationReferenceInput, toPresentationReference } from './types';
 
 const DIRECT_LEFT_ACTIONS: ActionKeys[] = [];
@@ -28,7 +29,6 @@ const CONVERSATION_RIGHT_ACTIONS: ActionKeys[] = ['contextWindow'];
 export interface PresentationSendPayload {
   references: PresentationReferenceInput[];
   text: string;
-  tools?: PresentationToolSelection;
 }
 
 export interface PresentationChatInputProps {
@@ -36,22 +36,20 @@ export interface PresentationChatInputProps {
   conversation?: boolean;
   creating?: boolean;
   disabled?: boolean;
+  extraActionItems?: ChatInputActionsProps['items'];
   onEditorReady?: (editor: ChatInputEditor) => void;
   onSend: (payload: PresentationSendPayload) => void;
   onStop?: () => void;
-  onToolsChange?: (value: PresentationToolSelection) => void;
   placeholder?: string;
-  tools?: PresentationToolSelection;
 }
 
 const PresentationChatInputInner = memo<PresentationChatInputProps>(
   ({
     agentId,
-    tools,
-    onToolsChange,
     conversation = false,
     creating = false,
     disabled = false,
+    extraActionItems = [],
     onEditorReady,
     onSend,
     onStop,
@@ -91,6 +89,7 @@ const PresentationChatInputInner = memo<PresentationChatInputProps>(
       key: 'presentation-upload',
       children: (
         <>
+          <BotMentionButton />
           <Button
             aria-label="上传 PPT 附件"
             icon={<Icon icon={Paperclip} size={22} />}
@@ -127,11 +126,11 @@ const PresentationChatInputInner = memo<PresentationChatInputProps>(
         const trimmedText = text.trim();
         if (!trimmedText && references.length === 0) return;
 
-        onSend({ references, text: trimmedText, tools });
+        onSend({ references, text: trimmedText });
         handlers?.clearContent?.();
         useFileStore.getState().clearChatUploadFileList();
       },
-      [onSend, tools],
+      [onSend],
     );
 
     if (conversation) {
@@ -147,22 +146,12 @@ const PresentationChatInputInner = memo<PresentationChatInputProps>(
           >
             <ConversationChatInput
               allowExpand
+              extraActionItems={[uploadAction, ...extraActionItems]}
               isConfigLoading={false}
               leftActions={CONVERSATION_LEFT_ACTIONS}
               placeholder={placeholder}
               rightActions={CONVERSATION_RIGHT_ACTIONS}
               showRuntimeConfig={false}
-              extraActionItems={
-                tools && onToolsChange
-                  ? [
-                      uploadAction,
-                      {
-                        key: 'presentation-tools',
-                        children: <PresentationTools value={tools} onChange={onToolsChange} />,
-                      },
-                    ]
-                  : [uploadAction]
-              }
               sendButtonProps={{
                 disabled: (disabled && !creating) || isUploadingFiles,
                 generating: creating,
@@ -215,20 +204,10 @@ const PresentationChatInputInner = memo<PresentationChatInputProps>(
           >
             <DesktopChatInput
               borderRadius={16}
+              extraActionItems={[uploadAction, ...extraActionItems]}
               isConfigLoading={false}
               showFootnote={false}
               showRuntimeConfig={false}
-              extraActionItems={
-                tools && onToolsChange
-                  ? [
-                      uploadAction,
-                      {
-                        key: 'presentation-tools',
-                        children: <PresentationTools value={tools} onChange={onToolsChange} />,
-                      },
-                    ]
-                  : [uploadAction]
-              }
               placeholder={
                 placeholder ??
                 '拖入图片、PPT、PDF 或输入你的演示文稿主题（例如：2026年企业数字化转型与AI赋能战略汇报）...'

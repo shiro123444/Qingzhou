@@ -17,7 +17,6 @@ export { default as ExportMenu } from './ExportMenu';
 export { useJobPolling } from './hooks/useJobPolling';
 export { usePresentationStudio } from './hooks/usePresentationStudio';
 export { default as JobStateTag } from './JobStateTag';
-export { default as PresentationComposer } from './PresentationComposer';
 export { default as PresentationJobList } from './PresentationJobList';
 export { default as PresentationProgress } from './PresentationProgress';
 export type { PresentationStudioProps } from './PresentationStudio';

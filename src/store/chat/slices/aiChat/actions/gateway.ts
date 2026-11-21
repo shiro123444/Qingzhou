@@ -7,13 +7,16 @@ import {
 import type { ConversationContext, ExecAgentResult, MessageMetadata } from '@lobechat/types';
 
 import { isDesktop } from '@/const/version';
+import { NativeStreamClient } from '@/services/agentRuntime/nativeClient';
 import { aiAgentService, type ResumeApprovalParam } from '@/services/aiAgent';
 import { messageService } from '@/services/message';
 import { topicService } from '@/services/topic';
 import { consumePendingTopicRepos, getPendingTopicRepos } from '@/store/chat/pendingTopicRepos';
 import type { ChatStore } from '@/store/chat/store';
 import type { StoreSetter } from '@/store/types';
+import { readUiAttention } from '@/store/uiAttention';
 import { useUserStore } from '@/store/user';
+import { toolInterventionSelectors } from '@/store/user/selectors';
 
 import { createGatewayEventHandler } from './gatewayEventHandler';
 
@@ -66,6 +69,7 @@ export interface ConnectGatewayParams {
    * `auth_expired`. Every Gateway op has a topic, so this is required.
    */
   topicId: string;
+  transport?: 'native' | 'gateway';
 }
 
 // ─── Action Implementation ───
@@ -77,6 +81,8 @@ export class GatewayActionImpl {
   /** Overridable factory for testing */
   createClient: (options: AgentStreamClientOptions) => GatewayConnection['client'] = (options) =>
     new AgentStreamClient(options);
+  createNativeClient = (operationId: string): GatewayConnection['client'] =>
+    new NativeStreamClient(operationId);
 
   constructor(set: Setter, get: () => ChatStore, _api?: unknown) {
     void _api;
@@ -95,7 +101,10 @@ export class GatewayActionImpl {
     // Disconnect existing connection for this operation if any
     this.disconnectFromGateway(operationId);
 
-    const client = this.createClient({ gatewayUrl, operationId, resumeOnConnect, token });
+    const client =
+      params.transport === 'native'
+        ? this.createNativeClient(operationId)
+        : this.createClient({ gatewayUrl, operationId, resumeOnConnect, token });
 
     // Track connection in store
     this.#set(
@@ -229,6 +238,8 @@ export class GatewayActionImpl {
    * Returns true if both server config and user lab toggle are set.
    */
   isGatewayModeEnabled = (): boolean => {
+    if (window.global_serverConfigStore?.getState()?.serverConfig?.agentRuntimeMode === 'native')
+      return true;
     const agentGatewayUrl =
       window.global_serverConfigStore?.getState()?.serverConfig?.agentGatewayUrl;
     const enableGatewayMode = useUserStore.getState().preference.lab?.enableGatewayMode;
@@ -290,7 +301,7 @@ export class GatewayActionImpl {
     } = params;
 
     const agentGatewayUrl =
-      window.global_serverConfigStore!.getState().serverConfig.agentGatewayUrl!;
+      window.global_serverConfigStore?.getState()?.serverConfig?.agentGatewayUrl ?? '';
 
     const isCreateNewTopic = !context.topicId;
     const taskId = context.viewedTask?.type === 'detail' ? context.viewedTask.taskId : undefined;
@@ -316,10 +327,24 @@ export class GatewayActionImpl {
     const abortSignal = parentOperationId
       ? this.#get().getOperationAbortSignal(parentOperationId)
       : undefined;
+    if (abortSignal?.aborted) throw abortSignal.reason ?? new DOMException('Aborted', 'AbortError');
+    const nativeConfigured =
+      window.global_serverConfigStore?.getState()?.serverConfig?.agentRuntimeMode === 'native';
 
     const result = await aiAgentService.execAgentTask(
       {
+        ...(window.global_serverConfigStore?.getState()?.serverConfig?.agentRuntimeMode === 'native'
+          ? {
+              userInterventionConfig: {
+                approvalMode: toolInterventionSelectors.approvalMode(useUserStore.getState()),
+                allowList: toolInterventionSelectors.allowList(useUserStore.getState()),
+              },
+            }
+          : {}),
         agentId: context.agentId,
+        ...(!parentMessageId && !resumeApproval
+          ? { uiAttention: readUiAttention(useUserStore.getState().user?.id, context.agentId) }
+          : {}),
         appContext: {
           defaultTaskAssigneeAgentId: context.defaultTaskAssigneeAgentId,
           documentId: context.documentId,
@@ -340,8 +365,12 @@ export class GatewayActionImpl {
         resumeApproval,
         trigger: metadata?.trigger,
       },
-      { signal: abortSignal },
+      // Keep the native admission response so an explicit Stop during startup can cancel
+      // the accepted server id. Aborting this fetch would discard that cancellation handle.
+      { signal: nativeConfigured ? undefined : abortSignal },
     );
+    if (!result.success) throw new Error(result.error || result.message);
+    const native = result.transport === 'native';
 
     if (abortSignal?.aborted) {
       // Cancel arrived after execAgentTask resolved — server task exists.
@@ -390,7 +419,7 @@ export class GatewayActionImpl {
 
     if (result.topicId) {
       this.#get().internal_updateTopicLoading(result.topicId, true);
-      void this.#get().updateTopicStatus?.(result.topicId, 'running');
+      if (!native) void this.#get().updateTopicStatus?.(result.topicId, 'running');
     }
 
     // Create a dedicated operation for gateway execution with correct context.
@@ -428,22 +457,25 @@ export class GatewayActionImpl {
       // Server-side operation id — needed for tool_result dispatch back over
       // the same WS that gatewayConnections is keyed on.
       gatewayOperationId: result.operationId,
+      transport: result.transport,
       operationId: gatewayOpId,
     });
 
     this.#get().connectToGateway({
+      transport: result.transport,
       gatewayUrl: agentGatewayUrl,
       onEvent: eventHandler,
       onSessionComplete: () => {
         this.#get().completeOperation(gatewayOpId);
         if (result.topicId) {
           this.#get().internal_updateTopicLoading(result.topicId, false);
-          void this.#get().updateTopicStatus?.(result.topicId, 'active');
+          if (!native) void this.#get().updateTopicStatus?.(result.topicId, 'active');
           // Clear running operation from topic metadata (best-effort from frontend;
           // if browser was closed, reconnect logic will handle stale entries)
-          topicService
-            .updateTopicMetadata(result.topicId, { runningOperation: null })
-            .catch(() => {});
+          if (!native)
+            topicService
+              .updateTopicMetadata(result.topicId, { runningOperation: null })
+              .catch(() => {});
         }
         onComplete?.();
       },
@@ -461,6 +493,7 @@ export class GatewayActionImpl {
    * and establishes a new WebSocket connection with event replay.
    */
   reconnectToGatewayOperation = async (params: {
+    transport?: 'native' | 'gateway';
     assistantMessageId: string;
     operationId: string;
     scope?: string;
@@ -471,7 +504,12 @@ export class GatewayActionImpl {
 
     const agentGatewayUrl =
       window.global_serverConfigStore?.getState()?.serverConfig?.agentGatewayUrl;
-    if (!agentGatewayUrl) return;
+    const transport =
+      params.transport ??
+      (window.global_serverConfigStore?.getState()?.serverConfig?.agentRuntimeMode === 'native'
+        ? 'native'
+        : 'gateway');
+    if (!agentGatewayUrl && transport !== 'native') return;
 
     // Skip reconnect if the gateway action already established (or is establishing)
     // a fresh connection for this operation. This prevents a race on new-topic creation
@@ -485,7 +523,8 @@ export class GatewayActionImpl {
     if (existingStatus && existingStatus !== 'disconnected') return;
 
     // Get a fresh JWT token (original expired after 5 min)
-    const { token } = await aiAgentService.refreshGatewayToken(topicId);
+    const { token } =
+      transport === 'native' ? { token: '' } : await aiAgentService.refreshGatewayToken(topicId);
 
     const agentId = this.#get().activeAgentId;
     const context = {
@@ -519,17 +558,20 @@ export class GatewayActionImpl {
       // Server-side operation id — needed for tool_result dispatch back over
       // the same WS that gatewayConnections is keyed on.
       gatewayOperationId: operationId,
+      transport,
       operationId: gatewayOpId,
     });
 
     this.#get().connectToGateway({
-      gatewayUrl: agentGatewayUrl,
+      transport,
+      gatewayUrl: agentGatewayUrl ?? '',
       onEvent: eventHandler,
       onSessionComplete: () => {
         this.#get().completeOperation(gatewayOpId);
         this.#get().internal_updateTopicLoading(topicId, false);
-        void this.#get().updateTopicStatus?.(topicId, 'active');
-        topicService.updateTopicMetadata(topicId, { runningOperation: null }).catch(() => {});
+        if (transport !== 'native') void this.#get().updateTopicStatus?.(topicId, 'active');
+        if (transport !== 'native')
+          topicService.updateTopicMetadata(topicId, { runningOperation: null }).catch(() => {});
       },
       operationId,
       resumeOnConnect: true,

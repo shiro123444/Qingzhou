@@ -1,25 +1,27 @@
-import { executeBudgetedSignal } from './signal-budget';
-import * as production from './production';
-// @vitest-environment node
-import { getTestDB } from '@lobechat/database/test-utils';
-import { createHarnessRevision, type LearningScope } from '@lobechat/agent-runtime';
-import { eq, sql } from 'drizzle-orm';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+
+import { createHarnessRevision, type LearningScope } from '@lobechat/agent-runtime';
+// @vitest-environment node
+import { getTestDB } from '@lobechat/database/test-utils';
+import { eq, sql } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { requestLearningErasure } from '../learning-lifecycle/files';
-import { learningBudgetRoots, users } from '@/database/schemas';
 import { UserModel } from '@/database/models/user';
+import { learningBudgetRoots, users } from '@/database/schemas';
 import { createToolSet } from '@/server/services/agentSignal/services/selfIteration/tools/shared';
 
-import { DatabaseLearningBudget } from './budget-store';
+import { requestLearningErasure } from '../learning-lifecycle/files';
 import { LearningBudgetBinding } from './budget';
-import { openLearningBudget } from './production';
+import { DatabaseLearningBudget } from './budget-store';
 import { HarnessCoordinator } from './coordinator';
-import { FileHarnessStore } from './store';
 import { LearningCommands } from './learning-commands';
+import * as production from './production';
+import { openLearningBudget } from './production';
+import { executeBudgetedSignal } from './signal-budget';
+import { SIGNAL_ATTEMPT_LIMIT } from './signal-limits';
+import { FileHarnessStore } from './store';
 
 const db = await getTestDB();
 const scope: LearningScope = {
@@ -278,14 +280,18 @@ describe('durable common learning budgets and domain commands', () => {
   });
   it('charges an actual AgentSignal reflection plus probe and independent validation to one parent without extra model calls', async () => {
     const port = store();
-    const reflection = { calls: 1, tokens: 132608, costMicros: 50000 };
+    const reflection = { ...SIGNAL_ATTEMPT_LIMIT };
     const probe = { calls: 3, tokens: 15000, costMicros: 300 },
       validation = { calls: 6, tokens: 30000, costMicros: 600 };
     const b = await openLearningBudget(
       port,
       scope,
       'combined',
-      { calls: 10, tokens: 177608, costMicros: 50900 },
+      {
+        calls: 10,
+        tokens: reflection.tokens + probe.tokens + validation.tokens,
+        costMicros: 50900,
+      },
       { reflection, probe, validation },
     );
     const chat = vi.fn(async (_payload: any, options: any) => {

@@ -2,7 +2,7 @@ import type { PresentationActivity } from '@/types/presentationActivity';
 import type { LessonPlan, TeacherBrief } from '@/types/presentationLesson';
 import type { PresentationMaterials } from '@/types/presentationMaterial';
 import type { PresentationCreativePlan } from '@/types/presentationPlan';
-import type { TeachingSelection } from '@/types/presentationTeaching';
+import type { TeachingContext, TeachingSelection } from '@/types/presentationTeaching';
 
 import type {
   PresentationDecisionAnswer,
@@ -18,6 +18,8 @@ export interface PresentationAgentMessage {
 }
 
 export interface PresentationAgentBrief {
+  teachingContext?: TeachingContext;
+  teachingSelection?: TeachingSelection;
   aspectRatio?: '16:9' | '4:3';
   assets?: string[];
   audience?: string;

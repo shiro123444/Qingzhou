@@ -1,15 +1,6 @@
 import { Button, Flexbox, Icon } from '@lobehub/ui';
-import { Alert, Drawer, Input, InputNumber } from 'antd';
-import {
-  ArrowUp,
-  BookOpen,
-  Check,
-  LockKeyhole,
-  Sparkles,
-  Undo2,
-  UnlockKeyhole,
-  X,
-} from 'lucide-react';
+import { Alert, Input, InputNumber } from 'antd';
+import { ArrowUp, Check, LockKeyhole, Sparkles, Undo2, UnlockKeyhole, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -18,7 +9,7 @@ import type { TeachingSelection } from '@/types/presentationTeaching';
 
 import { lessonStyles as styles } from './lessonStyle';
 import type { OutlineSlide } from './OutlineWorkspace';
-import { TeachingMemoryWorkspace } from './TeachingMemoryWorkspace';
+import { TeachingMemoryAccess } from './TeachingMemoryAccess';
 
 export interface LessonWorkspaceProps {
   audience?: string;
@@ -58,7 +49,6 @@ export function LessonWorkspace({
   const [duration, setDuration] = useState(45);
   const [opening, setOpening] = useState<'cover' | 'direct'>('cover');
   const [planning, setPlanning] = useState(false);
-  const [memoryOpened, setMemoryOpened] = useState(false);
   const [localSelection, setLocalSelection] = useState<TeachingSelection>({
     course: '',
     ids: [],
@@ -152,9 +142,12 @@ export function LessonWorkspace({
               : t('presentationLesson.conversationHint')}
           </span>
         </Flexbox>
-        <Button icon={<Icon icon={BookOpen} />} type="text" onClick={() => setMemoryOpened(true)}>
-          {t('presentationTeaching.title')}
-        </Button>
+        <TeachingMemoryAccess
+          disabled={disabled || Boolean(proposal)}
+          selection={teachingSelection}
+          onChange={setTeachingSelection}
+          template={template}
+        />
       </Flexbox>
       {proposal && (
         <Flexbox
@@ -378,21 +371,6 @@ export function LessonWorkspace({
           </Button>
         </Flexbox>
       </Flexbox>
-      <Drawer
-        open={memoryOpened}
-        size={520}
-        title={t('presentationTeaching.title')}
-        onClose={() => setMemoryOpened(false)}
-      >
-        {memoryOpened && (
-          <TeachingMemoryWorkspace
-            disabled={disabled || !!proposal}
-            selection={teachingSelection}
-            template={template}
-            onChange={setTeachingSelection}
-          />
-        )}
-      </Drawer>
     </Flexbox>
   );
 }

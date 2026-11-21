@@ -1,76 +1,57 @@
-import { Button, Flexbox, Icon } from '@lobehub/ui';
-import { Dropdown, type MenuProps, Tooltip } from 'antd';
-import {
-  Check,
-  ChevronDown,
-  Download,
-  FileSpreadsheet,
-  FileText,
-  History,
-  Layers,
-  LayoutGrid,
-  PanelRightOpen,
-  PanelsTopLeft,
-  Pause,
-  Plus,
-  RefreshCw,
-  Sparkles,
-} from 'lucide-react';
-import { memo } from 'react';
+import { Button, Icon } from '@lobehub/ui';
+import { Dropdown, type MenuProps, Modal } from 'antd';
+import { ArrowLeft, Check, Download, Ellipsis, Pause, RefreshCw } from 'lucide-react';
+import { memo, type Ref, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import Link from '@/components/Link';
 import ToggleLeftPanelButton from '@/features/NavPanel/ToggleLeftPanelButton';
+import { presentationChatHref } from '@/features/PresentationDelivery/origin';
+import { glassSurface } from '@/styles/liquidGlass';
 
 import type {
   PresentationExportFormat,
   PresentationJob,
 } from '../../../../packages/runtime-contracts/src/index';
-import ActivityHistory from '../ActivityHistory';
+import { ActivityHistoryList } from '../ActivityHistory';
 import PresentationJobList from '../PresentationJobList';
+import TrialComparison from '../TrialComparison';
 import { styles } from './style';
 import TemplateLibraryButton from './TemplateLibraryButton';
 import type { CompletedViewMode } from './types';
 
-export interface CapsuleHeaderProps {
+interface CapsuleHeaderProps {
   activity?: string;
   activityHistory?: { id: string; text: string }[];
-  availableFormats?: string[];
+  availableFormats: string[];
   canExport: boolean;
-  canQuickExport?: boolean;
-  conversationOpen?: boolean;
-  currentIndex: number;
+  canQuickExport: boolean;
   drawerOpen: boolean;
-  exported: { artifactId: string; format: PresentationExportFormat; uri?: string } | null;
+  drawerTrigger: Ref<HTMLButtonElement>;
   exporting: boolean | string | null;
+  focused: boolean;
+  handoutId?: string;
   job: PresentationJob;
   jobs?: PresentationJob[];
   jobTitle?: string;
+  onBack?: () => void;
   onDeleteJob?: (jobId: string) => Promise<void> | void;
   onExport: (format: PresentationExportFormat) => void;
   onJobChanged?: () => Promise<void>;
   onNewPresentation?: () => void;
-  onOpenConversation: () => void;
   onQuickExport: () => void;
   onRetryJob: () => void;
   onSelectJob?: (jobId: string) => void;
   onToggleDrawer: () => void;
+  onToggleFocus: () => void;
   onToggleViewMode: () => void;
-  presentationStyle?: string;
+  onTrialVersionCreated?: (jobId: string) => Promise<void> | void;
   showSidebarReopen?: boolean;
-  slideCount: number;
+  slideId?: string;
   viewMode: CompletedViewMode;
 }
 
-const MORE_EXPORT_FORMATS: {
-  format: PresentationExportFormat;
-  icon: typeof FileSpreadsheet;
-  label: string;
-}[] = [
-  { format: 'pptx', icon: FileSpreadsheet, label: 'PowerPoint (.pptx)' },
-  { format: 'pdf', icon: FileText, label: 'PDF 文档 (.pdf)' },
-  { format: 'svg', icon: Layers, label: '矢量切片 (.svg)' },
-  { format: 'quality-report', icon: FileText, label: '质量分析报告' },
-];
+type EditorDialog = 'activity' | 'history' | 'templates' | 'trial';
 
 export const CapsuleHeader = memo<CapsuleHeaderProps>(
   ({
@@ -78,28 +59,33 @@ export const CapsuleHeader = memo<CapsuleHeaderProps>(
     activityHistory,
     availableFormats,
     canExport,
-    canQuickExport = canExport,
-    conversationOpen = false,
+    canQuickExport,
+    drawerTrigger,
     drawerOpen,
     exporting,
+    focused,
+    handoutId,
     job,
     jobTitle,
     jobs,
+    onBack,
     onSelectJob,
     onDeleteJob,
     onExport,
     onJobChanged,
     onNewPresentation,
-    onOpenConversation,
     onQuickExport,
     onRetryJob,
     onToggleDrawer,
+    onToggleFocus,
     onToggleViewMode,
-    showSidebarReopen = false,
+    onTrialVersionCreated,
+    showSidebarReopen,
+    slideId,
     viewMode,
   }) => {
     const { t } = useTranslation('common');
-
+    const [dialog, setDialog] = useState<EditorDialog>();
     const working = job.state === 'running' || job.state === 'queued';
     const statusText = working
       ? activity?.trim() || '正在修改'
@@ -119,189 +105,237 @@ export const CapsuleHeader = memo<CapsuleHeaderProps>(
                   : job.error?.message?.trim()
                     ? job.error.message.trim().slice(0, 40)
                     : '未完成';
-    const viewLabel = viewMode === 'lightbox' ? '单页精研' : '全景网格';
-
-    const moreExportMenu: MenuProps['items'] = MORE_EXPORT_FORMATS.filter(
-      ({ format }) => !availableFormats || availableFormats.includes(format),
-    ).map(({ format, icon, label }) => ({
-      icon: <Icon aria-hidden icon={icon} size={18} />,
-      key: format,
-      label: (
-        <span>
-          导出 {label}
-          <span style={{ display: 'none' }}>Export {label}</span>
-        </span>
-      ),
-      onClick: () => onExport(format),
-    }));
-
+    const formats: { format: PresentationExportFormat; label: string }[] = [
+      { format: 'pptx', label: 'PowerPoint (.pptx)' },
+      { format: 'pdf', label: 'PDF (.pdf)' },
+      { format: 'svg', label: 'SVG (.svg)' },
+      { format: 'quality-report', label: t('presentationEditor.qualityReport') },
+    ];
+    const items: MenuProps['items'] = [
+      ...(job.chatOrigin
+        ? [
+            {
+              key: 'chat',
+              label: (
+                <Link href={presentationChatHref(job.chatOrigin)}>
+                  {t('presentationEditor.chat')}
+                </Link>
+              ),
+            },
+          ]
+        : []),
+      ...(onNewPresentation
+        ? [
+            {
+              key: 'new',
+              label: t('presentationTemplates.newPresentation'),
+              onClick: onNewPresentation,
+            },
+          ]
+        : []),
+      ...(jobs && onSelectJob
+        ? [
+            {
+              key: 'history',
+              label: t('presentationTemplates.history'),
+              onClick: () => setDialog('history'),
+            },
+          ]
+        : []),
+      {
+        key: 'templates',
+        label: t('presentationTemplates.title'),
+        onClick: () => setDialog('templates'),
+      },
+      { type: 'divider' },
+      {
+        key: 'focus',
+        label: t(focused ? 'presentationCanvas.leaveFocus' : 'presentationCanvas.enterFocus'),
+        onClick: onToggleFocus,
+      },
+      {
+        key: 'view',
+        label: t(
+          viewMode === 'focus' ? 'presentationEditor.gridView' : 'presentationEditor.slideView',
+        ),
+        onClick: onToggleViewMode,
+      },
+      {
+        key: 'assets',
+        label: t(drawerOpen ? 'panel.assetsHide' : 'panel.assetsOpen'),
+        onClick: onToggleDrawer,
+      },
+      {
+        key: 'trial',
+        label: t('presentationTrial.open'),
+        disabled: job.state !== 'completed' || !job.versionId || !slideId,
+        onClick: () => setDialog('trial'),
+      },
+      {
+        key: 'activity',
+        label: t('presentationTemplates.activityHistory'),
+        onClick: () => setDialog('activity'),
+      },
+      {
+        key: 'retry',
+        label: t('presentationEditor.regenerate'),
+        disabled: working,
+        onClick: onRetryJob,
+      },
+      ...(!availableFormats.length
+        ? []
+        : [
+            {
+              key: 'formats',
+              type: 'group' as const,
+              label: t('presentationEditor.exportFormats'),
+              children: formats
+                .filter(({ format }) => availableFormats.includes(format))
+                .map(({ format, label }) => ({
+                  key: format,
+                  label,
+                  disabled: !canExport || Boolean(exporting),
+                  onClick: () => onExport(format),
+                })),
+            },
+          ]),
+      ...(handoutId
+        ? [
+            {
+              key: 'handout',
+              label: (
+                <a
+                  download="student-handout.md"
+                  href={`/api/runtime/presentation/artifacts/${encodeURIComponent(handoutId)}?raw=true`}
+                  title={t('presentationLesson.exportNotice')}
+                >
+                  {t('presentationLesson.handout')}
+                </a>
+              ),
+            },
+          ]
+        : []),
+    ];
     return (
       <header
-        aria-label="演示文稿完成态顶栏"
-        className={styles.capsuleHeader}
+        aria-label={t('presentationEditor.toolbar')}
+        className={`${glassSurface} ${styles.capsuleHeader}`}
         data-testid="presentation-editor-toolbar"
       >
         <div className={styles.capsuleGroupLeft}>
+          {onBack && (
+            <Button
+              aria-label={t('back')}
+              data-testid="presentation-back-to-home"
+              icon={<ArrowLeft aria-hidden size={17} />}
+              type="text"
+              onClick={onBack}
+            >
+              {t('back')}
+            </Button>
+          )}
           {showSidebarReopen && (
             <div data-testid="presentation-sidebar-reopen">
               <ToggleLeftPanelButton />
             </div>
           )}
-          <span className={styles.capsuleTitle} title={jobTitle ?? '演示文稿'}>
-            {jobTitle ?? '演示文稿'}
+          <span className={styles.capsuleTitle} title={jobTitle}>
+            {jobTitle || t('presentationEditor.untitled')}
           </span>
-
-          <ActivityHistory history={activityHistory}>
-            <button
-              aria-label={t('presentationTemplates.activityHistory')}
-              aria-live="polite"
-              className={styles.capsuleStatus}
-              data-testid="presentation-completed-tag"
-              title={job.error?.message}
-              type="button"
-            >
-              <Icon
-                aria-hidden
-                icon={working ? RefreshCw : job.state === 'completed' ? Check : Pause}
-                size={14}
-                spin={working}
-              />
-              <span key={statusText}>{statusText}</span>
-            </button>
-          </ActivityHistory>
+          <span
+            aria-live="polite"
+            className={styles.capsuleStatus}
+            data-testid="presentation-completed-tag"
+            title={job.error?.message}
+          >
+            <Icon
+              aria-hidden
+              icon={working ? RefreshCw : job.state === 'completed' ? Check : Pause}
+              size={14}
+              spin={working}
+            />
+            <span>{statusText}</span>
+          </span>
         </div>
-
         <div className={styles.capsuleGroupRight}>
-          {onNewPresentation && (
-            <Tooltip title={t('presentationTemplates.newPresentation')}>
-              <Button
-                aria-label={t('presentationTemplates.newPresentation')}
-                className={styles.iconButton}
-                icon={<Icon aria-hidden icon={Plus} size={22} />}
-                type="text"
-                onClick={onNewPresentation}
-              />
-            </Tooltip>
-          )}
-          <Tooltip title={viewLabel}>
+          <Button
+            aria-busy={Boolean(exporting)}
+            data-testid="presentation-editor-export"
+            className={styles.exportButton}
+            disabled={!canQuickExport || Boolean(exporting)}
+            icon={<Download aria-hidden size={16} />}
+            loading={Boolean(exporting)}
+            type="text"
+            onClick={onQuickExport}
+          >
+            {t('presentationEditor.export')}
+          </Button>
+          <Dropdown
+            menu={{ items }}
+            placement="bottomRight"
+            styles={{ root: { maxHeight: '75dvh', overflowY: 'auto' } }}
+            trigger={['click']}
+          >
             <Button
-              aria-label={viewLabel}
-              aria-pressed={viewMode === 'lightbox'}
-              className={styles.iconButton}
+              aria-haspopup="menu"
+              data-testid="presentation-editor-more"
+              icon={<Ellipsis aria-hidden size={16} />}
+              ref={drawerTrigger}
               type="text"
-              icon={
-                <Icon
-                  aria-hidden
-                  icon={viewMode === 'lightbox' ? PanelsTopLeft : LayoutGrid}
-                  size={22}
-                />
-              }
-              onClick={onToggleViewMode}
-            />
-          </Tooltip>
-
-          <Tooltip title="架构与资产">
-            <Button
-              aria-label="查看架构与资产"
-              aria-pressed={drawerOpen}
-              className={styles.iconButton}
-              icon={<Icon aria-hidden icon={PanelRightOpen} size={22} />}
-              type="text"
-              onClick={onToggleDrawer}
-            />
-          </Tooltip>
-
-          {jobs && onSelectJob && (
-            <Dropdown
-              trigger={['click']}
-              popupRender={() => (
-                <div className={styles.historyPanel}>
-                  <PresentationJobList
-                    jobs={jobs}
-                    selectedJobId={job.jobId}
-                    titles={Object.fromEntries(
-                      jobs.map((item) => [item.jobId, item.title ?? '未命名演示文稿']),
-                    )}
-                    onDelete={onDeleteJob}
-                    onSelect={onSelectJob}
-                  />
-                </div>
-              )}
             >
-              <Button
-                aria-label={t('presentationTemplates.history')}
-                className={styles.iconButton}
-                icon={<Icon icon={History} size={22} />}
-                type="text"
-              />
-            </Dropdown>
-          )}
-          <TemplateLibraryButton
-            canLearn={job.state === 'completed'}
-            jobId={job.jobId}
-            jobTitle={jobTitle}
-            onJobChanged={onJobChanged}
-          />
-
-          <Tooltip title={conversationOpen ? undefined : 'AI 修改'}>
-            <Button
-              aria-expanded={conversationOpen}
-              aria-label="Continue prompting AI"
-              className={styles.iconButton}
-              icon={<Icon aria-hidden icon={Sparkles} size={24} />}
-              type="text"
-              onClick={onOpenConversation}
-            />
-          </Tooltip>
-
-          <Tooltip title="重新生成">
-            <Button
-              aria-label="Retry presentation job"
-              className={styles.iconButton}
-              icon={<Icon aria-hidden icon={RefreshCw} size={22} />}
-              type="text"
-              onClick={onRetryJob}
-            />
-          </Tooltip>
-
-          <Flexbox horizontal align="center" className={styles.exportActions} gap={4}>
-            <Tooltip title={exporting ? '导出中…' : '导出 PowerPoint'}>
-              <Button
-                aria-busy={Boolean(exporting)}
-                aria-label="Quick export presentation"
-                className={styles.iconButton}
-                disabled={!canQuickExport}
-                icon={<Icon aria-hidden icon={Download} size={22} />}
-                loading={Boolean(exporting)}
-                type="primary"
-                onClick={onQuickExport}
-              />
-            </Tooltip>
-
-            <Dropdown
-              disabled={!canExport}
-              menu={{ items: moreExportMenu }}
-              placement="bottomRight"
-              trigger={['click']}
-            >
-              <Tooltip title="其他格式">
-                <Button
-                  aria-busy={Boolean(exporting)}
-                  aria-label="Export presentation artifact"
-                  className={styles.iconButton}
-                  disabled={!canExport}
-                  icon={<Icon aria-hidden icon={ChevronDown} size={20} />}
-                  type="text"
-                />
-              </Tooltip>
-            </Dropdown>
-          </Flexbox>
+              {t('presentationEditor.more')}
+            </Button>
+          </Dropdown>
         </div>
+        {jobs && onSelectJob && (
+          <Modal
+            footer={null}
+            open={dialog === 'history'}
+            title={t('presentationTemplates.history')}
+            onCancel={() => setDialog(undefined)}
+          >
+            <PresentationJobList
+              jobs={jobs}
+              selectedJobId={job.jobId}
+              titles={Object.fromEntries(
+                jobs.map((item) => [item.jobId, item.title || t('presentationEditor.untitled')]),
+              )}
+              onDelete={onDeleteJob}
+              onSelect={(id) => {
+                setDialog(undefined);
+                onSelectJob(id);
+              }}
+            />
+          </Modal>
+        )}
+        <Modal
+          footer={null}
+          open={dialog === 'activity'}
+          title={t('presentationTemplates.activityHistory')}
+          onCancel={() => setDialog(undefined)}
+        >
+          <ActivityHistoryList history={activityHistory} />
+        </Modal>
+        <TemplateLibraryButton
+          canLearn={job.state === 'completed'}
+          dialogOpen={dialog === 'templates'}
+          jobId={job.jobId}
+          jobTitle={jobTitle}
+          onDialogChange={(value) => setDialog(value ? 'templates' : undefined)}
+          onJobChanged={onJobChanged}
+        />
+        <TrialComparison
+          dialogOpen={dialog === 'trial'}
+          jobId={job.jobId}
+          slideId={slideId}
+          versionId={job.versionId}
+          onCreated={onTrialVersionCreated}
+          onDialogChange={(value) => setDialog(value ? 'trial' : undefined)}
+        />
       </header>
     );
   },
 );
 
 CapsuleHeader.displayName = 'CapsuleHeader';
-
 export default CapsuleHeader;

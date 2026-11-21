@@ -8,6 +8,7 @@ import type {
   PresentationJobInput,
   PresentationPlan,
 } from '../../../../packages/runtime-contracts/src';
+import { getPresentationStylePreset } from '../../../../packages/runtime-contracts/src/presentation-style-presets';
 import { escapeSvgText } from './semantic-blocks';
 import type { TemplateApplication } from './templates';
 import { measureSlideText } from './text-measurement';
@@ -21,12 +22,17 @@ const rectangle = z.object({
 });
 export const deckVisualSystemSchema = z
   .object({
-    schemaVersion: z.union([z.literal(1), z.literal(2)]),
+    schemaVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]),
     id: z.string().regex(/^deck-style-[a-f\d]{24}$/u),
     sourceTemplateId: z.string().optional(),
+    styleWorkspaceId: z.string().optional(),
     width: z.literal(960),
     height: z.number().finite().min(400).max(1920),
-    fontFamily: z.literal('Microsoft YaHei, Arial'),
+    fontFamily: z
+      .string()
+      .min(1)
+      .max(200)
+      .regex(/^[^<>&"\u0000-\u001F]+$/u),
     palette: z.array(color).min(3).max(12),
     colors: z.object({
       primary: color,
@@ -35,8 +41,12 @@ export const deckVisualSystemSchema = z
       text: color,
       muted: color,
     }),
-    typography: z.object({ title: z.literal(32), body: z.literal(24), label: z.literal(16) }),
-    headerHeight: z.literal(40),
+    typography: z.object({
+      title: z.number().min(24).max(96),
+      body: z.number().min(18).max(40),
+      label: z.number().min(14).max(28),
+    }),
+    headerHeight: z.number().min(0).max(120),
     body: rectangle,
     darkBody: rectangle,
     deckLabel: z.string().max(16),
@@ -56,8 +66,12 @@ export function createDeckVisualSystem(
   template?: TemplateApplication,
 ): DeckVisualSystem | undefined {
   const existing = readDeckVisualSystem(input);
-  if (existing?.schemaVersion === 2) return existing;
-  if (!template && !input.options?.style) return;
+  // Persisted jobs retain their original rendering contract, including legacy chrome.
+  if (existing) return existing.schemaVersion === 1 ? { ...existing, schemaVersion: 2 } : existing;
+  const learned = input.options?.learnedCapabilities as
+    { capsules?: { rules: string[]; kind: string; name: string }[] } | undefined;
+  const preset = getPresentationStylePreset(input.options?.styleWorkspaceId);
+  if (!preset && !template && !input.options?.style && !learned?.capsules?.length) return;
   const primary = (input.options?.templateStyleVisual ??
     template?.visual) as TemplateApplication['visual'];
   const palette = (primary?.designProgram?.tokens?.palette ?? template?.constraints?.palette ?? [])
@@ -82,26 +96,36 @@ export function createDeckVisualSystem(
             ...[1, 3, 5].map((offset) => Number.parseInt(value.slice(offset, offset + 2), 16)),
           ) >
           35,
-    ) ?? '#1D3E6B';
+    ) ??
+    (/青绿|teal|green/iu.test(`${input.prompt ?? ''} ${input.options?.style ?? ''}`)
+      ? '#0F766E'
+      : '#243B53');
   const accent =
     palette.find((value) => {
       const [r, g, b] = [1, 3, 5].map((offset) =>
         Number.parseInt(value.slice(offset, offset + 2), 16),
       );
       return r > 150 && g > 100 && b < g * 0.8;
-    }) ?? '#F2C24C';
+    }) ?? primaryColor;
   const [w, h] = (input.aspectRatio ?? '16:9').split(':').map(Number);
   const height = (960 * h) / w;
   const style = {
-    schemaVersion: 2 as const,
+    schemaVersion: 3 as const,
+    ...(preset ? { styleWorkspaceId: preset.id } : {}),
     sourceTemplateId: template?.compositionPolicy?.primaryTemplateId ?? template?.templateId,
     width: 960 as const,
     height,
-    fontFamily: 'Microsoft YaHei, Arial' as const,
-    palette: [
-      ...new Set([...palette, primaryColor, accent, '#FFFFFF', '#1A1A1A', '#64748B']),
-    ].slice(0, 12),
-    colors: {
+    fontFamily:
+      preset?.fontFamily ||
+      process.env.CORDIS_PRESENTATION_FONT_FAMILY?.trim() ||
+      (process.platform === 'darwin' ? 'Hiragino Sans GB, Arial' : 'Microsoft YaHei, Arial'),
+    palette: preset
+      ? Object.values(preset.colors)
+      : [...new Set([...palette, primaryColor, accent, '#FFFFFF', '#1A1A1A', '#64748B'])].slice(
+          0,
+          12,
+        ),
+    colors: preset?.colors ?? {
       primary: primaryColor,
       accent,
       background: '#FFFFFF',
@@ -109,9 +133,9 @@ export function createDeckVisualSystem(
       muted: '#64748B',
     },
     typography: { title: 32 as const, body: 24 as const, label: 16 as const },
-    headerHeight: 40 as const,
-    body: { x: 48, y: 136, width: 864, height: height - 176 },
-    darkBody: { x: 48, y: 320, width: 864, height: height - 388 },
+    headerHeight: 0,
+    body: { x: 0, y: 0, width: 960, height },
+    darkBody: { x: 0, y: 0, width: 960, height },
     deckLabel: input.title
       .split(/20\d{2}|[暨（(]/u)[0]
       .trim()
@@ -191,6 +215,12 @@ export function deckVisualInstructions(
   role: DeckPageRole,
   template?: TemplateApplication,
 ): string {
+  if (system.schemaVersion === 3) {
+    return `整稿设计锚点（不提供固定页面外壳）：${JSON.stringify(system)}。
+由你创作完整页面 SVG，包括标题、背景与可选页码；不预留通用页眉，不添加统一横条，不要求封面和内容页使用相同构图。参考色板与字体形成连续性，字体层级、标题位置、留白和布局由所选 Style 的表达方法和本页任务决定。可以使用字体回退链、不同字重与合理的大小层次；不要为了机械统一而抹掉参考设计。页码只有阅读需要时才出现。
+学习到的 Style 负责表达方法、密度、装饰克制与节奏；Layout 只提供可调整的几何、信息关系和容量，槽位不等于可见边框或容器。内容事实以当前用户资料为准，不搬用模板占位文字、旧事实或机构标识。每页有一个明确的视觉焦点，流程体现顺序，验收清单体现逐项核对；先比较开放排版、轴线和文字层级，再决定是否需要容器。表格不再包一层卡片，旁边不重复表内结论；没有语义作用的圆、竖条、圆角底板和占位符不画。保留可编辑文字、公式与关系图。
+使用全画幅 viewBox="0 0 960 ${system.height}"。正文建议≥${system.typography.body}px，短标签≥${system.typography.label}px；先调整布局再缩字。若存在 data-deck-body 分组，它也可以使用整个画幅。原生流程图 spec.style 可设置 nodeFill、nodeStroke、edgeColor、textColor、fontFamily、borderRadius，使图解服从所选设计；原生表格可设置 fontFamily、headerFill、headerText、bodyFill、bandFill、textColor。保持所提供的学习能力来源，并仅在确实应用时记录 capabilityUses。`;
+  }
   const geometry = template?.visual?.designProgram.archetypes.map((a) => ({
     id: a.id,
     roles: a.roles,
@@ -228,6 +258,12 @@ export function renderDeckVisualFrame(
 ): string {
   const document = parseString(svg);
   const root = document.documentElement;
+  if (system.schemaVersion === 3) {
+    // The authored page owns its hierarchy, colors and geometry. Never repaint it.
+    root.setAttribute('data-deck-style', system.id);
+    if (!root.hasAttribute('font-family')) root.setAttribute('font-family', system.fontFamily);
+    return document.toString();
+  }
   const body = Array.from(document.getElementsByTagName('g')).find(
     (node) => node.getAttribute('data-deck-body') === 'true',
   );
@@ -303,6 +339,15 @@ export async function assertDeckBodyFits(
   system: DeckVisualSystem,
   role: DeckPageRole,
 ): Promise<void> {
+  if (system.schemaVersion === 3) {
+    const root = parseString(svg).documentElement;
+    if (
+      root.getAttribute('viewBox')?.trim().split(/\s+/u).map(Number).join(' ') !==
+      `0 0 960 ${system.height}`
+    )
+      throw new Error('Authored page must retain the shared canvas');
+    return;
+  }
   const document = parseString(svg);
   const root = document.documentElement;
   const body = Array.from(document.getElementsByTagName('g')).find(
@@ -350,6 +395,7 @@ export function assertDeckVisualConsistency(
     const document = parseString(slide.svg);
     if (document.documentElement.getAttribute('data-deck-style') !== system.id)
       throw new Error(`Slide ${slide.slideId} does not use the shared deck visual system`);
+    if (system.schemaVersion === 3) continue;
     for (const text of Array.from(document.getElementsByTagName('text')))
       if (text.getAttribute('font-family') !== system.fontFamily)
         throw new Error(`Slide ${slide.slideId} overrides the shared font family`);

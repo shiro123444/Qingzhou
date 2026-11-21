@@ -1,0 +1,302 @@
+{
+  "artifactHashes": {
+    "regression.log": "7ff9ed955daca6f803618069e1ca0e6c0b6b4caae3404e2ad8c4f1027a539dc5",
+    "approval-regression.log": "caec404fcab0a62072c8623c8807414ec2f60c2434e5139feaaa66fe19f919ab",
+    "type-check.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "eslint.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stylelint.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "prettier.log": "2941e4554b8ac9e56c55f1d561b10c95c3e93e99417bce694684d14adbe2df34",
+    "teardown.log": "92c898cd0215497845d9ed9db3f96791b7f7aab4fd4a2d9236fd74a89c787623",
+    "local-migration.log": "c17636c244f00bd6d16f7b8186aba7967ed7af0ff10f8c7b18a7f46adb226e54",
+    "acceptance.log": "d29e44862a33e1b46f5c118e09c0d109e5159aed4731f948c407c487f0e9b972",
+    "worker-preload.log": "c6ff55fe68c379d0ae35614f33e3ee34415af9c0e63c3c9258370bd91f89f6dd",
+    "provider-preload.log": "83e06dfa1f904b5b90ce6f2f5565b5fb89fd6a98e48ec0dde072f2f5ae4b4c2c",
+    "browser-takeover.png": "0152ec42c9f4abf5464d957192980b8a7a391d25fd4071dbd6e4d17ff3121698",
+    "runtime-live.json": "901cc02e54a09c195c598aae72ded6f2c0184b0cb48164523b02a974a0269df8",
+    "postgres-live.json": "29c5a9269efd281bd6005b7346c7503d608aa0cb2673f23f6328efce476da9e6"
+  },
+  "finishedAt": "2026-11-15T14:45:25.738Z",
+  "limitations": [
+    "Browser login tests use an offline fixture; real account CAPTCHA and MFA are not automated.",
+    "Live application SQL uses isolated PGlite; production deployment and host power-loss testing are separate from this acceptance run."
+  ],
+  "localArtifacts": ".data/computer-acceptance/2026-11-15T14-44-56-821Z-4f59c0ba",
+  "mode": ["--all", "--strict"],
+  "node": "v26.13.0",
+  "results": [
+    {
+      "id": "docker.ensure.non-root-isolation",
+      "status": "passed",
+      "ms": 333,
+      "evidence": {
+        "imageId": "sha256:407f9320c054fdddd79af106a0d13b8510b6f45b27253682e8df68c3c3935990",
+        "version": "29.5.2",
+        "user": "1000:1000",
+        "network": "none",
+        "readonlyRootfs": true
+      }
+    },
+    {
+      "id": "runtime.sql-cordis-http-docker",
+      "status": "passed",
+      "ms": 11914,
+      "evidence": {
+        "tests": 7,
+        "database": "isolated-in-memory-PGlite",
+        "provider": "real-loopback-HTTP",
+        "containers": "real-Docker"
+      }
+    },
+    {
+      "id": "browser.interactive-takeover-console",
+      "status": "passed",
+      "ms": 0,
+      "evidence": {
+        "evidence": "runtime-live.json",
+        "screenshot": "browser-takeover.png",
+        "component": "production React panel",
+        "input": "real click and text",
+        "handoff": "old human revision revoked"
+      }
+    },
+    {
+      "id": "agent.computer-tools-approval-chain",
+      "status": "passed",
+      "ms": 0,
+      "evidence": {
+        "evidence": "runtime-live.json",
+        "handler": "production HumanInterventionHandler",
+        "executor": "native Computer tool and real Docker",
+        "checks": "pending blocked; approval resumes; same call writes once; headless pauses"
+      }
+    },
+    {
+      "id": "docker.http.authentication-and-validation",
+      "status": "passed",
+      "ms": 3
+    },
+    {
+      "id": "docker.shell.persistence-and-idempotency",
+      "status": "passed",
+      "ms": 166
+    },
+    {
+      "id": "docker.sleep-wake.preserves-workspace",
+      "status": "passed",
+      "ms": 216
+    },
+    {
+      "id": "docker.control.human-fences-agent",
+      "status": "passed",
+      "ms": 112
+    },
+    {
+      "id": "docker.receipt.provider-restart-no-replay",
+      "status": "passed",
+      "ms": 393
+    },
+    {
+      "id": "docker.receipt.disconnected-client",
+      "status": "passed",
+      "ms": 1261
+    },
+    {
+      "id": "browser.chromium.real-profile-write",
+      "status": "passed",
+      "ms": 508,
+      "evidence": {
+        "chromium": true,
+        "cookieAndLocalStorage": true,
+        "network": "container-loopback-only"
+      }
+    },
+    {
+      "id": "browser.chromium.profile-survives-sleep-and-provider-restart",
+      "status": "passed",
+      "ms": 823
+    },
+    {
+      "id": "docker.shell.timeout-kills-descendants",
+      "status": "passed",
+      "ms": 3712,
+      "evidence": {
+        "exitCode": 137,
+        "descendantDidNotWrite": true
+      }
+    },
+    {
+      "id": "cleanup.provider-and-owned-containers",
+      "status": "passed",
+      "ms": 70,
+      "evidence": {
+        "providerStopped": true,
+        "removedContainers": 1,
+        "volumeRemoved": true
+      }
+    },
+    {
+      "id": "suite.docker-live",
+      "status": "passed",
+      "ms": 19779
+    },
+    {
+      "id": "browser.public-https-access",
+      "status": "passed",
+      "ms": 1562,
+      "evidence": {
+        "url": "https://example.org",
+        "https": true,
+        "network": "bridge",
+        "titleAndBodyVerified": true
+      }
+    },
+    {
+      "id": "model.gateway.live-model-catalog",
+      "status": "passed",
+      "ms": 625,
+      "evidence": {
+        "provider": "nexus",
+        "model": "deepseek-v4.1-flash",
+        "remoteModelCount": 2,
+        "baseURL": "https://cli.tinimodel.com/v1"
+      }
+    },
+    {
+      "id": "model.deepseek.live-completion",
+      "status": "passed",
+      "ms": 2066,
+      "evidence": {
+        "requestedModel": "deepseek-v4.1-flash",
+        "returnedModel": "workbuddy/deepseek-v4.1-flash",
+        "finishReason": "stop",
+        "usage": {
+          "completion_tokens": 13,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "prompt_tokens": 59,
+          "prompt_tokens_details": {
+            "cache_write_tokens": 0,
+            "cached_tokens": 0
+          },
+          "total_tokens": 72
+        },
+        "nonceMatched": true
+      }
+    },
+    {
+      "id": "model.deepseek.computer-tool-calling",
+      "status": "passed",
+      "ms": 1811,
+      "evidence": {
+        "model": "deepseek-v4.1-flash",
+        "tool": "qingzhou-computer____execute",
+        "argumentsMatched": true,
+        "usage": {
+          "completion_tokens": 91,
+          "completion_tokens_details": {
+            "reasoning_tokens": 18
+          },
+          "prompt_tokens": 1422,
+          "prompt_tokens_details": {
+            "cache_write_tokens": 0,
+            "cached_tokens": 1152
+          },
+          "total_tokens": 1513
+        },
+        "finishReason": "tool_calls"
+      }
+    },
+    {
+      "id": "suite.model-live",
+      "status": "passed",
+      "ms": 4915
+    },
+    {
+      "id": "database.postgres.real-concurrency-and-recovery",
+      "status": "passed",
+      "ms": 2655,
+      "evidence": {
+        "database": "PostgreSQL 18",
+        "passed": 2,
+        "coverage": "concurrent claims; ownership fencing; uncertain dispatch retained across reconnect",
+        "schema": "Computer migrations on minimal owned-account fixture"
+      }
+    },
+    {
+      "id": "journal.expired-work-never-replayed",
+      "status": "passed",
+      "ms": 2
+    }
+  ],
+  "runId": "2026-11-15T14-44-56-821Z-4f59c0ba",
+  "startedAt": "2026-11-15T14:44:56.823Z",
+  "verdict": "passed",
+  "verification": {
+    "regression": {
+      "application": {
+        "files": 17,
+        "passed": 101
+      },
+      "approvalAndEngine": {
+        "files": 3,
+        "passed": 134
+      },
+      "generalChatAgent": {
+        "files": 1,
+        "passed": 70
+      },
+      "total": 305
+    },
+    "liveVitest": {
+      "browserSqlCordisHttpDockerAndApproval": 7,
+      "realPostgresConcurrencyAndRecovery": 2,
+      "total": 9
+    },
+    "quality": {
+      "cordisTypes": true,
+      "wholeRepositoryTypes": true,
+      "eslint": true,
+      "stylelint": true,
+      "prettier": true,
+      "diffCheck": true
+    },
+    "strictAcceptance": {
+      "exitCode": 0,
+      "passed": 22,
+      "failed": 0,
+      "skipped": 0
+    },
+    "localMigration": {
+      "applied": ["0116", "0117", "0118", "0119"],
+      "totalMigrations": 120,
+      "backup": ".data/local-preview/backups/computer-browser-2026-11-15-1794753414443/",
+      "databaseStopped": true
+    },
+    "configuration": {
+      "computerEnabled": true,
+      "endpoint": "http://127.0.0.1:8791",
+      "agentPolicy": "ask",
+      "model": "deepseek-v4.1-flash",
+      "provider": "nexus",
+      "providerEnvFile": ".data/computer-provider/runtime.env",
+      "providerNetwork": "bridge",
+      "secretsPrinted": false
+    },
+    "teardown": {
+      "providerStopped": true,
+      "testContainersRemaining": 0,
+      "testVolumesRemaining": 0,
+      "localDatabaseStopped": true,
+      "workerStarted": false,
+      "colimaProfile": "qingzhou-test",
+      "colimaStatus": "Stopped",
+      "defaultDockerContext": "default",
+      "autostartEnabled": false
+    },
+    "preloadChecks": {
+      "nativeWorker": true,
+      "computerProvider": true
+    }
+  }
+}

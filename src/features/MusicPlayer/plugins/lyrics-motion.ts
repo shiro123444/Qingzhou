@@ -1,3 +1,5 @@
+import { createReadAlong } from '@/features/GlassMotion/textMotion';
+
 import { activeLyric, type LyricLine, lyricWordProgress } from '../lyrics';
 
 export const LYRICS_FOLLOW_DELAY = 5000;
@@ -19,6 +21,9 @@ export function createLyricsMotion({
   const rows = [...container.querySelectorAll<HTMLElement>('[data-lyric-line]')];
   const words = rows.map((row) => [...row.querySelectorAll<HTMLElement>('[data-lyric-word]')]);
   const reduced = window.matchMedia('(prefers-reduced-motion: reduce)');
+  const pill = container.querySelector<HTMLElement>('[data-reading-pill]');
+  const reading = pill ? createReadAlong(container, pill) : undefined;
+  let readTarget: HTMLElement | null | undefined;
   let active = true;
   let frame = 0;
   let resumeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -100,6 +105,16 @@ export function createLyricsMotion({
             : 'sung',
       );
     }
+    const nextTarget =
+      words[current]?.find((word) => word.dataset.state === 'current') ??
+      (words[current]?.length
+        ? null
+        : rows[current]?.querySelector<HTMLElement>('[data-lyric-phrase]')) ??
+      null;
+    if (nextTarget !== readTarget) {
+      readTarget = nextTarget;
+      reading?.focus(nextTarget);
+    }
     if (following && needsTarget) {
       const row = rows[current];
       const height = container.clientHeight;
@@ -173,6 +188,7 @@ export function createLyricsMotion({
     wake,
     dispose() {
       active = false;
+      reading?.dispose();
       cancelAnimationFrame(frame);
       clearTimeout(resumeTimer);
       observer?.disconnect();

@@ -1,4 +1,11 @@
+import { presentationMaterialsSchema } from '@/types/presentationMaterial';
+
+import type { PresentationOutlineCapability } from './outline-capability';
+import { deliveryFromArtifacts, readChatOrigin } from './chat-delivery';
+import { NativeSlideQualityError } from './toolchain';
+import { getPresentationStylePreset } from '../../../../packages/runtime-contracts/src/presentation-style-presets';
 import { createHash, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 
 import type {
   ArtifactSnapshot,
@@ -12,10 +19,22 @@ import type {
   PresentationPresenceInput,
   RuntimeScope,
 } from '../../../../packages/runtime-contracts/src';
+import {
+  type CanvasRect,
+  moveCanvasObject,
+} from '../../../../packages/runtime-contracts/src/canvas';
 import type { AtomicInvocation, AtomicRuntime } from '../atomic-runtime';
 import type { ExecutionLimiter } from '../execution-limiter';
 import { presentationActivity } from './activity';
-import { validateAnnotation } from './annotation';
+import { withPresentationAgentJob } from './agent-execution-context';
+import { canvasHistory } from '../../../../packages/utils/src/presentationCanvasHistory';
+import { canvasCommandSchema, editCanvasPage, recordCanvasPlacement } from './canvas-command';
+import { applyCanvasText, validateAnnotation } from './annotation';
+import {
+  applyTableDataPatch,
+  assertTableDataPatchTarget,
+  tableDataPatchSchema,
+} from './table-data-edit';
 import type { PresentationArtifactStore, StoredArtifact } from './artifact-store';
 import { createArtworkStyleAtlas } from './artwork-pipeline';
 import { appliedLearnedCapabilityIds } from './capability-composition';
@@ -25,6 +44,11 @@ import {
   type CapabilityMemory,
 } from './capability-memory';
 import type { PresentationCapabilitySelector } from './capability-selection';
+import {
+  applyChartDataPatch,
+  assertChartDataPatchTarget,
+  chartDataPatchSchema,
+} from './chart-data-edit';
 import {
   createPresentationDecision,
   mergePresenceTabs,
@@ -50,6 +74,7 @@ import {
   readDeckVisualSystem,
   renderDeckVisualFrame,
 } from './deck-visual-system';
+import { designFingerprint, designReferencePayload } from './design-evidence';
 import type { PresentationExecutionLease } from './execution-lease';
 import type {
   PresentationJobRepository,
@@ -59,7 +84,7 @@ import type {
 import type { PresentationGenerationCapability } from './generation-capability';
 import type { PresentationGenerationEventPublisherFactory } from './generation-handler';
 import type { ImageGenerationCapability } from './image-generation-capability';
-import type { ImageGenerationSlot } from './image-generation-planner';
+import type { ImageGenerationSlot, ImageGenerationSlotOutput } from './image-generation-planner';
 import { initialDesignPlan } from './initial-design';
 import {
   applyTeacherLessonInstruction,
@@ -67,6 +92,13 @@ import {
   compileLessonInput,
   prepareLessonDraft,
 } from './lesson';
+import type { MultimodalChatPort } from './multimodal-chat-provider';
+import {
+  applyObjectPositionPatch,
+  canvasMoveForSlide,
+  objectPositionPatchSchema,
+} from './object-position-edit';
+import { prepareNativeDataExport } from './native-data-export';
 import { validatePresentationPlan } from './planner';
 import {
   PRESENTATION_JOB_EVENT_TYPES,
@@ -78,11 +110,19 @@ import type {
   PresentationRevisionAssetResult,
 } from './revision-assets';
 import { presentationImageRefs } from './revision-assets';
-import { renderSemanticBlocks, semanticAuthoringSvg } from './semantic-blocks';
+import { renderSemanticBlocks, semanticAuthoringSvg, semanticBlockSchema } from './semantic-blocks';
 import { recoverSemanticSlideLayout } from './semantic-layout-recovery';
 import { attachSourceDocumentImages } from './source-document-images';
 import { rebalanceMixedLessonStages, rebasePlanForLessonStages } from './stage-capacity';
-import { normalizePresentationSvg, normalizeRasterOpacity } from './svg-compatibility';
+import { presentationStageHandoff } from './stage-handoff';
+import {
+  checkStoryboardCompatibility,
+  diagnoseStoryboardLayout,
+  intentLayoutInputs,
+  isExhaustedLearnedLayout,
+  type StoryboardCompatibility,
+} from './storyboard-compatibility';
+import { normalizeGroupOpacity, normalizeRasterOpacity } from './svg-compatibility';
 import type {
   FilePresentationTemplateLibrary,
   TemplateApplication,
@@ -113,11 +153,32 @@ import {
   presentationVisualStoryboardSchema,
 } from './visual-storyboard';
 
+/** Page-scoped providers may return a full plan. Only the requested page is authoritative. */
+function applyRevisionScope(
+  base: PresentationPlan,
+  candidate: PresentationPlan,
+  target: PresentationMessageInput['target'],
+): PresentationPlan {
+  if (target.type === 'deck') return candidate;
+  const original = base.slides[target.slideNumber - 1];
+  const replacement =
+    original && candidate.slides.find((slide) => slide.slideId === original.slideId);
+  if (!original || !replacement)
+    throw Object.assign(new Error('修改结果缺少目标页'), { code: 'PRESENTATION_REPAIR_INVALID' });
+  return {
+    ...base,
+    slides: base.slides.map((slide) =>
+      slide.slideId === original.slideId ? { ...replacement, order: original.order } : slide,
+    ),
+  };
+}
+
 export interface PresentationGenerationPortScope extends RuntimeScope {
   readonly request: Request;
 }
 
 export interface PresentationGenerationPortOptions {
+  readonly agentRoutingFingerprint?: string;
   readonly artifactStore: PresentationArtifactStore;
   readonly atomicRuntime?: AtomicRuntime;
   readonly capability: PresentationGenerationCapability;
@@ -125,12 +186,14 @@ export interface PresentationGenerationPortOptions {
   readonly capabilitySelector?: PresentationCapabilitySelector;
   readonly collaborationHook?: PresentationCollaborationHook;
   readonly contentCompiler?: PresentationContentCompiler;
+  readonly outlineCapability?: PresentationOutlineCapability;
   readonly contextFactory: PresentationGenerationContextFactory;
   readonly eventPublisherFactory?: PresentationGenerationEventPublisherFactory;
   /** Shared by account ports in one production composition. */
   readonly executionLimiter?: ExecutionLimiter;
   readonly idFactory?: () => string;
   readonly imageGenerationCapability?: ImageGenerationCapability;
+  readonly layoutDiagnosisChat?: MultimodalChatPort;
   readonly maxExecutionMs?: number;
   readonly now?: () => string;
   readonly prepareCapabilityLibrary?: (scope: RuntimeScope) => Promise<void>;
@@ -144,7 +207,9 @@ export interface PresentationGenerationPortOptions {
 interface JobEntry extends StoredPresentationJob {
   controller: AbortController;
   lease?: PresentationExecutionLease;
+  leaseAcquisition?: Promise<PresentationExecutionLease | null>;
   localTask?: boolean;
+  mutating?: boolean;
   passive?: boolean;
   persistence: Promise<void>;
   retryTimer?: ReturnType<typeof setTimeout>;
@@ -189,6 +254,7 @@ const learnedTemplateContextFingerprint = (input: PresentationJobInput): string 
   return createHash('sha256')
     .update(
       JSON.stringify({
+        agentRoutingFingerprint: options?.agentRoutingFingerprint,
         storyboard: storyboard
           ? {
               inputFingerprint: storyboard.inputFingerprint,
@@ -215,6 +281,14 @@ const learnedTemplateContextFingerprint = (input: PresentationJobInput): string 
     )
     .digest('hex');
 };
+
+// Older providers and checkpoints returned the main image directly.
+const slotAssetIds = (slot: ImageGenerationSlotOutput & { assetRef?: string }): string[] =>
+  Array.isArray(slot.assetRefs)
+    ? slot.assetRefs.map(({ ref }) => ref)
+    : typeof slot.assetRef === 'string' && slot.assetRef
+      ? [slot.assetRef]
+      : [];
 
 const preparedAssetsMatchLearnedTemplate = (
   prepared: PresentationRevisionAssetResult | undefined,
@@ -259,6 +333,53 @@ const confirmedDeckLength = (input: PresentationJobInput): number | undefined =>
     ? input.slideCount
     : undefined;
 };
+
+function editsPublishedObject(message: PresentationMessageInput, version: string): boolean {
+  if (message.target.type !== 'slide' || message.template || message.patch) return false;
+  const edits = [
+    message.annotation,
+    message.canvasCommand,
+    message.tableDataPatch,
+    message.chartDataPatch,
+    message.objectPositionPatch,
+  ].filter((edit) => edit !== undefined);
+  return edits.length === 1 && edits[0].expectedVersionId === version;
+}
+
+function hasPublishedStoryboardForExactEdits(entry: StoredPresentationJob): boolean {
+  const { job, input, plan } = entry;
+  const version = job.versionId;
+  if (
+    !version ||
+    job.delivery?.versionId !== version ||
+    !job.delivery.pptxId ||
+    !plan ||
+    !entry.initialAssetsComplete
+  )
+    return false;
+  const pending = job.messages?.filter(
+    (message) => message.status === 'queued' || message.status === 'applying',
+  );
+  if (!pending?.length || !pending.every((message) => editsPublishedObject(message, version)))
+    return false;
+  const saved = presentationVisualStoryboardSchema.safeParse(input.options?.visualStoryboard);
+  const visual = input.options?.templateVisual as TemplateApplication['visual'];
+  const receipt = entry.stageHandoffs?.['storyboard:deck'];
+  if (!saved.success || !visual?.designProgram || !input.options?.deckVisualSystem || !receipt)
+    return false;
+  const board = saved.data;
+  return (
+    board.templateId === input.template &&
+    board.versionId === input.options?.templateVersionId &&
+    board.templateId === visual.templateId &&
+    board.versionId === visual.versionId &&
+    receipt.inputVersion === board.inputFingerprint &&
+    receipt.outputVersion === designFingerprint(input.options?.visualStoryboard) &&
+    board.slides.length === plan.slides.length &&
+    confirmedDeckLength(input) === plan.slides.length &&
+    board.slides.every((slide, index) => slide.slideId === plan.slides[index].slideId)
+  );
+}
 
 const normalizeInput = (value: PresentationJobInput): PresentationJobInput | undefined => {
   if (!value || typeof value !== 'object') return;
@@ -394,20 +515,69 @@ export class PresentationGenerationPort implements PresentationPort {
     this.idFactory = options.idFactory ?? (() => `presentation-${randomUUID()}`);
   }
 
+  private bindAgentRouting(input: PresentationJobInput): PresentationJobInput {
+    const fingerprint = this.options.agentRoutingFingerprint;
+    if (!fingerprint && !Object.hasOwn(input.options ?? {}, 'agentRoutingFingerprint'))
+      return input;
+    const { agentRoutingFingerprint: _untrusted, ...options } = input.options ?? {};
+    return {
+      ...input,
+      ...(Object.keys(options).length || fingerprint
+        ? {
+            options: {
+              ...options,
+              ...(fingerprint ? { agentRoutingFingerprint: fingerprint } : {}),
+            },
+          }
+        : { options: undefined }),
+    };
+  }
+
+  private recordHandoff(
+    entry: JobEntry,
+    ...args: Parameters<typeof presentationStageHandoff>
+  ): void {
+    const receipt = presentationStageHandoff(...args);
+    entry.stageHandoffs = {
+      ...entry.stageHandoffs,
+      [receipt.stage + ':' + receipt.subject]: receipt,
+    };
+  }
+
+  private async imageHandoffDigests(slot: ImageGenerationSlotOutput) {
+    const refs = slotAssetIds(slot);
+    if (slot.state !== 'ready' || !refs.length) return undefined;
+    const digests: Record<string, string> = Object.create(null);
+    for (const ref of refs) {
+      const artifact = await this.options.artifactStore.get(this.scope, ref);
+      if (!artifact?.bytes?.length || !/^image\/(?:png|jpeg|webp)$/u.test(artifact.mimeType ?? ''))
+        return undefined;
+      digests[ref] = createHash('sha256').update(artifact.bytes).digest('hex');
+    }
+    return digests;
+  }
+
   async createJob(input: PresentationJobInput): Promise<PresentationJob> {
     if (this.disposed)
       throw Object.assign(new Error('Presentation generation port is disposed'), {
         code: 'PROVIDER_UNAVAILABLE',
       });
-    const normalizedInput = normalizeInput(compileLessonInput(input));
+    let normalizedInput = normalizeInput(compileLessonInput(input));
     if (!normalizedInput)
       throw Object.assign(new Error('notebookId, title and sourceVersionIds are required'), {
         code: 'PRESENTATION_INVALID',
       });
+    normalizedInput = this.bindAgentRouting(normalizedInput);
+    if (Object.hasOwn(normalizedInput.options ?? {}, 'layoutCompatibility')) {
+      const { layoutCompatibility: _untrusted, ...options } = normalizedInput.options!;
+      normalizedInput = { ...normalizedInput, options };
+    }
     const jobId = this.idFactory();
     const timestamp = this.now();
     const controller = new AbortController();
+    const chatOrigin = readChatOrigin(normalizedInput);
     const job: PresentationJob = {
+      ...(chatOrigin ? { chatOrigin } : {}),
       jobId,
       state: 'queued',
       createdAt: timestamp,
@@ -430,8 +600,75 @@ export class PresentationGenerationPort implements PresentationPort {
     };
     this.jobs.set(jobId, entry);
     await this.save(entry);
-    entry.task = this.run(jobId, normalizedInput, controller);
+    entry.task = this.run(entry);
     return clone(job);
+  }
+
+  private async applyCanvasCommand(
+    entry: JobEntry,
+    plan: PresentationPlan,
+    message: PresentationMessageInput,
+  ) {
+    if (message.target.type !== 'slide' || !message.canvasCommand) throw Error('请选择一个页面');
+    const number = message.target.slideNumber;
+    const slide = plan.slides[number - 1];
+    if (!slide) throw Error('找不到页面');
+    const command = message.canvasCommand;
+    const snapshotId = (version: string, id: string) =>
+      `${entry.job.jobId}:${version}:canvas-source:${id}`;
+    const page = await editCanvasPage(
+      slide,
+      number,
+      command,
+      message.requestId,
+      async (version, n) => {
+        const rev = entry.job.revisions?.find((r) => r.versionId === version);
+        const id = plan.slides[n - 1]?.slideId;
+        const artifactId = `${entry.job.jobId}:${version}:slide:${id}`;
+        if (!id || !rev?.artifactIds.includes(artifactId))
+          throw Error('找不到本稿中所选的历史页面');
+        if (version === command.expectedVersionId) return plan.slides[n - 1];
+        const snapshot = await this.options.artifactStore.get(this.scope, snapshotId(version, id));
+        if (snapshot?.bytes)
+          return JSON.parse(
+            new TextDecoder().decode(snapshot.bytes),
+          ) as PresentationPlan['slides'][number];
+        const a = await this.options.artifactStore.get(this.scope, artifactId);
+        if (!a?.bytes || a.type !== 'svg' || a.metadata?.slideId !== id)
+          throw Error('历史页面不可用');
+        const metadata = { ...a.metadata };
+        for (const key of [
+          'notes',
+          'artifactRole',
+          'nativeData',
+          'aspectRatio',
+          'jobId',
+          'order',
+          'slideNumber',
+          'slideId',
+          'versionId',
+          'type',
+          'mimeType',
+          'planId',
+          'quality',
+          'status',
+          'uri',
+        ])
+          delete metadata[key];
+        return {
+          metadata,
+          notes: typeof a.metadata.notes === 'string' ? a.metadata.notes : undefined,
+          order: n,
+          slideId: id,
+          svg: new TextDecoder().decode(a.bytes),
+        };
+      },
+    );
+    const updated = validatePresentationPlan({
+      ...plan,
+      slides: plan.slides.map((s) => (s === slide ? page : s)),
+    });
+    return updated;
   }
 
   private save(entry: JobEntry): Promise<void> {
@@ -448,6 +685,7 @@ export class PresentationGenerationPort implements PresentationPort {
       initialAssetsComplete: entry.initialAssetsComplete,
       draftCheckpoint: entry.draftCheckpoint,
       revisionCheckpoint: entry.revisionCheckpoint,
+      stageHandoffs: entry.stageHandoffs,
     });
     entry.persistence = entry.persistence
       .catch(() => undefined)
@@ -461,6 +699,8 @@ export class PresentationGenerationPort implements PresentationPort {
       cached &&
       (!this.options.repository?.acquireLease ||
         cached.localTask ||
+        cached.mutating ||
+        cached.leaseAcquisition ||
         cached.lease ||
         (cached.job.state === 'queued' && cached.retryTimer))
     )
@@ -469,6 +709,9 @@ export class PresentationGenerationPort implements PresentationPort {
     if (pending) return pending;
     const load = (async () => {
       const stored = await this.options.repository?.getJob(this.scope, jobId);
+      // A request may have pinned the cached entry while this storage read was in flight.
+      if (cached?.mutating || cached?.localTask || cached?.leaseAcquisition || cached?.lease)
+        return cached;
       if (!stored) return undefined;
       const entry: JobEntry = {
         ...stored,
@@ -537,14 +780,38 @@ export class PresentationGenerationPort implements PresentationPort {
           entry.lease = undefined;
         } else {
           await this.save(entry);
-          entry.localTask = true;
-          entry.task = this.run(jobId, entry.input, entry.controller);
+          entry.task = this.run(entry);
         }
       }
       return entry;
     })().finally(() => this.loading.delete(jobId));
     this.loading.set(jobId, load);
     return load;
+  }
+
+  private async acquireEntryLease(entry: JobEntry, signal?: AbortSignal) {
+    if (entry.lease) return entry.lease;
+    if (!entry.leaseAcquisition) {
+      const repository = this.options.repository;
+      if (!repository?.acquireLease) return null;
+      entry.leaseAcquisition = repository
+        .acquireLease(this.scope, entry.job.jobId, signal)
+        .then((lease) => {
+          if (lease) entry.lease = lease;
+          return lease;
+        })
+        .finally(() => {
+          entry.leaseAcquisition = undefined;
+        });
+    }
+    return entry.leaseAcquisition;
+  }
+
+  private async releaseEntryLease(entry: JobEntry) {
+    const lease = entry.lease;
+    if (!lease) return;
+    await lease.release();
+    if (entry.lease === lease) entry.lease = undefined;
   }
 
   private async mutate<T>(jobId: string, action: () => Promise<T>): Promise<T> {
@@ -562,25 +829,31 @@ export class PresentationGenerationPort implements PresentationPort {
           throw Object.assign(new Error('任务由其他执行器处理，请刷新当前进度后继续'), {
             code: 'PRESENTATION_CONFLICT',
           });
-        let acquired = false;
-        if (this.options.repository?.acquireLease && !entry.lease) {
-          const lease = await this.options.repository.acquireLease(this.scope, jobId);
-          if (!lease)
-            throw Object.assign(new Error('任务已在继续，请刷新当前进度'), {
-              code: 'PRESENTATION_CONFLICT',
-            });
-          entry.lease = lease;
-          acquired = true;
-          const stored = await this.options.repository.getJob(this.scope, jobId);
-          if (stored) Object.assign(entry, stored);
-        }
+        entry.mutating = true;
         try {
+          // A terminal state is published before the previous worker finishes its writes
+          // and lease cleanup. Keep that ownership until this mutation can take it over.
+          if (entry.localTask && entry.job.state !== 'running' && entry.job.state !== 'queued')
+            await entry.task;
+          if (this.options.repository?.acquireLease && !entry.lease) {
+            if (!(await this.acquireEntryLease(entry)))
+              throw Object.assign(new Error('任务已在继续，请刷新当前进度'), {
+                code: 'PRESENTATION_CONFLICT',
+              });
+            if (!entry.localTask) {
+              const stored = await this.options.repository.getJob(this.scope, jobId);
+              if (stored) Object.assign(entry, stored);
+            }
+          }
           return await action();
         } finally {
-          if (acquired && !entry.localTask) {
-            await entry.persistence.catch(() => undefined);
-            await entry.lease?.release();
-            entry.lease = undefined;
+          try {
+            if (!entry.localTask) {
+              await entry.persistence.catch(() => undefined);
+              await this.releaseEntryLease(entry);
+            }
+          } finally {
+            entry.mutating = false;
           }
         }
       });
@@ -794,11 +1067,14 @@ export class PresentationGenerationPort implements PresentationPort {
       input.annotation &&
       !entry.job.messages?.some((message) => message.requestId === input.requestId)
     ) {
-      validateAnnotation(entry.plan, input);
-      if (input.annotation.expectedVersionId !== entry.job.versionId)
-        throw Object.assign(new Error('这一页已经更新，请重新标注后发送。'), {
+      if (
+        entry.job.state !== 'completed' ||
+        input.annotation.expectedVersionId !== entry.job.versionId
+      )
+        throw Object.assign(new Error('请打开最新完成的版本，重新框选后再发送。'), {
           code: 'PRESENTATION_CONFLICT',
         });
+      validateAnnotation(entry.plan, input);
     }
     if (input.patch) {
       if (
@@ -825,6 +1101,82 @@ export class PresentationGenerationPort implements PresentationPort {
         ),
       });
     }
+    const objectEdits = [
+      input.chartDataPatch,
+      input.canvasCommand,
+      input.objectPositionPatch,
+      input.tableDataPatch,
+    ].filter((edit) => edit !== undefined);
+    if (objectEdits.length) {
+      const position = input.objectPositionPatch !== undefined;
+      const parsed =
+        input.canvasCommand !== undefined
+          ? canvasCommandSchema.safeParse(input.canvasCommand)
+          : position
+            ? objectPositionPatchSchema.safeParse(input.objectPositionPatch)
+            : input.tableDataPatch !== undefined
+              ? tableDataPatchSchema.safeParse(input.tableDataPatch)
+              : chartDataPatchSchema.safeParse(input.chartDataPatch);
+      if (
+        !parsed.success ||
+        input.target.type !== 'slide' ||
+        input.patch ||
+        input.annotation ||
+        input.template ||
+        objectEdits.length !== 1
+      )
+        throw Object.assign(new Error('请选择单页中的一个对象并提交一项有效修改'), {
+          code: 'PRESENTATION_INVALID',
+        });
+      if (!entry.job.messages?.some((message) => message.requestId === input.requestId)) {
+        if (
+          !entry.plan ||
+          entry.job.state !== 'completed' ||
+          parsed.data.expectedVersionId !== entry.job.versionId
+        )
+          throw Object.assign(new Error('请打开最新完成的版本后修改对象'), {
+            code: 'PRESENTATION_CONFLICT',
+          });
+        try {
+          if (input.canvasCommand) {
+            const cmd = input.canvasCommand;
+            if (cmd.kind === 'restore') {
+              const step = canvasHistory(entry.job)[cmd.direction].at(-1);
+              if (
+                !step ||
+                step.id !== cmd.operationId ||
+                step.page !== input.target.slideNumber ||
+                (cmd.direction === 'undo' ? step.before : step.after) !== cmd.version
+              )
+                throw Error('该画布修改已变化，请刷新后重试');
+            }
+            await this.applyCanvasCommand(entry, entry.plan, input);
+          } else if (input.objectPositionPatch)
+            moveCanvasObject(
+              canvasMoveForSlide(entry.plan, input.target, input.objectPositionPatch).move,
+            );
+          else if (input.tableDataPatch) {
+            const slideId = entry.plan.slides[input.target.slideNumber - 1].slideId;
+            const published = await this.options.artifactStore.get(
+              this.scope,
+              `${entry.job.jobId}:${entry.job.versionId}:slide:${slideId}`,
+            );
+            const manifest = published?.metadata?.nativeData as { tables?: unknown } | undefined;
+            if (
+              !Array.isArray(manifest?.tables) ||
+              !manifest.tables.includes(input.tableDataPatch.blockId)
+            )
+              throw new Error('此版本尚未导出可编辑的原生表格，请打开最新版或选择表格外的内容');
+            assertTableDataPatchTarget(entry.plan, input.target, input.tableDataPatch);
+          } else if (input.chartDataPatch)
+            assertChartDataPatchTarget(entry.plan, input.target, input.chartDataPatch);
+        } catch (error) {
+          throw Object.assign(error instanceof Error ? error : new Error('对象无法修改'), {
+            code: 'PRESENTATION_INVALID',
+          });
+        }
+      }
+    }
     if (input.template) {
       if (!this.options.templateLibrary)
         throw Object.assign(new Error('Template library is unavailable'), {
@@ -839,7 +1191,12 @@ export class PresentationGenerationPort implements PresentationPort {
     const existing = entry.job.messages?.find((message) => message.requestId === input.requestId);
     if (existing) {
       if (
-        JSON.stringify(existing.annotation) !== JSON.stringify(input.annotation) ||
+        !isDeepStrictEqual(existing.annotation, input.annotation) ||
+        !isDeepStrictEqual(existing.canvasCommand, input.canvasCommand) ||
+        !isDeepStrictEqual(existing.tableDataPatch, input.tableDataPatch) ||
+        JSON.stringify(existing.objectPositionPatch) !==
+          JSON.stringify(input.objectPositionPatch) ||
+        JSON.stringify(existing.chartDataPatch) !== JSON.stringify(input.chartDataPatch) ||
         JSON.stringify(existing.patch) !== JSON.stringify(input.patch) ||
         JSON.stringify(existing.template) !== JSON.stringify(input.template) ||
         existing.content !== input.content.trim() ||
@@ -888,7 +1245,7 @@ export class PresentationGenerationPort implements PresentationPort {
     entry.job.updatedAt = this.now();
     await this.save(entry);
     await this.publishSnapshot(entry, PRESENTATION_JOB_EVENT_TYPES.progress);
-    if (!active) entry.task = this.run(jobId, entry.input, entry.controller);
+    if (!active) entry.task = this.run(entry);
     return clone(entry.job);
   }
 
@@ -987,10 +1344,41 @@ export class PresentationGenerationPort implements PresentationPort {
     if (changed) await this.save(entry);
   }
 
-  private async embedOwnedAssets(plan: PresentationPlan): Promise<PresentationPlan> {
+  private async embedOwnedAssets(
+    plan: PresentationPlan,
+    capsules: CapabilityCapsule[] = [],
+    revision?: { jobId: string; previousVersionId: string; editedSlideIds: ReadonlySet<string> },
+  ): Promise<PresentationPlan> {
     const slides = await Promise.all(
       plan.slides.map(async (slide) => {
-        let svg = normalizePresentationSvg(slide.svg);
+        if (revision && !revision.editedSlideIds.has(slide.slideId)) {
+          const ref = `${revision.jobId}:${revision.previousVersionId}:slide:${slide.slideId}`;
+          const previous = await this.options.artifactStore.get(this.scope, ref);
+          if (
+            previous?.bytes &&
+            previous.mimeType === 'image/svg+xml' &&
+            previous.metadata?.slideId === slide.slideId &&
+            previous.metadata?.versionId === revision.previousVersionId
+          )
+            return {
+              ...slide,
+              svg: new TextDecoder().decode(previous.bytes),
+              ...(previous.metadata.contentBlocks || previous.metadata.designCompilation
+                ? {
+                    metadata: {
+                      ...slide.metadata,
+                      ...(previous.metadata.contentBlocks
+                        ? { contentBlocks: previous.metadata.contentBlocks }
+                        : {}),
+                      ...(previous.metadata.designCompilation
+                        ? { designCompilation: previous.metadata.designCompilation }
+                        : {}),
+                    },
+                  }
+                : {}),
+            };
+        }
+        let svg = normalizeGroupOpacity(slide.svg);
         svg = await normalizeRasterOpacity(svg, async (ref, opacity) => {
           const match = /^\/api\/runtime\/presentation\/artifacts\/([^?]+)(?:\?raw=true)?$/.exec(
             ref,
@@ -1028,7 +1416,12 @@ export class PresentationGenerationPort implements PresentationPort {
       }),
     );
     const embedded = { ...plan, slides };
-    return embedded;
+    return !revision &&
+      capsules.length &&
+      (plan.designSpec?.deckVisualSystem as { schemaVersion?: number } | undefined)
+        ?.schemaVersion === 3
+      ? stabilizePresentationVisuals(embedded, undefined, capsules, 'export')
+      : embedded;
   }
 
   private async publishSnapshot(entry: JobEntry, type: string): Promise<void> {
@@ -1186,7 +1579,7 @@ export class PresentationGenerationPort implements PresentationPort {
       }
     }
     await this.save(entry);
-    entry.task = this.run(jobId, entry.input, entry.controller);
+    entry.task = this.run(entry);
     return clone(entry.job);
   }
 
@@ -1266,7 +1659,7 @@ export class PresentationGenerationPort implements PresentationPort {
 
   private async readTrustedImages(ids: string[]) {
     const images = [];
-    for (const ref of [...new Set(ids)].slice(-4)) {
+    for (const ref of [...new Set(ids)].slice(0, 32)) {
       const artifact = await this.options.artifactStore.get(this.scope, ref);
       if (
         !artifact?.bytes ||
@@ -1374,12 +1767,14 @@ export class PresentationGenerationPort implements PresentationPort {
   ): Promise<PresentationJobInput> {
     if (!this.options.contentCompiler) return input;
     const previous = input.options?.contentIntents as
-      | Awaited<ReturnType<PresentationContentCompiler['compile']>>
-      | undefined;
-    if (previous?.inputFingerprint === contentInputFingerprint(input)) return input;
+      Awaited<ReturnType<PresentationContentCompiler['compile']>> | undefined;
+    if (previous?.inputFingerprint === contentInputFingerprint(input)) {
+      const slides = readContentIntents(input);
+      if (designFingerprint(previous.slides) === designFingerprint(slides)) return input;
+      return { ...input, options: { ...input.options, contentIntents: { ...previous, slides } } };
+    }
     const revision = input.options?.contentRevision as
-      | { target?: PresentationMessageInput['target'] }
-      | undefined;
+      { target?: PresentationMessageInput['target'] } | undefined;
     const target = revision?.target;
     const outline = input.options?.outline;
     const scoped =
@@ -1456,6 +1851,147 @@ export class PresentationGenerationPort implements PresentationPort {
     };
   }
 
+  private async prepareStoryboardLayout(
+    entry: JobEntry,
+    input: PresentationJobInput,
+    capsules: CapabilityCapsule[],
+    signal: AbortSignal,
+  ) {
+    const memory = this.options.capabilityMemory;
+    if (!memory?.candidates || entry.plan || !capsules.length) return { input, capsules };
+    const inputKey = (chosen: CapabilityCapsule[]) =>
+      designFingerprint([
+        intentLayoutInputs(input),
+        designReferencePayload(chosen),
+        readDeckVisualSystem(input),
+      ]);
+    const previous = input.options?.layoutCompatibility as StoryboardCompatibility | undefined;
+    const saved = entry.stageHandoffs?.['compatibility:deck'];
+    if (
+      saved?.inputVersion === inputKey(capsules) &&
+      saved.outputVersion === designFingerprint(previous) &&
+      previous?.pages.every((page) => page.layoutIds.length)
+    )
+      return { input, capsules };
+
+    const first = await checkStoryboardCompatibility(input, capsules, []);
+    if (!first) return { input, capsules };
+    const requiresReselection =
+      !first.styleId ||
+      first.pages.some(
+        (page) => !page.layoutIds.length || !page.layoutIds.includes(page.preferredLayoutId ?? ''),
+      );
+    const candidates = requiresReselection
+      ? await memory.candidates(
+          this.scope,
+          '简洁网格 明亮背景 分栏 图文 公式 表格 可编辑对象 swiss-minimal',
+          input.aspectRatio ?? '16:9',
+          { includeMeasuredStyles: true },
+        )
+      : [];
+    signal.throwIfAborted();
+    const report = candidates.length
+      ? (await checkStoryboardCompatibility(input, capsules, candidates))!
+      : first;
+    if (
+      ![...capsules, ...candidates].some(
+        (capsule) => capsule.kind === 'layout' && capsule.designReference?.slots?.length,
+      )
+    )
+      return { input, capsules };
+    const primary = report.styleId ?? report.previousStyleId;
+    const required = report.pages.flatMap((page) => page.layoutIds.slice(0, 1));
+    const ids = [
+      ...new Set([
+        ...(primary ? [primary] : []),
+        ...required,
+        ...capsules.filter((c) => c.kind !== 'style').map((c) => c.id),
+        ...report.pages.flatMap((page) => page.layoutIds),
+      ]),
+    ].slice(0, 10);
+    const composition =
+      ids.length === capsules.length && ids.every((id, index) => capsules[index].id === id)
+        ? undefined
+        : await memory.compose(this.scope, ids, true);
+    const nextCapsules = composition?.capsules ?? capsules;
+    const appliedIds = new Set(nextCapsules.map(({ id }) => id));
+    const final = {
+      ...report,
+      inputVersion: inputKey(nextCapsules),
+      previousStyleId: previous?.previousStyleId ?? report.previousStyleId,
+      pages: report.pages.map((page) => ({
+        ...page,
+        layoutIds: page.layoutIds.filter((id) => appliedIds.has(id)),
+      })),
+    };
+    const updated = {
+      ...input,
+      options: {
+        ...input.options,
+        ...(composition ? { learnedCapabilities: composition } : {}),
+        layoutCompatibility: final,
+      },
+    };
+    this.recordHandoff(
+      entry,
+      'compatibility',
+      'deck',
+      final.inputVersion,
+      final,
+      this.options.agentRoutingFingerprint,
+    );
+    entry.input = clone(updated);
+    await this.save(entry);
+    const blocked = final.pages.filter((page) => !page.layoutIds.length);
+    if (blocked.length) {
+      const diagnosis = await this.layoutDiagnosis(
+        {
+          failure: 'storyboard-candidates-exhausted',
+          pages: blocked,
+          candidates: designReferencePayload([...capsules, ...candidates]).slice(0, 30),
+        },
+        entry.job.jobId,
+        signal,
+      );
+      this.recordHandoff(
+        entry,
+        'diagnosis',
+        'storyboard',
+        final.inputVersion,
+        diagnosis,
+        this.options.agentRoutingFingerprint,
+      );
+      await this.save(entry);
+      throw Object.assign(
+        new Error(
+          '分镜版式重选后仍无法容纳第 ' +
+            blocked.map((page) => page.slideId.replace('slide-', '')).join('、') +
+            ' 页的全部对象。' +
+            (diagnosis.result?.reason ?? ' 请更换模板或调整这些页面的内容分配。'),
+        ),
+        { code: 'PRESENTATION_INVALID' },
+      );
+    }
+    return { input: updated, capsules: nextCapsules };
+  }
+
+  private async layoutDiagnosis(evidence: unknown, jobId: string, signal: AbortSignal) {
+    if (!this.options.layoutDiagnosisChat) return { status: 'unconfigured' as const };
+    try {
+      return {
+        status: 'completed' as const,
+        result: await diagnoseStoryboardLayout(this.options.layoutDiagnosisChat, evidence, {
+          idempotencyKey: `layout-diagnosis:${jobId}:${designFingerprint(evidence)}`,
+          scope: this.scope,
+          signal,
+        }),
+      };
+    } catch (error) {
+      if (signal.aborted) throw error;
+      return { status: 'unavailable' as const };
+    }
+  }
+
   private async ensureVisualStoryboard(
     input: PresentationJobInput,
     template: TemplateApplication,
@@ -1466,8 +2002,7 @@ export class PresentationGenerationPort implements PresentationPort {
     if (!template.visual?.designProgram || !this.options.visualStoryboardPlanner) return input;
     if (!confirmedDeckLength(input)) return input;
     const existing = input.options?.visualStoryboard as
-      | Partial<PresentationVisualStoryboard>
-      | undefined;
+      Partial<PresentationVisualStoryboard> | undefined;
     if (
       existing?.templateId === template.templateId &&
       existing.versionId === template.versionId &&
@@ -1534,27 +2069,79 @@ export class PresentationGenerationPort implements PresentationPort {
     jobId: string,
     signal: AbortSignal,
     publisher?: Pick<PresentationJobEventPublisherPort, 'publish'>,
+    editableSlideIds?: ReadonlySet<string>,
+    exactObjectSlideIds?: ReadonlySet<string>,
   ): Promise<PresentationPlan> {
+    input = this.bindAgentRouting(input);
     if (
       !this.options.visualCritic ||
       (!template?.visual && plan.designSpec?.contentPolicyVersion !== 1)
     )
       return plan;
-    plan = await stabilizePresentationVisuals(plan, template);
+    const designCapsules =
+      (input.options?.learnedCapabilities as { capsules?: CapabilityCapsule[] } | undefined)
+        ?.capsules ?? [];
+    if (designCapsules.length)
+      plan = {
+        ...plan,
+        designSpec: {
+          ...plan.designSpec,
+          designSourceContract: designReferencePayload(designCapsules),
+          designStageInputs: {
+            selectionFingerprint: input.options?.capabilitySelectionFingerprint,
+            sourceFingerprint: designFingerprint(designReferencePayload(designCapsules)),
+            storyboardInputFingerprint: (
+              input.options?.visualStoryboard as { inputFingerprint?: string } | undefined
+            )?.inputFingerprint,
+          },
+        },
+      };
+    if (input.options?.agentRoutingFingerprint || plan.designSpec?.agentRoutingFingerprint) {
+      const { agentRoutingFingerprint: _previousRoute, ...designSpec } = plan.designSpec ?? {};
+      plan = {
+        ...plan,
+        designSpec: {
+          ...designSpec,
+          ...(input.options?.agentRoutingFingerprint
+            ? { agentRoutingFingerprint: input.options.agentRoutingFingerprint }
+            : {}),
+        },
+      };
+    }
+    if (input.options?.layoutCompatibility)
+      plan = {
+        ...plan,
+        designSpec: { ...plan.designSpec, layoutCompatibility: input.options.layoutCompatibility },
+      };
+    plan = await stabilizePresentationVisuals(
+      plan,
+      template,
+      designCapsules,
+      'pre-review',
+      editableSlideIds,
+      exactObjectSlideIds,
+    );
     const previous = plan.designSpec?.templateVisualReview as
       | {
           planFingerprint?: string;
+          agentRoutingFingerprint?: string;
           templateId?: string;
           versionId?: string;
           final?: PresentationVisualReview;
           reviewVersion?: number;
         }
       | undefined;
+    const reviewVersion =
+      (plan.designSpec?.deckVisualSystem as { schemaVersion?: number } | undefined)
+        ?.schemaVersion === 3
+        ? 3
+        : 2;
     if (
+      previous?.agentRoutingFingerprint === input.options?.agentRoutingFingerprint &&
       previous?.templateId === template?.templateId &&
       previous?.versionId === template?.versionId &&
       previous?.final?.passed === true &&
-      previous.reviewVersion === 2 &&
+      previous.reviewVersion === reviewVersion &&
       (plan.designSpec?.contentPolicyVersion !== 1 || inspectPresentationContent(plan).passed) &&
       previous?.planFingerprint === planVisualFingerprint(plan)
     ) {
@@ -1629,12 +2216,17 @@ export class PresentationGenerationPort implements PresentationPort {
       plan,
       retainUnresolvedVisualIssues(
         await review(plan),
-        previous?.planFingerprint === planVisualFingerprint(plan) ? previous.final : undefined,
+        previous?.reviewVersion === reviewVersion &&
+          previous?.planFingerprint === planVisualFingerprint(plan)
+          ? previous.final
+          : undefined,
       ),
     );
     // Keep advisory style findings visible without regenerating an already publishable
     // page. Unnecessary rewrites can introduce new layout defects and repeat paid work.
-    let corrections = initial.issues.filter((issue) => issue.severity !== 'minor');
+    const repairable = (issue: PresentationVisualReview['issues'][number]) =>
+      issue.severity !== 'minor' && (!editableSlideIds || editableSlideIds.has(issue.slideId));
+    let corrections = initial.issues.filter(repairable);
     let repaired = plan;
     const repairedSlideIds: string[] = [];
     const repairFailures: Array<{ code: string; slideId: string }> = [];
@@ -1658,31 +2250,72 @@ export class PresentationGenerationPort implements PresentationPort {
       for (const [slideId, issues] of groups) {
         const slide = repaired.slides.find((item) => item.slideId === slideId);
         if (!slide) continue;
+        publisher?.publish({
+          jobId,
+          type: PRESENTATION_JOB_EVENT_TYPES.progress,
+          idempotencyKey: `template-repair-page:${template?.versionId ?? 'original'}:${repairRound}:${slideId}:${planVisualFingerprint(repaired)}`,
+          data: { phase: 'planner', activity: `正在调整第 ${slide.order} 页，完成后复核整稿` },
+        });
+        const layoutFailure = issues.find((issue) => isExhaustedLearnedLayout(issue.evidence));
+        const diagnosis = layoutFailure
+          ? await this.layoutDiagnosis(
+              {
+                failure: layoutFailure.evidence,
+                slideId,
+                candidates: designReferencePayload(designCapsules),
+                layoutCompatibility: input.options?.layoutCompatibility,
+                objects: (
+                  slide.metadata?.contentBlocks as { kind: string; rect: unknown }[] | undefined
+                )?.map(({ kind, rect }) => ({ kind, rect })),
+              },
+              jobId,
+              signal,
+            )
+          : undefined;
+        const entry = this.jobs.get(jobId);
+        if (entry && diagnosis) {
+          this.recordHandoff(
+            entry,
+            'diagnosis',
+            slideId,
+            planVisualFingerprint(repaired),
+            diagnosis,
+            this.options.agentRoutingFingerprint,
+          );
+          await this.save(entry);
+        }
         const editableArtwork = readVisualAssetBindings(slide.metadata?.visualAssets).filter(
           (asset) => asset.kind !== 'source-figure',
         );
-        const repairArtwork = issues.some(
-          (issue) =>
-            (['artwork-style', 'cutout'].includes(issue.category) &&
-              editableArtwork.some(
-                (asset) => !issue.visualId || asset.visualId === issue.visualId,
-              )) ||
-            (issue.category === 'legibility' &&
-              /图片|图像|插图|素材|image|raster/iu.test(`${issue.evidence} ${issue.instruction}`) &&
-              !/放大|扩大|加宽|提高.{0,8}(?:高度|宽度|占比)|增大|enlarge|viewport|display size|placement/iu.test(
-                issue.instruction,
-              ) &&
-              editableArtwork.some(
-                (asset) => !issue.visualId || asset.visualId === issue.visualId,
-              )) ||
-            ((issue.category === 'scientific-semantics' ||
-              (issue.category === 'template-fidelity' && !!issue.visualId)) &&
-              readVisualAssetBindings(slide.metadata?.visualAssets).some(
-                (asset) =>
-                  ['scientific-illustration', 'scientific-diagram', 'chart'].includes(asset.kind) &&
-                  (!issue.visualId || asset.visualId === issue.visualId),
-              )),
-        );
+        const repairArtwork =
+          !exactObjectSlideIds?.has(slideId) &&
+          !layoutFailure &&
+          issues.some(
+            (issue) =>
+              (['artwork-style', 'cutout'].includes(issue.category) &&
+                editableArtwork.some(
+                  (asset) => !issue.visualId || asset.visualId === issue.visualId,
+                )) ||
+              (issue.category === 'legibility' &&
+                /图片|图像|插图|素材|image|raster/iu.test(
+                  `${issue.evidence} ${issue.instruction}`,
+                ) &&
+                !/放大|扩大|加宽|提高.{0,8}(?:高度|宽度|占比)|增大|enlarge|viewport|display size|placement/iu.test(
+                  issue.instruction,
+                ) &&
+                editableArtwork.some(
+                  (asset) => !issue.visualId || asset.visualId === issue.visualId,
+                )) ||
+              ((issue.category === 'scientific-semantics' ||
+                (issue.category === 'template-fidelity' && !!issue.visualId)) &&
+                readVisualAssetBindings(slide.metadata?.visualAssets).some(
+                  (asset) =>
+                    ['scientific-illustration', 'scientific-diagram', 'chart'].includes(
+                      asset.kind,
+                    ) &&
+                    (!issue.visualId || asset.visualId === issue.visualId),
+                )),
+          );
         const repairContent = issues.some((issue) =>
           ['density', 'formula', 'scientific-semantics'].includes(issue.category),
         );
@@ -1696,6 +2329,7 @@ export class PresentationGenerationPort implements PresentationPort {
             repairArtwork
               ? '视觉复核后的素材修正。仅处理本页中有像素证据的画风、抠图、图内文字可读性或科研插图结构语义问题，按visualId定位素材并决定重绘、去底或保留背景；对科研插图缺失的部件、错误关系或图片内不可读标签用Image修正，不要仅移动SVG。图内必要文字必须完整、字号适合投影；复用其余素材，保留事实、文字含义、讲稿和其它页面。'
               : '视觉复核后的最小修正。只修改本页 SVG 的层级、间距、构图锚点、可读性或模板气质；保留事实、文字含义、讲稿和所有现有图片引用，不生成新素材。',
+            ...(diagnosis?.result ? ['版式诊断建议：' + diagnosis.result.repairInstruction] : []),
             ...issues.map((issue) => {
               const instruction = issue.instruction.replaceAll(
                 /缩小字号|微调(?:文字)?字号/gu,
@@ -1730,24 +2364,75 @@ export class PresentationGenerationPort implements PresentationPort {
                 publisher,
               )
             : { input, assetArtifactIds: [] };
-          const candidate = await this.options.capability.plan(prepared.input, {
-            abortSignal: signal,
-            basePlan: repaired,
-            jobId,
-            revision,
-            scope: this.scope,
-            template,
-            trustedImages: await this.readTrustedImages([
-              ...this.planAssetIds(repaired, revision.target),
-              ...prepared.assetArtifactIds,
-              ...trustedTemplatePageRefs(template),
-            ]),
-          });
+          const candidate = await this.options.capability.plan(
+            this.bindAgentRouting(prepared.input),
+            {
+              abortSignal: signal,
+              basePlan: repaired,
+              jobId,
+              revision,
+              scope: this.scope,
+              template,
+              trustedImages: await this.readTrustedImages([
+                ...this.planAssetIds(repaired, revision.target),
+                ...prepared.assetArtifactIds,
+                ...trustedTemplatePageRefs(template),
+              ]),
+            },
+          );
           const candidateSlide = candidate.slides.find((item) => item.slideId === slideId);
           if (!candidateSlide) {
             throw Object.assign(new Error(`visual repair omitted slide ${slideId}`), {
               code: 'PRESENTATION_REPAIR_INVALID',
             });
+          }
+          if (exactObjectSlideIds?.has(slideId)) {
+            const source = (page: typeof slide) =>
+              Array.isArray(page.metadata?.contentBlocks)
+                ? page.metadata.contentBlocks.map(
+                    (block: { id: string; rect: unknown; spec?: unknown; latex?: string }) => [
+                      block.id,
+                      block.rect,
+                      block.spec,
+                      block.latex,
+                    ],
+                  )
+                : [];
+            if (designFingerprint(source(candidateSlide)) !== designFingerprint(source(slide)))
+              throw Object.assign(new Error('视觉修复须保留已确认的对象位置和数据'), {
+                code: 'PRESENTATION_REPAIR_INVALID',
+              });
+          }
+          if (layoutFailure) {
+            const refs = (page: PresentationPlan['slides'][number]) =>
+              presentationImageRefs(page.svg).sort();
+            const exactContent = (blocks: unknown) =>
+              Array.isArray(blocks)
+                ? blocks
+                    .flatMap((raw) => {
+                      const block = semanticBlockSchema.safeParse(raw);
+                      if (!block.success) return [];
+                      if (block.data.kind === 'formula')
+                        return [JSON.stringify(block.data.latex.replaceAll(/\s+/gu, ''))];
+                      if (block.data.spec.type === 'table')
+                        return [JSON.stringify([block.data.spec.columns, block.data.spec.rows])];
+                      return [];
+                    })
+                    .sort()
+                : [];
+            if (
+              designFingerprint(refs(slide)) !== designFingerprint(refs(candidateSlide)) ||
+              designFingerprint(exactContent(slide.metadata?.contentBlocks)) !==
+                designFingerprint(
+                  exactContent(
+                    candidateSlide.metadata?.contentBlocks ?? slide.metadata?.contentBlocks,
+                  ),
+                )
+            )
+              throw Object.assign(
+                new Error('Layout repair must preserve the existing images, formulas and data'),
+                { code: 'PRESENTATION_REPAIR_INVALID' },
+              );
           }
           // Keep page identity, outline and speaker notes stable. Only an explicit
           // artwork correction may attach newly generated/processed asset refs.
@@ -1819,12 +2504,19 @@ export class PresentationGenerationPort implements PresentationPort {
           });
         }
       }
-      repaired = await stabilizePresentationVisuals(repaired, template);
+      repaired = await stabilizePresentationVisuals(
+        repaired,
+        template,
+        designCapsules,
+        'post-repair',
+        new Set(repairedSlideIds.slice(repairedBeforeRound)),
+        exactObjectSlideIds,
+      );
       if (repairedSlideIds.length === repairedBeforeRound && repaired === plan) break;
       try {
         final = withMeasuredContent(repaired, await review(repaired));
         finalReviewError = undefined;
-        corrections = final.issues.filter((issue) => issue.severity !== 'minor');
+        corrections = final.issues.filter(repairable);
       } catch (error) {
         if (signal.aborted) throw error;
         finalReviewError =
@@ -1839,7 +2531,9 @@ export class PresentationGenerationPort implements PresentationPort {
       designSpec: {
         ...repaired.designSpec,
         templateVisualReview: {
-          reviewVersion: 2,
+          reviewVersion,
+          agentRoutingFingerprint: input.options?.agentRoutingFingerprint,
+          designSourceFingerprint: designFingerprint(plan.designSpec?.designSourceContract),
           final,
           ...(evidenceAdjudications.size
             ? { evidenceAdjudications: [...evidenceAdjudications.values()] }
@@ -2015,16 +2709,31 @@ export class PresentationGenerationPort implements PresentationPort {
     'presentation.template.apply',
     'presentation.template.resolve',
   ]);
-  async listJobs() {
+  async listJobs(origin?: PresentationJob['chatOrigin']) {
     const persisted = (await this.options.repository?.listJobs?.(this.scope)) ?? [];
     const jobs = new Map(persisted.map((job) => [job.jobId, job]));
     for (const entry of this.jobs.values())
       if (!entry.passive) jobs.set(entry.job.jobId, entry.job);
+    const matches = [...jobs.values()]
+      .filter(
+        (job) =>
+          !origin ||
+          (job.chatOrigin?.agentId === origin.agentId &&
+            job.chatOrigin.topicId === origin.topicId &&
+            job.chatOrigin.messageId === origin.messageId),
+      )
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .slice(0, 100)
+      .map(clone);
+    if (!origin) return { jobs: matches };
     return {
-      jobs: [...jobs.values()]
-        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-        .slice(0, 100)
-        .map(clone),
+      jobs: await Promise.all(
+        matches.map(async (job) =>
+          job.state === 'completed' && !job.delivery
+            ? ((await this.getJob(job.jobId)) ?? job)
+            : job,
+        ),
+      ),
     };
   }
   async readPlan(jobId: string) {
@@ -2133,16 +2842,20 @@ export class PresentationGenerationPort implements PresentationPort {
     };
   }
 
-  private async run(
-    jobId: string,
+  private run(entry: JobEntry): Promise<void> {
+    entry.localTask = true;
+    return withPresentationAgentJob(entry.job.jobId, () =>
+      this.runOwned(entry, entry.input, entry.controller),
+    );
+  }
+
+  private async runOwned(
+    entry: JobEntry,
     input: PresentationJobInput,
     controller: AbortController,
   ): Promise<void> {
-    const scheduledEntry = this.jobs.get(jobId);
-    if (scheduledEntry) scheduledEntry.localTask = true;
+    const jobId = entry.job.jobId;
     const update = (patch: Partial<PresentationJob>): void => {
-      const entry = this.jobs.get(jobId);
-      if (!entry) return;
       if (entry.job.state === 'cancelled' && patch.state !== 'cancelled') return;
       if (controller.signal.aborted && patch.state !== 'cancelled') return;
       entry.job = { ...entry.job, ...patch, updatedAt: this.now() };
@@ -2151,10 +2864,10 @@ export class PresentationGenerationPort implements PresentationPort {
     await Promise.resolve();
     if (controller.signal.aborted) {
       update({ state: 'cancelled' });
-      if (scheduledEntry) scheduledEntry.localTask = false;
+      if (!entry.mutating) await this.releaseEntryLease(entry);
+      entry.localTask = false;
       return;
     }
-    const entry = this.jobs.get(jobId)!;
     let release: (() => void) | undefined;
     let releaseCapacity: (() => void) | undefined;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
@@ -2169,14 +2882,13 @@ export class PresentationGenerationPort implements PresentationPort {
     );
     const leaseLost = () => controller.abort(entry.lease?.signal.reason);
     try {
-      if (this.options.repository?.acquireLease && !entry.lease) {
-        entry.lease =
-          (await this.options.repository.acquireLease(this.scope, jobId, controller.signal)) ??
-          undefined;
-        if (!entry.lease) {
-          entry.passive = true;
-          return;
-        }
+      if (
+        this.options.repository?.acquireLease &&
+        !entry.lease &&
+        !(await this.acquireEntryLease(entry, controller.signal))
+      ) {
+        entry.passive = true;
+        return;
       }
       entry.lease?.signal.addEventListener('abort', leaseLost, { once: true });
       entry.passive = false;
@@ -2222,7 +2934,8 @@ export class PresentationGenerationPort implements PresentationPort {
           scope: this.scope,
           type: PRESENTATION_JOB_EVENT_TYPES.progress,
         });
-        let generationInput = clone(input);
+        let generationInput = this.bindAgentRouting(clone(input));
+        let reusePublishedStoryboard = hasPublishedStoryboardForExactEdits(entry);
         // An edit received while the initial deck is incomplete should shape that
         // first render, rather than forcing a second complete 18-page pass afterwards.
         const initialInstruction = !entry.plan
@@ -2231,6 +2944,10 @@ export class PresentationGenerationPort implements PresentationPort {
         const initialInstructionApplied =
           initialInstruction &&
           !initialInstruction.patch &&
+          !initialInstruction.tableDataPatch &&
+          !initialInstruction.chartDataPatch &&
+          !initialInstruction.objectPositionPatch &&
+          !initialInstruction.canvasCommand &&
           !initialInstruction.annotation &&
           !initialInstruction.template
             ? initialInstruction
@@ -2257,7 +2974,7 @@ export class PresentationGenerationPort implements PresentationPort {
         }
         // Keep an incomplete draft's fingerprint stable. Add source visuals on
         // initial creation or a later revision of the completed plan.
-        if (!entry.draftCheckpoint || entry.plan) {
+        if (!reusePublishedStoryboard && (!entry.draftCheckpoint || entry.plan)) {
           const sourceInput = generationInput;
           generationInput = await attachSourceDocumentImages(generationInput, {
             store: this.options.artifactStore,
@@ -2269,19 +2986,89 @@ export class PresentationGenerationPort implements PresentationPort {
             await this.save(entry);
           }
         }
+        // Direct creation provides a brief and a length. Persist the same editable
+        // page structure as the conversation flow before content batching or layout selection.
+        if (
+          // Existing saved direct jobs predate the mode flag and carry their brief in options.prompt.
+          (generationInput.options?.creationMode === 'direct' ||
+            typeof generationInput.options?.prompt === 'string') &&
+          this.options.outlineCapability &&
+          this.options.contentCompiler &&
+          !entry.plan &&
+          !entry.draftCheckpoint &&
+          !generationInput.options?.contentIntents &&
+          !generationInput.options?.lessonPlan &&
+          !(
+            Array.isArray(generationInput.options?.outline) &&
+            generationInput.options.outline.length
+          )
+        ) {
+          publisher?.publish({
+            jobId,
+            type: PRESENTATION_JOB_EVENT_TYPES.progress,
+            data: { activity: '正在将简报整理成逐页大纲', phase: 'planner' },
+          });
+          const {
+            options: current,
+            aspectRatio,
+            language,
+            title,
+            prompt,
+            slideCount,
+          } = generationInput;
+          const materials =
+            current?.materials === undefined
+              ? undefined
+              : presentationMaterialsSchema.parse(current.materials);
+          const { slides } = await this.options.outlineCapability.execute(
+            {
+              operation: 'propose',
+              exactSlideCount: slideCount,
+              brief: {
+                topic: title,
+                slideCount,
+                language,
+                materials,
+                aspectRatio:
+                  aspectRatio === '4:3' || aspectRatio === '16:9' ? aspectRatio : undefined,
+                style: typeof current?.style === 'string' ? current.style : undefined,
+                audience: typeof current?.audience === 'string' ? current.audience : undefined,
+                research: typeof current?.research === 'string' ? current.research : undefined,
+              },
+              instruction: [
+                prompt,
+                slideCount
+                  ? `整稿共 ${slideCount} 页。保留用户逐页指定的页序、标题、事实、数字和表达要求。`
+                  : undefined,
+              ]
+                .filter(Boolean)
+                .join('\n'),
+            },
+            { scope: this.scope, signal: controller.signal },
+          );
+          generationInput = {
+            ...generationInput,
+            slideCount: slides.length,
+            options: { ...current, outline: slides },
+          };
+          input = generationInput;
+          entry.input = clone(generationInput);
+          await this.save(entry);
+        }
         if (!entry.plan && !entry.draftCheckpoint)
           await this.options.prepareCapabilityLibrary?.(this.scope);
         if (
+          !entry.plan &&
+          !this.options.imageGenerationCapability &&
           Array.isArray(input.options?.imageSlots) &&
           input.options.imageSlots.length > 0 &&
-          !this.options.imageGenerationCapability
+          !Object.values(entry.stageHandoffs ?? {}).some((handoff) => handoff.stage === 'image')
         )
           throw Object.assign(new Error('Image generation provider is not configured'), {
             code: 'PROVIDER_UNAVAILABLE',
           });
         const pinnedMemory = generationInput.options?.learnedCapabilities as
-          | { capsules?: CapabilityCapsule[] }
-          | undefined;
+          { capsules?: CapabilityCapsule[] } | undefined;
         let learnedCapsules = pinnedMemory?.capsules ?? [];
         let templateCapsules: CapabilityCapsule[] = [];
         if (this.options.capabilityMemory && !entry.plan && !entry.draftCheckpoint) {
@@ -2292,11 +3079,16 @@ export class PresentationGenerationPort implements PresentationPort {
                 prompt: input.prompt,
                 outline: input.options?.outline,
                 style: input.options?.style,
+                styleWorkspaceId: input.options?.styleWorkspaceId,
                 capabilityIds: input.options?.capabilityIds,
               }),
             )
             .digest('hex');
           const requestedIds =
+            (entry.stageHandoffs?.['compatibility:deck'] &&
+            input.options?.capabilitySelectionFingerprint === selectionFingerprint
+              ? pinnedMemory?.capsules?.map((capsule) => capsule.id)
+              : undefined) ??
             input.options?.capabilityIds ??
             (input.options?.capabilitySelectionFingerprint === selectionFingerprint ||
             (!entry.plan && input.options?.visualDirection)
@@ -2312,6 +3104,7 @@ export class PresentationGenerationPort implements PresentationPort {
             );
           const query = [
             input.title,
+            input.prompt,
             input.options?.style,
             JSON.stringify(input.options?.outline ?? []),
           ]
@@ -2328,8 +3121,13 @@ export class PresentationGenerationPort implements PresentationPort {
                         this.options.capabilityMemory.candidates(
                           this.scope,
                           String(input.options?.style ?? ''),
+                          input.aspectRatio ?? '16:9',
                         ),
-                        this.options.capabilityMemory.candidates(this.scope, query),
+                        this.options.capabilityMemory.candidates(
+                          this.scope,
+                          query,
+                          input.aspectRatio ?? '16:9',
+                        ),
                       ])
                     )
                       .flat()
@@ -2337,14 +3135,36 @@ export class PresentationGenerationPort implements PresentationPort {
                   ).values(),
                 ]
               : await this.options.capabilityMemory.search(this.scope, query, 6, true);
-          const selectedIds =
+          const preset = getPresentationStylePreset(input.options?.styleWorkspaceId);
+          const pinned =
+            preset && !requestedIds
+              ? ((await this.options.capabilityMemory.resolveWorkspaces?.(this.scope, [
+                  preset.id,
+                  ...((input.aspectRatio ?? '16:9') === '16:9'
+                    ? [preset.coverLayout, preset.textLayout]
+                    : []),
+                ])) ?? [])
+              : [];
+          const selectable = pinned.length
+            ? [
+                ...new Map(
+                  [...pinned, ...capsules.filter((capsule) => capsule.kind !== 'style')].map(
+                    (capsule) => [capsule.id, capsule],
+                  ),
+                ).values(),
+              ]
+            : capsules;
+          const chosen =
             (requestedIds as string[] | undefined) ??
             (this.options.capabilitySelector
-              ? await this.options.capabilitySelector.select(input, capsules, {
+              ? await this.options.capabilitySelector.select(input, selectable, {
                   scope: this.scope,
                   signal: controller.signal,
                 })
-              : capsules.map(({ id }) => id));
+              : selectable.map(({ id }) => id));
+          const selectedIds = pinned.length
+            ? [...new Set([...pinned.map((capsule) => capsule.id), ...chosen])].slice(0, 10)
+            : chosen;
           const composed = await this.options.capabilityMemory.compose(
             this.scope,
             selectedIds,
@@ -2365,7 +3185,7 @@ export class PresentationGenerationPort implements PresentationPort {
         const uncompiledInput = generationInput;
         const needsInitialContent =
           !entry.plan && (!entry.draftCheckpoint || Boolean(initialInstructionApplied));
-        if (this.options.contentCompiler) {
+        if (!reusePublishedStoryboard && this.options.contentCompiler) {
           publisher?.publish({
             jobId,
             type: PRESENTATION_JOB_EVENT_TYPES.progress,
@@ -2374,6 +3194,22 @@ export class PresentationGenerationPort implements PresentationPort {
         }
         // Content art direction needs the selected templates and shared master.
         const loadedTemplates = await (async () => {
+          if (reusePublishedStoryboard && this.options.templateLibrary) {
+            // Open only the immutable template versions used to publish this deck.
+            const sources = uncompiledInput.options
+              ?.templateSources as TemplateApplication['sources'];
+            const pinned = sources?.length
+              ? sources
+              : [
+                  {
+                    templateId: uncompiledInput.template!,
+                    versionId: uncompiledInput.options!.templateVersionId as string,
+                  },
+                ];
+            return Promise.all(
+              pinned.map((ref) => this.options.templateLibrary!.resolve(this.scope, ref)),
+            );
+          }
           const references: TemplateReference[] = [];
           if (uncompiledInput.template)
             references.push({
@@ -2420,7 +3256,12 @@ export class PresentationGenerationPort implements PresentationPort {
           ? composeTemplateApplications(loadedTemplates, selectedFamilies)
           : undefined;
         let template: TemplateApplication | undefined = composedTemplate?.application;
-        if (template) {
+        if (template && reusePublishedStoryboard) {
+          template = {
+            ...template,
+            visual: generationInput.options!.templateVisual as TemplateApplication['visual'],
+          };
+        } else if (template) {
           generationInput = bindTemplateApplication(generationInput, template);
           if (loadedTemplates[0]?.visual && this.options.capabilityMemory) {
             templateCapsules = await this.options.capabilityMemory.learn(
@@ -2436,10 +3277,11 @@ export class PresentationGenerationPort implements PresentationPort {
             },
           };
         }
-        generationInput = bindDeckVisualSystem(
-          generationInput,
-          createDeckVisualSystem(generationInput, template),
-        );
+        if (!reusePublishedStoryboard)
+          generationInput = bindDeckVisualSystem(
+            generationInput,
+            createDeckVisualSystem(generationInput, template),
+          );
         if (needsInitialContent && this.options.contentCompiler?.prepareVisualDirection) {
           publisher?.publish({
             jobId,
@@ -2460,7 +3302,20 @@ export class PresentationGenerationPort implements PresentationPort {
           this.options.contentCompiler && needsInitialContent
             ? await this.ensureContentIntents(generationInput, jobId, controller.signal)
             : generationInput;
-        generationInput = rebalanceMixedLessonStages(compiledInput);
+        generationInput = reusePublishedStoryboard
+          ? compiledInput
+          : rebalanceMixedLessonStages(compiledInput);
+        const content = generationInput.options?.contentIntents as
+          Awaited<ReturnType<PresentationContentCompiler['compile']>> | undefined;
+        if (content?.inputFingerprint)
+          this.recordHandoff(
+            entry,
+            'content',
+            'deck',
+            content.inputFingerprint,
+            content.slides,
+            this.options.agentRoutingFingerprint,
+          );
         if (generationInput !== compiledInput) {
           if (entry.plan)
             entry.plan = rebasePlanForLessonStages(entry.plan, compiledInput, generationInput);
@@ -2471,7 +3326,17 @@ export class PresentationGenerationPort implements PresentationPort {
         }
         entry.input = clone(generationInput);
         await this.save(entry);
-        if (template) {
+        if (!reusePublishedStoryboard) {
+          const preflight = await this.prepareStoryboardLayout(
+            entry,
+            generationInput,
+            learnedCapsules,
+            controller.signal,
+          );
+          generationInput = preflight.input;
+          learnedCapsules = preflight.capsules;
+        }
+        if (template && !reusePublishedStoryboard) {
           generationInput = await this.ensureVisualStoryboard(
             generationInput,
             template,
@@ -2479,6 +3344,17 @@ export class PresentationGenerationPort implements PresentationPort {
             controller.signal,
             publisher,
           );
+          const storyboard = generationInput.options?.visualStoryboard as
+            PresentationVisualStoryboard | undefined;
+          if (storyboard?.inputFingerprint)
+            this.recordHandoff(
+              entry,
+              'storyboard',
+              'deck',
+              storyboard.inputFingerprint,
+              storyboard,
+              this.options.agentRoutingFingerprint,
+            );
           if (
             !(entry.plan && entry.initialAssetsComplete) &&
             !entry.plan?.designSpec?.templateVisualReview &&
@@ -2493,10 +3369,11 @@ export class PresentationGenerationPort implements PresentationPort {
           entry.input = clone(generationInput);
           await this.save(entry);
         }
-        generationInput = bindDeckVisualSystem(
-          generationInput,
-          createDeckVisualSystem(generationInput, template),
-        );
+        if (!reusePublishedStoryboard)
+          generationInput = bindDeckVisualSystem(
+            generationInput,
+            createDeckVisualSystem(generationInput, template),
+          );
         const deckVisualSystem = readDeckVisualSystem(generationInput);
         // Compiled content changes invalidate prepared art even without a template.
         if (
@@ -2538,7 +3415,7 @@ export class PresentationGenerationPort implements PresentationPort {
         }
         const slots = (generationInput.options as { imageSlots?: unknown[] } | undefined)
           ?.imageSlots;
-        let imageArtifactIds: string[] = [
+        const imageArtifactIds: string[] = [
           ...new Set([
             ...(entry.job.artifactIds ?? []).filter((id) => id.startsWith('image-')),
             ...Object.values(entry.preparedAssets ?? {}).flatMap(
@@ -2548,11 +3425,6 @@ export class PresentationGenerationPort implements PresentationPort {
         ];
         if (!entry.plan && Array.isArray(slots) && slots.length > 0) {
           if (controller.signal.aborted) return;
-          if (!this.options.imageGenerationCapability) {
-            throw Object.assign(new Error('Image generation provider is not configured'), {
-              code: 'PROVIDER_UNAVAILABLE',
-            });
-          }
           const validatedSlots: ImageGenerationSlot[] = slots.map((rawSlot, index) => {
             if (!rawSlot || typeof rawSlot !== 'object') {
               throw Object.assign(new Error(`imageSlots[${index}] must be an object`), {
@@ -2603,26 +3475,63 @@ export class PresentationGenerationPort implements PresentationPort {
             } as ImageGenerationSlot;
           });
 
-          const images = this.options.atomicRuntime
-            ? await this.options.atomicRuntime.invoke<
-                Awaited<ReturnType<ImageGenerationCapability['generate']>>
-              >(
-                'presentation.assets.generate',
-                { slots: validatedSlots },
-                { scope: this.scope, jobId, signal: controller.signal },
-              )
-            : await this.options.imageGenerationCapability.generate(this.scope, validatedSlots, {
-                jobId,
-                signal: controller.signal,
+          const subject = (slot: Pick<ImageGenerationSlot, 'slideId' | 'slotId'>) =>
+            JSON.stringify([slot.slideId, slot.slotId]);
+          const prior = Array.isArray(entry.input.options?.generatedImageSlots)
+            ? (entry.input.options.generatedImageSlots as ImageGenerationSlotOutput[])
+            : [];
+          const ready = new Map<string, ImageGenerationSlotOutput>();
+          const pending: ImageGenerationSlot[] = [];
+          for (const slot of validatedSlots) {
+            const key = subject(slot);
+            const receipt = entry.stageHandoffs?.['image:' + key];
+            const saved = prior.find((item) => subject(item) === key);
+            if (
+              receipt?.schemaVersion === 1 &&
+              receipt.inputVersion === designFingerprint(slot) &&
+              saved &&
+              receipt.outputVersion === designFingerprint(saved)
+            ) {
+              const digests = await this.imageHandoffDigests(saved);
+              if (
+                digests &&
+                designFingerprint(digests) === designFingerprint(receipt.assetDigests)
+              ) {
+                ready.set(key, saved);
+                continue;
+              }
+            }
+            pending.push(slot);
+          }
+          if (pending.length) {
+            if (!this.options.imageGenerationCapability)
+              throw Object.assign(new Error('Image generation provider is not configured'), {
+                code: 'PROVIDER_UNAVAILABLE',
               });
-          imageArtifactIds = (images.slots ?? []).flatMap((slot) =>
-            (slot.assetRefs ?? []).map((ref) => ref.ref.trim()),
-          );
+            const generated = this.options.atomicRuntime
+              ? await this.options.atomicRuntime.invoke<
+                  Awaited<ReturnType<ImageGenerationCapability['generate']>>
+                >(
+                  'presentation.assets.generate',
+                  { slots: pending },
+                  { scope: this.scope, jobId, signal: controller.signal },
+                )
+              : await this.options.imageGenerationCapability.generate(this.scope, pending, {
+                  jobId,
+                  signal: controller.signal,
+                });
+            for (const slot of generated.slots) ready.set(subject(slot), slot);
+          }
+          const images = validatedSlots.flatMap((slot) => {
+            const result = ready.get(subject(slot));
+            return result ? [result] : [];
+          });
+          imageArtifactIds.push(...images.flatMap(slotAssetIds));
           generationInput = {
             ...generationInput,
             options: {
               ...generationInput.options,
-              generatedImageSlots: images.slots.map((slot) => {
+              generatedImageSlots: images.map((slot) => {
                 const visual = readContentIntents(generationInput)
                   .find((c) => c.slideId === slot.slideId)
                   ?.visuals?.find((v) => v.id === slot.slotId && isRasterVisual(v));
@@ -2642,6 +3551,29 @@ export class PresentationGenerationPort implements PresentationPort {
               imageSlots: validatedSlots,
             },
           };
+          // Commit the asset handoff before page authors start. A restart must
+          // recover owned slot bindings as well as the generation event history.
+          entry.input = clone(generationInput);
+          for (const slot of entry.input.options!
+            .generatedImageSlots as ImageGenerationSlotOutput[]) {
+            const key = subject(slot);
+            const request = validatedSlots.find((item) => subject(item) === key)!;
+            const digests = await this.imageHandoffDigests(slot);
+            if (digests)
+              this.recordHandoff(
+                entry,
+                'image',
+                key,
+                designFingerprint(request),
+                slot,
+                undefined,
+                digests,
+              );
+          }
+          entry.job.artifactIds = [
+            ...new Set([...(entry.job.artifactIds ?? []), ...imageArtifactIds]),
+          ];
+          await this.save(entry);
         }
         do {
           if (controller.signal.aborted) return;
@@ -2704,7 +3636,10 @@ export class PresentationGenerationPort implements PresentationPort {
                 progressPublisher,
               ));
             entry.preparedAssets = { ...entry.preparedAssets, initial: prepared };
-            generationInput = bindDeckVisualSystem(prepared.input, deckVisualSystem);
+            generationInput = bindDeckVisualSystem(
+              this.bindAgentRouting(prepared.input),
+              deckVisualSystem,
+            );
             entry.preparedAssets.initial = { ...prepared, input: clone(generationInput) };
             imageArtifactIds.push(...prepared.assetArtifactIds);
             entry.initialAssetsComplete = true;
@@ -2721,7 +3656,7 @@ export class PresentationGenerationPort implements PresentationPort {
             preparedAssetsMatchLearnedTemplate(entry.preparedAssets.initial, generationInput)
           ) {
             generationInput = bindDeckVisualSystem(
-              clone(entry.preparedAssets.initial.input),
+              this.bindAgentRouting(clone(entry.preparedAssets.initial.input)),
               deckVisualSystem,
             );
           }
@@ -2730,6 +3665,7 @@ export class PresentationGenerationPort implements PresentationPort {
             entry.initialAssetsComplete === false &&
             !Array.isArray(slots) &&
             !!this.options.revisionAssetPlanner;
+          generationInput = this.bindAgentRouting(generationInput);
           const draftFingerprint = createHash('sha256')
             .update(JSON.stringify(generationInput))
             .digest('hex');
@@ -2769,6 +3705,14 @@ export class PresentationGenerationPort implements PresentationPort {
                 draft: true,
               },
             });
+            this.recordHandoff(
+              entry,
+              'page',
+              slide.slideId,
+              draftFingerprint,
+              { svg: slide.svg, notes: slide.notes, blocks: slide.metadata?.contentBlocks },
+              this.options.agentRoutingFingerprint,
+            );
             entry.draftCheckpoint = {
               fingerprint: draftFingerprint,
               slides: [
@@ -2820,7 +3764,7 @@ export class PresentationGenerationPort implements PresentationPort {
                   initial: prepared,
                 };
                 await this.save(entry);
-                generationInput = prepared.input;
+                generationInput = this.bindAgentRouting(prepared.input);
                 imageArtifactIds.push(...prepared.assetArtifactIds);
                 if (
                   prepared.assetArtifactIds.length > 0 ||
@@ -2857,9 +3801,62 @@ export class PresentationGenerationPort implements PresentationPort {
                 await this.save(entry);
                 await this.publishSnapshot(entry, PRESENTATION_JOB_EVENT_TYPES.progress);
                 if (!message.versionId) {
-                  if (!message.patch && !message.annotation)
+                  if (
+                    reusePublishedStoryboard &&
+                    !editsPublishedObject(message, entry.job.versionId!)
+                  ) {
+                    // A broad instruction may arrive while a scoped edit is already running.
+                    // Template changes and content compilation map their own new storyboard below.
+                    reusePublishedStoryboard = false;
+                    if (
+                      template &&
+                      !message.template &&
+                      (message.patch || !this.options.contentCompiler)
+                    ) {
+                      generationInput = await this.ensureVisualStoryboard(
+                        generationInput,
+                        template,
+                        jobId,
+                        controller.signal,
+                        progressPublisher,
+                      );
+                      entry.input = clone(generationInput);
+                      const board = generationInput.options?.visualStoryboard as
+                        PresentationVisualStoryboard | undefined;
+                      if (board)
+                        this.recordHandoff(
+                          entry,
+                          'storyboard',
+                          'deck',
+                          board.inputFingerprint,
+                          board,
+                          this.options.agentRoutingFingerprint,
+                        );
+                    }
+                    if (loadedTemplates[0]?.visual && this.options.capabilityMemory)
+                      templateCapsules = await this.options.capabilityMemory.learn(
+                        this.scope,
+                        loadedTemplates[0].visual,
+                      );
+                  }
+                  if (
+                    !message.patch &&
+                    !message.tableDataPatch &&
+                    !message.chartDataPatch &&
+                    !message.objectPositionPatch &&
+                    !message.canvasCommand &&
+                    !message.annotation
+                  )
                     generationInput = applyTeacherLessonInstruction(generationInput, message);
-                  if (!message.patch && !message.annotation && this.options.contentCompiler) {
+                  if (
+                    !message.patch &&
+                    !message.tableDataPatch &&
+                    !message.chartDataPatch &&
+                    !message.objectPositionPatch &&
+                    !message.canvasCommand &&
+                    !message.annotation &&
+                    this.options.contentCompiler
+                  ) {
                     generationInput = await this.ensureContentIntents(
                       {
                         ...generationInput,
@@ -2908,7 +3905,99 @@ export class PresentationGenerationPort implements PresentationPort {
                     entry.input = clone(generationInput);
                     await this.save(entry);
                   }
-                  if (message.patch) {
+                  // A preview can inline an image that the editable source references by ID.
+                  // All undoable edits snapshot the same source, including direct typing.
+                  const editable =
+                    message.canvasCommand ??
+                    message.tableDataPatch ??
+                    message.chartDataPatch ??
+                    message.objectPositionPatch ??
+                    (message.annotation?.textRuns ? message.annotation : undefined);
+                  if (editable && message.target.type === 'slide') {
+                    const source = plan.slides[message.target.slideNumber - 1];
+                    if (source) {
+                      const artifactId = `${entry.job.jobId}:${editable.expectedVersionId}:canvas-source:${source.slideId}`;
+                      if (!(await this.options.artifactStore.get(this.scope, artifactId)))
+                        await this.options.artifactStore.put(this.scope, {
+                          artifactId,
+                          type: 'document',
+                          mimeType: 'application/json',
+                          name: 'canvas-source.json',
+                          bytes: new TextEncoder().encode(JSON.stringify(source)),
+                        });
+                    }
+                  }
+                  if (
+                    message.tableDataPatch ||
+                    message.chartDataPatch ||
+                    message.objectPositionPatch
+                  ) {
+                    try {
+                      const runtime = this.options.atomicRuntime;
+                      const updated = message.tableDataPatch
+                        ? applyTableDataPatch(plan, generationInput, message)
+                        : message.chartDataPatch
+                          ? await applyChartDataPatch(plan, generationInput, message)
+                          : {
+                              input: generationInput,
+                              ...(await applyObjectPositionPatch(
+                                plan,
+                                message,
+                                runtime
+                                  ? (move) =>
+                                      runtime.invoke<CanvasRect>('canvas.object.move', move, {
+                                        jobId,
+                                        scope: this.scope,
+                                        signal: controller.signal,
+                                      })
+                                  : moveCanvasObject,
+                              )),
+                            };
+                      plan = updated.plan;
+                      generationInput = updated.input;
+                      entry.input = clone(generationInput);
+                      this.recordHandoff(
+                        entry,
+                        'page',
+                        updated.slideId,
+                        designFingerprint(
+                          message.tableDataPatch ??
+                            message.chartDataPatch ??
+                            message.objectPositionPatch,
+                        ),
+                        plan.slides.find((page) => page.slideId === updated.slideId),
+                      );
+                    } catch (error) {
+                      throw Object.assign(
+                        error instanceof Error ? error : new Error('对象修改无法保存'),
+                        { code: 'PRESENTATION_INVALID' },
+                      );
+                    }
+                  } else if (message.canvasCommand) {
+                    plan = await this.applyCanvasCommand(entry, plan, message);
+                    const index =
+                      message.target.type === 'slide' ? message.target.slideNumber - 1 : -1;
+                    const meta = plan.slides[index]?.metadata;
+                    const outline = generationInput.options?.outline;
+                    if (meta && Array.isArray(outline)) {
+                      generationInput = {
+                        ...generationInput,
+                        options: {
+                          ...generationInput.options,
+                          outline: outline.map((o, i) =>
+                            i === index
+                              ? {
+                                  ...o,
+                                  ...(typeof meta.title === 'string' && { title: meta.title }),
+                                  ...(Array.isArray(meta.outline) && { keyPoints: meta.outline }),
+                                }
+                              : o,
+                          ),
+                        },
+                      };
+                      entry.input = clone(generationInput);
+                    }
+                  } else if (message.patch) {
                     const patch = {
                       plan,
                       slideId: message.patch.slideId,
@@ -2960,7 +4049,7 @@ export class PresentationGenerationPort implements PresentationPort {
                       [`message:${message.requestId}`]: prepared,
                     };
                     await this.save(entry);
-                    generationInput = prepared.input;
+                    generationInput = this.bindAgentRouting(prepared.input);
                     imageArtifactIds.push(...prepared.assetArtifactIds);
                     progressPublisher?.publish({
                       jobId,
@@ -2974,45 +4063,77 @@ export class PresentationGenerationPort implements PresentationPort {
                         phase: 'planner',
                       },
                     });
-                    plan = await this.options.capability.plan(generationInput, {
-                      ...revisionContext.plannerContext,
-                      scope: this.scope,
-                      abortSignal: controller.signal,
-                      basePlan: plan,
-                      revision: message,
-                      completedRevisionSlideIds:
-                        entry.revisionCheckpoint?.requestId === message.requestId
-                          ? entry.revisionCheckpoint.completedSlideIds
-                          : [],
-                      onRevisionSlide: async (partial: PresentationPlan, slideId: string) => {
-                        const prior =
-                          entry.revisionCheckpoint?.requestId === message.requestId
-                            ? entry.revisionCheckpoint.completedSlideIds
-                            : [];
-                        entry.revisionCheckpoint = {
-                          requestId: message.requestId,
-                          completedSlideIds: [...new Set([...prior, slideId])],
-                        };
-                        entry.plan = clone(partial);
-                        await this.save(entry);
-                        progressPublisher?.publish({
-                          jobId,
-                          type: PRESENTATION_JOB_EVENT_TYPES.progress,
-                          idempotencyKey: `layout:${message.requestId}:${slideId}`,
-                          data: {
-                            activity: `第 ${partial.slides.find((s) => s.slideId === slideId)?.order ?? '?'} 页已排版，继续下一页`,
-                            phase: 'planner',
+                    const base = plan;
+                    const revised = message.annotation?.textRuns
+                      ? applyCanvasText(plan, message)
+                      : await this.options.capability.plan(generationInput, {
+                          ...revisionContext.plannerContext,
+                          userContentRevision: !message.annotation,
+                          scope: this.scope,
+                          abortSignal: controller.signal,
+                          basePlan: plan,
+                          revision: message,
+                          completedRevisionSlideIds:
+                            entry.revisionCheckpoint?.requestId === message.requestId
+                              ? entry.revisionCheckpoint.completedSlideIds
+                              : [],
+                          onRevisionSlide: async (partial: PresentationPlan, slideId: string) => {
+                            const prior =
+                              entry.revisionCheckpoint?.requestId === message.requestId
+                                ? entry.revisionCheckpoint.completedSlideIds
+                                : [];
+                            entry.revisionCheckpoint = {
+                              requestId: message.requestId,
+                              completedSlideIds: [...new Set([...prior, slideId])],
+                            };
+                            entry.plan = clone(applyRevisionScope(base, partial, message.target));
+                            await this.save(entry);
+                            progressPublisher?.publish({
+                              jobId,
+                              type: PRESENTATION_JOB_EVENT_TYPES.progress,
+                              idempotencyKey: `layout:${message.requestId}:${slideId}`,
+                              data: {
+                                activity: `第 ${partial.slides.find((s) => s.slideId === slideId)?.order ?? '?'} 页已排版，继续下一页`,
+                                phase: 'planner',
+                              },
+                            });
                           },
+                          trustedImages: await this.readTrustedImages([
+                            ...this.planAssetIds(plan, message.target),
+                            ...prepared.assetArtifactIds,
+                            ...trustedTemplatePageRefs(template),
+                          ]),
+                          template,
+                          jobId,
                         });
-                      },
-                      trustedImages: await this.readTrustedImages([
-                        ...this.planAssetIds(plan, message.target),
-                        ...prepared.assetArtifactIds,
-                        ...trustedTemplatePageRefs(template),
-                      ]),
-                      template,
-                      jobId,
-                    });
+                    plan = applyRevisionScope(base, revised, message.target);
+                    const outline = generationInput.options?.outline;
+                    if (Array.isArray(outline)) {
+                      const target = message.target;
+                      const updatedOutline = outline.map((item, index) => {
+                        if (target.type === 'slide' && target.slideNumber !== index + 1)
+                          return item;
+                        const meta = plan.slides[index]?.metadata;
+                        if (message.annotation)
+                          return item &&
+                            typeof meta?.title === 'string' &&
+                            meta.title !== base.slides[index]?.metadata?.title
+                            ? { ...item, title: meta.title }
+                            : item;
+                        return meta && item
+                          ? {
+                              ...item,
+                              ...(typeof meta.title === 'string' ? { title: meta.title } : {}),
+                              ...(Array.isArray(meta.outline) ? { keyPoints: meta.outline } : {}),
+                            }
+                          : item;
+                      });
+                      generationInput = {
+                        ...generationInput,
+                        options: { ...generationInput.options, outline: updatedOutline },
+                      };
+                      entry.input = clone(generationInput);
+                    }
                   }
                 }
                 if (controller.signal.aborted)
@@ -3026,6 +4147,77 @@ export class PresentationGenerationPort implements PresentationPort {
                 // Keep applying until the revised pages and deck are actually persisted.
                 await this.save(entry);
               }
+              const applying =
+                entry.job.messages?.filter(
+                  (message) => message.status === 'applying' && message.versionId,
+                ) ?? [];
+              // Run on both fresh and resumed revisions. An already composed drag
+              // still owns its exact drop coordinates when publication is retried.
+              for (const edit of applying) {
+                const cmd = edit.canvasCommand;
+                if (
+                  edit.target.type !== 'slide' ||
+                  (cmd?.kind !== 'translate' && cmd?.kind !== 'moveMany')
+                )
+                  continue;
+                const index = edit.target.slideNumber - 1;
+                const ids =
+                  cmd.kind === 'translate'
+                    ? [cmd.object]
+                    : cmd.moves.filter((move) => move.dx || move.dy).map((move) => move.object);
+                const page = recordCanvasPlacement(plan.slides[index], edit.requestId, ids);
+                if (page !== plan.slides[index])
+                  plan = {
+                    ...plan,
+                    slides: plan.slides.map((slide, i) => (i === index ? page : slide)),
+                  };
+              }
+              const editedSlideIds =
+                entry.job.versionId &&
+                applying.length &&
+                applying.every(({ target }) => target.type === 'slide')
+                  ? new Set(
+                      applying.flatMap(({ target }) =>
+                        target.type === 'slide'
+                          ? [plan.slides[target.slideNumber - 1].slideId]
+                          : [],
+                      ),
+                    )
+                  : undefined;
+              // Region edits have already spliced their selected SVG spans. The critic can
+              // inspect the entire deck; no layout, frame or repair may rewrite those spans' peers.
+              const reflowableSlideIds =
+                editedSlideIds &&
+                new Set(
+                  [...editedSlideIds].filter((slideId) => {
+                    const edits = applying.filter(
+                      ({ target }) =>
+                        target.type === 'deck' ||
+                        plan.slides[target.slideNumber - 1]?.slideId === slideId,
+                    );
+                    return !edits.every(
+                      (edit) => edit.canvasCommand || edit.annotation || edit.tableDataPatch,
+                    );
+                  }),
+                );
+              const exactObjectSlideIds = new Set(
+                plan.slides
+                  .filter((slide) => {
+                    const edits = applying.filter(
+                      ({ target }) =>
+                        target.type === 'deck' ||
+                        plan.slides[target.slideNumber - 1]?.slideId === slide.slideId,
+                    );
+                    return (
+                      edits.length > 0 &&
+                      edits.every(
+                        (edit) =>
+                          edit.canvasCommand || edit.chartDataPatch || edit.objectPositionPatch,
+                      )
+                    );
+                  })
+                  .map((slide) => slide.slideId),
+              );
               // Replay typed content through the current renderer, including retained pages
               // from older checkpoints. The critic must inspect what this version exports.
               if (plan.designSpec?.contentPolicyVersion === 1)
@@ -3033,6 +4225,8 @@ export class PresentationGenerationPort implements PresentationPort {
                   ...plan,
                   slides: await Promise.all(
                     plan.slides.map(async (slide) => {
+                      if (reflowableSlideIds && !reflowableSlideIds.has(slide.slideId))
+                        return slide;
                       const blocks = slide.metadata?.contentBlocks;
                       if (!Array.isArray(blocks) || !blocks.length) return slide;
                       try {
@@ -3042,8 +4236,28 @@ export class PresentationGenerationPort implements PresentationPort {
                         );
                         return { ...slide, svg: rendered.svg };
                       } catch (error) {
-                        if (!/Cannot recover editable content anchor/u.test(String(error)))
-                          throw error;
+                        if (!/Cannot recover editable content anchor/u.test(String(error))) {
+                          // A saved slot may predate the current native renderer's minimum size.
+                          // Refit it through its learned layout before retrying the same content.
+                          if (
+                            !slide.metadata?.compiledDesign ||
+                            !learnedCapsules.length ||
+                            exactObjectSlideIds.has(slide.slideId)
+                          )
+                            throw error;
+                          const resized = await stabilizePresentationVisuals(
+                            plan,
+                            template,
+                            learnedCapsules,
+                            'pre-review',
+                            new Set([slide.slideId]),
+                          );
+                          const updated = resized.slides.find(
+                            (item) => item.slideId === slide.slideId,
+                          );
+                          if (!updated?.metadata?.compiledDesign) throw error;
+                          return updated;
+                        }
                         const intent = readContentIntents(generationInput).find(
                           (item) => item.slideId === slide.slideId,
                         );
@@ -3090,7 +4304,8 @@ export class PresentationGenerationPort implements PresentationPort {
                 plan = {
                   ...plan,
                   slides: plan.slides.map((slide) =>
-                    slide.metadata?.deckVisualSystemId
+                    slide.metadata?.deckVisualSystemId &&
+                    (!reflowableSlideIds || reflowableSlideIds.has(slide.slideId))
                       ? {
                           ...slide,
                           svg: renderDeckVisualFrame(slide.svg, currentMaster, {
@@ -3103,17 +4318,63 @@ export class PresentationGenerationPort implements PresentationPort {
                       : slide,
                   ),
                 };
-              plan = bindLessonPlan(plan, generationInput);
-              plan = await this.reviewAndRepairVisualPlan(
-                plan,
-                generationInput,
-                template,
-                jobId,
-                controller.signal,
-                progressPublisher,
-              );
+              plan = bindLessonPlan(plan, generationInput, reflowableSlideIds);
+              const priorReview = initialPlan.designSpec?.templateVisualReview as
+                | {
+                    final?: PresentationVisualReview;
+                    authoredVersion?: string;
+                  }
+                | undefined;
+              // User-authored transforms and clipboard transactions deliberately allow
+              // overlapping objects. Keep the reviewed generation as provenance and run
+              // the normal document, PPT Master and native-data checks for this version.
+              const manual =
+                entry.job.delivery?.versionId === entry.job.versionId &&
+                entry.job.versionId &&
+                priorReview?.final?.passed &&
+                applying.length > 0 &&
+                applying.every(
+                  (edit) =>
+                    edit.canvasCommand ||
+                    edit.objectPositionPatch ||
+                    edit.annotation?.textRuns ||
+                    edit.tableDataPatch ||
+                    edit.chartDataPatch,
+                );
+              if (manual) {
+                plan = {
+                  ...plan,
+                  designSpec: {
+                    ...plan.designSpec,
+                    templateVisualReview: {
+                      mode: 'manual-canvas',
+                      authoredVersion: priorReview.authoredVersion ?? entry.job.versionId,
+                      baseVersion: entry.job.versionId,
+                      planFingerprint: planVisualFingerprint(plan),
+                      reviewedAt: this.now(),
+                      final: {
+                        schemaVersion: 1,
+                        passed: true,
+                        issues: [],
+                        summary: '画布修改已通过文稿结构检查。导出时继续校验整稿和原生对象。',
+                      } satisfies PresentationVisualReview,
+                    },
+                  },
+                };
+              } else {
+                plan = await this.reviewAndRepairVisualPlan(
+                  plan,
+                  generationInput,
+                  template,
+                  jobId,
+                  controller.signal,
+                  progressPublisher,
+                  reflowableSlideIds,
+                  exactObjectSlideIds,
+                );
+              }
               imageArtifactIds.push(...this.planAssetIds(plan));
-              if (this.options.capabilityMemory)
+              if (this.options.capabilityMemory && !reusePublishedStoryboard)
                 plan = {
                   ...plan,
                   designSpec: {
@@ -3127,7 +4388,7 @@ export class PresentationGenerationPort implements PresentationPort {
                     ],
                   },
                 };
-              plan = bindLessonPlan(plan, generationInput);
+              plan = bindLessonPlan(plan, generationInput, reflowableSlideIds);
               const visualDirection = presentationVisualDirectionSchema.safeParse(
                 generationInput.options?.visualDirection,
               );
@@ -3145,7 +4406,25 @@ export class PresentationGenerationPort implements PresentationPort {
                     },
                   })),
                 };
+              if (editedSlideIds) {
+                plan = {
+                  ...plan,
+                  slides: plan.slides.map((slide, index) =>
+                    editedSlideIds.has(slide.slideId) ? slide : initialPlan.slides[index],
+                  ),
+                };
+              }
               entry.plan = clone(plan);
+              const review = plan.designSpec?.templateVisualReview;
+              if (review)
+                this.recordHandoff(
+                  entry,
+                  'review',
+                  'deck',
+                  planVisualFingerprint(plan),
+                  review,
+                  this.options.agentRoutingFingerprint,
+                );
               await this.save(entry);
               // Publish the repaired draft even when final quality review still blocks export.
               // Otherwise the stage keeps showing the original, visibly broken composition.
@@ -3158,7 +4437,32 @@ export class PresentationGenerationPort implements PresentationPort {
               assertPresentationPublishable(plan);
               if (plan.designSpec?.deckVisualSystem && deckVisualSystem)
                 assertDeckVisualConsistency(plan, deckVisualSystem);
-              return await this.embedOwnedAssets(plan);
+              const embedded = await this.embedOwnedAssets(
+                plan,
+                learnedCapsules,
+                editedSlideIds && entry.job.versionId
+                  ? { jobId, previousVersionId: entry.job.versionId, editedSlideIds }
+                  : undefined,
+              );
+              const tableEdits = applying.filter((edit) => edit.tableDataPatch);
+              if (tableEdits.length) {
+                const nativePages = revisionContext.workerContext.nativeData
+                  ? prepareNativeDataExport(embedded.slides)
+                  : [];
+                for (const edit of tableEdits) {
+                  const page =
+                    edit.target.type === 'slide' && nativePages[edit.target.slideNumber - 1];
+                  if (
+                    !page ||
+                    !page.tables.some((table) => table.blockId === edit.tableDataPatch!.blockId)
+                  )
+                    throw Object.assign(
+                      new Error('当前版本无法将修改的表格导出为可编辑的 PowerPoint 表格'),
+                      { code: 'PRESENTATION_INVALID' },
+                    );
+                }
+              }
+              return embedded;
             },
             plannerContext: {
               ...context.plannerContext,
@@ -3221,6 +4525,16 @@ export class PresentationGenerationPort implements PresentationPort {
               message.versionId = versionId;
             }
           }
+          if (entry.plan)
+            this.recordHandoff(
+              entry,
+              'export',
+              versionId,
+              planVisualFingerprint(entry.plan),
+              produced.artifacts.map(({ artifactId }) => artifactId),
+              this.options.agentRoutingFingerprint,
+            );
+          entry.job.delivery = deliveryFromArtifacts(versionId, produced.artifacts);
           entry.job.versionId = versionId;
           entry.job.revisions = [
             ...(entry.job.revisions ?? []),
@@ -3327,9 +4641,23 @@ export class PresentationGenerationPort implements PresentationPort {
             if (message.status === 'applying' && !revisionIsComposed(entry, message))
               message.status = 'queued';
           if (resolution.action === 'ask') {
+            const decision = createPresentationDecision(
+              resolution.category,
+              randomUUID(),
+              this.now(),
+            );
+            const cause = error instanceof Error ? error.cause : undefined;
+            const nativeFailure =
+              error instanceof NativeSlideQualityError
+                ? error
+                : cause instanceof NativeSlideQualityError
+                  ? cause
+                  : undefined;
             collaboration.decisions = [
               ...collaboration.decisions.slice(-19),
-              createPresentationDecision(resolution.category, randomUUID(), this.now()),
+              nativeFailure
+                ? { ...decision, detail: nativeFailure.message + decision.detail }
+                : decision,
             ];
             update({ state: 'waiting_input', error: undefined });
           } else {
@@ -3344,7 +4672,7 @@ export class PresentationGenerationPort implements PresentationPort {
               if (this.disposed || entry.controller.signal.aborted || entry.job.state !== 'queued')
                 return;
               entry.controller = new AbortController();
-              entry.task = this.run(jobId, entry.input, entry.controller);
+              entry.task = this.run(entry);
             }, 1500 * collaboration.automaticAttempts);
           }
           return;
@@ -3386,8 +4714,8 @@ export class PresentationGenerationPort implements PresentationPort {
       releaseCapacity?.();
       entry.lease?.signal.removeEventListener('abort', leaseLost);
       await entry.persistence.catch(() => undefined);
-      await entry.lease?.release();
-      entry.lease = undefined;
+      // A synchronous edit or retry may already be handing this lease to its next run.
+      if (!entry.mutating) await this.releaseEntryLease(entry);
       entry.localTask = false;
     }
   }

@@ -31,6 +31,8 @@ import {
 } from '@/server/runtime/improvement/context-strategy';
 import { selectActiveHarness } from '@/server/runtime/improvement/production';
 import { skillMaterialBinding } from '@/server/runtime/improvement/skill-material';
+import { isNativeAgentRuntimeEnabled } from '@/server/runtime/tasks/mode';
+import { collectNativeCallbackIntents } from '@/server/runtime/tasks/wakeHooks';
 import { emitAgentSignalSourceEvent } from '@/server/services/agentSignal';
 import {
   isAgentSignalEnabledForUser,
@@ -197,10 +199,13 @@ export class AgentRuntimeService {
       createStreamEventManager();
     this.coordinator = new AgentRuntimeCoordinator({
       ...options?.coordinatorOptions,
+      database: db,
       streamEventManager: this.streamManager,
     });
     this.queueService =
-      options?.queueService === null ? null : (options?.queueService ?? new QueueService());
+      options?.queueService === null
+        ? null
+        : (options?.queueService ?? new QueueService({ db, userId }));
     this.traceRecorder = new OperationTraceRecorder(
       options?.snapshotStore ?? this.createDefaultSnapshotStore(),
     );
@@ -251,6 +256,7 @@ export class AgentRuntimeService {
   async interruptOperation(operationId: string): Promise<boolean> {
     const state = await this.coordinator.loadAgentState(operationId);
     if (!state) return false;
+    if (isNativeAgentRuntimeEnabled() && state.metadata?.userId !== this.userId) return false;
 
     if (state.status === 'done' || state.status === 'error' || state.status === 'interrupted') {
       return false;
@@ -260,6 +266,15 @@ export class AgentRuntimeService {
       ...state,
       lastModified: new Date().toISOString(),
       status: 'interrupted',
+      ...(isNativeAgentRuntimeEnabled()
+        ? {
+            interruption: {
+              canResume: false,
+              interruptedAt: new Date().toISOString(),
+              reason: 'user_cancelled',
+            },
+          }
+        : {}),
     });
 
     log('[%s] Operation interrupted', operationId);
@@ -272,6 +287,15 @@ export class AgentRuntimeService {
    * Create a new Agent operation
    */
   async createOperation(params: OperationCreationParams): Promise<OperationCreationResult> {
+    if (isNativeAgentRuntimeEnabled()) {
+      if (params.userId !== undefined && params.userId !== this.userId)
+        throw new Error('Agent operation owner mismatch');
+      if (params.hooks?.some((hook) => !hook.webhook))
+        throw new Error(
+          'Native execution requires durable hooks; in-memory callback functions cannot survive restart',
+        );
+      params = { ...params, userId: this.userId };
+    }
     const {
       activeDeviceId,
       operationId,
@@ -395,6 +419,7 @@ export class AgentRuntimeService {
           userId,
           userMemory,
           userTimezone,
+          ...(isNativeAgentRuntimeEnabled() ? { _nativeInitialContext: initialContext } : {}),
           workingDirectory: agentConfig?.chatConfig?.runtimeEnv?.workingDirectory,
           ...appContext,
         },
@@ -515,6 +540,12 @@ export class AgentRuntimeService {
       externalRetryCount = 0,
     } = params;
 
+    // Reject foreign commands before acquiring ownership or entering the error-state writer.
+    if (isNativeAgentRuntimeEnabled()) {
+      const metadata = await this.coordinator.getOperationMetadata(operationId);
+      if (metadata?.userId !== this.userId) throw new Error('Agent operation owner mismatch');
+    }
+
     // ===== Distributed lock: prevent duplicate execution from QStash retries =====
     const leaseStartedAt = Date.now();
     const lease = await this.coordinator.acquireStepLease(operationId, stepIndex, 35);
@@ -537,7 +568,11 @@ export class AgentRuntimeService {
       renew: (currentLease, ttl) => this.coordinator.renewStepLease(currentLease, ttl),
       startedAt: leaseStartedAt,
     });
-    const assertHeld = renewal.assertHeld;
+    const assertHeld = () => {
+      renewal.assertHeld();
+      params.signal?.throwIfAborted();
+      params.assertExecutionLease?.();
+    };
     const hookDeliveryFailures: HookDispatchFailure[] = [];
     // Once committed, notification/queue failures must not rewrite a successful
     // tool result as an execution error or repeat that tool on a queue retry.
@@ -571,6 +606,8 @@ export class AgentRuntimeService {
       }
 
       lastKnownState = agentState;
+      if (agentState.metadata?.userId && agentState.metadata.userId !== this.userId)
+        throw new Error('Agent operation owner mismatch');
       agentState.metadata = {
         ...agentState.metadata,
         externalRetryCount,
@@ -718,7 +755,7 @@ export class AgentRuntimeService {
         metadata: agentState?.metadata,
         operationId,
         stepIndex,
-        signal: renewal.signal,
+        signal: params.signal ? AbortSignal.any([renewal.signal, params.signal]) : renewal.signal,
         assertStepLease: assertHeld,
       });
       stepRuntime = runtime;
@@ -862,6 +899,14 @@ export class AgentRuntimeService {
         afterStepHookEvent,
         metadata._hooks,
       );
+      const nativeCallbacks = isNativeAgentRuntimeEnabled()
+        ? collectNativeCallbackIntents(
+            operationId,
+            'afterStep',
+            afterStepHookEvent,
+            metadata._hooks,
+          )
+        : [];
       if (!shouldContinue) {
         const completion = this.completionLifecycle.buildLifecycleEvent(
           operationId,
@@ -876,6 +921,15 @@ export class AgentRuntimeService {
             completion.metadata._hooks,
           ),
         );
+        if (isNativeAgentRuntimeEnabled())
+          nativeCallbacks.push(
+            ...collectNativeCallbackIntents(
+              operationId,
+              'onComplete',
+              completion.event,
+              completion.metadata._hooks,
+            ),
+          );
         if (completion.event.reason === 'error')
           pendingCallbacks.push(
             ...collectBotCallbackIntents(
@@ -891,6 +945,7 @@ export class AgentRuntimeService {
       // This is a wire-JSON snapshot, not an object clone: normalize Dates/undefined just like transport.
       const callbacksWire = JSON.stringify(pendingCallbacks);
       stepResult.newState.metadata._pendingBotCallbacks = JSON.parse(callbacksWire);
+      stepResult.newState.metadata._pendingNativeCallbacks = nativeCallbacks;
       await renewal.renewNow();
       if (
         !(await this.coordinator.saveStepResultWithLease(
@@ -1129,6 +1184,13 @@ export class AgentRuntimeService {
         ],
       };
       const errorCallbacksWire = JSON.stringify(finalStateWithError.metadata._pendingBotCallbacks);
+      if (isNativeAgentRuntimeEnabled())
+        finalStateWithError.metadata._pendingNativeCallbacks = collectNativeCallbackIntents(
+          operationId,
+          'onComplete',
+          errorCompletion.event,
+          errorCompletion.metadata._hooks,
+        );
       finalStateWithError.metadata._pendingBotCallbacks = JSON.parse(errorCallbacksWire);
       await renewal.renewNow();
       if (
@@ -1213,6 +1275,11 @@ export class AgentRuntimeService {
         log('Operation %s not found (may have expired)', operationId);
         return null;
       }
+      if (
+        isNativeAgentRuntimeEnabled() &&
+        (operationMetadata.userId !== this.userId || currentState.metadata?.userId !== this.userId)
+      )
+        return null;
 
       // Get execution history (if needed)
       let executionHistory;
@@ -1250,6 +1317,16 @@ export class AgentRuntimeService {
       };
 
       return {
+        ...(isNativeAgentRuntimeEnabled()
+          ? {
+              pendingIntervention:
+                currentState.status === 'waiting_for_human'
+                  ? await new (await import('@/server/runtime/tasks/store')).NativeAgentStore(
+                      this.serverDB,
+                    ).hasPendingIntervention(operationId, currentState.stepCount)
+                  : false,
+            }
+          : {}),
         currentState: {
           cost: currentState.cost,
           costLimit: currentState.costLimit,
@@ -1384,6 +1461,8 @@ export class AgentRuntimeService {
       if (!operationMetadata) {
         throw new Error(`Operation ${operationId} not found`);
       }
+      if (isNativeAgentRuntimeEnabled() && operationMetadata.userId !== this.userId)
+        throw new Error(`Operation ${operationId} not found`);
 
       // Get current state
       const currentState = await this.coordinator.loadAgentState(operationId);
@@ -1403,9 +1482,19 @@ export class AgentRuntimeService {
       if (currentState.status === 'error') {
         throw new Error(`Operation ${operationId} is in error state`);
       }
+      if (
+        isNativeAgentRuntimeEnabled() &&
+        (currentState.status === 'waiting_for_human' ||
+          (currentState.status === 'interrupted' && currentState.interruption?.canResume === false))
+      )
+        throw new Error('Resolve the pending review before starting this operation');
 
       // Build execution context
-      let executionContext = context;
+      let executionContext =
+        context ??
+        (isNativeAgentRuntimeEnabled() && currentState.status === 'idle'
+          ? currentState.metadata?._nativeInitialContext
+          : undefined);
       if (!executionContext) {
         // If no context provided, build default context from metadata
         // Note: AgentRuntimeContext requires sessionId for compatibility with @lobechat/agent-runtime
@@ -1424,9 +1513,26 @@ export class AgentRuntimeService {
         };
       }
 
-      // Update operation status to running
+      const startMessage: QueueMessage = {
+        context: executionContext,
+        delay,
+        endpoint: `${this.baseURL}/run`,
+        operationId,
+        priority,
+        stepIndex: currentState.stepCount || 0,
+      };
+      // Native checkpoints commit the resume intent in the same SQL transaction.
       await this.coordinator.saveAgentState(operationId, {
         ...currentState,
+        ...(isNativeAgentRuntimeEnabled() && this.queueService
+          ? {
+              metadata: {
+                ...currentState.metadata,
+                _pendingNextStep: startMessage,
+                _nativeAdmissionLease: params.nativeWakeLease,
+              },
+            }
+          : {}),
         lastModified: new Date().toISOString(),
         status: 'running',
       });
@@ -1434,14 +1540,7 @@ export class AgentRuntimeService {
       // Schedule execution (if queue service is available)
       let messageId: string | undefined;
       if (this.queueService) {
-        messageId = await this.queueService.scheduleMessage({
-          context: executionContext,
-          delay,
-          endpoint: `${this.baseURL}/run`,
-          operationId,
-          priority,
-          stepIndex: currentState.stepCount || 0,
-        });
+        messageId = await this.queueService.scheduleMessage(startMessage);
         log('Scheduled execution for operation %s (messageId: %s)', operationId, messageId);
       } else {
         log('Queue service disabled, skipping schedule for operation %s', operationId);
@@ -1490,6 +1589,34 @@ export class AgentRuntimeService {
         stepIndex,
         action,
       );
+      let boundApproval = approvedToolCall;
+      let boundHumanInput = humanInput;
+      if (isNativeAgentRuntimeEnabled()) {
+        const state = await this.coordinator.loadAgentState(operationId);
+        if (!state || state.metadata?.userId !== this.userId)
+          throw new Error('Agent operation owner mismatch');
+        if (state.status !== 'waiting_for_human' || state.stepCount !== stepIndex)
+          throw new Error('Approval is stale; refresh the current pending action');
+        if (
+          (action === 'approve' && (!approvedToolCall || humanInput || rejectionReason)) ||
+          (['reject', 'reject_continue'].includes(action) &&
+            (!rejectionReason || approvedToolCall || humanInput)) ||
+          (['input', 'select'].includes(action) &&
+            (!humanInput || approvedToolCall || rejectionReason))
+        )
+          throw new Error('Intervention action does not match its payload');
+        if (!toolMessageId || (!approvedToolCall && !humanInput && !rejectionReason))
+          throw new Error('A pending intervention and tool message are required');
+        const validated = await this.humanIntervention.validate(state, {
+          approvedToolCall,
+          humanInput,
+          rejectionReason,
+          toolMessageId,
+          rejectAndContinue,
+        });
+        boundApproval = validated.approvedToolCall;
+        boundHumanInput = validated.humanInput;
+      }
 
       // Schedule execution with high priority (if queue service is available)
       let messageId: string | undefined;
@@ -1500,9 +1627,12 @@ export class AgentRuntimeService {
           endpoint: `${this.baseURL}/run`,
           operationId,
           payload: {
-            approvedToolCall,
-            humanInput,
-            rejectAndContinue,
+            approvedToolCall: boundApproval,
+            humanInput: boundHumanInput,
+            rejectAndContinue:
+              isNativeAgentRuntimeEnabled() && ['reject', 'reject_continue'].includes(action)
+                ? action === 'reject_continue'
+                : rejectAndContinue,
             rejectionReason,
             toolMessageId,
           },
@@ -1557,6 +1687,7 @@ export class AgentRuntimeService {
 
     // Create Agent instance — use custom factory if provided, otherwise default to GeneralChatAgent
     const generalConfig = {
+      mandatoryInterventionTools: ['qingzhou-computer'],
       agentConfig: metadata?.agentConfig,
       compressionConfig: {
         enabled: metadata?.agentConfig?.chatConfig?.enableContextCompression ?? true,
@@ -1661,8 +1792,7 @@ export class AgentRuntimeService {
               activeDeviceId,
               devicePlatform: msg.pluginState?.metadata?.devicePlatform as string | undefined,
               deviceSystemInfo: msg.pluginState?.metadata?.deviceSystemInfo as
-                | Record<string, string>
-                | undefined,
+                Record<string, string> | undefined,
             };
           }
         },
@@ -1793,6 +1923,8 @@ export class AgentRuntimeService {
     if (!initialState) {
       throw new Error(`Agent state not found for operation ${operationId}`);
     }
+    if (isNativeAgentRuntimeEnabled() && initialState.metadata?.userId !== this.userId)
+      throw new Error(`Agent state not found for operation ${operationId}`);
 
     let state: AgentState = initialState;
 

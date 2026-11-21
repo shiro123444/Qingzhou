@@ -1,10 +1,9 @@
 import { type SendMessageParams, type UIChatMessage } from '@lobechat/types';
-import { Block, Button, Flexbox, Icon } from '@lobehub/ui';
+import { Button, Flexbox, Icon } from '@lobehub/ui';
 import { t } from 'i18next';
 import { FileText, Layers, Palette, Presentation, RotateCcw, Sparkles, Users } from 'lucide-react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { type ChatInputEditor } from '@/features/ChatInput';
 import { ChatList, ConversationProvider, MessageItem } from '@/features/Conversation';
 import { QingzhouPresentationScene } from '@/features/QingzhouBrand';
 import { ServerConfigStoreProvider } from '@/store/serverConfig/Provider';
@@ -13,8 +12,13 @@ import type { PresentationMaterials } from '@/types/presentationMaterial';
 import type { TeachingSelection } from '@/types/presentationTeaching';
 
 import type { PresentationPlanningSession } from '../../../../packages/runtime-contracts/src';
+import {
+  getPresentationStylePreset,
+  type PresentationStyleId,
+  presentationStylePresets,
+} from '../../../../packages/runtime-contracts/src/presentation-style-presets';
 import CollaborationControls from '../CollaborationControls';
-import { CreationContextBar, type PresentationCreationMode } from './CreationContextBar';
+import CreationGallery, { type RecentPresentation, StylePicker } from './CreationGallery';
 import { MaterialContextPanel } from './MaterialContextPanel';
 import OutlineWorkspace, { type OutlineSlide } from './OutlineWorkspace';
 import {
@@ -32,9 +36,8 @@ import type {
   PresentationAgentTurnResult,
 } from './presentationAgentClient';
 import PresentationChatInput, { type PresentationSendPayload } from './PresentationChatInput';
-import { PresentationTools, type PresentationToolSelection } from './PresentationTools';
-import PresentationTypewriterTitle from './PresentationTypewriterTitle';
 import { styles } from './style';
+import { TeachingMemoryAccess } from './TeachingMemoryAccess';
 import { type PresentationReferenceInput, toPresentationReference } from './types';
 
 export interface PresentationAgentFlowProps {
@@ -54,6 +57,7 @@ export interface PresentationAgentFlowProps {
     sourceVersionIds: string[];
     title: string;
   }) => Promise<void> | void;
+  onOpenWork?: (jobId: string) => void;
   /** Server-backed outline refinement through presentation.outline. */
   onOutlineAiRewrite: (input: {
     materials?: PresentationMaterials;
@@ -65,7 +69,11 @@ export interface PresentationAgentFlowProps {
     audience: string;
     style: string;
   }) => Promise<Partial<OutlineSlide> | OutlineSlide[] | void>;
+  onStyleChange?: (id: PresentationStyleId) => void;
+  recentWorks?: RecentPresentation[];
   selectedTemplate?: { name?: string; templateId: string; versionId?: string };
+  styleWorkspaceId?: PresentationStyleId;
+  templatePicker?: React.ReactNode;
 }
 
 type FlowStep = 'topic' | 'intake' | 'outline' | 'summary';
@@ -81,12 +89,6 @@ interface ChatMessage {
   references?: PresentationReferenceInput[];
   sender: 'agent' | 'user';
   stepKey?: FlowStep;
-}
-
-interface InspirationTemplate {
-  desc: string;
-  label: string;
-  prompt: string;
 }
 
 const ACTIVITY_TYPEWRITER_INTERVAL = 26;
@@ -129,69 +131,6 @@ const AgentActivityStatus = memo<{ text: string }>(({ text }) => {
 
 AgentActivityStatus.displayName = 'AgentActivityStatus';
 
-const INSPIRATION_TEMPLATES: InspirationTemplate[] = [
-  {
-    desc: '2026年企业数字化转型战略规划',
-    label: '企业战略规划',
-    prompt: `【主题背景】2026年集团全面推进数智化转型与全球化业务升级战略规划。
-【目标受众】集团董事会成员、高管团队及各事业部核心业务负责人。
-【核心内容结构】
-1. 行业宏观趋势与数字化变革挑战；
-2. 集团核心业务现状与痛点诊断；
-3. 2026数智转型总体战略愿景与三阶段推进路线图；
-4. 核心战略支柱（云原生技术底座、全链路数据治理、AI业务场景落地）；
-5. 组织变革、跨部门协同机制与重大风险应对预案。
-【数据/案例要求】引入权威行业对标数据，包含近3年营收成长指标、预期提效ROI预测及典型标杆落地案例。
-【视觉风格】商务稳重科技风，深蓝与质感雅灰为主色调，辅以金色强调，采用多栏信息卡片与流程图解。
-【交付要求】标准16:9宽屏，生成12页高质量幻灯片，逻辑严密，各页附带演讲要点说明。`,
-  },
-  {
-    desc: '人工智能前沿学术研讨会报告',
-    label: '课程讲义',
-    prompt: `【主题背景】面向高校与科研机构的人工智能前沿学术研讨会报告与教学讲义。
-【目标受众】计算机科学与人工智能相关专业的师生、青年学者及学术研究人员。
-【核心内容结构】
-1. 人工智能技术演变脉络与生成式大模型前沿发展概况；
-2. 核心架构原理解析（Transformer机制、多模态对齐与推理强化）；
-3. 前沿学术突破与代表性顶级会议论文关键成果；
-4. 行业应用实践探索与跨学科研究方向展望；
-5. 开放性挑战、伦理安全治理与未来学术思考。
-【数据/案例要求】展示主流学术榜单评测基准数据、经典实验对比图表与前沿实验室最新代表性案例。
-【视觉风格】学术严谨风格，高对比度现代扁平排版，清爽蓝灰配色，公式与框架结构清晰易读。
-【交付要求】标准16:9宽屏，生成12页教学演示讲义，重难点突出，适合45分钟深度讲解。`,
-  },
-  {
-    desc: '智能新零售产品发布商业提案',
-    label: '产品提案',
-    prompt: `【主题背景】智能新零售产品发布商业提案与全渠道数智化解决方案。
-【目标受众】大型零售品牌高管决策层、渠道战略合作伙伴及商业投资机构。
-【核心内容结构】
-1. 消费市场变革洞察与传统零售痛点（坪效瓶颈、全渠道割裂）；
-2. 智能新零售产品核心价值主张与全局技术架构方案；
-3. 核心功能矩阵（AI智能选品、全渠道客流分析、无人智能收银结账）；
-4. 商业盈利模式、部署投资预算与实施周期规划；
-5. 落地成功保障与全周期客户服务体系。
-【数据/案例要求】结合知名连锁品牌试点经营指标，呈现客单价提升与运营成本降低的量化对比数据与ROI测算。
-【视觉风格】活力现代商业风，明亮科技渐变色彩，搭配高清场景化插画与大尺寸关键指标展示。
-【交付要求】标准16:9宽屏，生成12页商业提案，结构精练、销售说服力强，适合商务路演。`,
-  },
-  {
-    desc: 'Q3 团队技术演进与业务增长复盘',
-    label: '研究汇报',
-    prompt: `【主题背景】Q3 团队技术演进与业务增长复盘深度研究汇报。
-【目标受众】技术总监、研发团队骨干成员及业务线产品运营主管。
-【核心内容结构】
-1. Q3业务核心目标回顾与关键KPI达成成果综述；
-2. 技术架构演进升级（微服务重构、稳定性保障与研发提效）；
-3. 关键业务线增长归因分析与技术指标支撑关联；
-4. 遇到的核心挑战、故障复盘反思与根因总结；
-5. Q4重点技术攻坚方向、资源保障规划与长远演进建议。
-【数据/案例要求】提供服务SLA稳定性指标、研发效能指标、线上异常监控趋势图及代表性技术攻坚案例。
-【视觉风格】科技极简风，深邃深色模式或干净冷色调，强化数据可视化折线图、柱状图与时间线卡片。
-【交付要求】标准16:9宽屏，生成12页技术复盘报告，逻辑客观严谨，图表详实直观。`,
-  },
-];
-
 export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
   ({
     agentClient,
@@ -203,11 +142,27 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
     onOutlineAiRewrite,
     onCreate,
     selectedTemplate,
+    styleWorkspaceId,
+    onStyleChange,
+    templatePicker,
+    recentWorks = [],
+    onOpenWork,
   }) => {
-    const editorRef = useRef<ChatInputEditor | null>(null);
+    const [localStyle, setLocalStyle] = useState<PresentationStyleId>();
+    const preset = !selectedTemplate
+      ? getPresentationStylePreset(styleWorkspaceId ?? localStyle)
+      : undefined;
+    const selectStyle = useCallback(
+      (id: PresentationStyleId) => {
+        setLocalStyle(id);
+        onStyleChange?.(id);
+      },
+      [onStyleChange],
+    );
     const flowScrollerRef = useRef<HTMLDivElement | null>(null);
     const [step, setStep] = useState<FlowStep>('topic');
-    const [creationMode, setCreationMode] = useState<PresentationCreationMode>('presentation');
+    const [lessonOverride, setLessonOverride] = useState<boolean>();
+    const memoryRequest = useRef('');
     const [teachingSelection, setTeachingSelection] = useState<TeachingSelection>({
       course: '',
       ids: [],
@@ -216,16 +171,14 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
     const [selectedReferences, setSelectedReferences] = useState<PresentationReferenceInput[]>([]);
     const [selectedAudience, setSelectedAudience] = useState('');
     const [selectedSlideCount, setSelectedSlideCount] = useState<number>(0);
-    const [selectedStyle, setSelectedStyle] = useState('');
+    const [suggestedStyle, setSelectedStyle] = useState('');
+    const selectedStyle = preset ? `${preset.visualStyle} · ${preset.id}` : suggestedStyle;
     const [selectedAspectRatio, setSelectedAspectRatio] = useState<'16:9' | '4:3'>('16:9');
     const [selectedLanguage, setSelectedLanguage] = useState<string>(defaultLanguage);
     const [confirmedSlides, setConfirmedSlides] = useState<OutlineSlide[]>([]);
     const [outlineVersionId, setOutlineVersionId] = useState('v1');
-    const [tools, setTools] = useState<PresentationToolSelection>({
-      search: true,
-      skillIds: ['ppt:story', 'ppt:visual'],
-    });
     const [agentBrief, setAgentBrief] = useState<PresentationAgentBrief>({});
+    const teaching = lessonOverride ?? Boolean(agentBrief.teachingContext?.active);
     const [agentBusy, setAgentBusy] = useState<'conversation' | 'outline' | null>(null);
     const [activity, setActivity] = useState('正在理解你的要求');
     const turnController = useRef<AbortController | null>(null);
@@ -261,6 +214,14 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
 
     const applyAgentBrief = useCallback((brief: PresentationAgentBrief) => {
       setAgentBrief(brief);
+      if (brief.teachingSelection) {
+        const key = JSON.stringify([brief.teachingContext, brief.teachingSelection]);
+        // Polls and subsequent checkpoints cannot overwrite the teacher's edits.
+        if (memoryRequest.current !== key) {
+          memoryRequest.current = key;
+          setTeachingSelection(brief.teachingSelection);
+        }
+      }
       if (brief.topic) setSelectedTopic(brief.topic);
       if (brief.audience) setSelectedAudience(brief.audience);
       if (brief.slideCount) setSelectedSlideCount(brief.slideCount);
@@ -282,6 +243,10 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
         setPlanningSession(session);
         const result = session.result as unknown as PresentationAgentTurnResult | undefined;
         const command = session.command as unknown as PresentationAgentTurnInput;
+        const chosen = presentationStylePresets.find(({ id }) =>
+          command.brief?.style?.endsWith(' · ' + id),
+        );
+        if (chosen) selectStyle(chosen.id);
         const brief = (session.checkpoint?.brief ?? result?.brief ?? command.brief) as
           PresentationAgentBrief | undefined;
         if (brief) applyAgentBrief(brief);
@@ -332,7 +297,7 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
           session.state === 'running' || session.state === 'queued' ? 'conversation' : null,
         );
       },
-      [applyAgentBrief],
+      [applyAgentBrief, selectStyle],
     );
 
     useEffect(() => {
@@ -516,7 +481,7 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
         try {
           const result = await agentClient.turn(
             {
-              brief: agentBrief,
+              brief: preset ? { ...agentBrief, style: selectedStyle } : agentBrief,
               requestId: crypto.randomUUID(),
               presence: {
                 tabId: presenceTabId,
@@ -530,14 +495,11 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
                   }
                 : undefined,
               messages: agentConversation.map((message) => ({
-                content:
-                  message === modelUserMessage && creationMode === 'lesson'
-                    ? `${message.content}\n\n创作场景：备课。请围绕学生的学习目标、已有知识和教学环节规划；保留提问、练习和揭示答案的节奏，避免直接把全部答案铺在页面上。`
-                    : message.content,
+                content: message.content,
                 role: message.sender === 'agent' ? 'assistant' : 'user',
               })),
               references: allReferences,
-              tools: payload.tools ?? tools,
+              tools: { search: true, skillIds: ['ppt:story', 'ppt:visual'] },
               threadId: threadIdRef.current,
             },
             {
@@ -615,15 +577,15 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
         agentBrief,
         restoring,
         presenceTabId,
+        preset,
+        selectedStyle,
         agentBusy,
         agentClient,
-        creationMode,
         applyAgentBrief,
         messages,
         nextMessageId,
         selectedReferences,
         selectedTemplate,
-        tools,
       ],
     );
 
@@ -676,18 +638,6 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
         },
       );
     }, [agentBusy, handleAgentTurn, initialTopic, selectedTemplate]);
-
-    const handleTemplateSelect = useCallback((prompt: string) => {
-      const editor = editorRef.current;
-      if (editor) {
-        try {
-          editor.setDocument('markdown', prompt, { keepHistory: true });
-        } catch {
-          // Fallback
-        }
-        editor.focus?.();
-      }
-    }, []);
 
     useEffect(() => {
       if (
@@ -768,10 +718,10 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
     const handleConversationSend = useCallback(
       async (params: SendMessageParams) => {
         const references = (params.files ?? []).map(toPresentationReference);
-        handleChatSend({ references, text: params.message, tools });
+        handleChatSend({ references, text: params.message });
         return false;
       },
-      [handleChatSend, tools],
+      [handleChatSend],
     );
 
     const handleStartCreate = useCallback(
@@ -838,6 +788,7 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
                 url: reference.assetRef,
               })),
             style: selectedStyle,
+            ...(preset ? { styleWorkspaceId: preset.id } : {}),
           },
           prompt: finalPrompt,
           slideCount: slidesToUse.length,
@@ -846,6 +797,7 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
         });
       },
       [
+        preset,
         agentBrief.assets,
         agentBrief.materials,
         agentBrief.research,
@@ -888,6 +840,9 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
       setSelectedAudience('');
       setSelectedSlideCount(0);
       setSelectedStyle('');
+      setLessonOverride(undefined);
+      setTeachingSelection({ course: '', ids: [] });
+      memoryRequest.current = '';
       setSelectedAspectRatio('16:9');
       setSelectedLanguage(defaultLanguage);
       setConfirmedSlides([]);
@@ -941,7 +896,7 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
                 initialSlides={agentOutline ?? []}
                 materials={agentBrief.materials}
                 memorySelection={teachingSelection}
-                teachingMode={creationMode === 'lesson'}
+                teachingMode={teaching}
                 template={selectedTemplate}
                 initialLessonInstruction={
                   messages.find((message) => message.sender === 'user' && !message.hidden)?.content
@@ -975,8 +930,8 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
                     throw new Error('Lesson provider did not return a teaching plan');
                   return result.lessonPlan;
                 }}
-                onTeachingModeChange={(teaching) =>
-                  setCreationMode(teaching ? 'lesson' : 'presentation')
+                onTeachingModeChange={
+                  agentBrief.teachingContext?.active ? setLessonOverride : undefined
                 }
               />
             );
@@ -1057,7 +1012,7 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
       },
       [
         step,
-        creationMode,
+        teaching,
         teachingSelection,
         messages,
         selectedAudience,
@@ -1106,6 +1061,7 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
           <CollaborationControls
             collaboration={planningSession.collaboration}
             key={planningSession.threadId}
+            layout="inline"
             pending={decisionBusy}
             state={planningSession.state}
             taskId={planningSession.threadId}
@@ -1135,14 +1091,6 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
             }}
           />
         )}
-        <CreationContextBar
-          disabled={creating || Boolean(agentBusy)}
-          mode={creationMode}
-          selection={teachingSelection}
-          template={selectedTemplate}
-          onModeChange={setCreationMode}
-          onSelectionChange={setTeachingSelection}
-        />
         <ConversationProvider
           skipFetch
           context={conversationContext}
@@ -1160,61 +1108,45 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
             <div className={styles.flowThread}>
               {step !== 'outline' && (
                 <div className={styles.flowScroller} ref={flowScrollerRef}>
-                  <div className={styles.capabilityBar}>
-                    <PresentationTools value={tools} onChange={setTools} />
-                  </div>
                   <MaterialContextPanel materials={agentBrief.materials} />
-                  <ServerConfigStoreProvider>
-                    <ChatList
-                      itemContent={(index, id) => {
-                        const message = conversationMessages[index];
-                        return (
-                          <div
-                            className={styles.flowMessageRow}
-                            data-message-role={message?.role}
-                            data-testid={
-                              message?.role === 'user' ? 'presentation-user-message' : undefined
-                            }
-                          >
-                            <MessageItem
-                              disableEditing
-                              id={id}
-                              index={index}
-                              isLatestItem={index === conversationMessages.length - 1}
-                            />
-                          </div>
-                        );
-                      }}
-                      welcome={
-                        <div className={styles.flowWelcome}>
-                          <PresentationTypewriterTitle />
-                          <p className={styles.flowWelcomeCopy}>
-                            说说你想讲什么，我们一起决定怎么呈现。
-                          </p>
-                          <div data-testid="agent-inspiration-chips">
-                            <p className={styles.flowWelcomeHint}>从这些想法开始</p>
-                            <Flexbox horizontal gap={8} wrap="wrap">
-                              {INSPIRATION_TEMPLATES.map((item) => (
-                                <Block
-                                  clickable
-                                  key={item.label}
-                                  paddingBlock={8}
-                                  paddingInline={14}
-                                  style={{ borderRadius: 48, fontSize: 13 }}
-                                  variant="filled"
-                                  onClick={() => {
-                                    handleTemplateSelect(item.prompt);
-                                  }}
-                                >
-                                  {item.label} · {item.desc}
-                                </Block>
-                              ))}
-                            </Flexbox>
-                          </div>
-                        </div>
-                      }
-                    />
-                  </ServerConfigStoreProvider>
+                  {agentBrief.teachingContext?.active && (
+                    <div className={styles.planningShelf}>
+                      <TeachingMemoryAccess
+                        selection={teachingSelection}
+                        template={selectedTemplate}
+                        onChange={setTeachingSelection}
+                      />
+                    </div>
+                  )}
+                  {!conversationMessages.length && step === 'topic' ? (
+                    <div className={styles.flowWelcome}>
+                      <h1>{t('presentationGallery.heading', { ns: 'common' })}</h1>
+                    </div>
+                  ) : (
+                    <ServerConfigStoreProvider>
+                      <ChatList
+                        itemContent={(index, id) => {
+                          const message = conversationMessages[index];
+                          return (
+                            <div
+                              className={styles.flowMessageRow}
+                              data-message-role={message?.role}
+                              data-testid={
+                                message?.role === 'user' ? 'presentation-user-message' : undefined
+                              }
+                            >
+                              <MessageItem
+                                disableEditing
+                                id={id}
+                                index={index}
+                                isLatestItem={index === conversationMessages.length - 1}
+                              />
+                            </div>
+                          );
+                        }}
+                      />
+                    </ServerConfigStoreProvider>
+                  )}
 
                   {(agentBrief.plan || step === 'summary') && (
                     <div className={styles.planningShelf}>
@@ -1289,13 +1221,45 @@ export const PresentationAgentFlow = memo<PresentationAgentFlowProps>(
                         conversation
                         creating={creating}
                         placeholder={chatInputPlaceholder}
+                        extraActionItems={[
+                          ...(templatePicker
+                            ? [
+                                {
+                                  alwaysDisplay: true,
+                                  children: templatePicker,
+                                  key: 'presentation-template',
+                                },
+                              ]
+                            : []),
+                          ...(!selectedTemplate
+                            ? [
+                                {
+                                  alwaysDisplay: true,
+                                  children: (
+                                    <StylePicker
+                                      disabled={creating}
+                                      selected={preset?.id}
+                                      onSelect={selectStyle}
+                                    />
+                                  ),
+                                  key: 'presentation-style',
+                                },
+                              ]
+                            : []),
+                        ]}
                         onSend={handleChatSend}
                         onStop={() => turnController.current?.abort()}
-                        onEditorReady={(inst) => {
-                          editorRef.current = inst;
-                        }}
                       />
                     </div>
+                  )}
+                  {step === 'topic' && !conversationMessages.length && !selectedTemplate && (
+                    <CreationGallery
+                      recent={recentWorks}
+                      selected={preset?.id}
+                      showStyles={false}
+                      onOpen={onOpenWork}
+                      onSelect={selectStyle}
+                    />
                   )}
                 </div>
               )}

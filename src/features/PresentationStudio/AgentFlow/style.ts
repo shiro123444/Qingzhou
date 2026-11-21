@@ -1,30 +1,6 @@
 import { createStaticStyles } from 'antd-style';
 
 export const styles = createStaticStyles(({ css, cssVar }) => ({
-  capabilityBar: css`
-    position: sticky;
-    z-index: 4;
-    inset-block-start: 0;
-
-    display: flex;
-    flex: none;
-    align-items: center;
-    justify-content: flex-end;
-
-    box-sizing: border-box;
-    width: 100%;
-    min-height: 34px;
-    padding-block: 4px;
-    padding-inline: 16px;
-
-    color: ${cssVar.colorTextSecondary};
-
-    background: linear-gradient(
-      to bottom,
-      color-mix(in srgb, ${cssVar.colorBgLayout} 90%, transparent),
-      transparent
-    );
-  `,
   interactiveCardGroup: css`
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
@@ -318,16 +294,6 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     width: 100%;
     height: 100%;
     min-height: 0;
-
-    > * {
-      display: flex;
-      flex: 1;
-      flex-direction: column;
-
-      width: 100%;
-      height: 100%;
-      min-height: 0;
-    }
   `,
   flowShell: css`
     isolation: isolate;
@@ -367,33 +333,19 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     padding-block-end: 16px;
   `,
   flowWelcome: css`
-    display: flex;
-    flex: 1;
-    flex-direction: column;
-    gap: 16px;
-    align-items: stretch;
-    justify-content: flex-end;
-
     box-sizing: border-box;
-    width: 100%;
-    min-height: 100%;
-    margin-inline: 0;
-    padding-block: 24px 8px;
-    padding-inline: 0;
-
-    text-align: start;
-  `,
-  flowWelcomeCopy: css`
-    margin: 0;
-    font-size: 14px;
-    line-height: 1.6;
-    color: ${cssVar.colorTextDescription};
-  `,
-  flowWelcomeHint: css`
-    margin-block: 0 10px;
-    font-size: 13px;
-    line-height: 1.5;
-    color: ${cssVar.colorTextDescription};
+    flex: none;
+    width: min(100%, 920px);
+    margin-inline: auto;
+    padding: clamp(28px, 7vh, 72px) 16px 0;
+    text-align: center;
+    h1 {
+      margin: 0;
+      line-height: 1.18;
+      letter-spacing: -0.04em;
+      font-size: clamp(26px, 3.3vw, 40px);
+      font-weight: 600;
+    }
   `,
   thinkingBubble: css`
     display: flex;

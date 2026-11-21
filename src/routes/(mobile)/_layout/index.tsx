@@ -5,6 +5,7 @@ import { Suspense } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
 
 import Loading from '@/components/Loading/BrandTextLoading';
+import BotSurfaceHost from '@/features/BotSurface';
 import { MarketAuthProvider } from '@/layout/AuthProvider/MarketAuth';
 import dynamic from '@/libs/next/dynamic';
 import { featureFlagsSelectors, useServerConfigStore } from '@/store/serverConfig';
@@ -31,12 +32,14 @@ const MobileMainLayout: FC = () => {
   return (
     <>
       <Suspense fallback={null}>{showCloudPromotion && <CloudBanner mobile />}</Suspense>
-      <MarketAuthProvider isDesktop={false}>
-        <Suspense fallback={<Loading debugId="MobileMainLayout > Outlet" />}>
-          <Outlet />
-          {showNav && <NavBar />}
-        </Suspense>
-      </MarketAuthProvider>
+      <BotSurfaceHost>
+        <MarketAuthProvider isDesktop={false}>
+          <Suspense fallback={<Loading debugId="MobileMainLayout > Outlet" />}>
+            <Outlet />
+            {showNav && <NavBar />}
+          </Suspense>
+        </MarketAuthProvider>
+      </BotSurfaceHost>
     </>
   );
 };

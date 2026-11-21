@@ -45,6 +45,22 @@ const request = (body: unknown, headers: Record<string, string> = {}) =>
     }),
     { params: Promise.resolve({}) },
   );
+it('blocks account operations and playlist covers when music is disabled', async () => {
+  vi.stubEnv('QINGZHOU_PLUGINS', 'sites');
+  try {
+    expect((await request({ operation: 'status' })).status).toBe(404);
+    expect(
+      (
+        await cover(new Request('https://app.test', { headers: { authorization: 'alice' } }), {
+          params: Promise.resolve({ playlistId: 'one' }),
+        })
+      ).status,
+    ).toBe(404);
+    expect(createMusicAccountService).not.toHaveBeenCalled();
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});
 it('authenticates every account action and forbids cross-site or forged-owner commands', async () => {
   expect((await request({ operation: 'status' }, { authorization: '' })).status).toBe(401);
   expect(createMusicAccountService).not.toHaveBeenCalled();
@@ -67,6 +83,24 @@ it('bounds streamed bodies and sanitizes upstream and vault failures', async () 
   const response = await request({ operation: 'poll', challengeId: randomUUID() });
   expect(response.status).toBe(503);
   expect(await response.text()).not.toContain('private-provider-token');
+});
+it('loads account status through the SPA proxy without treating its frontend port as cross-site', async () => {
+  const response = await POST(
+    new Request('http://localhost:3010/api/runtime/music/account', {
+      method: 'POST',
+      headers: {
+        'authorization': 'alice',
+        'content-type': 'application/json',
+        'host': 'localhost:9876',
+        'origin': 'http://localhost:9876',
+        'sec-fetch-site': 'same-origin',
+      },
+      body: JSON.stringify({ operation: 'status' }),
+    }),
+    { params: Promise.resolve({}) },
+  );
+  expect(response.status).toBe(200);
+  expect(service.status).toHaveBeenCalledOnce();
 });
 it('bounds personal library pages and rejects caller-supplied account identifiers or upstream locations', async () => {
   service.library.mockResolvedValue({ playlists: [], page: 1 });

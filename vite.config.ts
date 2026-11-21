@@ -286,7 +286,8 @@ export default defineConfig({
     host: true,
     port: 9876,
     proxy: {
-      '/api': `http://localhost:${process.env.PORT || 3010}`,
+      // Keep the browser-facing Host so API origin checks can recognize the SPA proxy.
+      '/api': { target: `http://localhost:${process.env.PORT || 3010}`, changeOrigin: false },
       '/oidc': `http://localhost:${process.env.PORT || 3010}`,
       '/trpc': `http://localhost:${process.env.PORT || 3010}`,
       '/webapi': `http://localhost:${process.env.PORT || 3010}`,

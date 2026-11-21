@@ -15,6 +15,7 @@ import {
 import { memo, type ReactNode, useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { AgentComputerButton } from '@/features/AgentComputer/Entry';
 import { useAgentStore } from '@/store/agent';
 import { agentByIdSelectors, chatConfigByIdSelectors } from '@/store/agent/selectors';
 import { useChatStore } from '@/store/chat';
@@ -310,6 +311,7 @@ const RuntimeConfig = memo(() => {
 
       <Flexbox horizontal align={'center'} gap={4}>
         {enableAgentMode && <ApprovalMode />}
+        {enableAgentMode && <AgentComputerButton agentId={agentId} />}
         {showContextWindow && <ContextWindow />}
       </Flexbox>
     </Flexbox>

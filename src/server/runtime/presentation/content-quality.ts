@@ -1,12 +1,13 @@
 import { parseString } from '../../../../packages/file-loaders/src/utils/parser-utils';
 import type { PresentationPlan } from '../../../../packages/runtime-contracts/src';
+import { approvedPointSeries } from './approved-point-series';
 import { PRESENTATION_CONTENT_BUDGET } from './content-intent';
 import { assertLessonPublishable } from './lesson';
 import { measureSlideText } from './text-measurement';
 import { inspectVisualOccupancy } from './visual-ownership';
 
 export interface ContentQualityIssue {
-  category: 'density' | 'formula' | 'geometry' | 'legibility';
+  category: 'density' | 'formula' | 'geometry' | 'legibility' | 'scientific-semantics';
   evidence: string;
   instruction: string;
   severity: 'major';
@@ -183,6 +184,40 @@ export const inspectPresentationContent = (
 ): { passed: boolean; issues: ContentQualityIssue[] } => {
   const issues: ContentQualityIssue[] = [];
   for (const slide of plan.slides) {
+    const attempts = slide.metadata?.designCompilation;
+    const attempt = Array.isArray(attempts) ? attempts.at(-1) : undefined;
+    if (
+      attempt?.status === 'skipped' &&
+      [
+        'heading-carrier-not-found',
+        'content-exceeds-source-capacity',
+        'graph-content-exceeds-source-capacity',
+        'source-slots-incomplete',
+        'media-content-exceeds-source-capacity',
+        'image-intrinsics-unavailable',
+        'media-image-decode-failed',
+        'media-image-too-large',
+        'media-object-count-exceeds-capacity',
+        'invalid-media-content-block',
+        'approved-plot-data-exceeds-source-range',
+        'approved-point-series-mismatch',
+      ].includes(attempt.reason)
+    )
+      issues.push({
+        slideId: slide.slideId,
+        severity: 'major',
+        category:
+          attempt.reason.startsWith('approved-point') ||
+          attempt.reason === 'approved-plot-data-exceeds-source-range'
+            ? 'scientific-semantics'
+            : 'geometry',
+        evidence: `Learned layout compilation failed: ${attempt.reason}`,
+        instruction:
+          attempt.reason.startsWith('approved-point') ||
+          attempt.reason === 'approved-plot-data-exceeds-source-range'
+            ? `Use the exact approved samples as native series points ${JSON.stringify(approvedPointSeries(Array.isArray(slide.metadata?.outline) ? (slide.metadata.outline as string[]) : []))}; keep axis ranges covering all pairs. Do not substitute a fitted polynomial. Update notes and provenance to describe the actual discrete samples, without inventing interpolation.`
+            : 'Keep all approved facts and readable typography. Reflow the native content into the selected source slots and make the heading carrier explicit; do not silently replace the learned style with default cards.',
+      });
     const document = parseString(slide.svg);
     const root = document.documentElement;
     const viewBox =
@@ -217,7 +252,12 @@ export const inspectPresentationContent = (
         issues.push({ category, evidence, instruction, severity: 'major', slideId: slide.slideId });
     };
     const texts = Array.from(document.getElementsByTagName('text'));
-    for (const conflict of inspectVisualOccupancy(slide))
+    for (const conflict of inspectVisualOccupancy(
+      slide,
+      undefined,
+      (plan.designSpec?.templateVisualReview as { mode?: string } | undefined)?.mode ===
+        'manual-canvas',
+    ))
       add(
         'geometry',
         conflict,
@@ -382,7 +422,16 @@ export const inspectPresentationContent = (
           isDiagram || isFooter || isShortLabel || isAnnotationLabel
             ? PRESENTATION_CONTENT_BUDGET.minLabelFontSize
             : PRESENTATION_CONTENT_BUDGET.minBodyFontSize;
-        if (!Number.isFinite(size) || size < minimum - 0.1)
+        // Manual scaling changes display size while the original design size stays valid.
+        // Keep the generation threshold on every object outside this resize.
+        const manualScale =
+          (plan.designSpec?.templateVisualReview as { mode?: string } | undefined)?.mode ===
+          'manual-canvas'
+            ? Number(inherited(run, 'data-canvas-scale') ?? 1)
+            : 1;
+        const designSize =
+          Number.isFinite(manualScale) && manualScale > 0 ? size / Math.min(1, manualScale) : size;
+        if (!Number.isFinite(size) || designSize < minimum - 0.1)
           add(
             'legibility',
             `Text “${content.slice(0, 50)}” is ${size.toFixed(1)}px; minimum ${minimum}px at 960 width`,

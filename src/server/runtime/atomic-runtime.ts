@@ -46,6 +46,8 @@ export interface AtomicPlugin {
   operations: AtomicOperation[];
   version: string;
 }
+/** A trusted factory is evaluated only when its profile entry is selected. */
+export type AtomicPluginModule = AtomicPlugin | (() => AtomicPlugin | Promise<AtomicPlugin>);
 export interface AtomicRuntimeOptions {
   /** Maximum scopes retained for diagnostics; zero disables retained history. */
   maxEventScopes?: number;
@@ -79,7 +81,7 @@ export class AtomicRuntime {
   private disposed = false;
   private disposal?: Promise<void>;
 
-  constructor(plugins: AtomicPlugin[] = [], options: AtomicRuntimeOptions = {}) {
+  constructor(plugins: AtomicPluginModule[] = [], options: AtomicRuntimeOptions = {}) {
     const limits = z
       .object({
         maxEventScopes: z.number().int().nonnegative().safe().default(256),
@@ -88,7 +90,14 @@ export class AtomicRuntime {
       .parse(options);
     this.maxEventScopes = limits.maxEventScopes;
     this.maxEventsPerScope = limits.maxEventsPerScope;
-    for (const plugin of plugins) this.pending = this.pending.then(() => this.install(plugin));
+    for (const plugin of plugins)
+      this.pending = this.pending.then(async () => {
+        if (this.disposed) return;
+        const resolved = typeof plugin === 'function' ? await plugin() : plugin;
+        if (!this.disposed) await this.install(resolved);
+      });
+    // Initialization errors remain observable to callers without unhandled rejections.
+    void this.pending.catch(() => {});
   }
 
   private manifest(plugin: AtomicPlugin) {
@@ -184,6 +193,12 @@ export class AtomicRuntime {
     } finally {
       for (const done of release.reverse()) done();
     }
+  }
+
+  /** Wait for selected module factories and native plugin activation. */
+  async ready(): Promise<void> {
+    await this.pending;
+    if (this.disposed) throw fail('PROVIDER_UNAVAILABLE', 'Runtime is disposed');
   }
 
   /** Mounted plugin ids, sorted. A whole job leases every participant to pin its version. */
@@ -332,7 +347,7 @@ export class AtomicRuntime {
 /** Resolve a trusted application profile before allocating any plugin resources. */
 export function createAtomicRuntimeFromProfile(definition: {
   bundles: Readonly<Record<string, PluginBundle>>;
-  modules: Readonly<Record<string, AtomicPlugin>>;
+  modules: Readonly<Record<string, AtomicPluginModule>>;
   profile: PluginProfile;
 }): AtomicRuntime {
   const plugins = resolveProfile(definition.profile, definition.bundles).map((entry) => {
@@ -340,13 +355,22 @@ export function createAtomicRuntimeFromProfile(definition: {
       ? definition.modules[entry.use]
       : undefined;
     if (!plugin) throw fail('PLUGIN_NOT_FOUND', `Unknown atomic module ${entry.use}`);
-    if (entry.id !== plugin.id || Object.keys(entry.config ?? {}).length) {
+    if (
+      (typeof plugin !== 'function' && entry.id !== plugin.id) ||
+      Object.keys(entry.config ?? {}).length
+    ) {
       throw fail(
         'PLUGIN_INVALID',
         'Atomic profiles preserve plugin IDs; configure modules in their trusted factories',
       );
     }
-    return plugin;
+    if (typeof plugin !== 'function') return plugin;
+    return async () => {
+      const resolved = await plugin();
+      if (resolved.id !== entry.id)
+        throw fail('PLUGIN_INVALID', `Factory for ${entry.id} returned ${resolved.id}`);
+      return resolved;
+    };
   });
   return new AtomicRuntime(plugins);
 }

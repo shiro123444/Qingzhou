@@ -1,6 +1,8 @@
 import type { PresentationPlan } from '../../../../packages/runtime-contracts/src';
 import { assertPresentationPublishable } from './content-quality';
+import { designFingerprint } from './design-evidence';
 import { lessonHandout } from './lesson';
+import { prepareNativeDataExport, verifyPptxNativeData } from './native-data-export';
 import { validatePresentationPlan } from './planner';
 import { pptMasterProjectLock } from './ppt-master-project';
 import {
@@ -11,6 +13,9 @@ import {
   PresentationJobEventPublisherError,
   type PresentationJobEventPublisherPort,
 } from './publisher';
+import { audienceSpeakerNotes } from './speaker-notes';
+import { projectCanvasGroups } from './canvas-group-export';
+import { normalizePresentationSvg } from './svg-compatibility';
 
 export interface PresentationWorkerWorkspace {
   cleanup?: () => void | Promise<void>;
@@ -38,10 +43,12 @@ export interface PresentationWorkerContext {
   readonly convert: (
     workspacePath: string,
     signal?: AbortSignal,
+    nativeData?: boolean,
   ) => Promise<readonly PresentationWorkerArtifact[]>;
   readonly eventPublisher?: PresentationJobEventPublisherPort;
   readonly eventScope?: PresentationEventScope;
   readonly jobId: string;
+  readonly nativeData?: boolean;
   /** Short aliases for callers constructing a worker context by hand. */
   readonly publisher?: PresentationJobEventPublisherPort;
   readonly qualityCheck: (
@@ -184,6 +191,16 @@ export class InMemoryPresentationPlanWorker {
     let validated: PresentationPlan;
     try {
       validated = validatePresentationPlan(plan);
+      validated = {
+        ...validated,
+        slides: validated.slides.map((slide) => ({
+          ...slide,
+          notes: audienceSpeakerNotes(
+            slide.notes ??
+              (typeof slide.metadata?.notes === 'string' ? slide.metadata.notes : undefined),
+          ),
+        })),
+      };
       assertPresentationPublishable(validated);
     } catch (error) {
       try {
@@ -209,11 +226,21 @@ export class InMemoryPresentationPlanWorker {
         'phase:worker',
         { phase: 'worker' },
       );
+      const preparedPages = context.nativeData
+        ? prepareNativeDataExport(validated.slides)
+        : validated.slides.map(({ svg }) => ({ svg, tables: [], charts: [] }));
+      const exportPages = preparedPages.map((page, index) => ({
+        ...page,
+        svg: normalizePresentationSvg(projectCanvasGroups(page.svg, validated.slides[index].metadata?.canvasPlaced)),
+      }));
+      const nativeData = exportPages.some(
+        ({ tables, charts }) => tables.length > 0 || charts.length > 0,
+      );
       const previewArtifactIds: string[] = [];
       for (const [slideIndex, slide] of validated.slides.entries()) {
         const path = `svg_output/${String(slideIndex + 1).padStart(3, '0')}.svg`;
         assertPresentationWorkerRelativePath(path);
-        await workspace.write(path, slide.svg);
+        await workspace.write(path, exportPages[slideIndex].svg);
         if (slide.notes?.trim())
           await workspace.write(`notes/${String(slideIndex + 1).padStart(3, '0')}.md`, slide.notes);
         const previewArtifactId = `${context.jobId}:${context.versionId ?? 'initial'}:preview:${slide.slideId}`;
@@ -262,6 +289,9 @@ export class InMemoryPresentationPlanWorker {
         JSON.stringify(cloneValue(validated.designSpec ?? {})),
       );
       await workspace.write('spec_lock.md', pptMasterProjectLock(validated));
+      // ppt-master also uses the document title for the theme, master and layout
+      // names shown in PowerPoint. An isolated version directory is an I/O detail.
+      await workspace.write('metadata.json', JSON.stringify({ title: validated.title }));
       throwIfAborted(context.abortSignal);
       let qualityReport: PresentationQualityReport;
       try {
@@ -294,7 +324,14 @@ export class InMemoryPresentationPlanWorker {
           progress: 88,
           totalSlides: validated.slides.length,
         });
-        artifacts = await context.convert(workspace.path, context.abortSignal);
+        artifacts = nativeData
+          ? await context.convert(workspace.path, context.abortSignal, true)
+          : await context.convert(workspace.path, context.abortSignal);
+        if (nativeData) {
+          const decks = artifacts.filter((artifact) => artifact.type === 'pptx');
+          if (!decks.length) throw new Error('Native data export did not return a PPTX');
+          for (const deck of decks) verifyPptxNativeData(deck.bytes, exportPages);
+        }
         throwIfAborted(context.abortSignal);
       } catch (error) {
         throw new PresentationWorkerError(
@@ -353,7 +390,53 @@ export class InMemoryPresentationPlanWorker {
           .map((artifact, index) => ({
             ...artifact,
             artifactId: `${artifactPrefix}:artifact:${index}`,
-            metadata: { ...artifact.metadata, artifactRole: 'deck', versionId: context.versionId },
+            metadata: {
+              ...artifact.metadata,
+              artifactRole: 'deck',
+              versionId: context.versionId,
+              ...(nativeData && artifact.type === 'pptx'
+                ? {
+                    nativeData: {
+                      schemaVersion: 1,
+                      tables: exportPages.flatMap((page, index) =>
+                        page.tables.map(({ blockId, payloadDigest }) => ({
+                          blockId,
+                          payloadDigest,
+                          slideId: validated.slides[index].slideId,
+                          converterSvgFingerprint: designFingerprint(page.svg),
+                        })),
+                      ),
+                      charts: exportPages.flatMap((page, index) =>
+                        page.charts.map(({ blockId, payloadDigest }) => ({
+                          blockId,
+                          payloadDigest,
+                          slideId: validated.slides[index].slideId,
+                          converterSvgFingerprint: designFingerprint(page.svg),
+                        })),
+                      ),
+                    },
+                  }
+                : {}),
+              ...(validated.designSpec?.designSourceContract
+                ? {
+                    designEvidence: {
+                      schemaVersion: 1,
+                      sourceFingerprint: designFingerprint(
+                        validated.designSpec.designSourceContract,
+                      ),
+                      pages: validated.slides.map((slide, pageIndex) => ({
+                        slideId: slide.slideId,
+                        svgFingerprint: designFingerprint(exportPages[pageIndex].svg),
+                        ...(exportPages[pageIndex].svg !== slide.svg
+                          ? { sourceSvgFingerprint: designFingerprint(slide.svg) }
+                          : {}),
+                        compilation: slide.metadata?.compiledDesign,
+                        attempts: slide.metadata?.designCompilation,
+                      })),
+                    },
+                  }
+                : {}),
+            },
           })),
         ...validated.slides.map((slide, index) => ({
           artifactId: `${artifactPrefix}:slide:${slide.slideId ?? index + 1}`,
@@ -362,6 +445,14 @@ export class InMemoryPresentationPlanWorker {
             ...slide.metadata,
             ...(slide.notes !== undefined ? { notes: slide.notes } : {}),
             artifactRole: 'slide',
+            ...(context.nativeData
+              ? {
+                  nativeData: {
+                    charts: exportPages[index].charts.map((chart) => chart.blockId),
+                    tables: exportPages[index].tables.map((table) => table.blockId),
+                  },
+                }
+              : {}),
             aspectRatio: validated.aspectRatio,
             jobId: context.jobId,
             order: slide.order,

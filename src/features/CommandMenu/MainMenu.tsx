@@ -13,9 +13,11 @@ import {
 import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { builtinPluginForPath, isBuiltinPluginEnabled } from '@/config/builtinPlugins';
 import { getNavigableRoutes, getRouteById } from '@/config/routes';
 import { FEEDBACK } from '@/const/url';
 import { useFeedbackModal } from '@/hooks/useFeedbackModal';
+import { builtinPluginSelectors, useServerConfigStore } from '@/store/serverConfig';
 
 import { useCommandMenuContext } from './CommandMenuContext';
 import { CommandItem } from './components';
@@ -23,6 +25,7 @@ import ContextCommands from './ContextCommands';
 import { useCommandMenu } from './useCommandMenu';
 
 const MainMenu = memo(() => {
+  const enabledPlugins = useServerConfigStore(builtinPluginSelectors.enabled);
   const { pathname, menuContext, setPages, pages } = useCommandMenuContext();
   const { t } = useTranslation('common');
   const { open: openFeedbackModal } = useFeedbackModal();
@@ -113,25 +116,30 @@ const MainMenu = memo(() => {
       </Command.Group>
 
       <Command.Group heading={t('cmdk.navigate')}>
-        {getNavigableRoutes().map((route) => {
-          const RouteIcon = route.icon;
-          const keywords = route.keywordsKey
-            ? t(route.keywordsKey as any).split(' ')
-            : route.keywords;
-          return (
-            !pathname?.startsWith(route.pathPrefix) && (
-              <CommandItem
-                icon={<RouteIcon />}
-                key={route.id}
-                keywords={keywords}
-                value={route.id}
-                onSelect={() => handleNavigate(route.path)}
-              >
-                {t(route.cmdkKey as any)}
-              </CommandItem>
-            )
-          );
-        })}
+        {getNavigableRoutes()
+          .filter((route) => {
+            const plugin = builtinPluginForPath(route.path);
+            return !plugin || isBuiltinPluginEnabled(plugin, enabledPlugins);
+          })
+          .map((route) => {
+            const RouteIcon = route.icon;
+            const keywords = route.keywordsKey
+              ? t(route.keywordsKey as any).split(' ')
+              : route.keywords;
+            return (
+              !pathname?.startsWith(route.pathPrefix) && (
+                <CommandItem
+                  icon={<RouteIcon />}
+                  key={route.id}
+                  keywords={keywords}
+                  value={route.id}
+                  onSelect={() => handleNavigate(route.path)}
+                >
+                  {t(route.cmdkKey as any)}
+                </CommandItem>
+              )
+            );
+          })}
       </Command.Group>
 
       <Command.Group heading={t('cmdk.about')}>

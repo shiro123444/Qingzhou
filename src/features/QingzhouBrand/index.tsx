@@ -25,19 +25,15 @@ export const QingzhouPresentationScene = memo(
       data-active={active}
       data-stage={stage}
     >
-      <svg
+      <img
+        alt=""
         aria-hidden="true"
         className={styles.presentationMist}
-        fill="none"
-        preserveAspectRatio="xMidYMax slice"
-        viewBox="0 0 1200 700"
-      >
-        <path
-          d="M0 560Q260 510 540 567T1200 552 M0 584Q290 558 600 587T1200 575 M0 620Q350 591 710 622T1200 604"
-          stroke="currentColor"
-          strokeOpacity=".09"
-        />
-      </svg>
+        draggable={false}
+        height={413}
+        src="/brand/qingzhou-celadon/wash.webp"
+        width={1024}
+      />
       <QingzhouFerrisWheel variant="presentation" />
       <span className={styles.presentationRipple}>
         <span />
@@ -62,28 +58,28 @@ export const QingzhouHomeFrame = memo(({ children }: { children: ReactNode }) =>
 
 export const QingzhouComposerOrnaments = memo(() => (
   <span aria-hidden="true" className={styles.ornaments}>
-    <span data-qz-leaf className={styles.leafPendant}>
-      <svg fill="none" viewBox="0 0 40 48">
-        <path
-          d="M20 3C5 12 4 31 18 43C31 39 38 23 20 3Z"
-          fill="currentColor"
-          fillOpacity=".15"
-          stroke="currentColor"
-        />
-        <path
-          d="M20 4L18 44M19 19L11 14M19 28L28 20M18 36L10 28"
-          stroke="currentColor"
-          strokeOpacity=".65"
-        />
-      </svg>
-    </span>
-    <span className={styles.waterline}>
-      <svg fill="none" viewBox="0 0 60 42">
-        <path d="M8 29H53L44 37H18Z" fill="currentColor" fillOpacity=".18" stroke="currentColor" />
-        <path d="M29 3V29M26 6L10 25H26Z" stroke="currentColor" />
-        <path d="M32 7L47 25H32Z" fill="currentColor" fillOpacity=".1" stroke="currentColor" />
-      </svg>
-    </span>
+    <img
+      data-qz-leaf
+      alt=""
+      className={styles.leafPendant}
+      draggable={false}
+      height={171}
+      src="/brand/qingzhou-celadon/leaf.webp"
+      width={256}
+    />
+  </span>
+));
+
+/** The boat accompanies an empty workspace, away from composer controls. */
+export const QingzhouEmptyBoat = memo(() => (
+  <span aria-hidden="true" className={styles.harbor}>
+    <img
+      alt=""
+      draggable={false}
+      height={351}
+      src="/brand/qingzhou-celadon/boat.webp"
+      width={384}
+    />
   </span>
 ));
 

@@ -112,17 +112,14 @@ export interface StepLifecycleCallbacks {
  * Step completion reason
  */
 export type StepCompletionReason =
-  | 'done'
-  | 'error'
-  | 'interrupted'
-  | 'max_steps'
-  | 'cost_limit'
-  | 'waiting_for_human';
+  'done' | 'error' | 'interrupted' | 'max_steps' | 'cost_limit' | 'waiting_for_human';
 
 // ==================== Execution Params ====================
 
 export interface AgentExecutionParams {
   approvedToolCall?: any;
+  /** Trusted background ownership, never accepted as executable request data. */
+  assertExecutionLease?: () => void;
   context?: AgentRuntimeContext;
   externalRetryCount?: number;
   humanInput?: any;
@@ -134,6 +131,7 @@ export interface AgentExecutionParams {
    */
   rejectAndContinue?: boolean;
   rejectionReason?: string;
+  signal?: AbortSignal;
   stepIndex: number;
   /** ID of the pending tool message targeted by the intervention. */
   toolMessageId?: string;
@@ -159,6 +157,8 @@ export interface OperationCreationParams {
   /** Resolved document material captured once, before the operation starts. */
   agentDocuments?: unknown[];
   appContext: {
+    nativeWakeId?: string;
+    nativeTaskVersion?: string;
     agentId?: string;
     defaultTaskAssigneeAgentId?: string;
     documentId?: string | null;
@@ -272,6 +272,7 @@ export interface OperationStatusResult {
   metadata: any;
   needsHumanInput: boolean;
   operationId: string;
+  pendingIntervention?: boolean;
   recentEvents?: any[];
   stats: {
     lastActiveTime: number;
@@ -302,6 +303,7 @@ export interface PendingInterventionsResult {
 export interface StartExecutionParams {
   context?: AgentRuntimeContext;
   delay?: number;
+  nativeWakeLease?: { id: string; owner: string };
   operationId: string;
   priority?: 'high' | 'normal' | 'low';
 }

@@ -17,6 +17,7 @@ import { teachingSourceReferenceSchema } from '@/types/presentationTeaching';
 import { AtomicRuntime } from '../atomic-runtime';
 import { createTeachingPlugin } from '../teaching/atomic-plugin';
 import type { MultimodalChatPort } from './multimodal-chat-provider';
+import { createPresentationConversationCapability } from './conversation-capability';
 import { createPresentationOutlineCapability } from './outline-capability';
 import { handleTeachingRequest } from './teaching-handler';
 import {
@@ -138,6 +139,36 @@ describe('conditional teaching memory', () => {
       'revoked',
     );
     expect(await memory.search(scope, '', '认知科学')).toEqual([]);
+  });
+  it('carries an actual approved course memory from conversation into lesson composition', async () => {
+    const { memory, record } = await setup();
+    const course = '认知科学';
+    await memory.review(scope, review(record, course));
+    const teachingContext = { active: true, course, query: '实验现象', useMemory: true };
+    const decisions = [
+      { operation: 'planning.update', input: { topic: '实验现象', teachingContext } },
+      { phase: 'intake', completion: 'fulfilled', message: '已检索课程教学记忆。' },
+    ];
+    const chat = {
+      manifest: { model: 'teaching-test' },
+      chat: vi.fn(async () => ({
+        choices: [{ message: { content: JSON.stringify(decisions.shift()) } }],
+      })),
+    } as unknown as MultimodalChatPort;
+    const result = await createPresentationConversationCapability({
+      chat,
+      teachingMemory: memory,
+    }).execute(
+      {
+        operation: 'turn',
+        threadId: 'teaching-conversation',
+        messages: [{ role: 'user', content: '为认知科学课备课，先查找实验现象相关教学记忆。' }],
+      },
+      { scope },
+    );
+    expect(result.brief.teachingSelection).toEqual({ course, ids: [record.id] });
+    const [selected] = await memory.compose(scope, result.brief.teachingSelection);
+    expect(selected.pattern).toEqual(record.pattern);
   });
   it('rejects fabricated excerpts, single-page patterns and spoofed approval fields', async () => {
     const { memory } = await setup();

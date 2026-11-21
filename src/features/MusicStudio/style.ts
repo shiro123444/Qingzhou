@@ -159,6 +159,9 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     box-shadow: inset 0 1px 0 var(--qz-glass-highlight);
   `,
   tabs: css`
+    isolation: isolate;
+    position: relative;
+
     display: flex;
     gap: 4px;
     align-items: center;
@@ -174,6 +177,46 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 2px;
     }
+  `,
+  tabDroplet: css`
+    pointer-events: none;
+
+    position: absolute;
+    z-index: -1;
+    inset-block-start: 0;
+    inset-inline-start: 0;
+    transform-origin: top left;
+
+    box-sizing: border-box;
+    border: 1px solid var(--qz-glass-highlight);
+    border-radius: 999px;
+
+    visibility: hidden;
+    background:
+      linear-gradient(145deg, var(--qz-glass-highlight), transparent 46%),
+      color-mix(in srgb, var(--music-accent) 8%, var(--qz-glass-surface));
+    backdrop-filter: var(--qz-glass-filter);
+    box-shadow:
+      inset 0 1px 1px var(--qz-glass-highlight),
+      inset 0 -1px 2px color-mix(in srgb, var(--music-accent) 18%, transparent),
+      0 3px 8px rgb(0 0 0 / 5%);
+  `,
+  tabSheen: css`
+    pointer-events: none;
+
+    position: absolute;
+    inset: 1px;
+
+    border-radius: inherit;
+
+    opacity: 0.18;
+    background: linear-gradient(
+      110deg,
+      transparent 10%,
+      color-mix(in srgb, var(--qz-glass-highlight) 65%, transparent) 32%,
+      transparent 58%
+    );
+    background-size: 200% 100%;
   `,
   tab: css`
     cursor: pointer;
@@ -206,15 +249,10 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     }
 
     &[aria-selected='true'] {
-      border-color: var(--qz-glass-border);
       color: var(--music-accent);
-      background: var(--qz-glass-strong);
-      box-shadow:
-        inset 0 1px 0 var(--qz-glass-highlight),
-        0 3px 10px color-mix(in srgb, ${cssVar.colorText} 4%, transparent);
     }
 
-    &:hover {
+    &:hover:not([aria-selected='true']) {
       color: ${cssVar.colorText};
       background: ${cssVar.colorFillTertiary};
     }
@@ -240,19 +278,39 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     }
   `,
   closeButton: css`
-    display: grid;
+    display: flex;
     flex: none;
-    place-items: center;
+    gap: 7px;
+    align-items: center;
+    justify-content: center;
 
-    width: 32px;
-    height: 32px;
-    border-radius: ${cssVar.borderRadius};
+    min-width: 36px;
+    height: 36px;
+    padding-inline: 12px;
+    border-radius: 18px;
 
+    font-size: 13px;
     color: ${cssVar.colorTextSecondary};
+    white-space: nowrap;
+
+    background: ${cssVar.colorFillQuaternary};
 
     &:hover {
       color: ${cssVar.colorText};
       background: ${cssVar.colorFillTertiary};
+    }
+
+    &:focus-visible {
+      outline: 2px solid ${cssVar.colorPrimary};
+      outline-offset: 3px;
+    }
+
+    @container (width <= 480px) {
+      padding-inline: 9px;
+
+      span:last-child {
+        display: none;
+      }
     }
   `,
   uploadButton: css`
@@ -323,24 +381,14 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       inset 0 -1px 1px color-mix(in srgb, var(--music-accent) 16%, transparent),
       var(--qz-glass-shadow);
 
-    &::before {
-      pointer-events: none;
-      content: '';
+    &:has([data-music-artwork='celadon']) {
+      overflow: visible;
 
-      position: absolute;
-      z-index: -1;
-      inset-block: 42% -30%;
-      inset-inline: -20% -35%;
-      transform: rotate(-18deg);
+      border-color: transparent;
 
-      border-block-start: 1px solid var(--qz-glass-highlight);
-      border-radius: 50%;
-
-      background: linear-gradient(
-        175deg,
-        color-mix(in srgb, var(--music-accent) 18%, transparent),
-        transparent 70%
-      );
+      background: transparent;
+      backdrop-filter: none;
+      box-shadow: none;
     }
 
     img {
@@ -699,6 +747,11 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     padding-block: 15px;
     font-size: 13px;
     color: ${cssVar.colorTextTertiary};
+  `,
+  emptyArtwork: css`
+    display: block;
+    width: 100px;
+    height: 100px;
   `,
   emptyCollection: css`
     display: flex;

@@ -1,6 +1,7 @@
 import { Flexbox, Icon, Popover, Tooltip } from '@lobehub/ui';
-import { createStaticStyles, cssVar, cx } from 'antd-style';
+import { cx } from 'antd-style';
 import {
+  CheckIcon,
   ChevronDownIcon,
   FolderIcon,
   InfinityIcon,
@@ -17,83 +18,7 @@ import { useToggleAgentMode } from '@/features/ChatInput/hooks/useToggleAgentMod
 import { useAgentStore } from '@/store/agent';
 import { agentByIdSelectors } from '@/store/agent/selectors';
 
-const styles = createStaticStyles(({ css }) => ({
-  activeOption: css`
-    background: ${cssVar.colorFillSecondary};
-  `,
-  agentTooltip: css`
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    min-width: 160px;
-  `,
-  agentTooltipCap: css`
-    display: flex;
-    gap: 6px;
-    align-items: center;
-
-    font-size: 12px;
-    color: ${cssVar.colorTextSecondary};
-  `,
-  agentTooltipTitle: css`
-    margin-block-end: 2px;
-    font-size: 12px;
-    font-weight: 600;
-    color: ${cssVar.colorText};
-  `,
-  button: css`
-    cursor: pointer;
-
-    display: flex;
-    gap: 6px;
-    align-items: center;
-
-    height: 28px;
-    padding-inline: 8px;
-    border-radius: 6px;
-
-    font-size: 12px;
-    color: ${cssVar.colorTextSecondary};
-
-    transition: all 0.2s;
-
-    &:hover {
-      color: ${cssVar.colorText};
-      background: ${cssVar.colorFillSecondary};
-    }
-  `,
-  option: css`
-    cursor: pointer;
-
-    width: 100%;
-    padding-block: 10px;
-    padding-inline: 8px;
-    border-radius: ${cssVar.borderRadius};
-
-    transition: background-color 0.2s;
-
-    &:hover {
-      background: ${cssVar.colorFillSecondary};
-    }
-  `,
-  optionDesc: css`
-    font-size: 12px;
-    line-height: 1.4;
-    color: ${cssVar.colorTextDescription};
-  `,
-  optionIcon: css`
-    flex-shrink: 0;
-    border: 1px solid ${cssVar.colorBorderSecondary};
-    border-radius: ${cssVar.borderRadius};
-    background: ${cssVar.colorBgElevated};
-  `,
-  optionTitle: css`
-    font-size: 14px;
-    font-weight: 500;
-    line-height: 1.4;
-    color: ${cssVar.colorText};
-  `,
-}));
+import { modeSelectorStyles as styles } from './modeSelector.style';
 
 const AGENT_CAPS = [
   { icon: WrenchIcon, key: 'tools' },
@@ -137,11 +62,10 @@ const ModeSelector = memo(() => {
 
   const popoverContent = (
     <Flexbox gap={4} style={{ maxWidth: 320, minWidth: 280 }}>
-      <Flexbox
-        horizontal
-        align="center"
+      <button
+        aria-pressed={currentMode === 'agent'}
         className={cx(styles.option, currentMode === 'agent' && styles.activeOption)}
-        gap={12}
+        type="button"
         onClick={() => handleSelect('agent')}
       >
         <Flexbox
@@ -157,13 +81,13 @@ const ModeSelector = memo(() => {
           <div className={styles.optionTitle}>{t('chatMode.agent')}</div>
           <div className={styles.optionDesc}>{t('chatMode.agentDesc')}</div>
         </Flexbox>
-      </Flexbox>
+        <Icon className={styles.optionCheck} icon={CheckIcon} size={16} />
+      </button>
 
-      <Flexbox
-        horizontal
-        align="center"
+      <button
+        aria-pressed={currentMode === 'chat'}
         className={cx(styles.option, currentMode === 'chat' && styles.activeOption)}
-        gap={12}
+        type="button"
         onClick={() => handleSelect('chat')}
       >
         <Flexbox
@@ -179,7 +103,8 @@ const ModeSelector = memo(() => {
           <div className={styles.optionTitle}>{t('chatMode.chat')}</div>
           <div className={styles.optionDesc}>{t('chatMode.chatDesc')}</div>
         </Flexbox>
-      </Flexbox>
+        <Icon className={styles.optionCheck} icon={CheckIcon} size={16} />
+      </button>
     </Flexbox>
   );
 
@@ -193,13 +118,13 @@ const ModeSelector = memo(() => {
 
   return (
     <Popover
+      arrow={false}
+      className={styles.popover}
+      classNames={{ content: styles.popoverContent }}
       content={popoverContent}
       open={open}
       placement="topLeft"
       trigger="click"
-      styles={{
-        content: { border: `1px solid ${cssVar.colorBorderSecondary}`, padding: 4 },
-      }}
       onOpenChange={setOpen}
     >
       <div>

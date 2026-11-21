@@ -14,6 +14,20 @@ export default function CollaborationPanel({
   const pending = store((s) => s.pendingActions[job.jobId] === 'decision');
   return (
     <CollaborationControls
+      canvasSavePaused={
+        job.state === 'waiting_input' &&
+        job.messages?.some(
+          (message) =>
+            message.status === 'applying' &&
+            Boolean(
+              message.canvasCommand ||
+              message.objectPositionPatch ||
+              message.annotation?.textRuns ||
+              message.tableDataPatch ||
+              message.chartDataPatch,
+            ),
+        )
+      }
       collaboration={job.collaboration}
       pending={pending}
       state={job.state}

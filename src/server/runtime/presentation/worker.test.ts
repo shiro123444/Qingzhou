@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { PresentationPlan } from '../../../../packages/runtime-contracts/src';
+import { designFingerprint } from './design-evidence';
 import { PresentationJobEventJournal } from './job-event-journal';
 import { PRESENTATION_JOB_EVENT_TYPES, PresentationJobEventPublisher } from './publisher';
 import {
@@ -57,6 +58,39 @@ const expectCode = async (operation: Promise<unknown>, code: string) =>
   expect(operation).rejects.toMatchObject({ code });
 
 describe('C-52 presentation plan worker', () => {
+  it('binds exported evidence to the actual source contract and exact slide bytes sent to conversion', async () => {
+    const { context: ctx, writes } = context();
+    const contract = [
+      {
+        id: 'owned-source',
+        source: { sourceDigest: 'source-hash' },
+        designReference: { slots: [] },
+      },
+    ];
+    const candidate = {
+      ...plan,
+      slides: plan.slides.map((slide, i) =>
+        i ? slide : { ...slide, svg: "<svg><rect width='24'/></svg>" },
+      ),
+      designSpec: { ...plan.designSpec, designSourceContract: contract },
+    };
+    const result = await new InMemoryPresentationPlanWorker().run(candidate, ctx);
+    const firstPreview = result.artifacts.find((a) => a.metadata?.slideId === 's-1')!;
+    expect(new TextDecoder().decode(firstPreview.bytes)).toBe(candidate.slides[0].svg);
+    expect(writes.get('svg_output/001.svg')).toContain('width="24"');
+    const exported = result.artifacts.find((a) => a.type === 'pptx')!;
+    const evidence = exported.metadata?.designEvidence as {
+      sourceFingerprint: string;
+      pages: { svgFingerprint: string }[];
+    };
+    expect(evidence.sourceFingerprint).toBe(designFingerprint(contract));
+    expect(evidence.pages[0].svgFingerprint).toBe(
+      designFingerprint(writes.get('svg_output/001.svg')),
+    );
+    expect(evidence.pages[1].svgFingerprint).toBe(
+      designFingerprint(writes.get('svg_output/002.svg')),
+    );
+  });
   it('never exports or publishes artifacts for a plan with unresolved major review issues', async () => {
     const { context: ctx } = context();
     await expect(
@@ -82,9 +116,9 @@ describe('C-52 presentation plan worker', () => {
         {
           ...plan.slides[0]!,
           metadata: { notes: 'Outdated metadata notes' },
-          notes: '介绍产品愿景。\n停顿后进入演示。',
+          notes: '介绍产品愿景。\n停顿后进入演示。\n[可编辑内容源]\nvisual-1: {"type":"graph"}',
         },
-        { ...plan.slides[1]!, metadata: { notes: 'Legacy notes to preserve' } },
+        { ...plan.slides[1]!, metadata: { notes: 'Legacy notes to preserve\n[可编辑内容源]\n{}' } },
         {
           ...plan.slides[1]!,
           metadata: { notes: 'Explicitly cleared notes' },
@@ -99,7 +133,7 @@ describe('C-52 presentation plan worker', () => {
       versionId: 'notes-version',
     });
     const result = await new InMemoryPresentationPlanWorker().run(withNotes, ctx);
-    const expected = [withNotes.slides[0]!.notes, 'Legacy notes to preserve', ''];
+    const expected = ['介绍产品愿景。\n停顿后进入演示。', 'Legacy notes to preserve', ''];
     expect(writes.get('notes/001.md')).toBe(expected[0]);
     expect(
       result.artifacts
@@ -124,7 +158,9 @@ describe('C-52 presentation plan worker', () => {
       'svg_output/002.svg',
       'design_spec.json',
       'spec_lock.md',
+      'metadata.json',
     ]);
+    expect(JSON.parse(writes.get('metadata.json') as string)).toEqual({ title: plan.title });
     expect(writes.get('design_spec.json')).toContain('light');
     result.artifacts[0]!.bytes[0] = 9;
     (result.artifacts[0]!.metadata!.nested as { ok: boolean }).ok = false;

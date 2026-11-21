@@ -28,6 +28,8 @@ export interface PresentationOutlineSlide {
 }
 
 export interface PresentationOutlineCommand {
+  /** The direct creator promises the exact length selected in its form. */
+  readonly exactSlideCount?: number;
   readonly brief: PresentationConversationBrief & { teacherBrief?: TeacherBrief };
   readonly currentLessonPlan?: LessonPlan;
   readonly currentSlides?: readonly PresentationOutlineSlide[];
@@ -162,7 +164,12 @@ export const createPresentationOutlineCapability = (options: {
         emptyError: 'Outline provider returned an empty response',
         parse: (value) => {
           if (!isRecord(value)) throw new Error('Outline provider returned a non-object response');
-          return { slides: normalizeSlides(value.slides, brief.materials) };
+          const slides = normalizeSlides(value.slides, brief.materials);
+          if (command.exactSlideCount !== undefined && slides.length !== command.exactSlideCount)
+            throw new Error(
+              `Return exactly ${command.exactSlideCount} slides; received ${slides.length}`,
+            );
+          return { slides };
         },
         request: {
           max_tokens: 16_000,

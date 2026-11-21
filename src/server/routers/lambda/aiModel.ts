@@ -54,9 +54,15 @@ export const aiModelRouter = router({
         id: z.string(),
         // TODO: Complete validation schema
         models: z.array(z.any()),
+        replace: z.boolean().optional(),
       }),
     )
     .mutation(async ({ input, ctx }) => {
+      const remoteProviders = await ctx.aiInfraRepos.aiProviderModel.getRemoteModelProviderIds(
+        input.id,
+      );
+      if (input.replace || remoteProviders.includes(input.id))
+        return ctx.aiModelModel.replaceRemoteModels(input.id, input.models);
       return ctx.aiModelModel.batchUpdateAiModels(input.id, input.models);
     }),
 

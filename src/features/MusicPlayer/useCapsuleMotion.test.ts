@@ -66,10 +66,11 @@ it('honours reduced motion immediately and cancels animation work on unmount', (
   expect(vi.getTimerCount()).toBe(0);
 });
 
-it('waits for a late-starting CSS transition and its final layout before ending the optical loop', () => {
+it('waits for layout transitions and then stops optics while a decorative playback meter continues', () => {
   const animation = { pending: false, playState: 'running' };
   const element = document.createElement('section');
-  Object.defineProperty(element, 'getAnimations', { value: () => [animation] });
+  const meter = { playState: 'running', effect: { getTiming: () => ({ iterations: Infinity }) } };
+  Object.defineProperty(element, 'getAnimations', { value: () => [animation, meter] });
   const dock = { current: element };
   const { result, rerender } = renderHook(
     ({ collapsed }) => useCapsuleMotion(collapsed, false, dock),

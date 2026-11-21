@@ -1918,6 +1918,7 @@ export const createRuntimeExecutors = (
             await assertChannelIdentityAccess(ctx.serverDB, ctx.userId, state.metadata?.botContext);
             assertStepActive(ctx);
             return toolExecutionService.executeTool(chatToolPayload, {
+              computerAllowed: !state.metadata?.botContext && !state.metadata?.discordContext,
               assertStepLease: ctx.assertStepLease,
               activeDeviceId: state.metadata?.activeDeviceId,
               agentId: state.metadata?.agentId,
@@ -2436,6 +2437,7 @@ export const createRuntimeExecutors = (
                 );
                 assertStepActive(ctx);
                 return toolExecutionService.executeTool(chatToolPayload, {
+                  computerAllowed: !state.metadata?.botContext && !state.metadata?.discordContext,
                   assertStepLease: ctx.assertStepLease,
                   activeDeviceId: state.metadata?.activeDeviceId,
                   agentId: state.metadata?.agentId,

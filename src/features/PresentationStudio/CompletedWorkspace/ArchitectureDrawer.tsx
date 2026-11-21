@@ -1,5 +1,4 @@
 import { Button, Flexbox, Icon, Tag } from '@lobehub/ui';
-import { Tooltip } from 'antd';
 import {
   FileText,
   Image as ImageIcon,
@@ -7,10 +6,11 @@ import {
   ListTree,
   MessageSquare,
   RefreshCw,
-  X,
 } from 'lucide-react';
 import { memo, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
+
+import { PanelToggle } from '@/features/GlassMotion/PanelToggle';
 
 import type {
   ArtifactSnapshot,
@@ -24,6 +24,7 @@ import type { PresentationSlotState } from '../store/presentationStore';
 import { styles } from './style';
 
 export interface ArchitectureDrawerProps {
+  id?: string;
   currentIndex: number;
   dismissSlotError: (jobId: string, slideId: string, slotId: string) => void;
   exporting?: boolean | string | null;
@@ -77,6 +78,7 @@ const isImagePreviewUri = (uri: string): boolean => {
 
 export const ArchitectureDrawer = memo<ArchitectureDrawerProps>(
   ({
+    id,
     currentIndex,
     dismissSlotError,
     exporting = false,
@@ -184,13 +186,14 @@ export const ArchitectureDrawer = memo<ArchitectureDrawerProps>(
       <aside
         aria-label="当前页架构与资产抽屉"
         className={styles.drawerRoot}
+        id={id}
+        inert={!open}
         data-open={open ? 'true' : 'false'}
         data-testid="presentation-architecture-drawer"
         style={{
           border: open ? '1px solid var(--ant-color-border-secondary)' : 'none',
-          marginLeft: open ? 0 : -12,
-          maxWidth: open ? 360 : 0,
-          minWidth: open ? 340 : 0,
+          marginInlineStart: open ? 0 : -12,
+          minWidth: 0,
           opacity: open ? 1 : 0,
           pointerEvents: open ? 'auto' : 'none',
           width: open ? 360 : 0,
@@ -204,15 +207,13 @@ export const ArchitectureDrawer = memo<ArchitectureDrawerProps>(
               第 {currentIndex + 1} 页
             </Tag>
           </Flexbox>
-          <Tooltip title="关闭">
-            <Button
-              aria-label="关闭抽屉"
-              className={styles.iconButton}
-              icon={<Icon aria-hidden icon={X} size={22} />}
-              type="text"
-              onClick={onClose}
-            />
-          </Tooltip>
+          <PanelToggle
+            aria-controls={id}
+            expanded={open}
+            label={t('panel.drawerClose', '关闭抽屉')}
+            side="right"
+            onToggle={onClose}
+          />
         </div>
 
         <div className={styles.drawerBody}>

@@ -8,7 +8,10 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     overflow: hidden;
 
     border: 1px solid var(--qz-glass-border, var(--container-border-color, ${cssVar.colorBorder}));
-    border-radius: var(--container-border-radius, ${cssVar.borderRadius});
+    border-radius: var(
+      --qz-glass-radius-shell,
+      var(--container-border-radius, ${cssVar.borderRadius})
+    );
 
     background: transparent;
   `,

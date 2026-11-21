@@ -6,7 +6,7 @@ import { useTranslation } from 'react-i18next';
 import { useMusicActivation } from '@/features/MusicPlayer/session-context';
 import MusicStudio from '@/features/MusicStudio';
 import { NavPanelPortal } from '@/features/NavPanel';
-import ToggleLeftPanelButton from '@/features/NavPanel/ToggleLeftPanelButton';
+import { SidebarReopenButton } from '@/features/NavPanel/ToggleLeftPanelButton';
 import SidebarContent from '@/routes/(main)/home/_layout/SidebarContent';
 
 /** Keep music in the shared workspace navigation without remounting the player host. */
@@ -19,7 +19,7 @@ export default function MusicWorkspace() {
         <SidebarContent />
       </NavPanelPortal>
       {ready ? (
-        <MusicStudio navigation={<ToggleLeftPanelButton />} />
+        <MusicStudio navigation={<SidebarReopenButton />} />
       ) : error ? (
         <Button onClick={retry}>{t('retry')}</Button>
       ) : (

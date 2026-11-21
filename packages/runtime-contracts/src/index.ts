@@ -1,3 +1,5 @@
+export type { CanvasMove, CanvasObject, CanvasRect } from './canvas';
+
 /** The wire protocol version shared by RuntimeFacade and its clients. */
 export const RUNTIME_PROTOCOL_VERSION = 'runtime.v1' as const;
 
@@ -259,7 +261,8 @@ export type PresentationCollaborationMode = 'adaptive' | 'ask' | 'auto';
 export interface PresentationDecision {
   answer?: { action: 'retry' | 'revise'; content?: string; requestId: string; answeredAt: string };
   category: 'quality' | 'provider' | 'input' | 'conflict';
-  choices?: { id: string; label: string; description?: string }[];
+  choices?: { id: string; label: string; description?: string; thumbnailUrl?: string }[];
+  context?: string[];
   createdAt: string;
   detail: string;
   id: string;
@@ -302,6 +305,8 @@ export interface PresentationPlanningSession {
 }
 
 export interface PresentationAnnotation {
+  /** Literal text runs, in document order, for a direct canvas edit. */
+  textRuns?: string[];
   baseSvgHash: string;
   elementIndices: number[];
   expectedVersionId: string;
@@ -309,11 +314,38 @@ export interface PresentationAnnotation {
   slideId: string;
 }
 
+export type CanvasCommand = { expectedVersionId: string } & (
+  | { kind: 'restore'; version: string; direction: 'undo' | 'redo'; operationId: string }
+  | { kind: 'paste'; sourceVersion: string; sourcePage: number; object: string }
+  | {
+      kind: 'pasteMany';
+      sourceVersion: string;
+      sourcePage: number;
+      objects: string[];
+      dx: number;
+      dy: number;
+    }
+  | { kind: 'moveMany'; moves: { object: string; dx: number; dy: number }[] }
+  | { kind: 'group' | 'ungroup'; objects: string[] }
+  | { kind: 'resizeGroup'; objects: string[]; anchorX: number; anchorY: number; factor: number }
+  | { kind: 'removeMany'; objects: string[] }
+  | { kind: 'remove'; object: string }
+  | { kind: 'translate'; object: string; dx: number; dy: number }
+);
 export interface PresentationMessageInput {
+  canvasCommand?: CanvasCommand;
   annotation?: PresentationAnnotation;
+  chartDataPatch?: { blockId: string; expectedVersionId: string; series: [number, number][][] };
   content: string;
+  objectPositionPatch?: { blockId: string; expectedVersionId: string; x: number; y: number };
   patch?: { slideId: string; svg: string; notes?: string; expectedVersionId?: string };
   requestId: string;
+  tableDataPatch?: {
+    blockId: string;
+    columns: string[];
+    expectedVersionId: string;
+    rows: string[][];
+  };
   target: { type: 'deck' } | { type: 'slide'; slideNumber: number };
   template?: { templateId: string; versionId?: string };
 }
@@ -332,6 +364,8 @@ export interface PresentationRevision {
 }
 
 export interface PresentationJob {
+  chatOrigin?: { agentId: string; messageId: string; topicId: string };
+  delivery?: { coverId?: string; pptxId?: string; versionId: string };
   artifactIds?: string[];
   aspectRatio?: string;
   collaboration?: PresentationCollaborationState;

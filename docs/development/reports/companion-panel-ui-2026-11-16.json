@@ -1,0 +1,65 @@
+{
+  "artifacts": "output/companion-panel-validation/",
+  "checks": {
+    "typecheck": "passed",
+    "eslint": "passed",
+    "stylelint": "passed",
+    "prettier": "passed",
+    "gitDiffCheck": "passed"
+  },
+  "cleanup": "Isolated test computer and volume removed in finally; user computer state not mutated by manual preview",
+  "date": "2026-11-16",
+  "implementation": {
+    "sidebar": "Celadon 3D companion with Activity, Review and Senses tabs",
+    "pullCord": "Removed from product UI at user request",
+    "computerScreen": "Only mounted in the explicitly opened workbench",
+    "sidebarFramePolling": false,
+    "taskSource": "Authenticated task.list filtered by current Bot; up to six active assigned tasks",
+    "locales": ["default", "en-US", "zh-CN"],
+    "pointerTracking": "Local head and eye animation; no model or tool execution from pointer movement"
+  },
+  "liveAssertions": [
+    "Owned heartbeat task is rendered from isolated SQL data",
+    "No observation request or sidebar image before explicit workbench open",
+    "No pull cord control mounted",
+    "Initialization, human takeover and browser startup require explicit action",
+    "Real browser navigation, click, text input and save work",
+    "Handback disables human input",
+    "Observation request count stops increasing after closing workbench",
+    "Head and eye tracking, awareness disable, narrow layout, dark theme, Chinese and reduced motion work"
+  ],
+  "manualPreview": {
+    "url": "http://localhost:3010/",
+    "verified": [
+      "Activity/Review/Senses switching",
+      "Click-only workbench screen",
+      "Close returns to companion sidebar"
+    ],
+    "screenshot": "output/companion-panel-preview.jpg",
+    "services": "Main preview and computer provider left running at user request",
+    "nativeWorker": "paused",
+    "modelCallsThisValidation": 0
+  },
+  "references": [
+    "https://muse.ai/blog/how-we-designed-muse",
+    "https://designbookmark.com/tool/appish",
+    "https://appish.app/",
+    "https://designbookmark.com/motion",
+    "https://designbookmark.com/motion-src/pull-cord/index.html"
+  ],
+  "scope": "Companion sidebar redesign and explicit computer workbench entry",
+  "tests": {
+    "regression": {
+      "passed": 17,
+      "failed": 0,
+      "success": true,
+      "report": "output/companion-panel-validation/regression-result.json"
+    },
+    "realContainerWorkflow": {
+      "passed": 1,
+      "failed": 0,
+      "success": true,
+      "report": "output/companion-panel-validation/live-result.json"
+    }
+  }
+}

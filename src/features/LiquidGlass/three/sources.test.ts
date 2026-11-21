@@ -63,6 +63,18 @@ describe('glass source resource boundary', () => {
       expect(isLocalGlassResource(resource, origin)).toBe(false);
   });
 
+  it('preserves gradient masks on scenery without loading external mask resources', async () => {
+    const root = document.createElement('div');
+    root.style.maskImage = 'linear-gradient(to bottom, black, transparent)';
+    root.innerHTML = '<div style="mask-image:url(https://external.test/mask.svg)">Scene</div>';
+    document.body.append(root);
+    const fetch = vi.spyOn(globalThis, 'fetch');
+    const result = await serializeGlassSource(root, { bounds });
+    expect(result).toContain('mask-image: linear-gradient(to bottom, black, transparent)');
+    expect(result).not.toContain('external.test');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it('serializes local text and vector icons without URL paint, scripts or optical output', async () => {
     const root = document.createElement('div');
     root.innerHTML = `<p onclick="danger()" style="background-image:url(https://external.test/bg.png)">Hello</p>
@@ -82,6 +94,19 @@ describe('glass source resource boundary', () => {
 });
 
 describe('glass source layer separation', () => {
+  it('keeps labels above a moving glass control out of its refracted backdrop without hiding live text', async () => {
+    const root = document.createElement('div');
+    root.innerHTML =
+      '<p>Background scene</p><button data-qz-glass-foreground style="width:120px;height:34px">Now playing</button>';
+    document.body.append(root);
+    const original = root.outerHTML;
+    const result = await serializeGlassSource(root, { bounds });
+    expect(result).toContain('Background scene');
+    expect(result).not.toContain('Now playing');
+    expect(result).toContain('data-qz-source-placeholder');
+    expect(result).toContain('120px');
+    expect(root.outerHTML).toBe(original);
+  });
   it('separates theme wallpaper from transparent page content without copying foreground', async () => {
     const root = document.createElement('div');
     root.style.background = 'linear-gradient(90deg, red, blue) rgb(240, 245, 250)';

@@ -7,6 +7,7 @@ import { checkAuth } from '@/app/(backend)/middleware/auth';
 import { auth } from '@/auth';
 import { session as authSessions } from '@/database/schemas/betterAuth';
 import type { LobeChatDatabase } from '@/database/type';
+import { builtinPluginUnavailableResponse } from '@/server/runtime/builtin-plugins';
 import {
   migratePresentationSessions,
   presentationAccountScope,
@@ -352,9 +353,7 @@ const defaultProductionGenerationComposition = (): PresentationRuntimeCompositio
   return result.composition;
 };
 
-const configuredDefaultComposition = defaultProductionGenerationComposition();
-
-const configuredDefaultPortFactory = defaultProductionPortFactory();
+let configuredDefaultPortFactory: PresentationPortFactory | undefined;
 
 const unavailableGenerationCapability: PresentationGenerationCapability = {
   execute: async () => {
@@ -1191,11 +1190,13 @@ const hasExplicitIndividualSeam = (options: PresentationRouteOptions): boolean =
 export const createPresentationRouteHandler = (
   options: PresentationRouteOptions = {},
 ): PresentationGuardedHandler => {
+  const unavailable = builtinPluginUnavailableResponse('presentation');
+  if (unavailable) return async () => unavailable.clone();
   const composition =
     options.composition !== undefined
       ? options.composition
       : !hasExplicitIndividualSeam(options)
-        ? configuredDefaultComposition
+        ? defaultProductionGenerationComposition()
         : undefined;
   const hasComposition = composition !== undefined;
   const conflictPath = compositionConflictPath(options);
@@ -1235,7 +1236,7 @@ export const createPresentationRouteHandler = (
           options.scopeCache,
           options.sessionIdFor ?? defaultSessionIdFor,
         )
-      : (options.portFactory ?? configuredDefaultPortFactory));
+      : (options.portFactory ?? (configuredDefaultPortFactory ??= defaultProductionPortFactory())));
   return authenticate((request, scope) =>
     new URL(request.url).pathname.endsWith('/presentation/teaching')
       ? toTeachingResponse(request, scope, composition, generationScopeFactory)
@@ -1277,7 +1278,13 @@ export const createPresentationRouteHandler = (
   );
 };
 
-const handler = createPresentationRouteHandler();
+let activeHandler: PresentationGuardedHandler | undefined;
+const handler: PresentationGuardedHandler = async (request, options) => {
+  const unavailable = builtinPluginUnavailableResponse('presentation');
+  if (unavailable) return unavailable;
+  activeHandler ??= createPresentationRouteHandler();
+  return activeHandler(request, options);
+};
 
 export const GET = handler;
 export const POST = handler;

@@ -798,6 +798,48 @@
       "when": 1794182400000,
       "tag": "0113_channel_digests",
       "breakpoints": true
+    },
+    {
+      "idx": 114,
+      "version": "7",
+      "when": 1794268800000,
+      "tag": "0114_native_agent_runtime",
+      "breakpoints": true
+    },
+    {
+      "idx": 115,
+      "version": "7",
+      "when": 1794268800001,
+      "tag": "0115_native_agent_wake",
+      "breakpoints": true
+    },
+    {
+      "idx": 116,
+      "version": "7",
+      "when": 1794614400000,
+      "tag": "0116_agent_activity_operations",
+      "breakpoints": true
+    },
+    {
+      "idx": 117,
+      "version": "7",
+      "when": 1794700800000,
+      "tag": "0117_agent_computer",
+      "breakpoints": true
+    },
+    {
+      "idx": 118,
+      "version": "7",
+      "when": 1794700800001,
+      "tag": "0118_computer_receipt_recovery",
+      "breakpoints": true
+    },
+    {
+      "idx": 119,
+      "version": "7",
+      "when": 1794752539104,
+      "tag": "0119_computer_browser",
+      "breakpoints": true
     }
   ],
   "version": "6"

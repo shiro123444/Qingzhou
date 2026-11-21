@@ -1,8 +1,10 @@
+import { scaleSvgGeometry } from '../../../utils/presentationCanvasTransform';
 import { z } from 'zod';
 
 import { parseString } from '../../../../packages/file-loaders/src/utils/parser-utils';
 import { isNativeVisual, type SlideContentIntent, visualRequirements } from './content-intent';
 import { layoutReportTable, renderReportTable, reportTableSchema } from './report-table';
+import { plotFrame, plotPalette } from './scatter-chart';
 import {
   computeScientificPlot,
   quadraticPlotSchema,
@@ -53,6 +55,8 @@ const series = z
 const plot = z
   .object({
     type: z.literal('plot'),
+    fontFamily: z.string().min(1).max(200).optional(),
+    textColor: color.optional(),
     xRange: point.refine(([a, b]) => b > a, 'Axis range must increase'),
     yRange: point.refine(([a, b]) => b > a, 'Axis range must increase'),
     xLabel: z.string().min(1).max(60),
@@ -64,6 +68,18 @@ const plot = z
 const graph = z
   .object({
     type: z.literal('graph'),
+    style: z
+      .object({
+        nodeFill: z.union([color, z.literal('none')]).optional(),
+        nodeStroke: z.union([color, z.literal('none')]).optional(),
+        edgeColor: color.optional(),
+        textColor: color.optional(),
+        fontFamily: z.string().min(1).max(200).optional(),
+        fontSize: z.number().min(16).max(32).optional(),
+        borderRadius: finite.min(0).max(24).optional(),
+      })
+      .strict()
+      .optional(),
     nodes: z
       .array(
         z
@@ -83,7 +99,12 @@ const graph = z
     edges: z
       .array(
         z
-          .object({ from: z.string(), to: z.string(), label: z.string().max(60).optional() })
+          .object({
+            from: z.string(),
+            to: z.string(),
+            label: z.string().max(60).optional(),
+            bidirectional: z.boolean().optional(),
+          })
           .strict(),
       )
       .max(32),
@@ -123,47 +144,58 @@ const radar = z
       ctx.addIssue({ code: 'custom', message: 'Each radar series needs one value per axis' });
   });
 const base = { id: z.string().regex(/^[\w-]{1,80}$/u), rect };
-export const semanticBlockSchema = z.discriminatedUnion('kind', [
-  z
-    .object({
-      ...base,
-      kind: z.literal('formula'),
-      latex: z.string().trim().min(1).max(2000),
-      display: z.boolean().default(true),
-      color: color.default('#172554'),
-      fontSize: finite.min(24).max(64).default(28),
-    })
-    .strict(),
-  z
-    .object({
-      ...base,
-      kind: z.literal('scientific-diagram'),
-      // Surface minimum geometry alongside schema errors in the same bounded repair.
-      rect: rect.extend({ width: finite.min(280), height: finite.min(180) }),
-      title: z.string().min(1).max(100),
-      provenance,
-      spec: z
-        .discriminatedUnion('type', [
-          plot,
-          graph.innerType(),
-          radar.innerType(),
-          quadraticPlotSchema,
-          taylorPlotSchema,
-          reportTableSchema,
-        ])
-        .superRefine((value, ctx) => {
-          if (value.type === 'graph') {
-            const result = graph.safeParse(value);
-            if (!result.success) for (const issue of result.error.issues) ctx.addIssue(issue);
-          }
-          if (value.type === 'radar') {
-            const result = radar.safeParse(value);
-            if (!result.success) for (const issue of result.error.issues) ctx.addIssue(issue);
-          }
-        }),
-    })
-    .strict(),
-]);
+export const semanticBlockSchema = z
+  .discriminatedUnion('kind', [
+    z
+      .object({
+        ...base,
+        kind: z.literal('formula'),
+        latex: z.string().trim().min(1).max(2000),
+        display: z.boolean().default(true),
+        color: color.default('#172554'),
+        fontSize: finite.min(24).max(64).default(28),
+      })
+      .strict(),
+    z
+      .object({
+        ...base,
+        kind: z.literal('scientific-diagram'),
+        // Surface minimum geometry alongside schema errors in the same bounded repair.
+        canvasScale: finite.positive().max(128).optional(),
+        title: z.string().min(1).max(100),
+        provenance,
+        spec: z
+          .discriminatedUnion('type', [
+            plot,
+            graph.innerType(),
+            radar.innerType(),
+            quadraticPlotSchema,
+            taylorPlotSchema,
+            reportTableSchema,
+          ])
+          .superRefine((value, ctx) => {
+            if (value.type === 'graph') {
+              const result = graph.safeParse(value);
+              if (!result.success) for (const issue of result.error.issues) ctx.addIssue(issue);
+            }
+            if (value.type === 'radar') {
+              const result = radar.safeParse(value);
+              if (!result.success) for (const issue of result.error.issues) ctx.addIssue(issue);
+            }
+          }),
+      })
+      .strict(),
+  ])
+  .superRefine((block, ctx) => {
+    if (block.kind === 'scientific-diagram') {
+      const scale = block.canvasScale ?? 1;
+      if (block.rect.width / scale < 280 - 0.001 || block.rect.height / scale < 96 - 0.001)
+        ctx.addIssue({
+          code: 'custom',
+          message: 'Scientific diagrams require 280 × 96 design units',
+        });
+    }
+  });
 export type SemanticBlock = z.infer<typeof semanticBlockSchema>;
 
 /** The renderer's true minimum, shared with composition before coordinates exist. */
@@ -172,19 +204,23 @@ export function minimumScientificDiagramSize(
   width: number,
 ): { width: number; height: number } {
   if (block.spec.type === 'table')
-    return { width, height: layoutReportTable(block.spec, width, 0).height };
+    return { width, height: Math.max(96, layoutReportTable(block.spec, width, 0).height) };
   const computed =
     block.spec.type === 'quadratic' || block.spec.type === 'taylor'
       ? computeScientificPlot(block.spec)
       : undefined;
   if (block.spec.type === 'graph') {
-    const widths = [...new Set([Math.max(280, width), 420, 540, 680, 864, 960])].sort(
-      (a, b) => a - b,
-    );
+    const widths = [
+      ...new Set([
+        Math.max(280, width),
+        ...[420, 540, 680, 864, 960].filter((candidate) => candidate > width),
+      ]),
+    ].sort((a, b) => a - b);
     for (const candidate of widths)
-      for (const height of [180, 240, 320, 420, 540])
+      for (const height of [96, 120, 180, 240, 320, 420, 540])
         try {
-          layoutScientificGraph(block.spec, candidate, height);
+          const scale = (block.spec.style?.fontSize ?? 16) / 16;
+          layoutScientificGraph(block.spec, candidate / scale, height / scale);
           return { width: Math.ceil(candidate), height };
         } catch {
           // A label that does not fit at this size needs a larger canvas, not a smaller font.
@@ -236,7 +272,7 @@ export const escapeSvgText = (value: string): string =>
 const number = (value: number) => Number(value.toFixed(3));
 
 /** Diagram-owned labels must fit their local viewport, not merely the slide. */
-function diagramLabelLines(value: string, width: number, maximum = 3): string[] {
+export function diagramLabelLines(value: string, width: number, maximum = 3): string[] {
   const lines: string[] = [];
   let line = '';
   for (const token of value.match(/[A-Za-z0-9.]+|\P{ASCII}|\s+|./gu) ?? []) {
@@ -257,15 +293,38 @@ function diagramLabelLines(value: string, width: number, maximum = 3): string[] 
 export function renderScientificDiagram(
   block: Extract<SemanticBlock, { kind: 'scientific-diagram' }>,
 ): string {
-  const { width, height } = block.rect;
-  if (width < 280 || height < 180)
-    throw new Error('Scientific diagrams need at least 280×180 canvas units');
+  if (block.canvasScale && block.canvasScale !== 1) {
+    const factor = block.canvasScale;
+    const design = {
+      ...block,
+      canvasScale: undefined,
+      rect: { ...block.rect, width: block.rect.width / factor, height: block.rect.height / factor },
+    };
+    const markup = renderScientificDiagram(design);
+    const doc = parseString('<svg xmlns="http://www.w3.org/2000/svg">' + markup + '</svg>');
+    const group = doc.getElementsByTagName('g')[0];
+    group.setAttribute('data-canvas-scale', String(factor));
+    for (const child of Array.from(group.childNodes))
+      if (child.nodeType === 1) scaleSvgGeometry(child as Element, factor);
+    return group.toString();
+  }
+  const minimumHeight =
+    block.spec.type === 'table'
+      ? minimumScientificDiagramSize(block, block.rect.width).height
+      : block.spec.type === 'graph'
+        ? 96
+        : 180;
+  if (block.rect.width < 280 || block.rect.height + 0.1 < minimumHeight)
+    throw new Error(`Scientific diagrams need at least 280×${minimumHeight} canvas units`);
+  const scale = block.spec.type === 'graph' ? (block.spec.style?.fontSize ?? 16) / 16 : 1;
+  const width = block.rect.width / scale,
+    height = block.rect.height / scale;
   if (block.spec.type === 'table')
     return `<g transform="translate(${block.rect.x} ${block.rect.y})" data-scientific-diagram="${block.id}" aria-label="${escapeSvgText(block.title)}">${renderReportTable(block.spec, width, height)}</g>`;
   const label = (x: number, y: number, text: string, anchor = 'middle') =>
-    `<text x="${number(x)}" y="${number(y)}" font-size="16" font-family="Arial, Microsoft YaHei" text-anchor="${anchor}" fill="#334155">${escapeSvgText(text)}</text>`;
+    `<text x="${number(x)}" y="${number(y)}" font-size="16" font-family="${escapeSvgText(block.spec.type === 'graph' ? (block.spec.style?.fontFamily ?? 'Arial, Microsoft YaHei') : block.spec.type === 'plot' ? (block.spec.fontFamily ?? 'Arial, Microsoft YaHei') : 'Arial, Microsoft YaHei')}" text-anchor="${anchor}" fill="${block.spec.type === 'graph' ? (block.spec.style?.textColor ?? '#334155') : block.spec.type === 'plot' ? (block.spec.textColor ?? '#334155') : '#334155'}">${escapeSvgText(text)}</text>`;
   const body: string[] = [];
-  const palette = ['#2563eb', '#dc2626', '#059669', '#7c3aed', '#b45309', '#0891b2'];
+  const palette = plotPalette;
   const computed =
     block.spec.type === 'quadratic' || block.spec.type === 'taylor'
       ? computeScientificPlot(block.spec)
@@ -289,15 +348,14 @@ export function renderScientificDiagram(
   const footerHeight = sourceLines.length * 20;
   if (block.spec.type === 'plot' || computed) {
     const spec = computed ?? (block.spec as z.infer<typeof plot>);
-    const left = 48;
-    const legendLines = spec.series.map((series) => graphLabelLines(series.label, width - 84));
-    const legendHeight = legendLines.reduce((rows, lines) => rows + lines.length, 0) * 20;
-    const right = width - 28;
-    const bottom = height - 68 - Math.max(0, sourceLines.length - 1) * 20;
     // A page whose rect cannot also hold legend rows still deserves a truthful structured plot:
     // drop the legend and label every series at its end instead of failing the whole page.
-    const withLegend = bottom - (28 + legendHeight) >= 48;
-    const top = withLegend ? 28 + legendHeight : 28;
+    const { left, right, top, bottom, withLegend, legendLines } = plotFrame(
+      spec.series,
+      width,
+      height,
+      sourceLines.length,
+    );
     if (bottom - top < 48)
       throw new Error(
         `Plot requires at least ${minimumScientificDiagramSize(block, width).height}px height to separate legend and geometry`,
@@ -330,11 +388,14 @@ export function renderScientificDiagram(
     );
     for (let tick = 0; tick <= 4; tick++) {
       const x = spec.xRange[0] + (tick / 4) * (spec.xRange[1] - spec.xRange[0]);
-      const y = spec.yRange[0] + (tick / 4) * (spec.yRange[1] - spec.yRange[0]);
-      body.push(
-        label(X(x), axisBottom + 20, String(number(x))),
-        label(axisLeft - 8, Y(y) + 5, String(number(y)), 'end'),
-      );
+      body.push(label(X(x), axisBottom + 20, String(number(x))));
+    }
+    // Keep native tick text readable after legends and equal-aspect scaling
+    // consume height. Preserve the full declared range and both endpoints.
+    const yIntervals = Math.max(1, Math.min(4, Math.floor((axisBottom - axisTop) / 22)));
+    for (let tick = 0; tick <= yIntervals; tick++) {
+      const y = spec.yRange[0] + (tick / yIntervals) * (spec.yRange[1] - spec.yRange[0]);
+      body.push(label(axisLeft - 8, Y(y) + 5, String(number(y)), 'end'));
     }
     body.push(
       label((left + right) / 2, axisBottom + 43, spec.xLabel),
@@ -367,6 +428,13 @@ export function renderScientificDiagram(
       body.push(
         `<polyline points="${points.map(([x, y]) => `${number(X(x))},${number(Y(y))}`).join(' ')}" fill="none" stroke="${item.color ?? palette[index]}" stroke-width="2.5"/>`,
       );
+      // Explicit small samples remain distinguishable from fitted functions;
+      // reference segments and direction arrows keep their own semantics.
+      if (item.points && points.length >= 3 && points.length <= 32 && !item.arrowEnd)
+        for (const [x, y] of points)
+          body.push(
+            `<circle cx="${number(X(x))}" cy="${number(Y(y))}" r="2.5" fill="${item.color ?? palette[index]}"/>`,
+          );
       if (item.arrowEnd) {
         const end = points.at(-1)!;
         const previous = [...points].reverse().find(([x, y]) => x !== end[0] || y !== end[1]);
@@ -445,15 +513,61 @@ export function renderScientificDiagram(
     });
   } else if (block.spec.type === 'graph') {
     const spec = block.spec;
-    const { positions, nodeWidth, nodeHeight, horizontal } = layoutScientificGraph(
-      spec,
-      width,
-      height,
-    );
+    const { positions, nodeWidth, nodeHeight, horizontal, feedbackLanes, relationshipRoutes } =
+      layoutScientificGraph(spec, width, height);
     const at = (node: (typeof spec.nodes)[number]) => positions.get(node.id)!;
-    for (const edge of spec.edges) {
+    const startArrow = (
+      enabled: boolean | undefined,
+      x: number,
+      y: number,
+      dx: number,
+      dy: number,
+    ) => {
+      if (!enabled) return;
+      const length = Math.hypot(dx, dy);
+      const ux = dx / length,
+        uy = dy / length;
+      body.push(
+        `<path d="M ${number(x + ux * 9 + uy * 4)} ${number(y + uy * 9 - ux * 4)} L ${number(x)} ${number(y)} L ${number(x + ux * 9 - uy * 4)} ${number(y + uy * 9 + ux * 4)}" stroke="#64748b" stroke-width="2" fill="none"/>`,
+      );
+    };
+    for (const [edgeIndex, edge] of spec.edges.entries()) {
       const a = at(spec.nodes.find((node) => node.id === edge.from)!);
       const b = at(spec.nodes.find((node) => node.id === edge.to)!);
+      const route = relationshipRoutes?.[edgeIndex];
+      if (route) {
+        const { start, end } = route;
+        startArrow(edge.bidirectional, start.x, start.y, end.x - start.x, end.y - start.y);
+        const length = Math.hypot(end.x - start.x, end.y - start.y);
+        const dx = (end.x - start.x) / length,
+          dy = (end.y - start.y) / length;
+        body.push(
+          `<path d="M ${number(start.x)} ${number(start.y)} L ${number(end.x)} ${number(end.y)} M ${number(end.x - dx * 9 - dy * 4)} ${number(end.y - dy * 9 + dx * 4)} L ${number(end.x)} ${number(end.y)} L ${number(end.x - dx * 9 + dy * 4)} ${number(end.y - dy * 9 - dx * 4)}" stroke="#64748b" stroke-width="2" fill="none"/>`,
+        );
+        route.label?.lines.forEach((line, i) =>
+          body.push(
+            label(
+              route.label!.x,
+              route.label!.y + 5 + (i - (route.label!.lines.length - 1) / 2) * 20,
+              line,
+            ),
+          ),
+        );
+        continue;
+      }
+      const lane = feedbackLanes.get(edgeIndex);
+      if (lane !== undefined) {
+        startArrow(edge.bidirectional, a.x, a.y + nodeHeight / 2, 0, 1);
+        const target = b.y + nodeHeight / 2;
+        body.push(
+          `<path d="M ${number(a.x)} ${number(a.y + nodeHeight / 2)} V ${number(lane)} H ${number(b.x)} V ${number(target)} M ${number(b.x - 4)} ${number(target + 8)} L ${number(b.x)} ${number(target)} L ${number(b.x + 4)} ${number(target + 8)}" stroke="#64748b" stroke-width="2" fill="none"/>`,
+        );
+        if (edge.label)
+          graphLabelLines(edge.label, Math.abs(a.x - b.x) - 20).forEach((line, i) =>
+            body.push(label((a.x + b.x) / 2, lane + 20 + i * 20, line)),
+          );
+        continue;
+      }
       const dx = b.x - a.x;
       const dy = b.y - a.y;
       const distance = Math.hypot(dx, dy);
@@ -468,6 +582,7 @@ export function renderScientificDiagram(
       const sy = a.y + (dy / distance) * inset;
       if (horizontal && b.x > a.x) {
         const start = a.x + nodeWidth / 2;
+        startArrow(edge.bidirectional, start, a.y, 1, 0);
         const end = b.x - nodeWidth / 2;
         const merging =
           spec.edges.filter((item) => item.to === edge.to).length > 1 &&
@@ -500,6 +615,7 @@ export function renderScientificDiagram(
         }
         continue;
       }
+      startArrow(edge.bidirectional, sx, sy, dx, dy);
       body.push(
         `<path d="M ${number(sx)} ${number(sy)} L ${number(ex)} ${number(ey)} M ${number(ex - (dx / distance) * 9 - (dy / distance) * 4)} ${number(ey - (dy / distance) * 9 + (dx / distance) * 4)} L ${number(ex)} ${number(ey)} L ${number(ex - (dx / distance) * 9 + (dy / distance) * 4)} ${number(ey - (dy / distance) * 9 - (dx / distance) * 4)}" stroke="#64748b" stroke-width="2" fill="none"/>`,
       );
@@ -533,9 +649,13 @@ export function renderScientificDiagram(
       if (node.label.length > 12)
         throw new Error('Use short graph labels (≤12 characters); explanations belong in notes');
       body.push(
-        `<rect x="${number(p.x - nodeWidth / 2)}" y="${number(p.y - nodeHeight / 2)}" width="${nodeWidth}" height="${nodeHeight}" rx="8" fill="#eff6ff" stroke="#2563eb"/>`,
+        `<rect x="${number(p.x - nodeWidth / 2)}" y="${number(p.y - nodeHeight / 2)}" width="${nodeWidth}" height="${nodeHeight}" rx="${spec.style?.borderRadius ?? 8}" fill="${spec.style?.nodeFill ?? '#eff6ff'}" stroke="${spec.style?.nodeStroke ?? '#2563eb'}"/>`,
         ...p.lines.map((line, index) =>
-          label(p.x, p.y + 5 + (index - (p.lines.length - 1) / 2) * 20, line),
+          label(
+            p.x,
+            p.y + 5 + (index - (p.lines.length - 1) / 2) * 20,
+            index < p.lines.length - 1 ? line.replace(/[·•]$/u, '') : line,
+          ),
         ),
       );
     }
@@ -544,7 +664,22 @@ export function renderScientificDiagram(
     body.push(label(8, height - 6 - (sourceLines.length - index - 1) * 20, line, 'start')),
   );
   if (radarIllustrative) body.push(label(width - 8, 23, source, 'end'));
-  return `<g transform="translate(${block.rect.x} ${block.rect.y})" data-scientific-diagram="${block.id}" aria-label="${escapeSvgText(block.title)}">${body.join('')}</g>`;
+  let content = body.join('');
+  // PowerPoint native text cannot inherit a scale transform. Bake the uniform
+  // scale into this server-owned graph geometry, including actual font sizes.
+  if (scale !== 1) {
+    content = content
+      .replaceAll(
+        /\b(x|y|x1|y1|x2|y2|width|height|rx|ry|stroke-width|font-size)="(-?\d+(?:\.\d+)?)"/gu,
+        (_, attribute: string, value: string) => `${attribute}="${number(Number(value) * scale)}"`,
+      )
+      .replaceAll(
+        /\bd="([^"]*)"/gu,
+        (_, commands: string) =>
+          `d="${commands.replaceAll(/-?\d+(?:\.\d+)?/gu, (value) => String(number(Number(value) * scale)))}"`,
+      );
+  }
+  return `<g transform="translate(${block.rect.x} ${block.rect.y})" data-scientific-diagram="${block.id}" aria-label="${escapeSvgText(block.title)}">${block.spec.type === 'graph' && block.spec.style?.edgeColor ? content.replaceAll('stroke="#64748b"', `stroke="${block.spec.style.edgeColor}"`) : content}</g>`;
 }
 
 /** Server-owned content rendering replaces explicit empty anchors, preserving paint order. */
@@ -669,5 +804,5 @@ export async function renderSemanticBlocks(
 
 export const SEMANTIC_BLOCK_FORMAT =
   '精确表格使用scientific-diagram，spec:{type:"table",columns:["单位","进展","合作重点"],rows:[["资料中的单位","已签约或推进中","资料中的事项"]],columnWeights:[2,1,4],fontSize:20,headerFill:"#1D3E6B"}。每行列数一致；原生文字按列宽自动换行，服务端核验完整行高，禁止把表格生成为图片或遗漏行列。出处存provenance和讲者备注。' +
-  `每页JSON可包含contentBlocks数组。formula: {id,kind:"formula",latex,display:true,color:"#172554",fontSize:28,rect:{x,y,width,height}}。scientific-diagram: {id,kind:"scientific-diagram",title,provenance:{kind:"illustrative"或"source",reference?:"出处"},rect:{x,y,width,height},spec: {type:"plot",xRange:[min,max],yRange:[min,max],xLabel,yLabel,series:[{label,color?:"#RRGGBB",arrowEnd?:true,points:[[x,y],...] 或 polynomial:[常数项,一次项,二次项,...]}]} 或 spec:{type:"graph",nodes:[{id,label:"最多12字",x:0到1,y:0到1}],edges:[{from,to,label?}]} 或定性雷达图 spec:{type:"radar",axes:["维度1","维度2","维度3","维度4"],series:[{label:"算法A",values:[0.2,0.5,0.8,0.6]},{label:"算法B",values:[0.7,0.6,0.3,0.9]}]}，雷达值在0到1，仅用于明确标为教学定性比较、不得伪称实测。方向向量用独立points序列和arrowEnd:true，不要把没有箭头的线段当向量。图例由服务端在绘图区外排布，每个图例行需20px空间；复杂多曲线图优先独占一页，不要与多行推导争抢区域。图区域至少280×180，坐标范围必须容纳全部数据。contentBlocks中的公式id和latex必须与内容编译器一致。公式区域须容纳指定字号，长公式拆行，不能压缩到无法阅读。` +
+  `每页JSON可包含contentBlocks数组。formula: {id,kind:"formula",latex,display:true,color:"#172554",fontSize:28,rect:{x,y,width,height}}。scientific-diagram: {id,kind:"scientific-diagram",title,provenance:{kind:"illustrative"或"source",reference?:"出处"},rect:{x,y,width,height},spec: {type:"plot",xRange:[min,max],yRange:[min,max],xLabel,yLabel,series:[{label,color?:"#RRGGBB",arrowEnd?:true,points:[[x,y],...] 或 polynomial:[常数项,一次项,二次项,...]}]} 或 spec:{type:"graph",style?:{nodeFill:"#FFFFFF",nodeStroke:"#0F766E",edgeColor:"#0F766E",textColor:"#163D37",fontFamily:"Hiragino Sans GB, Arial",borderRadius:0},nodes:[{id,label:"最多12字",x:0到1,y:0到1}],edges:[{from,to,label?,bidirectional?}]}（资料明确双向时，在同一条边指定bidirectional:true，保留原标签） 或定性雷达图 spec:{type:"radar",axes:["维度1","维度2","维度3","维度4"],series:[{label:"算法A",values:[0.2,0.5,0.8,0.6]},{label:"算法B",values:[0.7,0.6,0.3,0.9]}]}，雷达值在0到1，仅用于明确标为教学定性比较、不得伪称实测。方向向量用独立points序列和arrowEnd:true，不要把没有箭头的线段当向量。图例由服务端在绘图区外排布，每个图例行需20px空间；复杂多曲线图优先独占一页，不要与多行推导争抢区域。图区域至少280×180，坐标范围必须容纳全部数据。contentBlocks中的公式id和latex必须与内容编译器一致。公式区域须容纳指定字号，长公式拆行，不能压缩到无法阅读。` +
   ' 对需要精确计算的图，使用服务端计算配方（不要填points）：spec:{type:"quadratic",a:1,b:20,levels:[10,20],start:[-3,1],learningRate:0.08,momentum:0.9,steps:20,methods:["gradient","momentum"]}，函数为(a*x²+b*y²)/2，支持gradient/momentum/nesterov，等高线与迭代点由服务端真实计算。泰勒对比：spec:{type:"taylor",coefficients:[0,0,1,0.1],at:1,xRange:[-1,3]}，系数常数项在前，由服务端计算函数与一/二阶近似。图区域高度按图例行数测算，至少为144+20×图例行数；空间不够时拆页，不要缩小公式或覆盖板书区。精确向量几何的plot使用equalAspect:true避免角度失真。普通概念框架应使用Image资产或graph，不需要免责声明。';

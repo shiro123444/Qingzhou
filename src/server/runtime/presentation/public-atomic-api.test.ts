@@ -1,15 +1,18 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import path from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type {
   PresentationJob,
+  PresentationMessageInput,
   PresentationPlan,
   RuntimeScope,
 } from '../../../../packages/runtime-contracts/src';
+import { annotationElements } from '../../../../packages/utils/src/presentationAnnotation';
+import { reviseAnnotation } from './annotation';
 import { atomicPlanner, atomicWorker, createPresentationAtomicRuntime } from './atomic-plugin';
 import { FilePresentationStorage } from './file-storage';
 import { PresentationGenerationCapability } from './generation-capability';
@@ -17,6 +20,8 @@ import { PresentationGenerationPort } from './generation-port';
 import { handlePresentationRequest, matchPresentationRoute } from './handler';
 import type { MultimodalChatPort } from './multimodal-chat-provider';
 import { PresentationGenerationPipelineImpl } from './pipeline';
+import type { ScatterBlock } from './scatter-chart';
+import { renderScientificDiagram } from './semantic-blocks';
 import { FileTeachingMemory, TeachingLearning } from './teaching-memory';
 import { FilePresentationTemplateLibrary } from './templates/library';
 import { FileTrialLearningStore } from './trial-learning';
@@ -44,21 +49,29 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup();
 });
 
-const createHarness = async () => {
-  const root = await mkdtemp(join(tmpdir(), 'presentation-public-tools-'));
+const createHarness = async (
+  initialPlan = source,
+  configureStorage?: (storage: FilePresentationStorage) => void,
+) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'presentation-public-tools-'));
   const storage = new FilePresentationStorage(root);
-  const planner = { plan: vi.fn(async () => structuredClone(source)) };
+  configureStorage?.(storage);
+  const planner = { plan: vi.fn(async () => structuredClone(initialPlan)) };
   const teaching = new TeachingLearning(
-    new FileTeachingMemory(join(root, 'memory')),
-    new FilePresentationTemplateLibrary({ root: join(root, 'templates') }),
+    new FileTeachingMemory(path.join(root, 'memory')),
+    new FilePresentationTemplateLibrary({ root: path.join(root, 'templates') }),
     {} as MultimodalChatPort,
   );
-  const evidence = new FileTrialEvidenceStore(join(root, 'evidence'));
-  const learning = new FileTrialLearningStore({ root: join(root, 'learning'), evidence, storage });
+  const evidence = new FileTrialEvidenceStore(path.join(root, 'evidence'));
+  const learning = new FileTrialLearningStore({
+    root: path.join(root, 'learning'),
+    evidence,
+    storage,
+  });
   const workspace = new PresentationTrialWorkspace({
     companion: new PresentationTrialValidation({
-      root: join(root, 'validation'),
-      workerRoot: join(root, 'trial-tasks'),
+      root: path.join(root, 'validation'),
+      workerRoot: path.join(root, 'trial-tasks'),
       storage,
       evidence,
       learning,
@@ -67,9 +80,9 @@ const createHarness = async () => {
       },
     }),
     learning,
-    root: join(root, 'trial-tasks'),
+    root: path.join(root, 'trial-tasks'),
     storage,
-    evidence: new FileTrialEvidenceStore(join(root, 'evidence')),
+    evidence: new FileTrialEvidenceStore(path.join(root, 'evidence')),
     createRunner: async () => ({
       runner: {
         drain: async () => {},
@@ -91,7 +104,7 @@ const createHarness = async () => {
     teachingLearning: teaching,
     operations: [
       ...new PresentationTrialReview(
-        new FileTrialEvidenceStore(join(root, 'evidence')),
+        new FileTrialEvidenceStore(path.join(root, 'evidence')),
         storage,
       ).operations(),
       ...workspace.operations(),
@@ -148,9 +161,9 @@ const createHarness = async () => {
     await rm(root, { recursive: true, force: true });
   });
   const call = async (operation: string | undefined, input?: unknown, scope = owner) => {
-    const path = operation ? `/tools/${encodeURIComponent(operation)}` : '/tools';
+    const routePath = operation ? `/tools/${encodeURIComponent(operation)}` : '/tools';
     const request = new Request(
-      `http://localhost/api/runtime/presentation${path}`,
+      `http://localhost/api/runtime/presentation${routePath}`,
       operation
         ? {
             body: JSON.stringify(input),
@@ -486,10 +499,243 @@ describe('public presentation atomic tools', () => {
     ).toMatchObject({ status: 400 });
   });
 
-  it('admits only one concurrent exact edit against the same base version', async () => {
-    const { call, initial, port, terminal } = await createHarness();
+  it('keeps a region edit exact through the public message, review preparation and publication', async () => {
+    const graph = {
+      id: 'handoff',
+      kind: 'scientific-diagram' as const,
+      title: 'Handoff',
+      provenance: { kind: 'source' as const, reference: 'brief' },
+      rect: { x: 64, y: 110, width: 800, height: 280 },
+      spec: {
+        type: 'graph' as const,
+        nodes: [
+          { id: 'a', label: 'Start', x: 0.2, y: 0.5 },
+          { id: 'b', label: 'Review', x: 0.8, y: 0.5 },
+        ],
+        edges: [{ from: 'a', to: 'b' }],
+      },
+    };
+    const { initial, planner, port, terminal } = await createHarness({
+      ...source,
+      designSpec: { contentPolicyVersion: 1 },
+      slides: [
+        source.slides[0],
+        {
+          ...source.slides[1],
+          metadata: { contentBlocks: [graph] },
+          svg: svg('Handoff').replace('</svg>', renderScientificDiagram(graph) + '</svg>'),
+        },
+        source.slides[2],
+      ],
+    });
+    const { plan } = await port.readPlan('owned-job');
+    const slide = plan.slides[1];
+    const selected = annotationElements(slide.svg).find((node) =>
+      node.source.includes('>Review</'),
+    )!;
+    expect(selected).toBeDefined();
+    const replacement = selected.source.replace('>Review</', '>Sign off</');
+    const message: PresentationMessageInput = {
+      requestId: 'annotation-1',
+      content: 'Rename Review to Sign off',
+      target: { type: 'slide', slideNumber: 2 },
+      annotation: {
+        slideId: slide.slideId,
+        expectedVersionId: initial.versionId!,
+        baseSvgHash: createHash('sha256').update(slide.svg).digest('hex'),
+        elementIndices: [selected.index],
+        region: { x: 0.56, y: 0.3, width: 0.34, height: 0.35 },
+      },
+    };
+    const post = async (body: PresentationMessageInput) => {
+      const request = new Request(
+        'http://localhost/api/runtime/presentation/jobs/owned-job/messages',
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+      );
+      return handlePresentationRequest(
+        request,
+        { ...owner, serverDB: undefined },
+        matchPresentationRoute(request),
+        async () => port,
+      );
+    };
+    const gate = Promise.withResolvers<void>();
+    planner.plan.mockImplementationOnce(async () => {
+      await gate.promise;
+      return reviseAnnotation(
+        plan,
+        message,
+        {
+          chat: async () => ({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    patches: [{ index: selected.index, svg: replacement }],
+                  }),
+                },
+              },
+            ],
+          }),
+          manifest: { model: 'local' },
+        } as never,
+        owner,
+      );
+    });
+    expect(await post(message)).toMatchObject({ status: 200 });
+    expect(await post({ ...message, requestId: 'stale-while-active' })).toMatchObject({
+      status: 409,
+    });
+    gate.resolve();
+    const completed = await terminal();
+    expect(completed.state).toBe('completed');
+    const updated = await port.readPlan('owned-job');
+    expect(updated.plan.slides.map((page) => page.svg)).toEqual([
+      plan.slides[0].svg,
+      slide.svg.replace(selected.source, replacement),
+      plan.slides[2].svg,
+    ]);
+    expect(updated.plan.slides[1].notes).toBe(slide.notes);
+    expect(
+      await post({
+        ...message,
+        annotation: {
+          ...message.annotation!,
+          region: { width: 0.34, height: 0.35, y: 0.3, x: 0.56 },
+        },
+      }),
+    ).toMatchObject({ status: 200 });
+    expect(await post({ ...message, content: 'Different request' })).toMatchObject({ status: 400 });
+    expect(await post({ ...message, requestId: 'stale-after-publish' })).toMatchObject({
+      status: 409,
+    });
+    expect((await port.getJob('owned-job'))?.revisions).toHaveLength(2);
+  });
+
+  it('applies chart samples and canvas positions via the versioned owned-page message tool', async () => {
+    const block: ScatterBlock = {
+      id: 'samples',
+      kind: 'scientific-diagram',
+      title: 'Approved data',
+      provenance: { kind: 'source', reference: 'Approved readings' },
+      rect: { x: 80, y: 108, width: 520, height: 280 },
+      spec: {
+        type: 'plot',
+        xLabel: 'X',
+        yLabel: 'Y',
+        xRange: [0, 4],
+        yRange: [0, 20],
+        series: [
+          {
+            label: 'Samples',
+            points: [
+              [1, 8],
+              [2, 12],
+              [3, 16],
+            ],
+          },
+        ],
+      },
+    };
+    const detail = {
+      ...source.slides[1],
+      svg: svg('Approved data').replace('</svg>', renderScientificDiagram(block) + '</svg>'),
+      metadata: { contentBlocks: [block] },
+    };
+    const { call, initial, planner, port, terminal } = await createHarness({
+      ...source,
+      slides: [source.slides[0], detail, source.slides[2]],
+    });
+    const op = 'presentation.job.message';
+    const base = { jobId: 'owned-job', content: 'Edit on canvas', page: 2 };
+    const chartDataPatch = {
+      blockId: block.id,
+      expectedVersionId: initial.versionId,
+      series: [
+        [
+          [1, 8],
+          [2, 12],
+          [3, 17],
+        ],
+      ],
+    };
+    const chartRequest = { ...base, requestId: 'chart-edit', chartDataPatch };
+    expect(await call(op, chartRequest, { ...owner, userId: 'another-owner' })).toMatchObject({
+      status: 404,
+    });
+    expect(
+      await call(op, {
+        ...chartRequest,
+        chartDataPatch: { ...chartDataPatch, blockId: 'missing' },
+      }),
+    ).toMatchObject({ status: 400 });
+    expect(await call(op, chartRequest)).toMatchObject({ status: 200 });
+    const edited = await terminal();
+    const objectPositionPatch = {
+      blockId: block.id,
+      expectedVersionId: initial.versionId,
+      x: 100,
+      y: 120,
+    };
+    const move = { ...base, requestId: 'move', objectPositionPatch };
+    expect(await call(op, move)).toMatchObject({ status: 409 });
+    expect(
+      await call(op, {
+        ...move,
+        objectPositionPatch: { ...objectPositionPatch, expectedVersionId: edited.versionId },
+      }),
+    ).toMatchObject({ status: 200 });
+    expect(await terminal()).toMatchObject({ state: 'completed' });
+    const current = (await port.readPlan('owned-job')).plan;
+    expect(current.slides[0]).toEqual(source.slides[0]);
+    expect(current.slides[2]).toEqual(source.slides[2]);
+    expect(current.slides[1].metadata?.contentBlocks).toMatchObject([
+      {
+        rect: { x: 100, y: 120 },
+        spec: { series: [{ points: chartDataPatch.series[0] }] },
+      },
+    ]);
+    expect(planner.plan).toHaveBeenCalledTimes(1);
+  });
+
+  it('admits only one concurrent exact edit against the same base version while the previous run releases ownership', async () => {
+    const finishRelease = Promise.withResolvers<void>();
+    const terminalReleaseStarted = Promise.withResolvers<void>();
+    let initialAcquire = true;
+    let inFlight = 0;
+    let peak = 0;
+    const { call, initial, port, terminal } = await createHarness(source, (storage) => {
+      const acquire = storage.acquireLease.bind(storage);
+      vi.spyOn(storage, 'acquireLease').mockImplementation(async (...args) => {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        try {
+          // Let other requests reach acquisition before the filesystem responds.
+          await new Promise<void>((resume) => setImmediate(resume));
+          const lease = await acquire(...args);
+          if (!initialAcquire || !lease) return lease;
+          initialAcquire = false;
+          return {
+            signal: lease.signal,
+            release: async () => {
+              terminalReleaseStarted.resolve();
+              await finishRelease.promise;
+              await lease.release();
+            },
+          };
+        } finally {
+          inFlight--;
+        }
+      });
+    });
+    await terminalReleaseStarted.promise;
+    const submit = vi.spyOn(port, 'sendMessage');
     const patch = { expectedVersionId: initial.versionId, jobId: 'owned-job', page: 2 };
-    const responses = await Promise.all([
+    const edits = Promise.all([
       call('presentation.page.replace', {
         ...patch,
         requestId: 'first-editor',
@@ -501,10 +747,17 @@ describe('public presentation atomic tools', () => {
         svg: svg('Second edit'),
       }),
     ]);
+    try {
+      await vi.waitFor(() => expect(submit).toHaveBeenCalledTimes(2));
+    } finally {
+      finishRelease.resolve();
+    }
+    const responses = await edits;
     expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
     expect(await terminal()).toMatchObject({ state: 'completed' });
     expect((await port.getJob('owned-job'))?.messages).toHaveLength(1);
     expect((await port.getJob('owned-job'))?.revisions).toHaveLength(2);
+    expect(peak).toBe(1);
   });
 
   it('keeps job data scoped by user and session and rejects trusted-context fields in public arguments', async () => {

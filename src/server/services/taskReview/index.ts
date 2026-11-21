@@ -6,6 +6,7 @@ import debug from 'debug';
 import { UserModel } from '@/database/models/user';
 import type { LobeChatDatabase } from '@/database/type';
 import { initModelRuntimeFromDB } from '@/server/modules/ModelRuntime';
+import type { NativeExecutionGuard } from '@/server/runtime/tasks/worker';
 
 const log = debug('task-review');
 
@@ -35,7 +36,11 @@ export class TaskReviewService {
   private db: LobeChatDatabase;
   private userId: string;
 
-  constructor(db: LobeChatDatabase, userId: string) {
+  constructor(
+    db: LobeChatDatabase,
+    userId: string,
+    private readonly executionGuard?: NativeExecutionGuard,
+  ) {
     this.db = db;
     this.userId = userId;
   }
@@ -74,7 +79,8 @@ export class TaskReviewService {
       {
         matchContext: {
           generateObject: async (payload) => {
-            return (modelRuntime as any).generateObject(
+            this.executionGuard?.assertHeld();
+            const result = await (modelRuntime as any).generateObject(
               {
                 messages: payload.messages as any[],
                 model: payload.model || model,
@@ -82,6 +88,8 @@ export class TaskReviewService {
               },
               { metadata: { trigger: 'task-review' } },
             );
+            this.executionGuard?.assertHeld();
+            return result;
           },
           judgeModel: model,
         },

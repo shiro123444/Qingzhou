@@ -6,6 +6,7 @@ import {
   BusinessDesktopRoutesWithMainLayout,
   BusinessDesktopRoutesWithoutMainLayout,
 } from '@/business/client/BusinessDesktopRoutes';
+import { builtinPluginElement } from '@/features/BuiltinPlugins';
 import DesktopOnboarding from '@/routes/(desktop)/desktop-onboarding';
 // Layouts — sync import (Electron local, no network overhead)
 import DesktopMainLayout from '@/routes/(main)/_layout';
@@ -74,11 +75,9 @@ import MemoryContextsPage from '@/routes/(main)/memory/contexts';
 import MemoryExperiencesPage from '@/routes/(main)/memory/experiences';
 import MemoryIdentitiesPage from '@/routes/(main)/memory/identities';
 import MemoryPreferencesPage from '@/routes/(main)/memory/preferences';
-import MusicPage from '@/routes/(main)/music';
 import PageIndexPage from '@/routes/(main)/page';
 import DesktopPageLayout from '@/routes/(main)/page/_layout';
 import PageDetailPage from '@/routes/(main)/page/[id]';
-import PresentationPage from '@/routes/(main)/presentation';
 import ResourceLayout from '@/routes/(main)/resource/_layout';
 import ResourceHomePage from '@/routes/(main)/resource/(home)';
 import ResourceHomeLayout from '@/routes/(main)/resource/(home)/_layout';
@@ -89,10 +88,8 @@ import RuntimePage from '@/routes/(main)/runtime';
 import SettingsTabPage from '@/routes/(main)/settings';
 import SettingsLayout from '@/routes/(main)/settings/_layout';
 import { ProviderDetailPage, ProviderLayout } from '@/routes/(main)/settings/provider';
-import SitesPage from '@/routes/(main)/sites';
 import TaskDetailRoute from '@/routes/(main)/task/[taskId]';
 import AllTasksPage from '@/routes/(main)/tasks';
-import PublicBlogPage from '@/routes/share/sites/[siteId]';
 import ShareTopicPage from '@/routes/share/t/[id]';
 import ShareTopicLayout from '@/routes/share/t/[id]/_layout';
 import { ErrorBoundary, redirectElement } from '@/utils/router';
@@ -526,8 +523,14 @@ export const desktopRoutes: RouteObject[] = [
         path: 'page',
       },
 
-      { element: <SitesPage />, path: 'sites' },
-      { element: <MusicPage />, path: 'music' },
+      {
+        element: builtinPluginElement('sites', () => import('@/routes/(main)/sites')),
+        path: 'sites',
+      },
+      {
+        element: builtinPluginElement('music', () => import('@/routes/(main)/music')),
+        path: 'music',
+      },
       // Runtime routes
       {
         children: [
@@ -544,7 +547,10 @@ export const desktopRoutes: RouteObject[] = [
       {
         children: [
           {
-            element: <PresentationPage />,
+            element: builtinPluginElement(
+              'presentation',
+              () => import('@/routes/(main)/presentation'),
+            ),
             index: true,
           },
         ],
@@ -593,7 +599,10 @@ export const desktopRoutes: RouteObject[] = [
 
   ...BusinessDesktopRoutesWithoutMainLayout,
 
-  { element: <PublicBlogPage />, path: '/sites/view/:siteId' },
+  {
+    element: builtinPluginElement('sites', () => import('@/routes/share/sites/[siteId]')),
+    path: '/sites/view/:siteId',
+  },
   // Share topic route (outside main layout)
   {
     children: [

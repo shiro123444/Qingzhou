@@ -17,6 +17,19 @@ const mockScope: RuntimeScope = {
   userId: 'test-user',
 };
 
+// Persisted v2 jobs must retain their original header/body contract after v3 is introduced.
+const legacyDeckVisualSystem = (input: Parameters<typeof createDeckVisualSystem>[0]) => {
+  const system = createDeckVisualSystem(input)!;
+  return {
+    ...system,
+    schemaVersion: 2 as const,
+    fontFamily: 'Microsoft YaHei, Arial',
+    headerHeight: 40,
+    body: { x: 48, y: 136, width: 864, height: system.height - 176 },
+    darkBody: { x: 48, y: 320, width: 864, height: system.height - 388 },
+  };
+};
+
 describe('GLMPresentationPlanner (C-106)', () => {
   it('recovers native table geometry without dropping the table or swallowing its parent group', async () => {
     const input = {
@@ -52,7 +65,7 @@ describe('GLMPresentationPlanner (C-106)', () => {
         },
       },
     };
-    const system = createDeckVisualSystem(input)!;
+    const system = legacyDeckVisualSystem(input);
     const raw = {
       planId: 'table',
       title: '招生汇报',
@@ -181,7 +194,7 @@ describe('GLMPresentationPlanner (C-106)', () => {
           ],
         },
       } as PresentationJobInput;
-      const system = createDeckVisualSystem(input)!;
+      const system = legacyDeckVisualSystem(input);
       const planner = createGLMPresentationPlanner({
         chatPort: {
           chat,
@@ -277,7 +290,7 @@ describe('GLMPresentationPlanner (C-106)', () => {
         ],
       },
     };
-    const system = createDeckVisualSystem(base)!;
+    const system = legacyDeckVisualSystem(base);
     const planner = createGLMPresentationPlanner({
       chatPort: {
         chat,
@@ -994,6 +1007,43 @@ describe('dynamic image revision and learned layout planning', () => {
     });
     expect(result.slides[0]).toEqual(basePlan.slides[0]);
     expect(result.slides[2]).toEqual(basePlan.slides[2]);
+  });
+
+  it('uses revised outline text on the selected page only for a user edit', async () => {
+    const input = {
+      ...jobInput,
+      options: {
+        outline: basePlan.slides.map((slide) => ({
+          title: slide.slideId,
+          keyPoints: ['Original point'],
+        })),
+      },
+    };
+    const page = basePlan.slides[1];
+    const planner = createGLMPresentationPlanner({
+      chatPort: makePort({
+        slides: [
+          {
+            slideId: page.slideId,
+            svg: page.svg,
+            revisedOutline: { title: 'Revised heading', keyPoints: ['Updated point'] },
+          },
+        ],
+      }),
+    });
+    const context = { basePlan, revision, scope: mockScope };
+    const result = await planner.plan(input, { ...context, userContentRevision: true });
+    expect(result.slides[1].metadata).toMatchObject({
+      title: 'Revised heading',
+      outline: ['Updated point'],
+    });
+    expect(result.slides[0]).toEqual(basePlan.slides[0]);
+    expect(result.slides[2]).toEqual(basePlan.slides[2]);
+    const repair = await planner.plan(input, context);
+    expect(repair.slides[1].metadata).toMatchObject({
+      title: page.slideId,
+      outline: ['Original point'],
+    });
   });
 
   it('drops removed image associations and honors an explicit empty speaker note', async () => {

@@ -1,3 +1,3 @@
 'use client';
 
-export { default } from '@/features/PresentationStudio';
+export { default } from '@/features/PresentationStudio/PresentationPage';

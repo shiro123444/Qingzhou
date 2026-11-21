@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { type AtomicPlugin, createAtomicRuntimeFromProfile } from './atomic-runtime';
@@ -17,6 +17,39 @@ const module = (version: string): AtomicPlugin => ({
 });
 
 describe('atomic profile production assembly', () => {
+  it('evaluates only selected trusted factories and revokes operations when unloaded', async () => {
+    const selected = vi.fn(async () => module('lazy'));
+    const unused = vi.fn(async () => module('unused'));
+    const runtime = createAtomicRuntimeFromProfile({
+      bundles: { base: { entries: [{ id: 'probe', use: 'selected' }] } },
+      modules: { selected, unused },
+      profile: { bundles: ['base'] },
+    });
+    try {
+      expect(selected).not.toHaveBeenCalled();
+      await runtime.catalog();
+      expect(selected).toHaveBeenCalledTimes(1);
+      expect(unused).not.toHaveBeenCalled();
+      await runtime.remove('probe');
+      expect(await runtime.catalog()).toEqual([]);
+      await expect(
+        runtime.invoke('probe.run', {}, { scope: { userId: 'alice', sessionId: 'one' } }),
+      ).rejects.toMatchObject({ code: 'PROVIDER_UNAVAILABLE' });
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it('does not run a queued factory after its owner is disposed', async () => {
+    const load = vi.fn(() => module('1'));
+    const runtime = createAtomicRuntimeFromProfile({
+      bundles: { base: { entries: [{ id: 'probe', use: 'probe' }] } },
+      modules: { probe: load },
+      profile: { bundles: ['base'] },
+    });
+    await runtime.dispose();
+    expect(load).not.toHaveBeenCalled();
+  });
   it('selects module versions through the same profile contract while preserving trusted scope', async () => {
     const runtime = createAtomicRuntimeFromProfile({
       bundles: { base: { entries: [{ id: 'probe', use: 'v1' }] } },

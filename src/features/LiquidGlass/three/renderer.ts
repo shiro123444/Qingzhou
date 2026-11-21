@@ -1,4 +1,5 @@
 import { type Vec3 } from './geometry';
+import { createSourcePrefilter } from './prefilter';
 import { type GlassVolume, type ScenePlane } from './raytrace';
 import {
   glassFragmentShader,
@@ -17,7 +18,7 @@ export interface GlassRenderPlane extends ScenePlane {
 
 export interface GlassRenderRequest {
   activeVolumeId: string;
-  /** First-order RGB separation along the traced displacement, bounded to 1.5 CSS px. */
+  /** First-order RGB separation along the traced displacement, bounded to 0.5 CSS px at the lens edge. */
   chromaticAberration?: number;
   environmentBottom?: Vec3;
   environmentTop?: Vec3;
@@ -28,6 +29,8 @@ export interface GlassRenderRequest {
   sourceBlur?: number;
   /** Reuse one uploaded atlas across all target renders belonging to this dirty frame. */
   sourceVersion?: number;
+  /** Visual rim, inner shadow and adaptive tint, independent of the physical IOR. */
+  surfaceFinish?: number;
   target: { height: number; width: number; x: number; y: number };
   viewport: { height: number; width: number };
   volumes: readonly GlassVolume[];
@@ -111,6 +114,7 @@ export function createGlassRenderer(options: GlassRendererOptions = {}): GlassRe
 
   let program: WebGLProgram | null = null;
   let texture: WebGLTexture | null = null;
+  let prefilter: ReturnType<typeof createSourcePrefilter> | undefined;
   let vertexArray: WebGLVertexArrayObject | null = null;
   let vertexShader: WebGLShader | null = null;
   let fragmentShader: WebGLShader | null = null;
@@ -155,6 +159,7 @@ export function createGlassRenderer(options: GlassRendererOptions = {}): GlassRe
     gl.deleteQuery(pendingQuery);
     activeQuery = null;
     pendingQuery = null;
+    prefilter?.dispose();
     gl.deleteTexture(texture);
     gl.deleteVertexArray(vertexArray);
     gl.deleteProgram(program);
@@ -194,6 +199,7 @@ export function createGlassRenderer(options: GlassRendererOptions = {}): GlassRe
     gl.disable(gl.BLEND);
     gl.disable(gl.DEPTH_TEST);
     gl.disable(gl.DITHER);
+    prefilter = createSourcePrefilter(gl);
   } catch (error) {
     options.onError?.(error instanceof Error ? error : new Error(String(error)));
     dispose();
@@ -203,6 +209,8 @@ export function createGlassRenderer(options: GlassRendererOptions = {}): GlassRe
   const location = (name: string) => gl.getUniformLocation(program!, name);
   const uniforms = {
     active: location('uActiveVolume'),
+    lens: location('uVolumeLens[0]'),
+    surfaceFinish: location('uSurfaceFinish'),
     cameraZ: location('uCameraZ'),
     chromaticAberration: location('uChromaticAberration'),
     environmentBottom: location('uEnvironmentBottom'),
@@ -223,10 +231,11 @@ export function createGlassRenderer(options: GlassRendererOptions = {}): GlassRe
     volumeMaterial: location('uVolumeBevelAbsorption[0]'),
     volumeSizeRadius: location('uVolumeSizeRadius[0]'),
   };
-  const maxPixels = Math.max(1, Math.min(options.maxPixels ?? 120_000, 120_000));
+  const maxPixels = Math.max(1, options.maxPixels ?? 1_000_000);
   const maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
 
   const centers = new Float32Array(MAX_GLASS_VOLUMES * 4);
+  const lenses = new Float32Array(MAX_GLASS_VOLUMES);
   const sizes = new Float32Array(MAX_GLASS_VOLUMES * 4);
   const materials = new Float32Array(MAX_GLASS_VOLUMES * 4);
   const planeCenters = new Float32Array(MAX_CONTENT_PLANES * 4);
@@ -292,6 +301,7 @@ export function createGlassRenderer(options: GlassRendererOptions = {}): GlassRe
     };
   };
   const upload = (request: GlassRenderRequest) => {
+    gl.bindTexture(gl.TEXTURE_2D, texture);
     if (
       lastSource === request.source &&
       request.sourceVersion !== undefined &&
@@ -305,6 +315,7 @@ export function createGlassRenderer(options: GlassRendererOptions = {}): GlassRe
       sourceWidth = request.source.width;
       sourceHeight = request.source.height;
     }
+    prefilter?.invalidate();
     lastSource = request.source;
     lastSourceVersion = request.sourceVersion;
     metrics.sourceUploads++;
@@ -315,6 +326,7 @@ export function createGlassRenderer(options: GlassRendererOptions = {}): GlassRe
       (a, b) => b.size[0] * b.size[1] * b.size[2] - a.size[0] * a.size[1] * a.size[2],
     );
     volumes.forEach((volume, index) => {
+      lenses[index] = volume.profile === 'lens' ? 1 : 0;
       centers.set([...volume.center, volume.ior], index * 4);
       sizes.set([...volume.size, volume.radius], index * 4);
       materials.set([volume.bevel, ...volume.absorption], index * 4);
@@ -345,6 +357,7 @@ export function createGlassRenderer(options: GlassRendererOptions = {}): GlassRe
         100,
     );
     gl.uniform2f(uniforms.viewport, request.viewport.width, request.viewport.height);
+    gl.uniform1fv(uniforms.lens, lenses);
     gl.uniform4fv(uniforms.volumeCenterIor, centers);
     gl.uniform4fv(uniforms.volumeSizeRadius, sizes);
     gl.uniform4fv(uniforms.volumeMaterial, materials);
@@ -367,10 +380,17 @@ export function createGlassRenderer(options: GlassRendererOptions = {}): GlassRe
         ? Math.max(0, Math.min(request.chromaticAberration!, 0.08))
         : 0,
     );
-    gl.uniform1f(
-      uniforms.sourceBlur,
-      Number.isFinite(request.sourceBlur) ? Math.max(0, Math.min(request.sourceBlur!, 32)) : 0,
-    );
+    const blur = Number.isFinite(request.sourceBlur)
+      ? Math.max(0, Math.min(request.sourceBlur!, active.bevel, 32))
+      : 0;
+    const filtered =
+      blur > 0
+        ? prefilter!.render(texture!, sourceWidth, sourceHeight, request.planes, blur)
+        : texture;
+    gl.useProgram(program);
+    gl.bindTexture(gl.TEXTURE_2D, filtered);
+    gl.uniform1f(uniforms.sourceBlur, blur);
+    gl.uniform1f(uniforms.surfaceFinish, Math.max(0, Math.min(request.surfaceFinish ?? 0, 1)));
     gl.uniform1i(uniforms.active, activeIndex);
     gl.uniform1f(uniforms.cameraZ, active.center[2] + active.size[2] * 0.5 + 0.008);
     gl.uniform2f(uniforms.outputOrigin, tile.x, bottom);

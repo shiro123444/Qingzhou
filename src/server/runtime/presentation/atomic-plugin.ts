@@ -3,24 +3,26 @@ import { z } from 'zod';
 
 import type {
   PlannerContext,
+  PresentationMessageInput,
   PresentationJobInput,
   PresentationPlan,
   PresentationPlanner,
   RuntimeScope,
 } from '../../../../packages/runtime-contracts/src';
-import { createAssetPlugin } from '../assets/plugin';
 import {
   type AtomicInvocation,
   type AtomicOperation,
   type AtomicPlugin,
+  type AtomicPluginModule,
   type AtomicRuntime,
   createAtomicRuntimeFromProfile,
 } from '../atomic-runtime';
-import { createSkillsPlugin } from '../skills-plugin';
-import { createTeachingPlugin, type TeachingMemory } from '../teaching/atomic-plugin';
+import type { TeachingMemory } from '../teaching/atomic-plugin';
 import type { CompiledLesson } from '../teaching/lesson';
 import type { PresentationArtifactStore } from './artifact-store';
-import { createPresentationCollaborationPlugin } from './collaboration-plugin';
+import { chartDataPatchSchema } from './chart-data-edit';
+import { canvasCommandSchema } from './canvas-command';
+import { tableDataPatchSchema } from './table-data-edit';
 import type { PresentationContentCompiler } from './content-intent';
 import type { PresentationGenerationPort } from './generation-port';
 import type { ImageGenerationCapability } from './image-generation-capability';
@@ -31,6 +33,7 @@ import {
   readLessonPlan,
 } from './lesson';
 import type { GLMMultimodalChatPort } from './multimodal-chat-provider-glm';
+import { objectPositionPatchSchema } from './object-position-edit';
 import { validatePresentationPlan } from './planner';
 import { presentationSkillsOptions } from './recipes';
 import type { PresentationRevisionAssetPlanner } from './revision-assets';
@@ -105,454 +108,482 @@ export const createPresentationAtomicRuntime = (options: {
   operations?: AtomicOperation[];
   profile?: PluginProfile;
 }) => {
-  const teaching = createTeachingPlugin({
-    chat: options.chatPort,
-    memory: options.teachingMemory ?? options.teachingLearning?.memory,
-  });
-  const compileTeachingInput = async (
-    input: PresentationJobInput,
-    context: AtomicInvocation,
-  ): Promise<PresentationJobInput> => {
-    const lesson = readLessonPlan(input);
-    if (!lesson) return input;
-    const compiled = await runtime.invoke<CompiledLesson>(
-      'teaching.lesson.compile',
-      { plan: lesson },
-      context,
-    );
-    return compileLessonInput(input, compiled);
+  let teaching: AtomicPlugin | undefined;
+  const loadTeaching = async () => {
+    teaching ??= (await import('../teaching/atomic-plugin')).createTeachingPlugin({
+      chat: options.chatPort,
+      memory: options.teachingMemory ?? options.teachingLearning?.memory,
+    });
+    return teaching;
   };
-  const operations: AtomicOperation[] = [
-    // Compatibility entry points delegate through Cordis, including its leases and events.
-    ...teaching.operations
-      .filter(({ name }) => !['teaching.lesson.compile', 'teaching.lesson.validate'].includes(name))
-      .map((operation): AtomicOperation => ({
-        ...operation,
-        name: operation.name
-          .replace('teaching.lesson.', 'presentation.lesson.')
-          .replace('teaching.memory.', 'presentation.teaching.'),
-        agent: operation.name.startsWith('teaching.memory.')
-          ? { contexts: ['presentation.intake'], maxCalls: operation.agent?.maxCalls }
-          : undefined,
-        execute: (input, context) => runtime.invoke(operation.name, input, context),
-      })),
-    ...(options.teachingLearning?.operations() ?? []),
-    {
-      name: 'presentation.lesson.compile',
-      description:
-        'Compile a supplied lesson into ordered, teacher-advanced public stages, retaining private cues separately in the owned input.',
-      input: z.object({ input: inputSchema }).strict(),
-      execute: ({ input }, context) => compileTeachingInput(input, context),
-    },
-    {
-      name: 'presentation.lesson.validate',
-      description:
-        'Validate stage identity, withheld literal content and reserved boardwork region. Does not certify learning outcomes or raster-image semantics.',
-      input: z.object({ plan: presentationPlanSchema }).strict(),
-      execute: async ({ plan }, context) => {
-        if (!plan.designSpec?.lessonPlan)
-          throw new Error('A teaching plan is required for lesson validation');
-        await runtime.invoke(
-          'teaching.lesson.validate',
-          { plan: plan.designSpec.lessonPlan },
-          context,
-        );
-        assertLessonPublishable(plan);
-        return { passed: true };
+  const loadPresentation = async (): Promise<AtomicPlugin> => {
+    const teaching = await loadTeaching();
+    const compileTeachingInput = async (
+      input: PresentationJobInput,
+      context: AtomicInvocation,
+    ): Promise<PresentationJobInput> => {
+      const lesson = readLessonPlan(input);
+      if (!lesson) return input;
+      const compiled = await runtime.invoke<CompiledLesson>(
+        'teaching.lesson.compile',
+        { plan: lesson },
+        context,
+      );
+      return compileLessonInput(input, compiled);
+    };
+    const operations: AtomicOperation[] = [
+      // Compatibility entry points delegate through Cordis, including its leases and events.
+      ...teaching.operations
+        .filter(
+          ({ name }) => !['teaching.lesson.compile', 'teaching.lesson.validate'].includes(name),
+        )
+        .map((operation): AtomicOperation => ({
+          ...operation,
+          name: operation.name
+            .replace('teaching.lesson.', 'presentation.lesson.')
+            .replace('teaching.memory.', 'presentation.teaching.'),
+          agent: operation.name.startsWith('teaching.memory.')
+            ? { contexts: ['presentation.intake'], maxCalls: operation.agent?.maxCalls }
+            : undefined,
+          execute: (input, context) => runtime.invoke(operation.name, input, context),
+        })),
+      ...(options.teachingLearning?.operations() ?? []),
+      {
+        name: 'presentation.lesson.compile',
+        description:
+          'Compile a supplied lesson into ordered, teacher-advanced public stages, retaining private cues separately in the owned input.',
+        input: z.object({ input: inputSchema }).strict(),
+        execute: ({ input }, context) => compileTeachingInput(input, context),
       },
-    },
-    ...(options.contentCompiler
-      ? [
-          {
-            name: 'presentation.content.compile',
-            description:
-              'Compile confirmed slide content into claims, LaTeX formulas and semantic renderer choices.',
-            input: z.object({ input: inputSchema }).strict(),
-            execute: ({ input }: any, ctx: AtomicInvocation) =>
-              options.contentCompiler!.compile(input, { scope: ctx.scope, signal: ctx.signal }),
-          },
-        ]
-      : []),
-    ...presentationVectorOperations(),
-    {
-      name: 'presentation.job.list',
-      description: 'Recover the authenticated account’s recent presentations across logins.',
-      input: z.object({}).strict(),
-      execute: (_, ctx) => requiredService<PresentationGenerationPort>(ctx, 'port').listJobs(),
-    },
-    {
-      name: 'presentation.plan',
-      description:
-        'Plan a new presentation or revise selected existing slides, returning editable SVG pages.',
-      input: z.object({ input: inputSchema }).strict(),
-      output: presentationPlanSchema,
-      execute: async ({ input }, ctx) =>
-        bindLessonPlan(
-          await options.planner.plan(await compileTeachingInput(input, ctx), {
-            ...(ctx.services?.plannerContext as PlannerContext),
+      {
+        name: 'presentation.lesson.validate',
+        description:
+          'Validate stage identity, withheld literal content and reserved boardwork region. Does not certify learning outcomes or raster-image semantics.',
+        input: z.object({ plan: presentationPlanSchema }).strict(),
+        execute: async ({ plan }, context) => {
+          if (!plan.designSpec?.lessonPlan)
+            throw new Error('A teaching plan is required for lesson validation');
+          await runtime.invoke(
+            'teaching.lesson.validate',
+            { plan: plan.designSpec.lessonPlan },
+            context,
+          );
+          assertLessonPublishable(plan);
+          return { passed: true };
+        },
+      },
+      ...(options.contentCompiler
+        ? [
+            {
+              name: 'presentation.content.compile',
+              description:
+                'Compile confirmed slide content into claims, LaTeX formulas and semantic renderer choices.',
+              input: z.object({ input: inputSchema }).strict(),
+              execute: ({ input }: any, ctx: AtomicInvocation) =>
+                options.contentCompiler!.compile(input, { scope: ctx.scope, signal: ctx.signal }),
+            },
+          ]
+        : []),
+      ...presentationVectorOperations(),
+      {
+        name: 'presentation.job.list',
+        description: 'Recover the authenticated account’s recent presentations across logins.',
+        input: z
+          .object({
+            chatOrigin: z
+              .object({
+                agentId: z.string().min(1),
+                messageId: z.string().min(1),
+                topicId: z.string().min(1),
+              })
+              .optional(),
+          })
+          .strict(),
+        execute: ({ chatOrigin }, ctx) =>
+          requiredService<PresentationGenerationPort>(ctx, 'port').listJobs(chatOrigin),
+      },
+      {
+        name: 'presentation.plan',
+        description:
+          'Plan a new presentation or revise selected existing slides, returning editable SVG pages.',
+        input: z.object({ input: inputSchema }).strict(),
+        output: presentationPlanSchema,
+        execute: async ({ input }, ctx) => {
+          const context = ctx.services?.plannerContext as PlannerContext | undefined;
+          const revision = context?.revision as PresentationMessageInput | undefined;
+          const plan = await options.planner.plan(await compileTeachingInput(input, ctx), {
+            ...context,
             scope: ctx.scope,
             abortSignal: ctx.signal,
+          });
+          return bindLessonPlan(plan, input, revision?.annotation ? new Set<string>() : undefined);
+        },
+      },
+      {
+        name: 'presentation.slide.read',
+        description: 'Read one slide without changing the presentation.',
+        input: z.object({ plan: presentationPlanSchema, slideId: z.string().min(1) }).strict(),
+        execute: ({ plan, slideId }) => {
+          const slide = plan.slides.find((s: { slideId: string }) => s.slideId === slideId);
+          if (!slide)
+            throw Object.assign(new Error('Slide not found'), { code: 'PRESENTATION_NOT_FOUND' });
+          return slide;
+        },
+      },
+      {
+        name: 'presentation.slide.replace',
+        description: 'Replace one editable SVG page, preserving all other slides exactly.',
+        input: z
+          .object({
+            plan: presentationPlanSchema,
+            slideId: z.string().min(1),
+            svg: z.string().max(10 * 1024 * 1024),
+            notes: z.string().optional(),
+          })
+          .strict(),
+        output: presentationPlanSchema,
+        execute: ({ plan, slideId, svg, notes }) => {
+          if (!plan.slides.some((s: { slideId: string }) => s.slideId === slideId))
+            throw Object.assign(new Error('Slide not found'), { code: 'PRESENTATION_NOT_FOUND' });
+          return {
+            ...plan,
+            slides: plan.slides.map((s: { slideId: string }) =>
+              s.slideId === slideId ? { ...s, svg, ...(notes === undefined ? {} : { notes }) } : s,
+            ),
+          };
+        },
+      },
+      {
+        name: 'presentation.validate',
+        description: 'Check PPT SVG compatibility in the current trusted render workspace.',
+        input: z.object({}).strict(),
+        execute: (_, ctx) => {
+          const worker = requiredService<PresentationWorkerContext>(ctx, 'workerContext');
+          return worker.qualityCheck(worker.workspace.path, ctx.signal);
+        },
+      },
+      {
+        name: 'presentation.export',
+        description:
+          'Convert validated pages in the current render workspace to a native editable PPTX.',
+        input: z.object({ nativeData: z.literal(true).optional() }).strict(),
+        execute: ({ nativeData }, ctx) => {
+          const worker = requiredService<PresentationWorkerContext>(ctx, 'workerContext');
+          return nativeData && worker.nativeData
+            ? worker.convert(worker.workspace.path, ctx.signal, true)
+            : worker.convert(worker.workspace.path, ctx.signal);
+        },
+      },
+      {
+        name: 'presentation.render',
+        description:
+          'Render a page plan, validate it and produce previews and editable presentation artifacts.',
+        input: z.object({ plan: presentationPlanSchema }).strict(),
+        execute: ({ plan }, ctx) => {
+          const worker = requiredService<PresentationWorkerContext>(ctx, 'workerContext');
+          return options.worker.run(plan, {
+            ...worker,
+            abortSignal: ctx.signal,
+            qualityCheck: () => runtime.invoke('presentation.validate', {}, ctx),
+            convert: (_workspace, _signal, nativeData) =>
+              runtime.invoke('presentation.export', nativeData ? { nativeData: true } : {}, ctx),
+          });
+        },
+      },
+      {
+        name: 'presentation.job.read',
+        description: 'Read the current job, version and editable pages by job ID.',
+        input: z.object({ jobId: z.string().min(1) }).strict(),
+        execute: ({ jobId }, ctx) =>
+          requiredService<PresentationGenerationPort>(ctx, 'port').readPlan(jobId),
+      },
+      {
+        name: 'presentation.page.read',
+        description: 'Read one page from an owned presentation by page number.',
+        input: z.object({ jobId: z.string().min(1), page: z.number().int().positive() }).strict(),
+        execute: async ({ jobId, page }, ctx) => {
+          const { job, plan } = await requiredService<PresentationGenerationPort>(
+            ctx,
+            'port',
+          ).readPlan(jobId);
+          if (!plan.slides[page - 1])
+            throw Object.assign(new Error('Page not found'), { code: 'PRESENTATION_NOT_FOUND' });
+          return { versionId: job.versionId, slide: plan.slides[page - 1] };
+        },
+      },
+      {
+        name: 'presentation.page.replace',
+        description:
+          'Queue an exact editable SVG replacement for one page. Requires the current version to prevent overwriting newer edits.',
+        input: z
+          .object({
+            jobId: z.string().min(1),
+            page: z.number().int().positive(),
+            expectedVersionId: z.string().min(1),
+            requestId: z.string().min(1).max(128),
+            svg: z
+              .string()
+              .min(1)
+              .max(10 * 1024 * 1024),
+            notes: z.string().optional(),
+          })
+          .strict(),
+        execute: (input, ctx) =>
+          requiredService<PresentationGenerationPort>(ctx, 'port').replacePage(input),
+      },
+      {
+        name: 'presentation.job.message',
+        description:
+          'Revise an owned presentation. To edit a native table, change chart samples, or move a semantic object on a completed page, read that page, then pass its version and block ID in one typed patch.',
+        input: z
+          .object({
+            annotation: z
+              .object({
+                slideId: z.string().min(1),
+                expectedVersionId: z.string().min(1),
+                textRuns: z.array(z.string().max(4000)).min(1).max(128).optional(),
+                baseSvgHash: z.string().regex(/^[a-f0-9]{64}$/),
+                elementIndices: z.array(z.number().int().nonnegative()).min(1).max(40),
+                region: z
+                  .object({
+                    x: z.number().min(0).max(1),
+                    y: z.number().min(0).max(1),
+                    width: z.number().min(0).max(1),
+                    height: z.number().min(0).max(1),
+                  })
+                  .strict(),
+              })
+              .strict()
+              .optional(),
+            canvasCommand: canvasCommandSchema.optional(),
+            tableDataPatch: tableDataPatchSchema.optional(),
+            chartDataPatch: chartDataPatchSchema.optional(),
+            objectPositionPatch: objectPositionPatchSchema.optional(),
+            jobId: z.string().min(1),
+            content: z.string().min(1).max(4000),
+            requestId: z.string().min(1).max(128),
+            page: z.number().int().positive().optional(),
+          })
+          .strict(),
+        execute: ({ jobId, page, ...message }, ctx) =>
+          requiredService<PresentationGenerationPort>(ctx, 'port').sendMessage(jobId, {
+            ...message,
+            target: page ? { type: 'slide', slideNumber: page } : { type: 'deck' },
           }),
-          input,
-        ),
-    },
-    {
-      name: 'presentation.slide.read',
-      description: 'Read one slide without changing the presentation.',
-      input: z.object({ plan: presentationPlanSchema, slideId: z.string().min(1) }).strict(),
-      execute: ({ plan, slideId }) => {
-        const slide = plan.slides.find((s: { slideId: string }) => s.slideId === slideId);
-        if (!slide)
-          throw Object.assign(new Error('Slide not found'), { code: 'PRESENTATION_NOT_FOUND' });
-        return slide;
       },
-    },
-    {
-      name: 'presentation.slide.replace',
-      description: 'Replace one editable SVG page, preserving all other slides exactly.',
-      input: z
-        .object({
-          plan: presentationPlanSchema,
-          slideId: z.string().min(1),
-          svg: z.string().max(10 * 1024 * 1024),
-          notes: z.string().optional(),
-        })
-        .strict(),
-      output: presentationPlanSchema,
-      execute: ({ plan, slideId, svg, notes }) => {
-        if (!plan.slides.some((s: { slideId: string }) => s.slideId === slideId))
-          throw Object.assign(new Error('Slide not found'), { code: 'PRESENTATION_NOT_FOUND' });
-        return {
-          ...plan,
-          slides: plan.slides.map((s: { slideId: string }) =>
-            s.slideId === slideId ? { ...s, svg, ...(notes === undefined ? {} : { notes }) } : s,
+      {
+        name: 'presentation.job.export',
+        description: 'Resolve a ready artifact download for an existing presentation version.',
+        input: z
+          .object({
+            artifactId: z.string().min(1),
+            format: z.enum(['pptx', 'svg', 'pdf', 'quality-report']),
+          })
+          .strict(),
+        execute: ({ artifactId, format }, ctx) =>
+          requiredService<PresentationGenerationPort>(ctx, 'port').exportArtifact(
+            artifactId,
+            format,
           ),
-        };
       },
-    },
-    {
-      name: 'presentation.validate',
-      description: 'Check PPT SVG compatibility in the current trusted render workspace.',
-      input: z.object({}).strict(),
-      execute: (_, ctx) => {
-        const worker = requiredService<PresentationWorkerContext>(ctx, 'workerContext');
-        return worker.qualityCheck(worker.workspace.path, ctx.signal);
+      {
+        name: 'presentation.template.fromJob',
+        description: 'Learn and save a reusable template from an owned presentation.',
+        input: z.object({ jobId: z.string().min(1), name: z.string().min(1).max(120) }).strict(),
+        execute: ({ jobId, name }, ctx) =>
+          requiredService<PresentationGenerationPort>(ctx, 'port').learnTemplate(name, jobId),
       },
-    },
-    {
-      name: 'presentation.export',
-      description:
-        'Convert validated pages in the current render workspace to a native editable PPTX.',
-      input: z.object({}).strict(),
-      execute: (_, ctx) => {
-        const worker = requiredService<PresentationWorkerContext>(ctx, 'workerContext');
-        return worker.convert(worker.workspace.path, ctx.signal);
+      {
+        name: 'presentation.template.apply',
+        description: 'Apply a saved template version while retaining the presentation content.',
+        input: z
+          .object({
+            jobId: z.string().min(1),
+            templateId: z.string().min(1),
+            versionId: z.string().optional(),
+            requestId: z.string().min(1).max(128),
+          })
+          .strict(),
+        execute: ({ jobId, ...input }, ctx) =>
+          requiredService<PresentationGenerationPort>(ctx, 'port').applyTemplate(jobId, input),
       },
-    },
-    {
-      name: 'presentation.render',
-      description:
-        'Render a page plan, validate it and produce previews and editable presentation artifacts.',
-      input: z.object({ plan: presentationPlanSchema }).strict(),
-      execute: ({ plan }, ctx) => {
-        const worker = requiredService<PresentationWorkerContext>(ctx, 'workerContext');
-        return options.worker.run(plan, {
-          ...worker,
-          abortSignal: ctx.signal,
-          qualityCheck: () => runtime.invoke('presentation.validate', {}, ctx),
-          convert: () => runtime.invoke('presentation.export', {}, ctx),
-        });
-      },
-    },
-    {
-      name: 'presentation.job.read',
-      description: 'Read the current job, version and editable pages by job ID.',
-      input: z.object({ jobId: z.string().min(1) }).strict(),
-      execute: ({ jobId }, ctx) =>
-        requiredService<PresentationGenerationPort>(ctx, 'port').readPlan(jobId),
-    },
-    {
-      name: 'presentation.page.read',
-      description: 'Read one page from an owned presentation by page number.',
-      input: z.object({ jobId: z.string().min(1), page: z.number().int().positive() }).strict(),
-      execute: async ({ jobId, page }, ctx) => {
-        const { job, plan } = await requiredService<PresentationGenerationPort>(
-          ctx,
-          'port',
-        ).readPlan(jobId);
-        if (!plan.slides[page - 1])
-          throw Object.assign(new Error('Page not found'), { code: 'PRESENTATION_NOT_FOUND' });
-        return { versionId: job.versionId, slide: plan.slides[page - 1] };
-      },
-    },
-    {
-      name: 'presentation.page.replace',
-      description:
-        'Queue an exact editable SVG replacement for one page. Requires the current version to prevent overwriting newer edits.',
-      input: z
-        .object({
-          jobId: z.string().min(1),
-          page: z.number().int().positive(),
-          expectedVersionId: z.string().min(1),
-          requestId: z.string().min(1).max(128),
-          svg: z
-            .string()
-            .min(1)
-            .max(10 * 1024 * 1024),
-          notes: z.string().optional(),
-        })
-        .strict(),
-      execute: (input, ctx) =>
-        requiredService<PresentationGenerationPort>(ctx, 'port').replacePage(input),
-    },
-    {
-      name: 'presentation.job.message',
-      description: 'Add a natural-language modification to a running or completed presentation.',
-      input: z
-        .object({
-          annotation: z
-            .object({
-              slideId: z.string().min(1),
-              expectedVersionId: z.string().min(1),
-              baseSvgHash: z.string().regex(/^[a-f0-9]{64}$/),
-              elementIndices: z.array(z.number().int().nonnegative()).min(1).max(40),
-              region: z
+      ...(options.imageGenerationCapability
+        ? [
+            {
+              name: 'presentation.assets.generate',
+              description:
+                'Generate image assets for explicit slide slots with cancellation and idempotency.',
+              input: z
                 .object({
-                  x: z.number().min(0).max(1),
-                  y: z.number().min(0).max(1),
-                  width: z.number().min(0).max(1),
-                  height: z.number().min(0).max(1),
+                  slots: z
+                    .array(
+                      z
+                        .object({
+                          slideId: z.string().min(1),
+                          slotId: z.string().min(1),
+                          prompt: z.string().min(1),
+                          idempotencyKey: z.string().optional(),
+                          size: z.string().optional(),
+                          quality: z.string().optional(),
+                        })
+                        .passthrough(),
+                    )
+                    .min(1)
+                    .max(4),
                 })
                 .strict(),
-            })
-            .strict()
-            .optional(),
-          jobId: z.string().min(1),
-          content: z.string().min(1).max(4000),
-          requestId: z.string().min(1).max(128),
-          page: z.number().int().positive().optional(),
-        })
-        .strict(),
-      execute: ({ jobId, content, requestId, page, annotation }, ctx) =>
-        requiredService<PresentationGenerationPort>(ctx, 'port').sendMessage(jobId, {
-          annotation,
-          content,
-          requestId,
-          target: page ? { type: 'slide', slideNumber: page } : { type: 'deck' },
-        }),
-    },
-    {
-      name: 'presentation.job.export',
-      description: 'Resolve a ready artifact download for an existing presentation version.',
-      input: z
-        .object({
-          artifactId: z.string().min(1),
-          format: z.enum(['pptx', 'svg', 'pdf', 'quality-report']),
-        })
-        .strict(),
-      execute: ({ artifactId, format }, ctx) =>
-        requiredService<PresentationGenerationPort>(ctx, 'port').exportArtifact(artifactId, format),
-    },
-    {
-      name: 'presentation.template.fromJob',
-      description: 'Learn and save a reusable template from an owned presentation.',
-      input: z.object({ jobId: z.string().min(1), name: z.string().min(1).max(120) }).strict(),
-      execute: ({ jobId, name }, ctx) =>
-        requiredService<PresentationGenerationPort>(ctx, 'port').learnTemplate(name, jobId),
-    },
-    {
-      name: 'presentation.template.apply',
-      description: 'Apply a saved template version while retaining the presentation content.',
-      input: z
-        .object({
-          jobId: z.string().min(1),
-          templateId: z.string().min(1),
-          versionId: z.string().optional(),
-          requestId: z.string().min(1).max(128),
-        })
-        .strict(),
-      execute: ({ jobId, ...input }, ctx) =>
-        requiredService<PresentationGenerationPort>(ctx, 'port').applyTemplate(jobId, input),
-    },
-    ...(options.imageGenerationCapability
-      ? [
-          {
-            name: 'presentation.assets.generate',
-            description:
-              'Generate image assets for explicit slide slots with cancellation and idempotency.',
-            input: z
-              .object({
-                slots: z
-                  .array(
-                    z
-                      .object({
-                        slideId: z.string().min(1),
-                        slotId: z.string().min(1),
-                        prompt: z.string().min(1),
-                        idempotencyKey: z.string().optional(),
-                        size: z.string().optional(),
-                        quality: z.string().optional(),
-                      })
-                      .passthrough(),
-                  )
-                  .min(1)
-                  .max(4),
-              })
-              .strict(),
-            execute: ({ slots }: any, ctx: AtomicInvocation) =>
-              options.imageGenerationCapability!.generate(ctx.scope, slots, {
-                jobId: ctx.jobId!,
-                signal: ctx.signal,
-              }),
-          },
-        ]
-      : []),
-    ...(options.templateLibrary
-      ? [
-          {
-            name: 'presentation.template.import',
-            description: 'Extract reusable style and layout from a trusted uploaded native PPTX.',
-            input: z.object({ name: z.string().min(1).max(120) }).strict(),
-            execute: (input: any, ctx: AtomicInvocation) =>
-              options.templateLibrary!.importPptx(ctx.scope, {
-                name: input.name,
-                bytes: requiredService<Uint8Array>(ctx, 'upload'),
-              }),
-          },
-          {
-            name: 'presentation.template.learn',
-            description:
-              'Learn reusable style, geometry and image slots from an editable slide plan.',
-            input: z
-              .object({
-                name: z.string().min(1).max(120),
-                plan: presentationPlanSchema,
-                templateId: z.string().optional(),
-              })
-              .strict(),
-            execute: (input: any, ctx: AtomicInvocation) =>
-              options.templateLibrary!.learnFromPlan(ctx.scope, input),
-          },
-          {
-            name: 'presentation.template.list',
-            description: 'List reusable templates owned by the current authenticated scope.',
-            input: z.object({}).strict(),
-            execute: (_: any, ctx: AtomicInvocation) => options.templateLibrary!.list(ctx.scope),
-          },
-          {
-            name: 'presentation.template.resolve',
-            description: 'Load the constraints and reference layouts of a saved template version.',
-            input: z
-              .object({ templateId: z.string().min(1), versionId: z.string().optional() })
-              .strict(),
-            execute: (input: any, ctx: AtomicInvocation) =>
-              options.templateLibrary!.resolve(ctx.scope, input),
-          },
-        ]
-      : []),
-    ...(options.revisionAssetPlanner
-      ? [
-          {
-            name: 'presentation.assets.prepare',
-            description:
-              'Decide which page assets to reuse, generate, replace or remove and generate only the required images.',
-            input: z
-              .object({
-                jobInput: inputSchema,
-                basePlan: presentationPlanSchema,
-                revision: z.object({
-                  content: z.string().min(1).max(4000),
-                  requestId: z.string().min(1),
-                  target: z.union([
-                    z.object({ type: z.literal('deck') }),
-                    z.object({
-                      type: z.literal('slide'),
-                      slideNumber: z.number().int().positive(),
-                    }),
-                  ]),
-                  template: z
-                    .object({ templateId: z.string(), versionId: z.string().optional() })
-                    .optional(),
+              execute: ({ slots }: any, ctx: AtomicInvocation) =>
+                options.imageGenerationCapability!.generate(ctx.scope, slots, {
+                  jobId: ctx.jobId!,
+                  signal: ctx.signal,
                 }),
-              })
-              .strict(),
-            execute: (input: any, ctx: AtomicInvocation) =>
-              options.revisionAssetPlanner!.prepare({
-                ...input,
-                onEvent: ctx.onEvent,
-                scope: ctx.scope,
-                jobId: ctx.jobId!,
-                signal: ctx.signal,
-              }),
-          },
-        ]
-      : []),
-    ...(options.visualStoryboardPlanner
-      ? [
-          {
-            name: 'presentation.template.mapDeck',
-            description:
-              'Translate a learned visual template into a deck-level storyboard that assigns semantic page roles, visual families, composition archetypes, reusable components and asset modes before slide composition.',
-            input: z
-              .object({
-                jobInput: inputSchema,
-                template: z
-                  .object({
-                    name: z.string().min(1),
-                    templateId: z.string().min(1),
-                    versionId: z.string().min(1),
-                  })
-                  .passthrough(),
-              })
-              .strict(),
-            output: presentationVisualStoryboardSchema,
-            execute: (
-              input: { jobInput: z.infer<typeof inputSchema>; template: TemplateApplication },
-              ctx: AtomicInvocation,
-            ) =>
-              options.visualStoryboardPlanner!.plan(input, {
-                scope: ctx.scope,
-                signal: ctx.signal,
-              }),
-          },
-        ]
-      : []),
-    ...(options.visualCritic
-      ? [
-          {
-            name: 'presentation.template.reviewDeck',
-            description:
-              'Compare rendered slides with the learned template pixels and design program, returning bounded evidence-based visual corrections.',
-            input: z
-              .object({
-                plan: presentationPlanSchema,
-                template: z
-                  .object({
-                    name: z.string().min(1),
-                    templateId: z.string().min(1),
-                    versionId: z.string().min(1),
-                  })
-                  .passthrough()
-                  .optional(),
-              })
-              .strict(),
-            output: presentationVisualReviewSchema,
-            execute: (
-              input: { plan: PresentationPlan; template?: TemplateApplication },
-              ctx: AtomicInvocation,
-            ) => options.visualCritic!.review(input, { scope: ctx.scope, signal: ctx.signal }),
-          },
-        ]
-      : []),
-    ...(options.templateLibrary
-      ? nativeTemplateOperations(options.templateLibrary, options.artifactStore)
-      : []),
-    ...(options.operations ?? []),
-  ];
-  const plugins: AtomicPlugin[] = [
-    createPresentationCollaborationPlugin(),
-    teaching,
-    {
+            },
+          ]
+        : []),
+      ...(options.templateLibrary
+        ? [
+            {
+              name: 'presentation.template.import',
+              description: 'Extract reusable style and layout from a trusted uploaded native PPTX.',
+              input: z.object({ name: z.string().min(1).max(120) }).strict(),
+              execute: (input: any, ctx: AtomicInvocation) =>
+                options.templateLibrary!.importPptx(ctx.scope, {
+                  name: input.name,
+                  bytes: requiredService<Uint8Array>(ctx, 'upload'),
+                }),
+            },
+            {
+              name: 'presentation.template.learn',
+              description:
+                'Learn reusable style, geometry and image slots from an editable slide plan.',
+              input: z
+                .object({
+                  name: z.string().min(1).max(120),
+                  plan: presentationPlanSchema,
+                  templateId: z.string().optional(),
+                })
+                .strict(),
+              execute: (input: any, ctx: AtomicInvocation) =>
+                options.templateLibrary!.learnFromPlan(ctx.scope, input),
+            },
+            {
+              name: 'presentation.template.list',
+              description: 'List reusable templates owned by the current authenticated scope.',
+              input: z.object({}).strict(),
+              execute: (_: any, ctx: AtomicInvocation) => options.templateLibrary!.list(ctx.scope),
+            },
+            {
+              name: 'presentation.template.resolve',
+              description:
+                'Load the constraints and reference layouts of a saved template version.',
+              input: z
+                .object({ templateId: z.string().min(1), versionId: z.string().optional() })
+                .strict(),
+              execute: (input: any, ctx: AtomicInvocation) =>
+                options.templateLibrary!.resolve(ctx.scope, input),
+            },
+          ]
+        : []),
+      ...(options.revisionAssetPlanner
+        ? [
+            {
+              name: 'presentation.assets.prepare',
+              description:
+                'Decide which page assets to reuse, generate, replace or remove and generate only the required images.',
+              input: z
+                .object({
+                  jobInput: inputSchema,
+                  basePlan: presentationPlanSchema,
+                  revision: z.object({
+                    content: z.string().min(1).max(4000),
+                    requestId: z.string().min(1),
+                    target: z.union([
+                      z.object({ type: z.literal('deck') }),
+                      z.object({
+                        type: z.literal('slide'),
+                        slideNumber: z.number().int().positive(),
+                      }),
+                    ]),
+                    template: z
+                      .object({ templateId: z.string(), versionId: z.string().optional() })
+                      .optional(),
+                  }),
+                })
+                .strict(),
+              execute: (input: any, ctx: AtomicInvocation) =>
+                options.revisionAssetPlanner!.prepare({
+                  ...input,
+                  onEvent: ctx.onEvent,
+                  scope: ctx.scope,
+                  jobId: ctx.jobId!,
+                  signal: ctx.signal,
+                }),
+            },
+          ]
+        : []),
+      ...(options.visualStoryboardPlanner
+        ? [
+            {
+              name: 'presentation.template.mapDeck',
+              description:
+                'Translate a learned visual template into a deck-level storyboard that assigns semantic page roles, visual families, composition archetypes, reusable components and asset modes before slide composition.',
+              input: z
+                .object({
+                  jobInput: inputSchema,
+                  template: z
+                    .object({
+                      name: z.string().min(1),
+                      templateId: z.string().min(1),
+                      versionId: z.string().min(1),
+                    })
+                    .passthrough(),
+                })
+                .strict(),
+              output: presentationVisualStoryboardSchema,
+              execute: (
+                input: { jobInput: z.infer<typeof inputSchema>; template: TemplateApplication },
+                ctx: AtomicInvocation,
+              ) =>
+                options.visualStoryboardPlanner!.plan(input, {
+                  scope: ctx.scope,
+                  signal: ctx.signal,
+                }),
+            },
+          ]
+        : []),
+      ...(options.visualCritic
+        ? [
+            {
+              name: 'presentation.template.reviewDeck',
+              description:
+                'Compare rendered slides with the learned template pixels and design program, returning bounded evidence-based visual corrections.',
+              input: z
+                .object({
+                  plan: presentationPlanSchema,
+                  template: z
+                    .object({
+                      name: z.string().min(1),
+                      templateId: z.string().min(1),
+                      versionId: z.string().min(1),
+                    })
+                    .passthrough()
+                    .optional(),
+                })
+                .strict(),
+              output: presentationVisualReviewSchema,
+              execute: (
+                input: { plan: PresentationPlan; template?: TemplateApplication },
+                ctx: AtomicInvocation,
+              ) => options.visualCritic!.review(input, { scope: ctx.scope, signal: ctx.signal }),
+            },
+          ]
+        : []),
+      ...(options.templateLibrary
+        ? nativeTemplateOperations(options.templateLibrary, options.artifactStore)
+        : []),
+      ...(options.operations ?? []),
+    ];
+    return {
       id: 'presentation',
       version: '3.0.0',
       operations: operations.map((operation) => {
@@ -598,13 +629,29 @@ export const createPresentationAtomicRuntime = (options: {
             }
           : operation;
       }),
-    },
-    createAssetPlugin(options.artifactStore, options.imageGenerationCapability),
-    createSkillsPlugin(() => runtime, options.chatPort, presentationSkillsOptions),
-  ];
+    };
+  };
+  const modules: Record<string, AtomicPluginModule> = {
+    'presentation-collaboration': async () =>
+      (await import('./collaboration-plugin')).createPresentationCollaborationPlugin(),
+    'canvas': async () => (await import('../canvas/plugin')).createCanvasPlugin(),
+    'teaching': loadTeaching,
+    'presentation': loadPresentation,
+    'assets': async () =>
+      (await import('../assets/plugin')).createAssetPlugin(
+        options.artifactStore,
+        options.imageGenerationCapability,
+      ),
+    'skills': async () =>
+      (await import('../skills-plugin')).createSkillsPlugin(
+        () => runtime,
+        options.chatPort,
+        presentationSkillsOptions,
+      ),
+  };
   const runtime: AtomicRuntime = createAtomicRuntimeFromProfile({
-    bundles: { presentation: { entries: plugins.map(({ id }) => ({ id, use: id })) } },
-    modules: Object.fromEntries(plugins.map((plugin) => [plugin.id, plugin])),
+    bundles: { presentation: { entries: Object.keys(modules).map((id) => ({ id, use: id })) } },
+    modules,
     profile: options.profile ?? { bundles: ['presentation'] },
   });
   return runtime;

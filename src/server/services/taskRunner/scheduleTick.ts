@@ -5,7 +5,9 @@ import { BriefModel } from '@/database/models/brief';
 import { TaskModel } from '@/database/models/task';
 import { TaskTopicModel } from '@/database/models/taskTopic';
 import { getServerDB } from '@/database/server';
+import type { LobeChatDatabase } from '@/database/type';
 
+import type { RunTaskParams } from './index';
 import { TaskRunnerService } from './index';
 
 const log = debug('task-runner:schedule-tick');
@@ -14,7 +16,7 @@ const TERMINAL_STATUSES = new Set(['canceled', 'completed', 'failed']);
 const isTerminal = (status: string) => TERMINAL_STATUSES.has(status);
 
 export type ScheduleTickOutcome =
-  | { ran: true; taskIdentifier: string }
+  | { ran: true; taskIdentifier: string; operationId?: string }
   | { ran: false; reason: ScheduleTickSkipReason };
 
 export type ScheduleTickSkipReason =
@@ -37,8 +39,11 @@ export type ScheduleTickSkipReason =
 export async function runScheduleTick(
   taskId: string,
   userId: string,
+  options: Pick<RunTaskParams, 'nativeWakeId' | 'nativeWakeLease' | 'guard'> & {
+    db?: LobeChatDatabase;
+  } = {},
 ): Promise<ScheduleTickOutcome> {
-  const db = await getServerDB();
+  const db = options.db ?? (await getServerDB());
 
   const taskModel = new TaskModel(db, userId);
   const task = await taskModel.findById(taskId);
@@ -107,7 +112,18 @@ export async function runScheduleTick(
 
   const runner = new TaskRunnerService(db, userId);
   try {
-    await runner.runTask({ taskId });
+    const result = await runner.runTask({
+      taskId,
+      ...(options.nativeWakeId
+        ? {
+            nativeWakeId: options.nativeWakeId,
+            nativeWakeLease: options.nativeWakeLease,
+            guard: options.guard,
+          }
+        : {}),
+    });
+    if (options.nativeWakeId)
+      return { ran: true, taskIdentifier: task.identifier, operationId: result.operationId };
   } catch (e) {
     // Concurrent tick / manual run already running this task — graceful skip.
     if (e instanceof TRPCError && e.code === 'CONFLICT') {

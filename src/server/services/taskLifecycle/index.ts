@@ -15,13 +15,18 @@ import type {
 } from '@lobechat/types';
 import { DEFAULT_BRIEF_ACTIONS } from '@lobechat/types';
 import debug from 'debug';
+import { and, eq } from 'drizzle-orm';
 
 import { BriefModel } from '@/database/models/brief';
 import { TaskModel } from '@/database/models/task';
 import { TaskTopicModel } from '@/database/models/taskTopic';
 import { TopicModel } from '@/database/models/topic';
+import { tasks } from '@/database/schemas/task';
 import type { LobeChatDatabase } from '@/database/type';
 import { initModelRuntimeFromDB } from '@/server/modules/ModelRuntime';
+import { isNativeAgentRuntimeEnabled } from '@/server/runtime/tasks/mode';
+import { taskWakeVersion } from '@/server/runtime/tasks/wakeIdentity';
+import type { NativeExecutionGuard } from '@/server/runtime/tasks/worker';
 import { SystemAgentService } from '@/server/services/systemAgent';
 import { TaskReviewService } from '@/server/services/taskReview';
 import { createTaskSchedulerModule } from '@/server/services/taskScheduler';
@@ -70,6 +75,42 @@ export interface TopicCompleteParams {
  * Used by both local onComplete hooks and production webhook callbacks.
  */
 export class TaskLifecycleService {
+  private nativeControl?: { taskId: string; generation: unknown; version: string };
+  private async updateStatus(id: string, status: string, extra?: Record<string, any>) {
+    if (!this.nativeControl)
+      return extra === undefined
+        ? this.taskModel.updateStatus(id, status)
+        : this.taskModel.updateStatus(id, status, extra);
+    return this.db.transaction(async (tx) => {
+      const [task] = await tx
+        .select()
+        .from(tasks)
+        .where(and(eq(tasks.id, id), eq(tasks.createdByUserId, this.userId)))
+        .for('update');
+      if (
+        !task ||
+        (task.context as any)?.scheduler?.nativeGeneration !== this.nativeControl!.generation
+      )
+        throw new Error('Task control changed during completion');
+      this.executionGuard?.assertHeld();
+      return new TaskModel(tx as unknown as LobeChatDatabase, this.userId).updateStatus(
+        id,
+        status,
+        extra,
+      );
+    });
+  }
+  private async checkControl() {
+    this.executionGuard?.assertHeld();
+    if (!this.nativeControl) return;
+    const task = await this.taskModel.findById(this.nativeControl.taskId);
+    if (
+      !task ||
+      (task.context as any)?.scheduler?.nativeGeneration !== this.nativeControl.generation
+    )
+      throw new Error('Task control changed during completion');
+    this.executionGuard?.assertHeld();
+  }
   private briefModel: BriefModel;
   private db: LobeChatDatabase;
   private systemAgentService: SystemAgentService;
@@ -78,7 +119,11 @@ export class TaskLifecycleService {
   private topicModel: TopicModel;
   private userId: string;
 
-  constructor(db: LobeChatDatabase, userId: string) {
+  constructor(
+    db: LobeChatDatabase,
+    userId: string,
+    private readonly executionGuard?: NativeExecutionGuard,
+  ) {
     this.db = db;
     this.userId = userId;
     this.taskModel = new TaskModel(db, userId);
@@ -94,6 +139,7 @@ export class TaskLifecycleService {
    * Flow: updateHeartbeat → updateTopicStatus → handoff → review → checkpoint
    */
   async onTopicComplete(params: TopicCompleteParams): Promise<void> {
+    this.executionGuard?.assertHeld();
     const { taskId, taskIdentifier, topicId, reason, lastAssistantContent, errorMessage } = params;
 
     log('onTopicComplete: task=%s topic=%s reason=%s', taskIdentifier, topicId, reason);
@@ -101,6 +147,13 @@ export class TaskLifecycleService {
     await this.taskModel.updateHeartbeat(taskId);
 
     const currentTask = await this.taskModel.findById(taskId);
+    this.executionGuard?.assertHeld();
+    if (this.executionGuard)
+      this.nativeControl = {
+        taskId,
+        generation: (currentTask?.context as any)?.scheduler?.nativeGeneration,
+        version: taskWakeVersion(currentTask ?? {}),
+      };
 
     if (reason === 'done') {
       // 1. Update topic status
@@ -132,6 +185,7 @@ export class TaskLifecycleService {
           : false;
 
       if (reviewTerminated) return;
+      await this.checkControl();
 
       // 4. Synthesize a programmatic brief for the user (auto mode only).
       //    The agent-driven `createBrief` tool path stays the default until
@@ -165,18 +219,24 @@ export class TaskLifecycleService {
       //      via the brief action to transition to 'completed'. Auto-complete
       //      only happens via the Judge path above.
       if (currentTask) {
+        await this.checkControl();
         if (
           currentTask.automationMode === 'schedule' &&
           (await this.scheduleCapReached(currentTask))
         ) {
           log('cap reached for task=%s — marking completed post-tick', taskIdentifier);
-          await this.taskModel.updateStatus(taskId, 'completed', { completedAt: new Date() });
+          await this.updateStatus(taskId, 'completed', { completedAt: new Date() });
         } else if (currentTask.automationMode) {
-          await this.taskModel.updateStatus(taskId, 'scheduled', { error: null });
+          await this.updateStatus(taskId, 'scheduled', { error: null });
         } else if (this.taskModel.shouldPauseOnTopicComplete(currentTask)) {
-          await this.taskModel.updateStatus(taskId, 'paused', { error: null });
+          await this.updateStatus(taskId, 'paused', { error: null });
         }
       }
+    } else if (reason === 'interrupted') {
+      await this.checkControl();
+      if (topicId) await this.taskTopicModel.updateStatus(taskId, topicId, 'canceled');
+      await this.updateStatus(taskId, 'paused', { error: errorMessage ?? null });
+      return;
     } else if (reason === 'error') {
       if (topicId) await this.taskTopicModel.updateStatus(taskId, topicId, 'failed');
 
@@ -194,13 +254,14 @@ export class TaskLifecycleService {
         type: 'error',
       });
 
-      await this.taskModel.updateStatus(taskId, 'paused');
+      await this.updateStatus(taskId, 'paused');
     }
 
     // Heartbeat re-arm: re-read task state (status / context may have just
     // been mutated by the branches above) and decide whether to publish the
     // next tick.
     const finalTask = await this.taskModel.findById(taskId);
+    this.executionGuard?.assertHeld();
     if (finalTask) await this.maybeRearmHeartbeat(finalTask, reason);
   }
 
@@ -250,6 +311,7 @@ export class TaskLifecycleService {
    *     resolves the urgent error brief)
    */
   private async maybeRearmHeartbeat(task: TaskItem, reason: string): Promise<void> {
+    await this.checkControl();
     if (task.automationMode !== 'heartbeat') return;
     if (!task.heartbeatInterval || task.heartbeatInterval <= 0) return;
     if (isTerminal(task.status)) return;
@@ -294,10 +356,17 @@ export class TaskLifecycleService {
       // pending here, since the prior tick has already fired to bring us
       // into onTopicComplete).
       if (sched.tickMessageId) {
-        await scheduler.cancelScheduled(sched.tickMessageId).catch(() => undefined);
+        await scheduler
+          .cancelScheduled(
+            sched.tickMessageId,
+            ...(isNativeAgentRuntimeEnabled() ? [this.userId] : []),
+          )
+          .catch(() => undefined);
       }
 
+      await this.checkControl();
       const tickMessageId = await scheduler.scheduleNextTopic({
+        ...(this.nativeControl ? { expectedVersion: this.nativeControl.version } : {}),
         delay: task.heartbeatInterval,
         taskId: task.id,
         userId: this.userId,
@@ -318,6 +387,7 @@ export class TaskLifecycleService {
         tickMessageId,
       );
     } catch (e) {
+      await this.checkControl();
       console.warn('[TaskLifecycle] re-arm failed:', e);
     }
   }
@@ -347,6 +417,7 @@ export class TaskLifecycleService {
       });
 
       const modelRuntime = await initModelRuntimeFromDB(this.db, this.userId, provider);
+      await this.checkControl();
       const result = await modelRuntime.generateObject(
         {
           messages: payload.messages as any[],
@@ -356,6 +427,7 @@ export class TaskLifecycleService {
         { metadata: { trigger: 'task-handoff' } },
       );
 
+      await this.checkControl();
       const handoff = result as {
         keyFindings?: string[];
         nextAction?: string;
@@ -373,6 +445,7 @@ export class TaskLifecycleService {
 
       log('handoff generated for topic %s: title=%s', topicId, handoff.title);
     } catch (e) {
+      await this.checkControl();
       console.warn('[TaskLifecycle] handoff generation failed:', e);
     }
   }
@@ -447,6 +520,7 @@ export class TaskLifecycleService {
         });
 
         const modelRuntime = await initModelRuntimeFromDB(this.db, this.userId, provider);
+        await this.checkControl();
         const judgeResult = (await modelRuntime.generateObject(
           {
             messages: judgePayload.messages as any[],
@@ -455,6 +529,7 @@ export class TaskLifecycleService {
           },
           { metadata: { trigger: 'task-brief-judge' } },
         )) as { emit?: boolean; reason?: string };
+        await this.checkControl();
 
         decision = {
           decidedAt: new Date().toISOString(),
@@ -500,6 +575,7 @@ export class TaskLifecycleService {
       });
 
       const modelRuntime = await initModelRuntimeFromDB(this.db, this.userId, provider);
+      await this.checkControl();
       const result = await modelRuntime.generateObject(
         {
           messages: payload.messages as any[],
@@ -510,6 +586,7 @@ export class TaskLifecycleService {
       );
 
       const generated = result as { summary?: string; title?: string };
+      await this.checkControl();
       if (!generated.title || !generated.summary) {
         log(
           'synthesize: LLM returned empty title/summary task=%s topic=%s',
@@ -538,6 +615,7 @@ export class TaskLifecycleService {
 
       log('synthesize: brief created task=%s topic=%s type=%s', taskIdentifier, topicId, briefType);
     } catch (e) {
+      await this.checkControl();
       console.warn('[TaskLifecycle] brief synthesis failed:', e);
     }
   }
@@ -567,7 +645,7 @@ export class TaskLifecycleService {
       const targetTopic = topicLinks.find((t) => t.topicId === topicId);
       const iteration = (targetTopic?.reviewIteration || 0) + 1;
 
-      const reviewService = new TaskReviewService(this.db, this.userId);
+      const reviewService = new TaskReviewService(this.db, this.userId, this.executionGuard);
       const reviewResult = await reviewService.review({
         content,
         iteration,
@@ -585,6 +663,7 @@ export class TaskLifecycleService {
         reviewConfig.maxIterations,
       );
 
+      await this.checkControl();
       // Save review result to task_topics
       await this.taskTopicModel.updateReview(taskId, topicId, {
         iteration,
@@ -609,7 +688,7 @@ export class TaskLifecycleService {
           trigger: 'task',
           type: 'result',
         });
-        await this.taskModel.updateStatus(taskId, 'completed', { error: null });
+        await this.updateStatus(taskId, 'completed', { error: null });
         await this.cascadeAfterAutoComplete(taskId);
         return true;
       }
@@ -626,7 +705,7 @@ export class TaskLifecycleService {
         });
 
         // Pause so the webhook / polling loop can pick up and re-run
-        await this.taskModel.updateStatus(taskId, 'paused', { error: null });
+        await this.updateStatus(taskId, 'paused', { error: null });
         return true;
       }
 
@@ -643,9 +722,10 @@ export class TaskLifecycleService {
         trigger: 'task',
         type: 'result',
       });
-      await this.taskModel.updateStatus(taskId, 'paused', { error: null });
+      await this.updateStatus(taskId, 'paused', { error: null });
       return true;
     } catch (e) {
+      await this.checkControl();
       console.warn('[TaskLifecycle] auto-review failed:', e);
       return false;
     }
@@ -663,6 +743,7 @@ export class TaskLifecycleService {
       const runner = new TaskRunnerService(this.db, this.userId);
       await runner.cascadeOnCompletion(completedTaskId);
     } catch (e) {
+      await this.checkControl();
       console.warn('[TaskLifecycle] dependency cascade failed:', e);
     }
   }

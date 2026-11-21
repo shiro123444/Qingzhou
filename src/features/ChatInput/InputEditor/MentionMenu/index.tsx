@@ -27,6 +27,8 @@ interface MenuRenderProps {
 const getRecentItems = (options: ISlashMenuOption[], count: number): ISlashMenuOption[] => {
   return [...options]
     .sort((a, b) => {
+      if (a.key === 'companion-bot') return -1;
+      if (b.key === 'companion-bot') return 1;
       const ta = (a as any).metadata?.timestamp || 0;
       const tb = (b as any).metadata?.timestamp || 0;
       return tb - ta;

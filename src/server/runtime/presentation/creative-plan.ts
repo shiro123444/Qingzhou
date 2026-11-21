@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { teachingContextSchema } from '@/types/presentationTeaching';
+
 export const creativePlanSchema = z.object({
   goal: z.string().min(1).max(1500),
   narrative: z.string().min(1).max(3000),
@@ -13,6 +15,7 @@ export const creativePlanSchema = z.object({
 
 export const creativeBriefSchema = z
   .object({
+    teachingContext: teachingContextSchema.optional(),
     topic: z.string().min(1).max(2000).optional(),
     audience: z.string().max(2000).optional(),
     language: z.string().max(100).optional(),

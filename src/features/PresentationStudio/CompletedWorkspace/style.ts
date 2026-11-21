@@ -16,15 +16,6 @@ const watercolorWash = keyframes`
 `;
 
 export const styles = createStaticStyles(({ css, cssVar }) => ({
-  historyPanel: css`
-    overflow-y: auto;
-
-    width: min(360px, calc(100vw - 32px));
-    max-height: min(520px, calc(100vh - 96px));
-    border-radius: 16px;
-
-    box-shadow: ${cssVar.boxShadowSecondary};
-  `,
   bentoCard: css`
     cursor: pointer;
 
@@ -37,12 +28,16 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     border: 1px solid ${cssVar.colorBorderSecondary};
     border-radius: 12px;
 
-    background: ${cssVar.colorBgContainer};
+    background: var(--qz-glass-sheen), var(--qz-glass-strong);
+    backdrop-filter: var(--qz-glass-filter);
 
     transition:
-      transform 200ms ease,
+      transform var(--qz-panel-resize),
       box-shadow 200ms ease,
       border-color 200ms ease;
+    @media (prefers-reduced-motion: reduce) {
+      transition: none;
+    }
 
     &:hover {
       transform: translateY(-2px);
@@ -118,61 +113,26 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     white-space: nowrap;
   `,
   commandBar: css`
+    pointer-events: none;
+
+    position: absolute;
+    z-index: 7;
+    inset-block-end: 12px;
+    inset-inline: 16px;
+
     display: flex;
     flex-shrink: 0;
     gap: 8px;
     align-items: center;
 
-    width: 100%;
-    min-height: 48px;
-    padding-block: 0 8px;
-    padding-inline: 16px;
-
-    @media (width <= 768px) {
-      flex-wrap: wrap;
-      justify-content: center;
-      padding-inline: 8px;
-    }
-  `,
-  conversationTrigger: css`
-    cursor: pointer;
-
-    display: flex;
-    flex: 1;
-    gap: 10px;
-    align-items: center;
-
-    min-width: 120px;
     min-height: 44px;
-    padding-block: 8px;
-    padding-inline: 16px;
-    border: 1px solid ${cssVar.colorBorderSecondary};
-    border-radius: 999px;
 
-    font: inherit;
-    font-size: 13px;
-    color: ${cssVar.colorTextSecondary};
-
-    background: ${cssVar.colorBgElevated};
-
-    &:hover {
-      color: ${cssVar.colorText};
-      background: ${cssVar.colorFillQuaternary};
-    }
-
-    &[aria-pressed='true'] {
-      color: ${cssVar.colorText};
-      background: ${cssVar.colorFillSecondary};
-    }
-
-    &:focus-visible {
-      outline: 2px solid ${cssVar.colorPrimary};
-      outline-offset: 3px;
+    > * {
+      pointer-events: auto;
     }
 
     @media (width <= 768px) {
-      flex: 1 1 100%;
-      order: 3;
+      inset-inline: 8px;
     }
   `,
   paginatorGroup: css`
@@ -184,10 +144,10 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     min-height: 44px;
     padding: 2px;
-    border: 1px solid ${cssVar.colorBorderSecondary};
+    border: 1px solid var(--qz-glass-border, ${cssVar.colorBorderSecondary});
     border-radius: 999px;
 
-    background: ${cssVar.colorBgElevated};
+    background: transparent;
   `,
   capsuleGroupLeft: css`
     overflow: hidden;
@@ -204,32 +164,51 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     flex-wrap: wrap;
     gap: 4px;
     align-items: center;
+    @media (width <= 768px) {
+      flex-wrap: nowrap;
+      gap: 2px;
+      overflow-x: auto;
+      scrollbar-width: thin;
+      button {
+        flex-shrink: 0;
+      }
+    }
+  `,
+  exportButton: css`
+    &&:not(:disabled) {
+      color: ${cssVar.colorText};
+      border: 1px solid var(--qz-glass-border, ${cssVar.colorBorderSecondary});
+      background: var(--qz-glass-selection, color-mix(in srgb, #74948c 14%, transparent));
+      box-shadow: inset 0 1px 0 var(--qz-glass-highlight);
+    }
   `,
   capsuleHeader: css`
+    position: absolute;
+    z-index: 12;
+    inset-block-start: 12px;
+    inset-inline: 12px;
+
     display: flex;
     flex-shrink: 0;
     gap: 12px;
     align-items: center;
     justify-content: space-between;
 
-    padding-block: 8px;
-    padding-inline: 18px 12px;
-    border: 1px solid ${cssVar.colorBorderSecondary};
-    border-radius: 24px;
+    min-height: 48px;
+    padding-block: 6px;
+    padding-inline: 10px 8px;
+    border: 1px solid var(--qz-glass-border, ${cssVar.colorBorderSecondary});
+    border-radius: 18px;
 
-    background: ${cssVar.colorBgElevated};
-    box-shadow: 0 4px 16px rgb(0 0 0 / 5%);
+    background: transparent;
 
     @media (width <= 768px) {
-      flex-direction: column;
-      align-items: stretch;
-      padding: 12px;
-      border-radius: 20px;
+      gap: 6px;
+      padding: 6px;
+      border-radius: 16px;
     }
   `,
   capsuleStatus: css`
-    cursor: pointer;
-
     display: inline-flex;
     flex-shrink: 0;
     gap: 4px;
@@ -286,7 +265,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     color: ${cssVar.colorTextDescription};
     text-align: center;
 
-    background: ${cssVar.colorFillQuaternary};
+    background: var(--qz-glass-surface);
   `,
   drawerHeader: css`
     display: flex;
@@ -308,15 +287,19 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     flex-shrink: 0;
 
     height: 100%;
-    border-radius: 14px;
+    border-radius: 2px;
 
-    background: ${cssVar.colorBgContainer};
+    background: var(--qz-glass-sheen), var(--qz-glass-strong);
+    backdrop-filter: var(--qz-glass-filter);
     box-shadow: -4px 0 20px rgb(0 0 0 / 6%);
 
     transition:
-      width 260ms cubic-bezier(0.16, 1, 0.3, 1),
-      margin-inline-start 260ms cubic-bezier(0.16, 1, 0.3, 1),
-      opacity 200ms ease;
+      width var(--qz-panel-resize),
+      margin-inline-start var(--qz-panel-resize),
+      opacity 150ms ease;
+    @media (prefers-reduced-motion: reduce) {
+      transition: none;
+    }
   `,
   drawerSection: css`
     display: flex;
@@ -331,7 +314,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     line-height: 1.6;
     color: ${cssVar.colorTextSecondary};
 
-    background: ${cssVar.colorFillQuaternary};
+    background: var(--qz-glass-surface);
   `,
   drawerSectionHeader: css`
     display: flex;
@@ -350,11 +333,6 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     font-size: 12px;
     color: ${cssVar.colorTextDescription};
   `,
-  exportActions: css`
-    margin-inline-start: 4px;
-    padding-inline-start: 8px;
-    border-inline-start: 1px solid ${cssVar.colorBorderSecondary};
-  `,
   iconButton: css`
     && {
       display: inline-flex;
@@ -371,9 +349,17 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       box-shadow: none;
     }
 
+    @media (width <= 768px) {
+      && {
+        width: 36px;
+        min-width: 36px;
+        height: 36px;
+        border-radius: 12px;
+      }
+    }
     &[aria-pressed='true'] {
       color: ${cssVar.colorText};
-      background: ${cssVar.colorFillSecondary};
+      background: var(--qz-glass-selection);
     }
 
     &:focus-visible {
@@ -382,34 +368,44 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     }
   `,
   filmstripContainer: css`
-    position: relative;
+    position: absolute;
+    z-index: 8;
+    inset-block-start: 76px;
+    inset-inline-start: 12px;
 
     overflow: hidden;
     display: flex;
-    flex: 0 0 48px;
+    flex: none;
     flex-direction: column;
 
-    width: 48px;
+    width: 44px;
     min-width: 0;
-    height: 100%;
-    border: 1px solid ${cssVar.colorBorderSecondary};
-    border-radius: 12px;
+    height: calc(100% - 164px);
+    max-height: 640px;
+    border: 1px solid var(--qz-glass-border, ${cssVar.colorBorderSecondary});
+    border-radius: 14px;
 
-    background: ${cssVar.colorBgContainer};
+    background: transparent;
 
     transition:
-      width 240ms cubic-bezier(0.16, 1, 0.3, 1),
-      opacity 200ms ease;
+      width var(--qz-panel-resize),
+      height var(--qz-panel-resize);
+    &[data-open='false'] {
+      height: 40px;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      transition: none;
+    }
 
     &[data-open='true'] {
-      flex-basis: 176px;
       width: 176px;
     }
 
     @media (width <= 768px) {
+      inset-inline-start: 8px;
+      width: 38px;
       &[data-open='true'] {
-        flex-basis: 104px;
-        width: 104px;
+        width: 124px;
       }
     }
   `,
@@ -427,7 +423,75 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     align-items: center;
     justify-content: flex-end;
 
-    padding: 1px;
+    padding: 3px 6px;
+  `,
+  canvasTools: css`
+    position: absolute;
+    z-index: 3;
+    inset-block-start: 76px;
+    inset-inline-start: 50%;
+    transform: translateX(-50%);
+    width: max-content;
+    max-width: calc(100% - 20px);
+    @container (width < 430px) {
+      inset-inline-start: auto;
+      inset-inline-end: 10px;
+      transform: none;
+      max-width: calc(100% - 56px);
+      [role='toolbar'] {
+        gap: 1px;
+        padding: 4px;
+      }
+      button {
+        width: 32px;
+        height: 34px;
+      }
+    }
+  `,
+  objectBar: css`
+    position: absolute;
+    z-index: 3;
+    inset-inline-start: 50%;
+    inset-block-end: 12px;
+    transform: translateX(-50%);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    width: max-content;
+    max-width: calc(100% - 28px);
+    padding: 6px 10px;
+    border: 1px solid ${cssVar.colorBorderSecondary};
+    border-radius: 12px;
+    background: transparent;
+    box-shadow: var(--qz-glass-shadow);
+
+    select {
+      max-width: min(160px, 32vw);
+      border: 0;
+      padding: 2px;
+      color: ${cssVar.colorText};
+      background: transparent;
+      font: inherit;
+      font-size: 12px;
+    }
+    label {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      font-size: 11px;
+      color: ${cssVar.colorTextSecondary};
+    }
+    label .ant-input-number {
+      width: 60px;
+    }
+    [role='alert'] {
+      flex-basis: 100%;
+      text-align: center;
+      font-size: 12px;
+      color: ${cssVar.colorError};
+    }
   `,
   focusCanvas: css`
     position: relative;
@@ -441,12 +505,12 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     width: 100%;
     min-height: 0;
-    padding-block: 12px 4px;
-    padding-inline: 16px;
+    padding: 0;
 
-    @media (width <= 768px) {
-      padding-block: 6px 2px;
-      padding-inline: 6px;
+    [data-testid='spatial-canvas'] {
+      border: 0;
+      border-radius: 0;
+      background: transparent;
     }
   `,
   focusEmpty: css`
@@ -463,8 +527,6 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     text-align: center;
   `,
   focusFrame169: css`
-    cursor: pointer;
-
     position: relative;
 
     overflow: hidden;
@@ -477,60 +539,33 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     max-width: 100%;
     height: min(100cqh, calc(100cqw * var(--slide-ah, 9) / var(--slide-aw, 16)));
     max-height: 100%;
-    border: 1px solid ${cssVar.colorBorderSecondary};
-    border-radius: 14px;
+    border: 0;
+    border-radius: 0;
 
-    background: ${cssVar.colorBgContainer};
-    box-shadow:
-      0 8px 28px -12px rgb(0 0 0 / 16%),
-      0 1px 4px rgb(0 0 0 / 4%);
-
-    transition:
-      transform 200ms ease,
-      box-shadow 200ms ease,
-      border-color 200ms ease;
-
-    &:hover {
-      border-color: ${cssVar.colorBorder};
-      box-shadow:
-        0 10px 32px -12px rgb(0 0 0 / 20%),
-        0 1px 4px rgb(0 0 0 / 4%);
-
-      [data-role='hover-cue'] {
-        opacity: 1;
-      }
+    background: transparent;
+    box-shadow: none;
+  `,
+  dragImage: css`
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    pointer-events: none;
+    visibility: hidden;
+    [data-moving='true'] > & {
+      visibility: visible;
     }
   `,
   focusImage: css`
+    [data-moving='true'] > & {
+      visibility: hidden;
+    }
+
     display: block;
     width: 100%;
     height: 100%;
     object-fit: contain;
-  `,
-  hoverCue: css`
-    pointer-events: none;
-
-    position: absolute;
-    inset-block-end: 14px;
-    inset-inline-end: 16px;
-
-    display: flex;
-    gap: 6px;
-    align-items: center;
-
-    padding-block: 4px;
-    padding-inline: 10px;
-    border: 1px solid rgb(255 255 255 / 10%);
-    border-radius: 999px;
-
-    font-size: 11px;
-    color: #fff;
-
-    opacity: 0;
-    background: rgb(0 0 0 / 68%);
-    backdrop-filter: blur(8px);
-
-    transition: opacity 180ms ease;
   `,
   mainLayout: css`
     position: relative;
@@ -538,7 +573,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     overflow: hidden;
     display: flex;
     flex: 1;
-    gap: 12px;
+    gap: 0;
 
     width: 100%;
     min-height: 0;
@@ -562,8 +597,9 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     color: ${cssVar.colorText};
 
-    background: ${cssVar.colorBgElevated};
-    box-shadow: 0 4px 20px rgb(23 62 69 / 8%);
+    background: var(--qz-glass-sheen), var(--qz-glass-strong);
+    backdrop-filter: var(--qz-glass-filter);
+    box-shadow: var(--qz-glass-shadow);
 
     &[data-empty='true']:not([data-compact='true']) {
       inset-block: 50% auto;
@@ -667,23 +703,57 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     display: flex;
     flex: 1;
     flex-direction: column;
-    gap: 8px;
+    gap: 0;
     align-items: stretch;
     justify-content: flex-end;
 
     min-width: 0;
-    height: 100%;
+    min-height: 0;
 
-    transition: width 240ms cubic-bezier(0.16, 1, 0.3, 1);
+    transition: width var(--qz-panel-resize);
+  `,
+  editorColumn: css`
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    gap: 0;
+    min-height: 0;
+    min-width: 0;
+  `,
+  workspaceMount: css`
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    width: 100%;
+    height: 100%;
+  `,
+  collaborationSlot: css`
+    pointer-events: none;
+    position: absolute;
+    z-index: 20;
+    inset-block-start: 68px;
+    inset-inline: 0;
   `,
   workspaceRoot: css`
+    &[data-focused='true'] {
+      position: fixed;
+      inset: 0;
+      z-index: 800;
+      width: 100vw;
+      height: 100dvh;
+      box-sizing: border-box;
+      padding: 0;
+      background: ${cssVar.colorBgLayout};
+    }
+
     position: relative;
 
     overflow: hidden;
     display: flex;
     flex: 1;
     flex-direction: column;
-    gap: 12px;
+    gap: 0;
 
     width: 100%;
     height: 100%;

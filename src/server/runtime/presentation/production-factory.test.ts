@@ -608,7 +608,14 @@ describe('createProductionPresentationGenerationComposition (R2-A pipeline)', ()
     expect(imageCap.generate).not.toHaveBeenCalled();
     expect(
       (await result.composition.atomicRuntime!.snapshot(baseScope())).plugins.map(({ id }) => id),
-    ).toEqual(['presentation-collaboration', 'teaching', 'presentation', 'assets', 'skills']);
+    ).toEqual([
+      'presentation-collaboration',
+      'canvas',
+      'teaching',
+      'presentation',
+      'assets',
+      'skills',
+    ]);
     await result.composition.dispose();
   });
 

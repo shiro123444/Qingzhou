@@ -6,6 +6,7 @@ import type {
   PresentationJobInput,
   RuntimeScope,
 } from '../../../../packages/runtime-contracts/src';
+import { describesReportTable, readApprovedReportRows } from './approved-report-data';
 import { assetAnnotationsSchema } from './asset-annotations';
 import { contentLayout } from './content-layout';
 import {
@@ -138,6 +139,153 @@ export const slideContentIntentSchema = z
 
 export type SlideContentIntent = z.infer<typeof slideContentIntentSchema>;
 
+/** Editable prose columns are already native text. A conceptual text matrix
+ * must not force the page author to manufacture a graph or a data table. */
+function normalizeParallelTextIntent(intent: SlideContentIntent): SlideContentIntent {
+  const visuals = intent.visuals?.filter((visual) => {
+    if (
+      !['chart', 'scientific-diagram'].includes(visual.kind) ||
+      visual.renderer !== 'native' ||
+      visual.fidelity !== 'conceptual'
+    )
+      return true;
+    const brief = visual.brief
+      .replaceAll(/(?:不是|并非|不作为)(?:定量)?(?:流程图?|图表|数据图)/gu, '')
+      .replaceAll(/(?:无|不画|不用|不使用|不加|不需要|没有)(?:流程)?箭头/gu, '');
+    const prose = /(?:三栏|双栏|两栏|多栏|并列).*(?:说明|文本|文字)/u.test(
+      `${intent.visualReason} ${brief}`,
+    );
+    const structured =
+      /表格|表头|行列|每行|每列|数值|统计|指标|坐标|曲线|分布|趋势|比例|系列|有向|节点|连线|连接线|箭头|流程|流向|父子|因果|分支|拓扑/u.test(
+        brief,
+      );
+    return !(prose && !structured);
+  });
+  return visuals && visuals.length !== intent.visuals?.length
+    ? { ...intent, visuals, visualKind: visuals[0]?.kind ?? 'none' }
+    : intent;
+}
+
+/** Approved formula bodies and explicit per-page asset bindings outrank a model's
+ * cross-batch guesses. This contract is shared by new and cached intentions. */
+function normalizeApprovedPageIntent(
+  intent: SlideContentIntent,
+  input: PresentationJobInput,
+  index: number,
+): SlideContentIntent {
+  if (input.options?.contentRevision) return normalizeParallelTextIntent(intent);
+  const page = (input.options?.outline as { title?: string; keyPoints?: string[] }[] | undefined)?.[
+    index
+  ];
+  const content = [page?.title, ...(page?.keyPoints ?? [])].filter(Boolean).join('\n');
+  const math = [
+    ...content.matchAll(/\${1,2}([\s\S]+?)\${1,2}|\\\(([\s\S]+?)\\\)|\\\[([\s\S]+?)\\\]/gu),
+  ].map((m) => (m[1] ?? m[2] ?? m[3]).trim());
+  const formulas = math.length
+    ? [...new Set(math)].map((latex, i) => {
+        const prior = intent.formulas.find((f) => f.latex === latex) ?? intent.formulas[i];
+        return {
+          id: `approved-formula-${i + 1}`,
+          latex,
+          display: prior?.display ?? true,
+          fontSize: prior?.fontSize ?? 28,
+          placement: 'slide' as const,
+          ...(prior?.latex === latex
+            ? { explanation: prior.explanation, measurement: prior.measurement }
+            : {}),
+        };
+      })
+    : intent.formulas;
+  const slots = input.options?.generatedImageSlots as
+    | { slideId?: string; slotId?: string; state?: string; assetRefs?: { ref: string }[] }[]
+    | undefined;
+  let visuals = visualRequirements(intent);
+  const sources = input.options?.sourceDocumentVisuals as
+    { ref: string; caption?: string }[] | undefined;
+  const sourceRefs = new Set(sources?.map((s) => s.ref) ?? []);
+  if (slots?.some((s) => s.assetRefs?.some((a) => sourceRefs.has(a.ref)))) {
+    const refs = [
+      ...new Set(
+        slots
+          .filter((s) => s.slideId === intent.slideId && s.state === 'ready')
+          .flatMap(
+            (s) => s.assetRefs?.map((a) => a.ref).filter((ref) => sourceRefs.has(ref)) ?? [],
+          ),
+      ),
+    ];
+    const direction = presentationVisualDirectionSchema.safeParse(input.options?.visualDirection);
+    const decision = direction.success
+      ? direction.data.slides.find((p) => p.slideId === intent.slideId)
+      : undefined;
+    const reuseOnly =
+      requestsImageReuse(input.prompt) ||
+      (input.options?.visualEnrichment as { mode?: string } | undefined)?.mode === 'off';
+    visuals = [
+      ...visuals.filter((v) => {
+        if (v.kind === 'source-figure') return false;
+        if (!refs.length || !isRasterVisual(v)) return true;
+        return (
+          !reuseOnly &&
+          !(decision && !needsGeneratedVisual(decision) && v.id === 'autonomous-visual')
+        );
+      }),
+      ...refs.map((ref, i): VisualRequirement => ({
+        id: /^[\w-]{1,80}$/u.test(ref) ? ref : `provided-figure-${i + 1}`,
+        kind: 'source-figure',
+        required: true,
+        brief:
+          `复用已指定给本页的原图 ${ref}。${sources?.find((s) => s.ref === ref)?.caption ?? ''}`.slice(
+            0,
+            1600,
+          ),
+      })),
+    ];
+  }
+  const tableRows = describesReportTable(`${input.prompt ?? ''} ${content}`)
+    ? readApprovedReportRows(page?.keyPoints ?? [])
+    : undefined;
+  if (
+    tableRows &&
+    !visuals.some(
+      (v) => v.renderer !== 'image' && v.kind === 'chart' && describesReportTable(v.brief),
+    )
+  ) {
+    visuals = [
+      ...visuals.filter((v) => !isRasterVisual(v) || !describesReportTable(v.brief)),
+      {
+        id: 'approved-data-table',
+        kind: 'chart',
+        renderer: 'native',
+        fidelity: 'computed',
+        required: true,
+        brief: (
+          '使用可编辑数据表格，保留原始列名和数值：' +
+          tableRows.map(({ source }) => source).join('；')
+        ).slice(0, 1600),
+      },
+    ];
+  }
+  const pageProse = content.replaceAll(/\${1,2}[\s\S]+?\${1,2}/gu, '');
+  if (
+    math.length &&
+    !tableRows &&
+    !input.options?.materials &&
+    !/曲线|坐标|图表|表格|清单|采样|数据|数值|分布|对照|矩阵|统计/u.test(pageProse)
+  )
+    visuals = visuals.filter((v) => v.kind !== 'chart');
+  return normalizeParallelTextIntent({
+    ...intent,
+    formulas,
+    visuals,
+    visualKind: visuals[0]?.kind ?? 'none',
+  });
+}
+
+export const requestsImageReuse = (text?: string) =>
+  /不重新生图|不再生图|不新增生图|不要生图|不要重新生成|仅(?:复用|使用已有)|(?:不要|不)(?:再|重新)?(?:新增|添加|生成)(?:任何|额外|新的?)?(?:图像|图片|配图)|只复用(?:已提供|原有|已有)|do not generate (?:new )?images/iu.test(
+    text ?? '',
+  );
+
 /** Normalized to the planner's 960-wide canvas, independent of source-template density. */
 export const PRESENTATION_CONTENT_BUDGET = Object.freeze({
   maxBodyCharacters: 480,
@@ -150,16 +298,18 @@ export const contentInputFingerprint = (input: PresentationJobInput): string =>
   createHash('sha256')
     .update(
       JSON.stringify({
+        agentRoutingFingerprint: input.options?.agentRoutingFingerprint,
         outline: input.options?.outline,
         prompt: input.prompt,
         slideCount: input.slideCount,
         title: input.title,
         revision: input.options?.contentRevision,
-        contractVersion: 10,
+        contractVersion: 13,
         learnedCapabilities: input.options?.learnedCapabilities,
         deckVisualSystem: input.options?.deckVisualSystem,
         visualEnrichment: input.options?.visualEnrichment,
         imageSlots: input.options?.imageSlots,
+        generatedImageSlots: input.options?.generatedImageSlots,
         lessonPlan: input.options?.lessonPlan,
         materials: input.options?.materials,
         sourceDocumentVisuals: input.options?.sourceDocumentVisuals,
@@ -213,6 +363,7 @@ export const createPresentationContentCompiler = (
         readLessonPlan(input) ||
         options.imageGenerationAvailable !== true ||
         requested?.mode === 'off' ||
+        requestsImageReuse(input.prompt) ||
         requested?.slideNumbers?.length ||
         input.options?.contentRevision ||
         Array.isArray(input.options?.imageSlots)
@@ -345,6 +496,14 @@ export const createPresentationContentCompiler = (
                       ? 'off'
                       : 'auto',
                 },
+                generatedImageSlots: Array.isArray(input.options?.generatedImageSlots)
+                  ? input.options.generatedImageSlots.flatMap((slot: any) => {
+                      const local = numbers.indexOf(
+                        Number(String(slot.slideId).replace('slide-', '')),
+                      );
+                      return local < 0 ? [] : [{ ...slot, slideId: `slide-${local + 1}` }];
+                    })
+                  : undefined,
                 imageSlots: Array.isArray(input.options?.imageSlots)
                   ? input.options.imageSlots.flatMap((slot: any) => {
                       const original = Number(String(slot.slideId).replace('slide-', ''));
@@ -450,9 +609,12 @@ export const createPresentationContentCompiler = (
           for (const [index, slide] of result.slides.entries()) {
             if (slide.slideId !== `slide-${index + 1}`)
               throw new Error('Content intents must preserve slide order and identity');
+            Object.assign(slide, normalizeApprovedPageIntent(slide, input, index));
             const pageDirection = direction?.slides[index];
             const disabled =
-              requested?.mode === 'off' || options.imageGenerationAvailable === false;
+              requested?.mode === 'off' ||
+              requestsImageReuse(input.prompt) ||
+              options.imageGenerationAvailable === false;
             if (pageDirection || disabled) {
               // The whole-deck decision owns artwork allocation; batches cannot
               // consume later pages' budget or silently omit a selected figure.
@@ -541,7 +703,13 @@ export const createPresentationContentCompiler = (
               }
               try {
                 Object.assign(formula, await fitFormula(source, bounds));
-              } catch {
+              } catch (error) {
+                if (
+                  normalizeApprovedPageIntent(slide, input, index).formulas.some(
+                    (f) => f.id.startsWith('approved-formula-') && f.latex === formula.latex,
+                  )
+                )
+                  throw error;
                 // MathJax cannot vectorize a formula that carries explanatory prose (CJK inside
                 // \text{}) or raw angle brackets. An undrawable page must not fail the deck, so
                 // the exact LaTeX and its explanation move to the speaker notes unchanged.
@@ -557,7 +725,14 @@ export const createPresentationContentCompiler = (
             throw new Error(
               'The user requires generated visuals: plan at least one meaningful renderer:image asset, while keeping factual data native.',
             );
-          return { ...result, slides: applyRasterBudget(result.slides, allowance, input).slides };
+          return {
+            ...result,
+            slides: applyRasterBudget(
+              result.slides.map(normalizeParallelTextIntent),
+              allowance,
+              input,
+            ).slides,
+          };
         },
         request: {
           model: chat.manifest.model,
@@ -572,12 +747,12 @@ export const createPresentationContentCompiler = (
             { role: 'system', content: MATERIAL_GROUNDING_INSTRUCTIONS },
             {
               role: 'system',
-              content: `你是演示内容编译器。把已确认大纲逐页转换为内容意图，保留页序、事实与核心教学内容。提取正确LaTeX，不编造数据、公式与来源。输出JSON {slides:[{slideId:"slide-1",claim:"当前标题或问题",formulas:[{id:"formula-1",latex:"LaTeX",explanation:"变量说明",fontSize:28,placement:"slide"}],visualKind:"none|illustration|photograph|scientific-illustration|scientific-diagram|chart|source-figure",visualReason:"视觉目的",visuals:[{id:"visual-1",kind:"scientific-diagram",renderer:"image",fidelity:"conceptual",brief:"可验证的视觉需求",required:true}]}]}。最多4个公式。不要Markdown。`,
+              content: `你是演示内容编译器。把已确认大纲逐页转换为内容意图，保留页序、事实与核心教学内容。prompt可能描述整稿，当前只处理outline列出的本批次页面；其他页的图像、公式和图表不能合并到本批次最后一页。明确的approvedImageBindings拥有图片页属，未分配原图的页不能借用其他页的原图。提取正确LaTeX，不编造数据、公式与来源。输出JSON {slides:[{slideId:"slide-1",claim:"当前标题或问题",formulas:[{id:"formula-1",latex:"LaTeX",explanation:"变量说明",fontSize:28,placement:"slide"}],visualKind:"none|illustration|photograph|scientific-illustration|scientific-diagram|chart|source-figure",visualReason:"视觉目的",visuals:[{id:"visual-1",kind:"scientific-diagram",renderer:"image",fidelity:"conceptual",brief:"可验证的视觉需求",required:true}]}]}。最多4个公式。不要Markdown。`,
             },
             {
               role: 'system',
               content:
-                '视觉类型kind与绘制工具renderer必须分开。贴纸、表情包、角标、小徽章这类纯装饰用 kind:"sticker"：只画一个孤立主体，不带文字、不带整幅背景；服务端会自动抠图成透明并小尺寸落位，所以不要在 sticker 上要求背景、场景或图注。工作汇报中的表格、指标矩阵、对比与明确节点流程优先renderer:native（表格用kind:chart，流程用kind:scientific-diagram），保持数字、状态、文字和关系可编辑；表格brief列出有来源的完整行列。复杂科研机制、实验装置、主体插画才优先renderer:image；brief明确部件、关系和箭头，不允许多余拼贴、照片条或无关装饰。选择image渲染的概念性框架图、流程图、知识地图使用 annotationMode:"embedded"：生图负责图内短标签、连接线与箭头，SVG只负责图外标题正文，不再叠加同一套标签和箭头。不要在看到真实图片之前猜测对象坐标。只有确实需要独立编辑、且按确定布局约束生成的精确几何标注才用 annotationMode:"overlay" 与 visuals[].annotations：{type:"vector"|"guide"|"label", from/to 或 at（实际图像内 0 到 1 的相对坐标）, label 或 text（不超过 24 字）, color?}；此模式下图片禁止同名标签与箭头，服务端按真实图像比例投影。定量或严格几何关系优先native，由服务端计算。科研图默认简洁的二维学术图、实物照片或可核实原始资料；没有定义函数与数据时，不生成装饰性三维曲面、发光光轨和空泛科技背景。需要精确函数、等高线、泰勒逼近、迭代轨迹、实验数值的图选renderer:native,fidelity:computed，交给可复算模型或有来源数据，禁止手填看似正确的点。仅解释概念、不声称定量结果时用fidelity:conceptual，可以生图。复杂页面可以拆成一个image机制图和一个native数据块，不用整页禁用生图。论文原图source-figure只复用。不要强制每页配图。概念/框架/机制图不用添加“示意图·非实测”免责声明；数据图则保留真实来源和实验设置。数学公式默认28px，由服务器测量和等价换行，不能虚构measurement。板书页预算为左侧544px净宽。教学封面优先只用课程标题、统一色彩和留白；没有内容意义的AI背景会被服务端移除。',
+                '视觉类型kind与绘制工具renderer必须分开。贴纸、表情包、角标、小徽章这类纯装饰用 kind:"sticker"：只画一个孤立主体，不带文字、不带整幅背景；服务端会自动抠图成透明并小尺寸落位，所以不要在 sticker 上要求背景、场景或图注。工作汇报中的表格、指标矩阵、数值对比与明确节点流程优先renderer:native（表格用kind:chart，流程用kind:scientific-diagram），保持数字、状态、文字和关系可编辑；纯文字双栏或三栏并列说明使用visualKind:none、visuals:[]，直接以可编辑文本排版，不强制chart或graph。表格brief列出有来源的完整行列。复杂科研机制、实验装置、主体插画才优先renderer:image；brief明确部件、关系和箭头，不允许多余拼贴、照片条或无关装饰。选择image渲染的概念性框架图、流程图、知识地图使用 annotationMode:"embedded"：生图负责图内短标签、连接线与箭头，SVG只负责图外标题正文，不再叠加同一套标签和箭头。不要在看到真实图片之前猜测对象坐标。只有确实需要独立编辑、且按确定布局约束生成的精确几何标注才用 annotationMode:"overlay" 与 visuals[].annotations：{type:"vector"|"guide"|"label", from/to 或 at（实际图像内 0 到 1 的相对坐标）, label 或 text（不超过 24 字）, color?}；此模式下图片禁止同名标签与箭头，服务端按真实图像比例投影。定量或严格几何关系优先native，由服务端计算。科研图默认简洁的二维学术图、实物照片或可核实原始资料；没有定义函数与数据时，不生成装饰性三维曲面、发光光轨和空泛科技背景。需要精确函数、等高线、泰勒逼近、迭代轨迹、实验数值的图选renderer:native,fidelity:computed，交给可复算模型或有来源数据，禁止手填看似正确的点。仅解释概念、不声称定量结果时用fidelity:conceptual，可以生图。复杂页面可以拆成一个image机制图和一个native数据块，不用整页禁用生图。论文原图source-figure只复用。不要强制每页配图。概念/框架/机制图不用添加“示意图·非实测”免责声明；数据图则保留真实来源和实验设置。数学公式默认28px，由服务器测量和等价换行，不能虚构measurement。板书页预算为左侧544px净宽。教学封面优先只用课程标题、统一色彩和留白；没有内容意义的AI背景会被服务端移除。',
             },
             {
               role: 'user',
@@ -592,6 +767,7 @@ export const createPresentationContentCompiler = (
                 sourceDocumentVisuals: input.options?.sourceDocumentVisuals,
                 availableAssetRefs: input.options?.availableAssetRefs,
                 requestedImageSlots: input.options?.imageSlots,
+                approvedImageBindings: input.options?.generatedImageSlots,
                 teachingStage: input.options?.lessonStage,
                 rasterBudget: rasterBudgetInstruction(allowance),
                 visualEnrichment: {
@@ -639,7 +815,12 @@ export const createPresentationContentCompiler = (
 
 export const readContentIntents = (input: PresentationJobInput): SlideContentIntent[] => {
   const value = input.options?.contentIntents as { slides?: unknown } | undefined;
-  return value ? z.array(slideContentIntentSchema).parse(value.slides) : [];
+  return value
+    ? z
+        .array(slideContentIntentSchema)
+        .parse(value.slides)
+        .map((intent, index) => normalizeApprovedPageIntent(intent, input, index))
+    : [];
 };
 
 export const CONTENT_RENDERING_INSTRUCTIONS = `每页围绕一个明确任务组织信息；封面、章节和收束页留白，汇报数据/对比页使用完整表格、图表与关键结论，教学页按讲解步骤组织。正文至少24px，原生表格18–24px，短标签/坐标/页脚至少16px。大纲要点只是内容，不代表项目符号列表；默认用短句、分栏或留白组织，不添加Markdown圆点、星号或破折号，只有用户或模板明确要求列表时才保留。先留真实图像与公式区域，再排文字；借鉴模板的信息层级和图文比例，正文保留核心事实与比较维度，不把关键事实全部转移到备注。公式用formula节点渲染，使用编译器给出的完整latex、measurement字号和尺寸；不能缩字或改变数学含义。板书页左侧净宽544，右侧三分之一留白，不跨栏。按visuals.renderer选工具：image的科研/框架/流程图用已生成的真实image资产，native的表格、流程和计算图必须用同id scientific-diagram节点；不把image图重复绘制为plot/graph。annotationMode:embedded的图内文字和箭头已经属于图片，不在SVG里重写或补箭头；overlay模式只由服务端添加已声明的标注。计算轨迹使用可复算quadratic/taylor模型或有来源数据，不让模型猜坐标。纯概念图不添加“示意图/非实测/AI生成”通用标签，数据性质保存在metadata与备注，需要避免误解的模拟数据应说明实验设置。source-figure保留原图，出处默认存讲者备注，必要时在对应图旁简短标注，不统一添加资料来源页脚。SVG用空<g data-content-id="块id"/>放置公式/计算图，服务端绘制，不重复画内容。`;

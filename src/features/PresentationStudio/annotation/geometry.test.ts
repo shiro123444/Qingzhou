@@ -16,4 +16,25 @@ describe('annotation selection', () => {
       1,
     ]);
   });
+  it('keeps blank background out of hits and prefers text under the finger to a nearby thin rule', () => {
+    const candidates: typeof boxes = [
+      boxes[1],
+      { index: 3, x: 0.202, y: 0.132, width: 0.005, height: 0.04 },
+    ];
+    expect(
+      selectAnnotationElements(
+        candidates,
+        { x: 0.2, y: 0.15, width: 0, height: 0 },
+        { x: 0.03, y: 0.03 },
+      ),
+    ).toEqual([1]);
+    expect(
+      selectAnnotationElements([{ ...boxes[0], kind: 'background' }], {
+        x: 0.08,
+        y: 0.02,
+        width: 0,
+        height: 0,
+      }),
+    ).toEqual([]);
+  });
 });

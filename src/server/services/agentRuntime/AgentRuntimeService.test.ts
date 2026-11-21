@@ -1,6 +1,7 @@
 /**
  * @vitest-environment node
  */
+import type * as AgentRuntimeModule from '@lobechat/agent-runtime';
 import { getModelPropertyWithFallback } from '@lobechat/model-runtime';
 import type * as ModelBankModule from 'model-bank';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -93,7 +94,8 @@ vi.mock('@/server/modules/AgentRuntime', async (importOriginal) => {
   };
 });
 
-vi.mock('@lobechat/agent-runtime', () => ({
+vi.mock('@lobechat/agent-runtime', async (importOriginal) => ({
+  ...(await importOriginal<typeof AgentRuntimeModule>()),
   AgentRuntime: vi.fn().mockImplementation((_agent, _options) => ({
     dispose: vi.fn().mockResolvedValue(undefined),
     step: vi.fn(),
@@ -239,20 +241,23 @@ describe('AgentRuntimeService', () => {
           status: 'idle',
           stepCount: 0,
           messages: [],
-          metadata: {
+          metadata: expect.objectContaining({
             agentConfig: mockParams.agentConfig,
             modelRuntimeConfig: mockParams.modelRuntimeConfig,
             userId: mockParams.userId,
-          },
+          }),
           toolManifestMap: {},
         }),
       );
 
-      expect(mockCoordinator.createAgentOperation).toHaveBeenCalledWith('test-operation-1', {
-        agentConfig: mockParams.agentConfig,
-        modelRuntimeConfig: mockParams.modelRuntimeConfig,
-        userId: mockParams.userId,
-      });
+      expect(mockCoordinator.createAgentOperation).toHaveBeenCalledWith(
+        'test-operation-1',
+        expect.objectContaining({
+          agentConfig: mockParams.agentConfig,
+          modelRuntimeConfig: mockParams.modelRuntimeConfig,
+          userId: mockParams.userId,
+        }),
+      );
 
       expect(mockQueueService.scheduleMessage).toHaveBeenCalledWith({
         operationId: 'test-operation-1',
@@ -1518,6 +1523,127 @@ describe('AgentRuntimeService', () => {
   });
 
   describe('processHumanIntervention', () => {
+    it('binds native approvals to the stored call and rejects changed or stale reviews', async () => {
+      vi.stubEnv('AGENT_RUNTIME_MODE', 'native');
+      try {
+        const pending = {
+          id: 'tool-1',
+          identifier: 'search',
+          apiName: 'find',
+          arguments: '{"q":"x"}',
+        };
+        const state = {
+          status: 'waiting_for_human',
+          stepCount: 2,
+          metadata: { userId: mockUserId },
+          pendingToolsCalling: [pending],
+        };
+        mockCoordinator.loadAgentState.mockResolvedValue(state);
+        mockDb.query = {
+          messagePlugins: {
+            findFirst: vi.fn().mockResolvedValue({
+              toolCallId: pending.id,
+              identifier: pending.identifier,
+              apiName: pending.apiName,
+            }),
+          },
+        };
+        mockQueueService.scheduleMessage.mockResolvedValue('accepted');
+        const input = {
+          action: 'approve' as const,
+          operationId: 'op',
+          stepIndex: 2,
+          approvedToolCall: { id: pending.id },
+          toolMessageId: 'message-1',
+        };
+        await service.processHumanIntervention(input);
+        expect(mockQueueService.scheduleMessage).toHaveBeenCalledWith(
+          expect.objectContaining({
+            payload: expect.objectContaining({ approvedToolCall: pending }),
+          }),
+        );
+        mockQueueService.scheduleMessage.mockClear();
+        await expect(
+          service.processHumanIntervention({
+            ...input,
+            approvedToolCall: { ...pending, arguments: '{"q":"changed"}' },
+          }),
+        ).rejects.toThrow('arguments changed');
+        mockCoordinator.loadAgentState.mockResolvedValue({ ...state, stepCount: 3 });
+        await expect(service.processHumanIntervention(input)).rejects.toThrow('stale');
+        expect(mockQueueService.scheduleMessage).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('does not expose, interrupt or start another account native operation', async () => {
+      vi.stubEnv('AGENT_RUNTIME_MODE', 'native');
+      try {
+        mockCoordinator.loadAgentState.mockResolvedValue({
+          status: 'idle',
+          metadata: { userId: 'other' },
+        });
+        mockCoordinator.getOperationMetadata.mockResolvedValue({ userId: 'other' });
+        expect(await service.getOperationStatus({ operationId: 'other' })).toBeNull();
+        expect(await service.interruptOperation('other')).toBe(false);
+        await expect(service.executeStep({ operationId: 'other', stepIndex: 0 })).rejects.toThrow(
+          'owner mismatch',
+        );
+        expect(mockCoordinator.acquireStepLease).not.toHaveBeenCalled();
+        expect(mockCoordinator.saveAgentStateWithLease).not.toHaveBeenCalled();
+        await expect(service.startExecution({ operationId: 'other' })).rejects.toThrow('not found');
+        await expect(
+          service.createOperation({
+            operationId: 'other',
+            userId: 'other',
+          } as OperationCreationParams),
+        ).rejects.toThrow('owner mismatch');
+        expect(mockQueueService.scheduleMessage).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('requires review before manually restarting a paused native operation', async () => {
+      vi.stubEnv('AGENT_RUNTIME_MODE', 'native');
+      try {
+        mockCoordinator.loadAgentState.mockResolvedValue({
+          status: 'waiting_for_human',
+          metadata: { userId: mockUserId },
+        });
+        mockCoordinator.getOperationMetadata.mockResolvedValue({ userId: mockUserId });
+        await expect(service.startExecution({ operationId: 'paused' })).rejects.toThrow(
+          'pending review',
+        );
+        expect(mockQueueService.scheduleMessage).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('rejects memory-only hooks before creating a native operation', async () => {
+      vi.stubEnv('AGENT_RUNTIME_MODE', 'native');
+      try {
+        await expect(
+          service.createOperation({
+            operationId: 'memory-only',
+            appContext: {},
+            initialContext: {
+              phase: 'user_input',
+              payload: {},
+              session: { sessionId: 'memory-only', status: 'idle', stepCount: 0, messageCount: 0 },
+            },
+            toolSet: { manifestMap: {} },
+            hooks: [{ id: 'callback', type: 'onComplete', handler: async () => {} }],
+          }),
+        ).rejects.toThrow('requires durable hooks');
+        expect(mockCoordinator.createAgentOperation).not.toHaveBeenCalled();
+        expect(mockQueueService.scheduleMessage).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
     it('should process human intervention successfully', async () => {
       mockQueueService.scheduleMessage.mockResolvedValue('message-789');
 

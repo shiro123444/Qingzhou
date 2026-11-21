@@ -7,7 +7,9 @@ import type {
   RuntimeScope,
 } from '../../../../packages/runtime-contracts/src';
 import { isReusableTemplateComponent } from './artwork-pipeline';
+import type { CapabilityCapsule } from './capability-memory';
 import { isRasterVisual, readContentIntents, visualRequirements } from './content-intent';
+import { designFingerprint, designReferencePayload } from './design-evidence';
 import { LESSON_RENDERING_INSTRUCTIONS, publicLessonStages } from './lesson';
 import { materialContextForSlides } from './material-document';
 import type { GLMMultimodalChatPort } from './multimodal-chat-provider-glm';
@@ -66,6 +68,7 @@ export const presentationStoryboardInputFingerprint = (input: PresentationJobInp
   createHash('sha256')
     .update(
       JSON.stringify({
+        agentRoutingFingerprint: input.options?.agentRoutingFingerprint,
         outline: input.options?.outline,
         prompt: input.prompt,
         slideCount: input.slideCount,
@@ -74,8 +77,18 @@ export const presentationStoryboardInputFingerprint = (input: PresentationJobInp
           input.options?.contentIntents as { inputFingerprint?: string } | undefined
         )?.inputFingerprint,
         visualDirection: input.options?.visualDirection,
+        layoutCompatibility: input.options?.layoutCompatibility,
         templateSources: input.options?.templateSources,
         materials: input.options?.materials,
+        designReferences: (
+          input.options?.learnedCapabilities as { capsules?: CapabilityCapsule[] } | undefined
+        )?.capsules
+          ? designFingerprint(
+              designReferencePayload(
+                (input.options!.learnedCapabilities as { capsules: CapabilityCapsule[] }).capsules,
+              ),
+            )
+          : undefined,
       }),
     )
     .digest('hex')
@@ -205,6 +218,9 @@ export const createPresentationVisualStoryboardPlanner = (options: {
     const layoutIds = new Set(template.layouts.map((layout) => layout.layoutId));
     const components = new Map(template.visual!.components.map((item) => [item.id, item]));
     const inputFingerprint = presentationStoryboardInputFingerprint(jobInput);
+    const authoredDesign =
+      (jobInput.options?.deckVisualSystem as { schemaVersion?: number } | undefined)
+        ?.schemaVersion === 3;
 
     const result = await completeStructuredJson({
       chat: options.chat,
@@ -343,6 +359,7 @@ export const createPresentationVisualStoryboardPlanner = (options: {
           return {
             ...slide,
             ...(jobInput.options?.deckVisualSystem &&
+            !authoredDesign &&
             ['cover', 'closing'].includes(role) &&
             intent &&
             visualRequirements(intent).length === 0
@@ -405,10 +422,29 @@ export const createPresentationVisualStoryboardPlanner = (options: {
             content: JSON.stringify({
               designProgram: design,
               userStyle: jobInput.options?.style,
-              deckVisualSystem: jobInput.options?.deckVisualSystem,
-              deckPolicy: jobInput.options?.deckVisualSystem
-                ? '整稿的字体、色板、页眉页脚、标题和正文净区已锁定。仅为各页选择内容区的构图、素材、图表与阅读顺序；不同模板不允许改变母版。compositionIntent不得重新规定页眉、字号、口号或旧机构名称。'
+              checkedPageLayouts: jobInput.options?.layoutCompatibility,
+              selectedDesignReferences: authoredDesign
+                ? designReferencePayload(
+                    (
+                      jobInput.options?.learnedCapabilities as
+                        { capsules?: CapabilityCapsule[] } | undefined
+                    )?.capsules ?? [],
+                  )
                 : undefined,
+              selectedMethods: authoredDesign
+                ? (
+                    jobInput.options?.learnedCapabilities as
+                      { capsules?: { kind: string; name: string; rules: string[] }[] } | undefined
+                  )?.capsules
+                    ?.filter((item) => item.kind === 'style')
+                    .map(({ name, rules }) => ({ name, rules }))
+                : undefined,
+              deckVisualSystem: jobInput.options?.deckVisualSystem,
+              deckPolicy: authoredDesign
+                ? '整稿保留共同的设计语言，由各页任务决定完整画幅的构图、标题层级与留白；没有预制页眉、页脚、标题位置或正文净区。Style提供表达与视觉方法，Layout提供可调整的结构参考，不把中性原型的灰色或占位字体当成品牌。compositionIntent必须说明本页的真实构图，不得假定服务端会再绘制母版。'
+                : jobInput.options?.deckVisualSystem
+                  ? '整稿的字体、色板、页眉页脚、标题和正文净区已锁定。仅为各页选择内容区的构图、素材、图表与阅读顺序；不同模板不允许改变母版。compositionIntent不得重新规定页眉、字号、口号或旧机构名称。'
+                  : undefined,
               componentSelectionPolicy:
                 '每个被选中的 artwork 主体必须在本页 assetBrief 解释和当前主题的内容联系，无论assetMode取值是什么。纯native流程页无需位图主体时，componentIds返回[]；不要为凑复用数量搬入旧照片。已提供的availableAssetRefs由后续素材规划绑定，不写进componentIds。',
               primaryStyle: template.compositionPolicy ? design.tokens : undefined,

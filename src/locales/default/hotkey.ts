@@ -39,7 +39,9 @@ export default {
   'switchAgent.desc':
     'Switch between pinned agents in the sidebar by holding Ctrl and pressing numbers 0-9',
   'switchAgent.title': 'Quick Switch Agent',
+  'toggleLeftPanel.collapse': 'Collapse sidebar',
   'toggleLeftPanel.desc': 'Show or hide the left panel',
+  'toggleLeftPanel.expand': 'Expand sidebar',
   'toggleLeftPanel.title': 'Toggle Left Panel',
   'toggleRightPanel.desc': 'Show or hide the right panel',
   'toggleRightPanel.title': 'Toggle Right Panel',

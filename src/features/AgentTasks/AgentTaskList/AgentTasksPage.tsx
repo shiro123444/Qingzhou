@@ -4,6 +4,7 @@ import { memo, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { DESKTOP_HEADER_ICON_SMALL_SIZE } from '@/const/layoutTokens';
+import { BackgroundActivityButton } from '@/features/BackgroundActivity';
 import NavHeader from '@/features/NavHeader';
 import ToggleRightPanelButton from '@/features/RightPanel/ToggleRightPanelButton';
 import WideScreenContainer from '@/features/WideScreenContainer';
@@ -67,6 +68,7 @@ const AgentTasksPage = memo(() => {
         left={<Breadcrumb />}
         right={
           <Flexbox horizontal align={'center'} gap={4}>
+            <BackgroundActivityButton />
             {(inlineCollapsed || viewMode === 'kanban') && (
               <ActionIcon
                 icon={Plus}

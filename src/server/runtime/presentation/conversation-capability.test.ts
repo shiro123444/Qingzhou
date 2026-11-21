@@ -57,6 +57,38 @@ const command = {
 const op = (operation: string, input: unknown = {}) => ({ operation, input });
 
 describe('autonomous presentation conversation', () => {
+  it.each([true, false])(
+    'retrieves scoped teaching memory only when the teaching request permits it (%s)',
+    async (useMemory) => {
+      const search = vi.fn(async () => []);
+      const teachingContext = {
+        active: true,
+        course: '物理',
+        query: '学生预测实验结果',
+        useMemory,
+      };
+      const chat = chatPort(op('planning.update', { topic: '实验预测', plan, teachingContext }), {
+        phase: 'intake',
+        completion: 'fulfilled',
+        message: '已整理备课需求。',
+      });
+      const result = await createPresentationConversationCapability({
+        chat,
+        teachingMemory: { search },
+      }).execute(
+        {
+          ...command,
+          messages: [{ role: 'user', content: '先为课堂实验整理备课需求。' }],
+        },
+        { scope },
+      );
+      expect(result.brief.teachingContext).toEqual(teachingContext);
+      expect(result.brief.teachingSelection).toEqual({ course: '物理', ids: [] });
+      if (useMemory) expect(search).toHaveBeenCalledWith(scope, '学生预测实验结果', '物理');
+      else expect(search).not.toHaveBeenCalled();
+    },
+  );
+
   it('repairs an unfinished announcement into an actual question instead of silently stopping', async () => {
     const chat = chatPort(
       {
@@ -395,7 +427,7 @@ describe('autonomous presentation conversation', () => {
       await expect(
         createPresentationConversationCapability({
           chat: chatPort(op('context.search', { query: 'private' })),
-        }).execute(command, { scope, tools: runtime }),
+        }).execute({ ...command, tools: { search: false } }, { scope, tools: runtime }),
       ).rejects.toThrow('联网搜索不可用');
       await expect(
         createPresentationConversationCapability({

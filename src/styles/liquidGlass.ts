@@ -4,6 +4,14 @@ import { createStaticStyles } from 'antd-style';
 export const { liquidGlass, liquidGlassBackdrop, liquidGlassOverlays, glassSurface } =
   createStaticStyles(({ css, cssVar }) => ({
     liquidGlass: css`
+      --qz-glass-radius-shell: 20px;
+      --qz-glass-radius-panel: 20px;
+      --qz-glass-radius-item: 12px;
+      --qz-glass-selection: linear-gradient(
+        110deg,
+        color-mix(in srgb, var(--qz-glass-tint) 14%, transparent),
+        color-mix(in srgb, var(--qz-glass-tint) 4%, transparent)
+      );
       --qz-glass-surface: color-mix(in srgb, ${cssVar.colorBgElevated} 24%, transparent);
       --qz-glass-strong: color-mix(in srgb, ${cssVar.colorBgElevated} 66%, transparent);
       --qz-glass-border: color-mix(in srgb, ${cssVar.colorText} 12%, transparent);
@@ -51,6 +59,8 @@ export const { liquidGlass, liquidGlassBackdrop, liquidGlassOverlays, glassSurfa
       [role='dialog'][data-side],
       [role='dialog'][aria-modal='true'][data-open]:not([data-side]) > div:only-child {
         border-color: var(--qz-glass-border);
+        border-radius: var(--qz-glass-radius-panel);
+
         background: var(--qz-glass-sheen), var(--qz-glass-strong);
         backdrop-filter: var(--qz-glass-filter);
         box-shadow: var(--qz-glass-shadow);

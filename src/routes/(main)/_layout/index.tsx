@@ -11,7 +11,9 @@ import { Outlet } from 'react-router-dom';
 
 import Loading from '@/components/Loading/BrandTextLoading';
 import { isDesktop } from '@/const/version';
+import CompanionHost from '@/features/AgentComputer/CompanionHost';
 import { BANNER_HEIGHT } from '@/features/AlertBanner/CloudBanner';
+import BotSurfaceHost from '@/features/BotSurface';
 import DesktopFileMenuBridge from '@/features/DesktopFileMenuBridge';
 import DesktopNavigationBridge from '@/features/DesktopNavigationBridge';
 import AuthRequiredModal from '@/features/Electron/AuthRequiredModal';
@@ -79,16 +81,20 @@ const Layout: FC = () => {
         >
           <NavPanel />
           <DesktopLayoutContainer>
-            <MusicPlayerHost>
-              <MarketAuthProvider isDesktop={isDesktop}>
-                <DesktopHomeLayout>
-                  <DesktopHome />
-                </DesktopHomeLayout>
-                <Suspense fallback={<Loading debugId="DesktopMainLayout > Outlet" />}>
-                  <Outlet />
-                </Suspense>
-              </MarketAuthProvider>
-            </MusicPlayerHost>
+            <BotSurfaceHost>
+              <CompanionHost>
+                <MusicPlayerHost>
+                  <MarketAuthProvider isDesktop={isDesktop}>
+                    <DesktopHomeLayout>
+                      <DesktopHome />
+                    </DesktopHomeLayout>
+                    <Suspense fallback={<Loading debugId="DesktopMainLayout > Outlet" />}>
+                      <Outlet />
+                    </Suspense>
+                  </MarketAuthProvider>
+                </MusicPlayerHost>
+              </CompanionHost>
+            </BotSurfaceHost>
           </DesktopLayoutContainer>
         </Flexbox>
       </DndContextWrapper>

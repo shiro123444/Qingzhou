@@ -10,13 +10,14 @@ const options = {
   trimValues: false,
 };
 
-/** Canonicalize attribute quotes and shape opacity for ppt-master's SVG tools. */
-export const normalizePresentationSvg = (svg: string): string => {
-  // Some ppt-master checks read attributes with double-quote-only patterns.
-  // XML serialization preserves coordinates and escapes attribute contents safely.
-  if (/<[\w:.-]+\b[^>]*\s[\w:.-]+\s*=\s*'/u.test(svg)) svg = parseString(svg).toString();
+// Some PPT Master checks only recognize attributes delimited by double quotes.
+const normalizeSvgAttributeQuotes = (svg: string): string =>
+  /<[\w:.-]+\b[^>]*\s[\w:.-]+\s*=\s*'/u.test(svg) ? parseString(svg).toString() : svg;
+
+/** Flatten group opacity before resolving raster assets for a rendered copy. */
+export const normalizeGroupOpacity = (svg: string): string => {
   if (!/<g\b[^>]*\sopacity\s*=/i.test(svg)) return svg;
-  const nodes = new XMLParser(options).parse(svg) as XmlNode[];
+  const nodes = new XMLParser(options).parse(normalizeSvgAttributeQuotes(svg)) as XmlNode[];
   const opacity = (value?: string) =>
     value === undefined
       ? 1
@@ -42,13 +43,16 @@ export const normalizePresentationSvg = (svg: string): string => {
   return new XMLBuilder(options).build(nodes);
 };
 
+export const normalizePresentationSvg = (svg: string): string =>
+  normalizeSvgAttributeQuotes(normalizeGroupOpacity(svg));
+
 /** The PPT converter needs raster alpha baked into pixels, not an SVG image opacity attribute. */
 export const normalizeRasterOpacity = async (
   svg: string,
   transform: (ref: string, opacity: number) => Promise<string>,
 ): Promise<string> => {
   if (!/<image\b[^>]*\sopacity\s*=/i.test(svg)) return svg;
-  const nodes = new XMLParser(options).parse(svg) as XmlNode[];
+  const nodes = new XMLParser(options).parse(normalizeSvgAttributeQuotes(svg)) as XmlNode[];
   const visit = async (items: XmlNode[]): Promise<void> => {
     for (const node of items) {
       const tag = Object.keys(node).find((key) => key !== ':@');

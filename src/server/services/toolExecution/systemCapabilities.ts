@@ -25,6 +25,8 @@ export interface SystemCapabilityPorts extends ChannelExtraPorts {
   /** Trusted lazy provider. Discovery never calls it. */
   loadPresentation?: () => Promise<PresentationGenerationPort>;
   presentation?: PresentationGenerationPort;
+  /** Trusted deployment policy, also applied to provider-independent presentation tools. */
+  presentationEnabled?: boolean;
   presentationUnavailableReason?: string;
   saveSvg: (svg: string) => Promise<unknown>;
   tasks: {
@@ -46,14 +48,14 @@ export const createSystemCapabilityTools = (
   if (!context.userId || !context.topicId) throw new Error('Authenticated tool scope required');
   const scope = presentationAccountScope(context.userId);
 
-  let presentation = ports.presentation;
+  const loadPresentation = ports.presentationEnabled === false ? undefined : ports.loadPresentation;
+  let presentation = ports.presentationEnabled === false ? undefined : ports.presentation;
   let loading: Promise<PresentationGenerationPort> | undefined;
   const ensurePresentation = async () => {
     assertHeld(context);
     if (presentation) return presentation;
-    if (!ports.loadPresentation) throw new Error('Presentation provider unavailable');
-    loading ??= ports
-      .loadPresentation()
+    if (!loadPresentation) throw new Error('Presentation provider unavailable');
+    loading ??= loadPresentation()
       .then((port) => {
         assertHeld(context);
         presentation = port;
@@ -66,7 +68,8 @@ export const createSystemCapabilityTools = (
   };
   const getOperations = async (): Promise<AtomicOperation[]> => {
     assertHeld(context);
-    const presentationOperations: AtomicOperation[] = presentationVectorOperations();
+    const presentationOperations: AtomicOperation[] =
+      ports.presentationEnabled === false ? [] : presentationVectorOperations();
     const publicTools = await presentation?.listOperations();
     const extras = publicTools?.tools ?? [];
     for (const tool of extras) {
@@ -79,7 +82,7 @@ export const createSystemCapabilityTools = (
         execute: (input) => presentation!.executeOperation(tool.name, input, context.signal),
       });
     }
-    if (presentation || ports.loadPresentation)
+    if (presentation || loadPresentation)
       presentationOperations.push({
         name: 'presentation.create',
         description:
@@ -145,7 +148,7 @@ export const createSystemCapabilityTools = (
           ]
         : []),
     ];
-    if (presentation || ports.loadPresentation)
+    if (presentation || loadPresentation)
       presentationOperations.push({
         name: 'presentation.catalog',
         description:
@@ -167,7 +170,7 @@ export const createSystemCapabilityTools = (
     let operations = await getOperations();
     if (
       !operations.some((operation) => operation.name === name) &&
-      ports.loadPresentation &&
+      loadPresentation &&
       ['presentation', 'assets', 'skills'].includes(name.split('.')[0])
     ) {
       await ensurePresentation();
@@ -249,9 +252,9 @@ export const createSystemCapabilityTools = (
         success: true,
         content: JSON.stringify({
           presentationReady: !!presentation,
-          presentationConfigured: !!(presentation || ports.loadPresentation),
+          presentationConfigured: !!(presentation || loadPresentation),
           presentationActivation:
-            !presentation && ports.loadPresentation
+            !presentation && loadPresentation
               ? 'Invoke presentation.create directly, or presentation.catalog to activate and discover additional operations.'
               : undefined,
           pngReady: !!ports.images,
@@ -263,7 +266,7 @@ export const createSystemCapabilityTools = (
               }
             : {}),
           presentationSetup:
-            presentation || ports.loadPresentation
+            presentation || loadPresentation
               ? undefined
               : (ports.presentationUnavailableReason ??
                 'PPT generation requires CORDIS_PPT_MASTER_ROOT with real checker/converter scripts and CORDIS_PPT_PYTHON; formula and diagram tools are available.'),

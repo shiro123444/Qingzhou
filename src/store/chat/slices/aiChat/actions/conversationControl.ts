@@ -396,6 +396,30 @@ export class ConversationControlActionImpl {
     const optimisticContext: OptimisticUpdateContext = { operationId };
     const shouldCreateUserMessage = options?.createUserMessage !== false;
 
+    if (window.global_serverConfigStore?.getState()?.serverConfig?.agentRuntimeMode === 'native') {
+      try {
+        if (!toolMessage.tool_call_id) throw new Error('Pending question identity is missing');
+        await this.#get().executeGatewayAgent({
+          context: effectiveContext,
+          message: '',
+          parentMessageId: toolMessageId,
+          resumeApproval: {
+            decision: 'answered',
+            parentMessageId: toolMessageId,
+            toolCallId: toolMessage.tool_call_id,
+            response,
+          },
+          parentOperationId: operationId,
+        });
+      } catch (error) {
+        this.#get().failOperation(operationId, {
+          type: 'NativeInteractionError',
+          message: (error as Error).message,
+        });
+      }
+      return;
+    }
+
     // 1. Mark intervention as approved and set tool result to user's response
     await this.#get().optimisticUpdateMessagePlugin(
       toolMessageId,
@@ -568,6 +592,30 @@ export class ConversationControlActionImpl {
 
     const optimisticContext: OptimisticUpdateContext = { operationId };
 
+    if (window.global_serverConfigStore?.getState()?.serverConfig?.agentRuntimeMode === 'native') {
+      try {
+        if (!toolMessage.tool_call_id) throw new Error('Pending question identity is missing');
+        await this.#get().executeGatewayAgent({
+          context: effectiveContext,
+          message: '',
+          parentMessageId: toolMessageId,
+          resumeApproval: {
+            decision: 'rejected_continue',
+            parentMessageId: toolMessageId,
+            toolCallId: toolMessage.tool_call_id,
+            rejectionReason: reason || 'User skipped this question.',
+          },
+          parentOperationId: operationId,
+        });
+      } catch (error) {
+        this.#get().failOperation(operationId, {
+          type: 'NativeInteractionError',
+          message: (error as Error).message,
+        });
+      }
+      return;
+    }
+
     // 1. Mark intervention as rejected (skipped) with reason
     await this.#get().optimisticUpdateMessagePlugin(
       toolMessageId,
@@ -672,6 +720,30 @@ export class ConversationControlActionImpl {
     });
 
     const optimisticContext = { operationId };
+
+    if (window.global_serverConfigStore?.getState()?.serverConfig?.agentRuntimeMode === 'native') {
+      try {
+        if (!toolMessage.tool_call_id) throw new Error('Pending question identity is missing');
+        await this.#get().executeGatewayAgent({
+          context: effectiveContext,
+          message: '',
+          parentMessageId: toolMessageId,
+          resumeApproval: {
+            decision: 'rejected',
+            parentMessageId: toolMessageId,
+            toolCallId: toolMessage.tool_call_id,
+            rejectionReason: 'User cancelled interaction',
+          },
+          parentOperationId: operationId,
+        });
+      } catch (error) {
+        this.#get().failOperation(operationId, {
+          type: 'NativeInteractionError',
+          message: (error as Error).message,
+        });
+      }
+      return;
+    }
 
     await this.#get().optimisticUpdateMessagePlugin(
       toolMessageId,

@@ -11,6 +11,7 @@ import { publicProcedure, router } from '@/libs/trpc/lambda';
 
 import { agentRouter } from './agent';
 import { agentBotProviderRouter } from './agentBotProvider';
+import { agentComputerRouter } from './agentComputer';
 import { agentDocumentRouter } from './agentDocument';
 import { agentEvalRouter } from './agentEval';
 import { agentEvalExternalRouter } from './agentEvalExternal';
@@ -24,6 +25,7 @@ import { aiChatRouter } from './aiChat';
 import { aiModelRouter } from './aiModel';
 import { aiProviderRouter } from './aiProvider';
 import { apiKeyRouter } from './apiKey';
+import { backgroundActivityRouter } from './backgroundActivity';
 import { botDeliveryRouter } from './botDelivery';
 import { botMessageRouter } from './botMessage';
 import { briefRouter } from './brief';
@@ -94,6 +96,8 @@ export const lambdaRouter = router({
   aiChat: aiChatRouter,
   aiModel: aiModelRouter,
   aiProvider: aiProviderRouter,
+  backgroundActivity: backgroundActivityRouter,
+  agentComputer: agentComputerRouter,
   apiKey: apiKeyRouter,
   chunk: chunkRouter,
   comfyui: comfyuiRouter,

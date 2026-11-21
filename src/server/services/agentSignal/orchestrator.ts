@@ -15,6 +15,7 @@ import type {
   AgentSignalExecutionContext,
   AgentSignalSourceEventInput,
 } from './emitter';
+import { resolveAgentSignalModelConfig } from './modelConfig';
 import { projectAgentSignalObservability } from './observability/projector';
 import { persistAgentSignalObservability } from './observability/store';
 import type { CreateDefaultAgentSignalPoliciesOptions } from './policies';
@@ -127,17 +128,20 @@ const createPolicyOptions = (
   context: AgentSignalExecutionContext,
   options: ExecuteAgentSignalSourceEventOptions,
   procedurePolicyOptions: NonNullable<CreateDefaultAgentSignalPoliciesOptions['procedure']>,
+  modelConfig: { model: string; provider: string },
 ): CreateDefaultAgentSignalPoliciesOptions => {
   const policyOptions = withServerAgentSignalPolicyDefaults(options.policyOptions, context);
 
   return {
     feedbackDomainJudge: {
       db: context.db,
+      ...modelConfig,
       ...policyOptions?.feedbackDomainJudge,
       userId: context.userId,
     },
     feedbackSatisfactionJudge: {
       db: context.db,
+      ...modelConfig,
       ...policyOptions?.feedbackSatisfactionJudge,
       userId: context.userId,
     },
@@ -153,12 +157,14 @@ const createPolicyOptions = (
     },
     skillManagement: {
       db: context.db,
+      skillDecisionModel: modelConfig,
       ...policyOptions?.skillManagement,
       selfIterationEnabled: policyOptions?.skillManagement?.selfIterationEnabled ?? false,
       userId: context.userId,
     },
     skillIntentClassifier: {
       db: context.db,
+      ...modelConfig,
       ...policyOptions?.skillIntentClassifier,
       userId: context.userId,
     },
@@ -179,6 +185,13 @@ const executeAgentSignalSourceEventCore = async <TSourceType extends AgentSignal
     );
     if (emission.deduped) return emission;
 
+    const modelConfig = await resolveAgentSignalModelConfig(
+      context.db,
+      context.userId,
+      context.agentId ??
+        ('agentId' in sourceEvent.payload ? (sourceEvent.payload.agentId as string) : undefined),
+    );
+
     const procedurePolicyOptions =
       options.policyOptions?.procedure ??
       createProcedurePolicyOptions({
@@ -189,7 +202,7 @@ const executeAgentSignalSourceEventCore = async <TSourceType extends AgentSignal
     const runtime = await createAgentSignalRuntime({
       guardBackend: options.runtimeGuardBackend,
       policies: createDefaultAgentSignalPolicies(
-        createPolicyOptions(context, options, procedurePolicyOptions),
+        createPolicyOptions(context, options, procedurePolicyOptions, modelConfig),
       ),
     });
     const runtimeResult = await runtime.emitNormalized(emission.source);

@@ -1,6 +1,14 @@
 import { createStaticStyles } from 'antd-style';
 
-export const styles = createStaticStyles(({ css }) => ({
+export const styles = createStaticStyles(({ css, cssVar }) => ({
+  floatingLayer: css`
+    pointer-events: none;
+    position: fixed;
+
+    /* Above workspace editors; standard menus and modal dialogs retain their own layer. */
+    z-index: calc(${cssVar.zIndexPopupBase} - 100);
+    inset: 0;
+  `,
   shell: css`
     position: relative;
 

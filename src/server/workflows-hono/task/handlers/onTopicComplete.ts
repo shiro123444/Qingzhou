@@ -2,6 +2,7 @@ import debug from 'debug';
 import type { Context } from 'hono';
 
 import { getServerDB } from '@/database/server';
+import { isNativeAgentRuntimeEnabled } from '@/server/runtime/tasks/mode';
 import { TaskLifecycleService } from '@/server/services/taskLifecycle';
 
 const log = debug('lobe-server:workflows:task:on-topic-complete');
@@ -20,6 +21,7 @@ export interface OnTopicCompletePayload {
 }
 
 export async function onTopicComplete(c: Context) {
+  if (isNativeAgentRuntimeEnabled()) return c.json({ success: true, managedBy: 'native-worker' });
   try {
     const body = (await c.req.json()) as OnTopicCompletePayload;
     const {

@@ -402,6 +402,12 @@ export class PresentationPlanningSessions {
               question.choices = result.question.choices
                 .slice(0, 8)
                 .map((choice) => ({ ...choice }));
+            if (result.question?.context?.length)
+              question.context = result.question.context
+                .filter((item): item is string => typeof item === 'string')
+                .map((item) => item.trim().slice(0, 500))
+                .filter(Boolean)
+                .slice(0, 6);
             question.title = result.question?.title ?? '继续前请确认';
             question.detail = result.question?.prompt ?? result.message;
             session.collaboration.decisions = [

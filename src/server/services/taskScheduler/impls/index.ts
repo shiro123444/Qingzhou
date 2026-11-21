@@ -1,7 +1,9 @@
 import { appEnv } from '@/envs/app';
 import { qstashClient } from '@/libs/qstash';
+import { isNativeAgentRuntimeEnabled } from '@/server/runtime/tasks/mode';
 
 import { LocalTaskScheduler, type TaskExecutionCallback } from './local';
+import { NativeTaskScheduler } from './native';
 import { QStashTaskScheduler } from './qstash';
 import type { TaskSchedulerImpl } from './type';
 
@@ -18,6 +20,14 @@ let cachedExecutionCallback: TaskExecutionCallback | null = null;
  * a per-request instance would orphan pending timers on the next request.
  */
 export const createTaskSchedulerModule = (): TaskSchedulerImpl => {
+  if (isNativeAgentRuntimeEnabled()) {
+    if (!(cachedScheduler instanceof NativeTaskScheduler))
+      cachedScheduler = new NativeTaskScheduler(async () =>
+        (await import('@/database/server')).getServerDB(),
+      );
+    return cachedScheduler;
+  }
+  if (cachedScheduler instanceof NativeTaskScheduler) cachedScheduler = null;
   if (cachedScheduler) return cachedScheduler;
 
   if (appEnv.enableQueueAgentRuntime) {

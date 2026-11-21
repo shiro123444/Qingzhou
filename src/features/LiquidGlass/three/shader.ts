@@ -20,7 +20,7 @@ precision highp int;
 const float EPSILON = 0.002;
 const float INFINITY_DISTANCE = 1.0e8;
 
-uniform sampler2D uSource;
+uniform highp sampler2D uSource;
 uniform float uSourceBlur;
 uniform float uChromaticAberration;
 uniform vec2 uViewport;
@@ -33,6 +33,8 @@ uniform int uActiveVolume;
 uniform int uVolumeCount;
 uniform int uPlaneCount;
 uniform vec4 uVolumeCenterIor[MAX_VOLUMES];
+uniform float uVolumeLens[MAX_VOLUMES];
+uniform float uSurfaceFinish;
 uniform vec4 uVolumeSizeRadius[MAX_VOLUMES];
 uniform vec4 uVolumeBevelAbsorption[MAX_VOLUMES];
 uniform vec4 uPlaneCenter[MAX_PLANES];
@@ -65,6 +67,23 @@ float surface(int index, vec3 point, out vec3 normal) {
   vec3 p = point - uVolumeCenterIor[index].xyz;
   vec3 halfSize = uVolumeSizeRadius[index].xyz * 0.5;
   float outerRadius = min(uVolumeSizeRadius[index].w, min(halfSize.x, halfSize.y));
+  if (uVolumeLens[index] > 0.5 && uVolumeBevelAbsorption[index].x > 0.0) {
+    float width = uVolumeBevelAbsorption[index].x;
+    vec2 q = abs(p.xy) - halfSize.xy + outerRadius;
+    vec2 corner = max(q, vec2(0.0));
+    float cornerLength = length(corner);
+    float xy = cornerLength + min(max(q.x, q.y), 0.0) - outerRadius;
+    vec2 signXY = mix(vec2(-1.0), vec2(1.0), greaterThanEqual(p.xy, vec2(0.0)));
+    vec2 outward = cornerLength > 0.0 ? signXY * corner / cornerLength :
+      (q.x > q.y ? vec2(signXY.x, 0.0) : vec2(0.0, signXY.y));
+    float t = clamp(-xy / width, 0.0, 1.0);
+    float height = 0.35 + 0.65 * t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+    float slope = halfSize.z * 0.65 * 30.0 * t * t * (1.0 - t) * (1.0 - t) / width;
+    float z = abs(p.z) - halfSize.z * height;
+    normal = xy > z ? vec3(outward, 0.0) : normalize(vec3(outward * slope, p.z < 0.0 ? -1.0 : 1.0));
+    float bound = length(vec2(1.0, halfSize.z * 0.65 * 1.875 / width));
+    return max(xy, z) / bound;
+  }
   float bevel = min(uVolumeBevelAbsorption[index].x, min(outerRadius, halfSize.z));
   float radius = outerRadius - bevel;
   vec2 q = abs(p.xy) - (halfSize.xy - bevel - radius);
@@ -162,32 +181,18 @@ vec4 planeColor(int index, vec3 point) {
   vec2 minimum = halfTexel;
   vec2 maximum = vec2(1.0) - halfTexel;
   vec2 uv = point.xy / uViewport;
-  vec2 worldToUV = vec2(1.0) / uViewport;
   if (uvRect.z >= 0.0) {
     vec2 local = (point.xy - uPlaneCenter[index].xy) / uPlaneSizeOwnerOpaque[index].xy + 0.5;
     uv = uvRect.xy + local * uvRect.zw;
     minimum = uvRect.xy + halfTexel;
     maximum = uvRect.xy + uvRect.zw - halfTexel;
-    worldToUV = uvRect.zw / uPlaneSizeOwnerOpaque[index].xy;
   }
-  bool opaque = uPlaneSizeOwnerOpaque[index].w > 0.5;
-  if (uSourceBlur <= 0.0) {
-    vec4 color = texture(uSource, clamp(uv, minimum, maximum));
-    return vec4(color.rgb, opaque ? 1.0 : color.a);
+  vec4 color = textureLod(uSource, clamp(uv, minimum, maximum), 0.0);
+  if (uSourceBlur > 0.0) {
+    // The cached separable prefilter stores premultiplied linear light.
+    return vec4(color.a > 0.0 ? color.rgb / color.a : vec3(0.0), color.a);
   }
-  // Bounded nine-tap Gaussian source prefilter, not a change to the optical surface.
-  // Accumulate premultiplied linear light to prevent transparent texels creating dark halos.
-  vec2 stepUV = worldToUV * uSourceBlur * 1.41421356237;
-  vec4 filtered = vec4(0.0);
-  for (int y = -1; y <= 1; y++) {
-    for (int x = -1; x <= 1; x++) {
-      float weight = float((x == 0 ? 2 : 1) * (y == 0 ? 2 : 1)) / 16.0;
-      vec4 color = texture(uSource, clamp(uv + vec2(float(x), float(y)) * stepUV, minimum, maximum));
-      float alpha = opaque ? 1.0 : color.a;
-      filtered += vec4(color.rgb * alpha, alpha) * weight;
-    }
-  }
-  return vec4(filtered.a > 0.0 ? filtered.rgb / filtered.a : vec3(0.0), filtered.a);
+  return vec4(color.rgb, uPlaneSizeOwnerOpaque[index].w > 0.5 ? 1.0 : color.a);
 }
 
 float mediumIor(Path path) {
@@ -200,10 +205,15 @@ float mediumIor(Path path) {
 vec4 dispersedPlaneColor(int index, vec3 point, vec2 cameraXY, Path path) {
   vec4 center = planeColor(index, point);
   if (uChromaticAberration <= 0.0 || path.reflections != 0 || path.interfaces == 0) return center;
-  vec2 separation = (point.xy - cameraXY) * uChromaticAberration;
+  vec2 halfXY = uVolumeSizeRadius[uActiveVolume].xy * 0.5;
+  float radius = min(uVolumeSizeRadius[uActiveVolume].w, min(halfXY.x, halfXY.y));
+  vec2 q = abs(cameraXY - uVolumeCenterIor[uActiveVolume].xy) - halfXY + radius;
+  float depth = -(length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - radius);
+  float edge = 1.0 - smoothstep(0.0, max(uVolumeBevelAbsorption[uActiveVolume].x, 0.001), depth);
+  vec2 separation = (point.xy - cameraXY) * uChromaticAberration * edge;
   float amount = length(separation);
   if (amount < 0.01) return center;
-  separation *= min(1.0, 1.5 / amount);
+  separation *= min(1.0, 0.5 / amount);
   vec4 red = planeColor(index, point - vec3(separation, 0.0));
   vec4 blue = planeColor(index, point + vec3(separation, 0.0));
   // Transparent content keeps its original coverage. Mix in premultiplied space
@@ -232,7 +242,13 @@ void main() {
   vec2 outlineNormal = length(outlineCorner) > 0.0 ? normalize(outlineCorner) :
     (outlineQ.x > outlineQ.y ? vec2(1.0, 0.0) : vec2(0.0, 1.0));
   float footprint = max(dot(outlineNormal, uRegion.zw / uResolution), 0.001);
-  float coverage = clamp(-outlineDistance / footprint, 0.0, 1.0);
+  float coverage = clamp(0.5 - outlineDistance / footprint, 0.0, 1.0);
+  // Extend the boundary sample to cover partially intersected corner pixels.
+  // Tracing only their outside centre would discard valid subpixel coverage.
+  if (outlineDistance > 0.0 && coverage > 0.0) {
+    vec2 signXY = mix(vec2(-1.0), vec2(1.0), greaterThanEqual(first.origin.xy - uVolumeCenterIor[uActiveVolume].xy, vec2(0.0)));
+    first.origin.xy -= outlineNormal * signXY * (outlineDistance + EPSILON * 2.0);
+  }
   first.direction = vec3(0.0, 0.0, -1.0);
   first.weight = vec3(1.0);
   first.interfaces = 0;
@@ -350,5 +366,25 @@ void main() {
   for (int index = 0; index < MAX_PENDING; index++) {
     if (index < pendingCount) radiance += pending[index].weight * environment(pending[index].direction);
   }
-  outputColor = vec4(displayColor(radiance), coverage);
+  if (uSurfaceFinish > 0.0) {
+    float depth = max(0.0, -outlineDistance);
+    float width = max(uVolumeBevelAbsorption[uActiveVolume].x, 1.0);
+    vec2 signXY = mix(vec2(-1.0), vec2(1.0), greaterThanEqual(first.origin.xy - uVolumeCenterIor[uActiveVolume].xy, vec2(0.0)));
+    vec2 outward = outlineNormal * signXY;
+    float facing = dot(outward, normalize(vec2(-0.6, -0.8))) * 0.5 + 0.5;
+    float light = smoothstep(0.0, 1.0, facing);
+    float sharpWidth = sqrt(0.65 * 0.65 + footprint * footprint / 12.0);
+    float sharp = exp(-pow((depth - 0.85) / sharpWidth, 2.0)) * 0.65 / sharpWidth;
+    float broad = exp(-pow(depth / max(width * 0.65, 1.0), 2.0));
+    float shadow = exp(-pow((depth - 2.8) / 2.0, 2.0)) * (1.0 - light);
+    // Uniform adaptive tint, with luminance compressed equally across the whole surface.
+    vec3 tint = mix(uEnvironmentBottom, uEnvironmentTop, 0.45);
+    radiance = mix(radiance, tint, 0.08 * uSurfaceFinish);
+    radiance *= 1.0 - shadow * 0.12 * uSurfaceFinish;
+    radiance += (sharp * (0.035 + 0.16 * light) + broad * 0.018 * light) * uSurfaceFinish;
+  }
+  // Sub-LSB display-space dither prevents dark 8-bit gradients from forming bands.
+  vec2 screenPixel = floor(first.origin.xy * uResolution / uRegion.zw);
+  float noise = fract(52.9829189 * fract(dot(screenPixel, vec2(0.06711056, 0.00583715)))) - 0.5;
+  outputColor = vec4(clamp(displayColor(radiance) + noise / 255.0, 0.0, 1.0), coverage);
 }`;

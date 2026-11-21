@@ -1,12 +1,12 @@
-import '@mathjax/src/js/input/tex/ams/AmsConfiguration.js';
-import '@mathjax/src/js/input/tex/base/BaseConfiguration.js';
-import '@mathjax/src/js/util/asyncLoad/esm.js';
+import '@mathjax/src/mjs/input/tex/ams/AmsConfiguration.js';
+import '@mathjax/src/mjs/input/tex/base/BaseConfiguration.js';
+import '@mathjax/src/mjs/util/asyncLoad/esm.js';
 
-import { liteAdaptor } from '@mathjax/src/js/adaptors/liteAdaptor.js';
-import { RegisterHTMLHandler } from '@mathjax/src/js/handlers/html.js';
-import { TeX } from '@mathjax/src/js/input/tex.js';
-import { mathjax } from '@mathjax/src/js/mathjax.js';
-import { SVG } from '@mathjax/src/js/output/svg.js';
+import { liteAdaptor } from '@mathjax/src/mjs/adaptors/liteAdaptor.js';
+import { RegisterHTMLHandler } from '@mathjax/src/mjs/handlers/html.js';
+import { TeX } from '@mathjax/src/mjs/input/tex.js';
+import { mathjax } from '@mathjax/src/mjs/mathjax.js';
+import { SVG } from '@mathjax/src/mjs/output/svg.js';
 import svgpath from 'svgpath';
 import { z } from 'zod';
 
@@ -226,5 +226,17 @@ export async function renderFormula(raw: FormulaBlock): Promise<string> {
   const brace = braceWidth
     ? `<path d="M ${right} ${top + 2} Q ${stem} ${top + 2} ${stem} ${top + height * scale * 0.2} L ${stem} ${middle - 10} Q ${stem} ${middle - 3} ${left + 2} ${middle} Q ${stem} ${middle + 3} ${stem} ${middle + 10} L ${stem} ${bottom - height * scale * 0.2} Q ${stem} ${bottom - 2} ${right} ${bottom - 2}" fill="none" stroke="${block.color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>`
     : '';
-  return `<g data-content-id="${block.id}" data-formula-latex="${escapeSvgText(block.latex)}" aria-label="${escapeSvgText(block.latex)}" fill="${block.color}">${brace}${paths}</g>`;
+  const { x: frameX, y: frameY, width: frameWidth, height: frameHeight } = block.rect;
+  // PPT Master's registered block marker lets its exporter compile exact LaTeX
+  // into Office Math while retaining these same vector paths as the fallback.
+  const payload = escapeSvgText(
+    JSON.stringify({
+      latex: block.latex,
+      display: 'block',
+      font_size: block.fontSize,
+      color: block.color,
+      align: 'center',
+    }),
+  );
+  return `<g id="formula-${block.id}" data-content-id="${block.id}" data-formula-latex="${escapeSvgText(block.latex)}" data-pptx-replace-with="formula" data-pptx-x="${frameX}" data-pptx-y="${frameY}" data-pptx-width="${frameWidth}" data-pptx-height="${frameHeight}" data-pptx-bounds="${frameX} ${frameY} ${frameWidth} ${frameHeight}" aria-label="${escapeSvgText(block.latex)}" fill="${block.color}"><metadata type="application/json">${payload}</metadata>${brace}${paths}</g>`;
 }

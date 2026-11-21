@@ -1,4 +1,16 @@
+import { BUILTIN_PLUGIN_IDS } from '@/config/builtinPlugins';
+
 import { type ServerConfigStore } from './store';
+
+const noPlugins: readonly string[] = [];
+export const builtinPluginSelectors = {
+  // Wait for bootstrap before activating a plugin. Older servers retain the default profile
+  // after their configuration has finished loading.
+  enabled: (s: ServerConfigStore): readonly string[] =>
+    s.serverConfig.builtinPlugins ?? (s.serverConfigInit ? BUILTIN_PLUGIN_IDS : noPlugins),
+  ready: (s: ServerConfigStore) =>
+    s.serverConfig.builtinPlugins !== undefined || s.serverConfigInit,
+};
 
 export const featureFlagsSelectors = (s: ServerConfigStore) => s.featureFlags;
 

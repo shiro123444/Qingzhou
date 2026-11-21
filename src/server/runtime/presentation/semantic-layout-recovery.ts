@@ -25,6 +25,8 @@ export async function recoverSemanticSlideLayout(input: {
   visibleContent?: string[];
   /** A deck contract owns the title/chrome and the content rectangle across every recovery path. */
   deckBody?: { x: number; y: number; width: number; height: number };
+  /** V3 pages own their heading; legacy masters still supply it externally. */
+  authoredFontFamily?: string;
 }) {
   const blocks = Array.isArray(input.rawBlocks)
     ? input.rawBlocks
@@ -83,9 +85,15 @@ export async function recoverSemanticSlideLayout(input: {
   }
   if (diagramIds.length && !diagram)
     throw new Error('A required scientific diagram has no valid source');
-  const bounds = input.deckBody ?? contentLayout(input.boardSpace, input.aspectRatio);
+  const originalBounds = input.deckBody ?? contentLayout(input.boardSpace, input.aspectRatio);
   const [ratioWidth, ratioHeight] = input.aspectRatio.split(':').map(Number);
   const canvasHeight = (960 * ratioHeight) / ratioWidth;
+  const bounds = input.authoredFontFamily
+    ? { x: 48, y: 100, width: 864, height: canvasHeight - 140 }
+    : originalBounds;
+  const recoveryHeading = input.authoredFontFamily
+    ? `<rect width="960" height="${canvasHeight}" fill="#ffffff"/><text x="48" y="64" font-family="${escapeSvgText(input.authoredFontFamily)}" font-size="32" font-weight="bold" fill="#172554">${escapeSvgText(input.title)}</text>`
+    : '';
   const formulas = input.intent.formulas.filter((formula) => formula.placement !== 'notes');
   const imageRefs = [...new Set(input.imageRefs ?? [])];
   if (
@@ -119,7 +127,7 @@ export async function recoverSemanticSlideLayout(input: {
             rect: { x: bounds.x, y: bounds.y, width, height: bounds.height },
             spec: table,
           };
-          const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 ${canvasHeight}"><g data-deck-body="true"><g data-content-id="${block.id}"/><image href="${escapeSvgText(imageRefs[0])}" x="${bounds.x + width + 24}" y="${bounds.y}" width="${bounds.width - width - 24}" height="${bounds.height}" preserveAspectRatio="xMidYMid meet"/></g></svg>`;
+          const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 ${canvasHeight}">${recoveryHeading}<g data-deck-body="true"><g data-content-id="${block.id}"/><image href="${escapeSvgText(imageRefs[0])}" x="${bounds.x + width + 24}" y="${bounds.y}" width="${bounds.width - width - 24}" height="${bounds.height}" preserveAspectRatio="xMidYMid meet"/></g></svg>`;
           return await renderSemanticBlocks(svg, [block], input.intent);
         }
       }
@@ -176,7 +184,7 @@ export async function recoverSemanticSlideLayout(input: {
         ...diagram,
         rect: { x: bounds.x, y: bounds.y, width, height: bounds.height },
       };
-      const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 ${canvasHeight}"><g data-deck-body="true"><g data-content-id="${block.id}"/><image href="${escapeSvgText(imageRefs[0])}" x="${bounds.x + width + 24}" y="${bounds.y}" width="${bounds.width - width - 24}" height="${bounds.height}" preserveAspectRatio="xMidYMid meet"/></g></svg>`;
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 ${canvasHeight}">${recoveryHeading}<g data-deck-body="true"><g data-content-id="${block.id}"/><image href="${escapeSvgText(imageRefs[0])}" x="${bounds.x + width + 24}" y="${bounds.y}" width="${bounds.width - width - 24}" height="${bounds.height}" preserveAspectRatio="xMidYMid meet"/></g></svg>`;
       try {
         return {
           ...(await renderSemanticBlocks(svg, [block], input.intent)),
@@ -243,7 +251,9 @@ export async function recoverSemanticSlideLayout(input: {
   const columnWidth = sideBySide ? (bounds.width - 24) / 2 : bounds.width;
   const textMarkup: string[] = [];
   const fontSize = 24;
-  const fontFamily = input.deckBody ? 'Microsoft YaHei, Arial' : 'Arial, Microsoft YaHei';
+  const fontFamily =
+    input.authoredFontFamily ??
+    (input.deckBody ? 'Microsoft YaHei, Arial' : 'Arial, Microsoft YaHei');
   const measure = (text: string) => measureSlideText(text, fontSize, fontFamily);
   const lineHeight = 29;
   const wrap = (value: string, maxWidth: number): string[] => {
@@ -339,7 +349,7 @@ export async function recoverSemanticSlideLayout(input: {
       );
   }
   const title = escapeSvgText(input.title);
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 ${canvasHeight}">${input.deckBody ? '<g data-deck-body="true">' : `<rect x="0" y="0" width="960" height="${canvasHeight}" fill="#ffffff"/><text x="72" y="44" font-family="Microsoft YaHei, Arial" font-size="28" font-weight="bold" fill="#172554">${title}</text>`}${imageMarkup.join('')}${textMarkup.join('')}${blocksOut.map((block) => `<g data-content-id="${block.id}"/>`).join('')}${input.deckBody ? '</g>' : ''}</svg>`;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 ${canvasHeight}">${recoveryHeading}${input.deckBody ? '<g data-deck-body="true">' : `<rect x="0" y="0" width="960" height="${canvasHeight}" fill="#ffffff"/><text x="72" y="44" font-family="Microsoft YaHei, Arial" font-size="28" font-weight="bold" fill="#172554">${title}</text>`}${imageMarkup.join('')}${textMarkup.join('')}${blocksOut.map((block) => `<g data-content-id="${block.id}"/>`).join('')}${input.deckBody ? '</g>' : ''}</svg>`;
   const rendered = await renderSemanticBlocks(svg, blocksOut, input.intent);
   return overflowLines.length ? { ...rendered, overflowNotes: overflowLines.join('\n') } : rendered;
 }

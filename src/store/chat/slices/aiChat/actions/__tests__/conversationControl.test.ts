@@ -49,6 +49,70 @@ afterEach(() => {
 });
 
 describe('ConversationControl actions', () => {
+  it.each(['answer', 'skip', 'cancel'] as const)(
+    'sends a native question %s to the original operation without local message writes',
+    async (decision) => {
+      const { result } = renderHook(() => useChatStore());
+      const agentId = 'native-agent';
+      const topicId = 'native-topic';
+      const chatKey = messageMapKey({ agentId, topicId });
+      const question = createMockMessage({
+        id: 'native-question',
+        role: 'tool',
+        tool_call_id: 'pending-call',
+      });
+      const previousConfig = window.global_serverConfigStore;
+      window.global_serverConfigStore = {
+        getState: () => ({ serverConfig: { agentRuntimeMode: 'native' } }),
+      } as typeof window.global_serverConfigStore;
+      try {
+        act(() => {
+          useChatStore.setState({
+            activeAgentId: agentId,
+            activeTopicId: topicId,
+            activeThreadId: undefined,
+            dbMessagesMap: { [chatKey]: [question] },
+            messagesMap: { [chatKey]: [question] },
+          });
+        });
+        const remote = vi.spyOn(result.current, 'executeGatewayAgent').mockResolvedValue({} as any);
+        const local = vi.spyOn(result.current, 'executeClientAgent').mockResolvedValue(undefined);
+        const create = vi.spyOn(result.current, 'optimisticCreateMessage');
+        const plugin = vi.spyOn(result.current, 'optimisticUpdateMessagePlugin');
+        const content = vi.spyOn(result.current, 'optimisticUpdateMessageContent');
+        await act(async () => {
+          if (decision === 'answer')
+            await result.current.submitToolInteraction(question.id, { answer: 'yes' });
+          else if (decision === 'skip')
+            await result.current.skipToolInteraction(question.id, 'Later');
+          else await result.current.cancelToolInteraction(question.id);
+        });
+        expect(remote).toHaveBeenCalledWith(
+          expect.objectContaining({
+            parentMessageId: question.id,
+            resumeApproval: expect.objectContaining({
+              decision:
+                decision === 'answer'
+                  ? 'answered'
+                  : decision === 'skip'
+                    ? 'rejected_continue'
+                    : 'rejected',
+              parentMessageId: question.id,
+              toolCallId: 'pending-call',
+              ...(decision === 'answer' ? { response: { answer: 'yes' } } : {}),
+            }),
+          }),
+        );
+        expect(local).not.toHaveBeenCalled();
+        expect(create).not.toHaveBeenCalled();
+        expect(plugin).not.toHaveBeenCalled();
+        expect(content).not.toHaveBeenCalled();
+      } finally {
+        window.global_serverConfigStore = previousConfig;
+      }
+    },
+  );
+
   describe('stopGenerateMessage', () => {
     it('should cancel running generateAI operations in current context', () => {
       const { result } = renderHook(() => useChatStore());

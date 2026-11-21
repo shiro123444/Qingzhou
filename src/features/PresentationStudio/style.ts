@@ -67,6 +67,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     }
   `,
   canvasWorkspace: css`
+    position: relative;
     display: flex;
     flex: 1;
     flex-direction: column;
@@ -663,6 +664,10 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     height: 100%;
     min-height: 0;
   `,
+  emptyBack: css`
+    flex-shrink: 0;
+    margin-inline-start: -8px;
+  `,
   emptyWorks: css`
     flex-shrink: 0;
   `,
@@ -727,8 +732,9 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     border: 1px solid ${cssVar.colorBorderSecondary};
     border-radius: 14px;
 
-    background: ${cssVar.colorBgElevated};
-    box-shadow: 0 8px 24px rgb(0 0 0 / 12%);
+    background: var(--qz-glass-sheen), var(--qz-glass-strong);
+    backdrop-filter: var(--qz-glass-filter);
+    box-shadow: var(--qz-glass-shadow);
   `,
   noticeSuccess: css`
     border-color: ${cssVar.colorSuccessBorder};

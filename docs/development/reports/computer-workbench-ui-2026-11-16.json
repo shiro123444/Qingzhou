@@ -1,0 +1,49 @@
+{
+  "artifacts": {
+    "actualApp": "output/computer-workbench-redesign.jpg",
+    "initial": "output/computer-workbench-validation/workbench-empty.png",
+    "humanControl": "output/computer-workbench-validation/browser-takeover.png",
+    "agentControl": "output/computer-workbench-validation/browser-handback.png",
+    "narrowDark": "output/computer-workbench-validation/workbench-narrow-dark.png",
+    "chinese": "output/computer-workbench-validation/workbench-zh.png"
+  },
+  "checks": {
+    "typecheck": "passed",
+    "eslint": "passed",
+    "stylelint": "passed",
+    "prettier": "passed",
+    "gitDiffCheck": "passed"
+  },
+  "date": "2026-11-16",
+  "live": {
+    "passed": 1,
+    "failed": 0,
+    "report": "output/computer-workbench-validation/live-result.json",
+    "provider": "real local Docker browser, isolated account and database",
+    "checks": [
+      "Passive inspect and idle greeting issue no commands",
+      "Explicit Open computer performs ensure, acknowledged human handoff and browser start",
+      "Real browser click, text input and saved result",
+      "Handback revokes human input and changes large heading",
+      "Magnifier and pull cord",
+      "390px dark workbench fits screen",
+      "Reduced motion",
+      "Chinese workbench and instant en/zh i18n unit check"
+    ],
+    "cleanup": "Only isolated test container and its volume removed in finally"
+  },
+  "preview": {
+    "app": "http://localhost:3010",
+    "services": "Main preview and computer provider left running as requested",
+    "worker": "Native worker remains paused",
+    "modelCalls": "No model call needed for this UI verification",
+    "accountLanguage": "Unchanged"
+  },
+  "regression": {
+    "passed": 16,
+    "failed": 0,
+    "files": 6,
+    "report": "output/computer-workbench-validation/regression-result.json"
+  },
+  "scope": "Computer workbench redesign with prominent confirmed control state and system i18n"
+}

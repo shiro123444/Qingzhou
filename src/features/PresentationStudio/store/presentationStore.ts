@@ -262,7 +262,10 @@ export interface PresentationStudioActions {
   dismissExport: () => void;
   /** Clears a slot's error after the user saw it (C-87 recovery affordance). */
   dismissSlotError: (jobId: string, slideId: string, slotId: string) => void;
-  exportArtifact: (artifactId: string, format: PresentationExportFormat) => Promise<void>;
+  exportArtifact: (
+    artifactId: string,
+    format: PresentationExportFormat,
+  ) => Promise<ExportResult | void>;
   refreshArtifacts: (jobId: string) => Promise<void>;
   refreshJob: (jobId: string) => Promise<void>;
   restoreJobList: () => Promise<string[]>;
@@ -400,6 +403,8 @@ export const aggregateJobStreamStatus = (
  * ------------------------------------------------------------------------ */
 
 const JOB_FIELDS = [
+  'chatOrigin',
+  'delivery',
   'recovery',
   'heartbeatAt',
   'jobId',
@@ -1016,6 +1021,7 @@ export const createPresentationStudioStore = (
           return;
         }
         set({ exported, exportError: null, exporting: null });
+        return exported;
       } catch (err) {
         // Selection, artifacts and draft are untouched — only the error
         // surfaces so the user can retry the same export. The code is also

@@ -58,17 +58,23 @@ export default function TrialComparison({
   slideId,
   disabled,
   onCreated,
+  dialogOpen,
+  onDialogChange,
 }: {
   jobId: string;
   versionId?: string;
   slideId?: string;
   disabled?: boolean;
+  dialogOpen?: boolean;
+  onDialogChange?: (open: boolean) => void;
   onCreated?: (jobId: string) => Promise<void> | void;
 }) {
   const { t } = useTranslation('common');
-  const [open, setOpen] = useState(false),
+  const [localOpen, setLocalOpen] = useState(false),
     [loading, setLoading] = useState(false),
     [pending, setPending] = useState(false);
+  const open = dialogOpen ?? localOpen;
+  const setOpen = onDialogChange ?? setLocalOpen;
   const [trials, setTrials] = useState<{ runId: string }[]>([]),
     [runId, setRunId] = useState<string>();
   const [review, setReview] = useState<TrialReviewView>(),
@@ -84,7 +90,7 @@ export default function TrialComparison({
     busy = useRef(false),
     request = useRef<{ key: string; id: string } | undefined>(undefined);
   useEffect(() => {
-    setOpen(false);
+    setLocalOpen(false);
     setReview(undefined);
     setSelected(undefined);
     setRunId(undefined);
@@ -218,10 +224,15 @@ export default function TrialComparison({
     }
   };
   return (
-    <div className={styles.toolbar}>
-      <Button disabled={disabled || !versionId || !slideId} onClick={() => setOpen(true)}>
-        {t('presentationTrial.open')}
-      </Button>
+    <div
+      className={styles.toolbar}
+      style={dialogOpen === undefined ? undefined : { display: 'contents' }}
+    >
+      {dialogOpen === undefined && (
+        <Button disabled={disabled || !versionId || !slideId} onClick={() => setOpen(true)}>
+          {t('presentationTrial.open')}
+        </Button>
+      )}
       <Modal
         closable={!pending}
         mask={{ closable: !pending }}

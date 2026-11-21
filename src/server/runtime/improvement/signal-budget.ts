@@ -11,18 +11,23 @@ import {
   withHarnessCoordinator,
   withLearningBudget,
 } from './production';
+import { SIGNAL_ATTEMPT_LIMIT } from './signal-limits';
 
 /** Existing AgentSignal scheduling remains the owner; this adds no new experiment or retry. */
 export async function executeBudgetedSignal(
   db: LobeChatDatabase,
   input: ExecuteSelfIterationInput,
 ) {
-  if (process.env.QINGZHOU_HARNESS_LEARNING_ENABLED !== '1') return executeSelfIteration(input);
+  if (process.env.QINGZHOU_HARNESS_LEARNING_ENABLED !== '1') {
+    const result = await executeSelfIteration(input);
+    if (result.status === 'failed') throw new Error('AGENT_SIGNAL_SELF_ITERATION_FAILED');
+    return result;
+  }
   const scope = {
     userId: input.userId,
     subject: { kind: 'agent' as const, agentId: input.agentId },
   };
-  const perCall = { calls: 1, tokens: 132608, costMicros: 50000 };
+  const perCall = SIGNAL_ATTEMPT_LIMIT;
   const calls = Math.max(1, input.maxSteps) + 4;
   const limit = { calls, tokens: calls * perCall.tokens, costMicros: calls * perCall.costMicros };
   const binding =
@@ -80,5 +85,6 @@ export async function executeBudgetedSignal(
     throw error;
   }
   await record(result);
+  if (result.status === 'failed') throw new Error('AGENT_SIGNAL_SELF_ITERATION_FAILED');
   return result;
 }

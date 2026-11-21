@@ -13,7 +13,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { memo, useCallback, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { lessonOutline, type LessonPlan, type TeacherBrief } from '@/types/presentationLesson';
@@ -103,6 +103,10 @@ export const OutlineWorkspace = memo<OutlineWorkspaceProps>(
     const [localTeaching, setLocalTeaching] = useState(false);
     const teaching = teachingMode ?? localTeaching;
     const setTeaching = onTeachingModeChange ?? setLocalTeaching;
+    const [openedLesson, setOpenedLesson] = useState(teaching);
+    useEffect(() => {
+      if (teaching) setOpenedLesson(true);
+    }, [teaching]);
     const [lessonPlan, setLessonPlan] = useState<LessonPlan>();
 
     const bumpVersion = useCallback(() => {
@@ -332,18 +336,19 @@ export const OutlineWorkspace = memo<OutlineWorkspaceProps>(
             </span>
           </Flexbox>
           <Flexbox horizontal align="center" gap={8}>
-            {onPlanLesson && (
-              <Button
-                aria-pressed={teaching}
-                disabled={creating || aiBusy !== null}
-                onClick={() => {
-                  setTeaching(!teaching);
-                  setSelectedId(null);
-                }}
-              >
-                {t('presentationLesson.mode')}
-              </Button>
-            )}
+            {onPlanLesson &&
+              (teachingMode === undefined || teachingMode || onTeachingModeChange) && (
+                <Button
+                  aria-pressed={teaching}
+                  disabled={creating || aiBusy !== null}
+                  onClick={() => {
+                    setTeaching(!teaching);
+                    setSelectedId(null);
+                  }}
+                >
+                  {t('presentationLesson.mode')}
+                </Button>
+              )}
             <Button
               aria-label={t('presentationStoryboard.view')}
               aria-pressed={rail}
@@ -385,7 +390,7 @@ export const OutlineWorkspace = memo<OutlineWorkspaceProps>(
         </div>
         {aiError && <div role="alert">{aiError}</div>}
         <MaterialContextPanel materials={materials} />
-        {onPlanLesson && (
+        {onPlanLesson && (teaching || openedLesson) && (
           <div hidden={!teaching}>
             <LessonWorkspace
               audience={audience}

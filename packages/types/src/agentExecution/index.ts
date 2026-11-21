@@ -23,6 +23,7 @@ export interface ExecAgentAppContext {
   scope?: string | null;
   /** Session ID */
   sessionId?: string;
+  sourceMessageId?: string;
   /** Current task identifier when executing from a task detail surface */
   taskId?: string | null;
   /** Thread ID for threaded conversations */
@@ -109,6 +110,7 @@ export interface ExecAgentResult {
   token?: string;
   /** The topic ID (created or reused) */
   topicId: string;
+  transport?: 'native' | 'gateway';
   /** The user message ID created for this operation */
   userMessageId: string;
 }

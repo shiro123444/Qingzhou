@@ -2,6 +2,7 @@
 
 import { lazy, type PropsWithChildren, Suspense } from 'react';
 
+import FloatingPlayerLayer from './FloatingPlayerLayer';
 import { useMusicActivation } from './session-context';
 import { styles } from './style';
 
@@ -14,7 +15,13 @@ export default function PlayerShell({ children }: PropsWithChildren) {
     <div className={styles.shell}>
       <Suspense fallback={null}>{ready && <ArtworkAtmosphere />}</Suspense>
       <div className={styles.content}>{children}</div>
-      <Suspense fallback={null}>{ready && <MiniPlayer />}</Suspense>
+      {ready && (
+        <FloatingPlayerLayer>
+          <Suspense fallback={null}>
+            <MiniPlayer />
+          </Suspense>
+        </FloatingPlayerLayer>
+      )}
     </div>
   );
 }

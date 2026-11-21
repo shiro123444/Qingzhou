@@ -51,7 +51,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     }
   `,
   dock: css`
-    --music-dock-width: min(380px, calc(100vw - 48px));
+    --music-dock-width: min(400px, calc(100vw - 48px));
     --music-spring-duration: 520ms;
     --music-spring-ease: linear(
       0,
@@ -82,6 +82,10 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     align-items: flex-end;
 
     width: var(--music-dock-width);
+
+    &[hidden] {
+      display: none;
+    }
 
     > * {
       pointer-events: auto;
@@ -128,8 +132,8 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     box-sizing: border-box;
     width: 100%;
     max-width: calc(100vw - 24px);
-    height: 76px;
-    border-radius: 38px;
+    height: 112px;
+    border-radius: 28px;
 
     color: ${cssVar.colorText};
 
@@ -160,13 +164,15 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     transform-origin: left center;
     transform: scale(1);
 
-    display: flex;
-    gap: 12px;
+    display: grid;
+    grid-template-columns: 64px minmax(0, 1fr) 56px;
+    grid-template-rows: 1fr 1fr;
+    gap: 4px 14px;
     align-items: center;
 
     box-sizing: border-box;
     width: var(--music-dock-width);
-    padding-block: 12px;
+    padding-block: 14px;
     padding-inline: 14px;
 
     opacity: 1;
@@ -197,6 +203,42 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     @media (width <= 390px) {
       gap: 8px;
       padding-inline: 12px;
+    }
+  `,
+  deckLayout: css`
+    > a:first-child {
+      grid-column: 1;
+      grid-row: 1 / 3;
+
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+    }
+
+    > a:nth-child(2) {
+      grid-column: 2;
+      grid-row: 1;
+    }
+
+    > div:nth-of-type(1):where(:not(:last-child)) {
+      grid-column: 2;
+      grid-row: 2;
+    }
+
+    > div:nth-of-type(2) {
+      grid-column: 3;
+      grid-row: 1 / 3;
+    }
+
+    [data-empty='true'] & {
+      > a:nth-child(2) {
+        grid-row: 1 / 3;
+      }
+
+      > div:nth-of-type(1) {
+        grid-column: 3;
+        grid-row: 1 / 3;
+      }
     }
   `,
   artworkLink: css`
@@ -230,13 +272,6 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     background: color-mix(in srgb, ${cssVar.colorText} 5%, var(--qz-glass-surface));
     box-shadow: inset 0 1px 1px var(--qz-glass-highlight);
-
-    img {
-      display: block;
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-    }
   `,
   recordLabel: css`
     display: grid;
@@ -356,7 +391,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     height: 36px;
     padding: 0;
     border: 1px solid color-mix(in srgb, var(--qz-glass-highlight) 65%, transparent);
-    border-radius: 50%;
+    border-radius: 12px;
 
     color: ${cssVar.colorText};
 
@@ -388,12 +423,12 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     display: flex;
     flex: none;
-    flex-direction: column;
+    gap: 2px;
     align-items: center;
     justify-content: center;
 
-    width: 24px;
-    height: 48px;
+    width: 62px;
+    height: 32px;
   `,
   collapseButton: css`
     cursor: pointer;
@@ -401,10 +436,11 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     display: grid;
     place-items: center;
 
-    width: 24px;
-    height: 18px;
+    width: 30px;
+    height: 30px;
     padding: 0;
     border: 0;
+    border-radius: 50%;
 
     color: ${cssVar.colorTextSecondary};
 
@@ -412,6 +448,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     &:hover {
       color: ${cssVar.colorText};
+      background: ${cssVar.colorFillTertiary};
     }
 
     &:focus-visible {
@@ -421,7 +458,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
   progress: css`
     position: absolute;
     inset-block-end: 9px;
-    inset-inline: 76px 40px;
+    inset-inline: 92px 82px;
 
     height: 2px;
     border-radius: 2px;
@@ -522,17 +559,22 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       border-radius: 50%;
     }
   `,
-  orbIndicator: css`
+  expandBadge: css`
     position: absolute;
-    inset-block-end: 5px;
-    inset-inline-end: 5px;
+    inset-block-end: 4px;
+    inset-inline-end: 4px;
 
-    width: 9px;
-    height: 9px;
-    border: 2px solid var(--qz-glass-strong);
+    display: grid;
+    place-items: center;
+
+    width: 18px;
+    height: 18px;
+    border: 1px solid ${cssVar.colorBorderSecondary};
     border-radius: 50%;
 
-    background: var(--music-accent);
+    color: ${cssVar.colorTextSecondary};
+
+    background: var(--qz-glass-strong);
   `,
   panel: css`
     --music-panel-shift: 10px;
@@ -688,15 +730,6 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
 
     font-size: 10px;
     color: ${cssVar.colorTextTertiary};
-  `,
-  activeDot: css`
-    flex: none;
-
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-
-    background: var(--music-accent);
   `,
   settings: css`
     display: flex;

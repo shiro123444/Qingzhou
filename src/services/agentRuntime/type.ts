@@ -66,8 +66,10 @@ export interface AgentOperationResponse {
 }
 
 export interface HumanInterventionRequest {
-  action: 'approve' | 'reject' | 'input' | 'select';
+  action: 'approve' | 'reject' | 'reject_continue' | 'input' | 'select';
   data?: any;
   operationId: string;
   reason?: string;
+  stepIndex?: number;
+  toolMessageId?: string;
 }

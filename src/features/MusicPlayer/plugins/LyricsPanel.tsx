@@ -3,6 +3,8 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { textStyles } from '@/features/GlassMotion/text.style';
+
 import { type LyricLine } from '../lyrics';
 import { useMusicPlugins, useMusicPluginState } from './context';
 import { createLyricsMotion } from './lyrics-motion';
@@ -25,19 +27,21 @@ const LyricRows = memo(function LyricRows({
       key={trackId + ':' + index + ':' + line.timeMs}
     >
       <button aria-label={line.text || undefined} onClick={() => onSeek(index)}>
-        {line.words?.length
-          ? line.words.map((word, wordIndex) => (
-              <span
-                aria-hidden
-                className={styles.word}
-                data-lyric-word={wordIndex}
-                data-state="future"
-                key={wordIndex + ':' + word.timeMs}
-              >
-                {word.text}
-              </span>
-            ))
-          : line.text || '♪'}
+        {line.words?.length ? (
+          line.words.map((word, wordIndex) => (
+            <span
+              aria-hidden
+              className={styles.word}
+              data-lyric-word={wordIndex}
+              data-state="future"
+              key={wordIndex + ':' + word.timeMs}
+            >
+              {word.text}
+            </span>
+          ))
+        ) : (
+          <span data-lyric-phrase>{line.text || '♪'}</span>
+        )}
       </button>
     </p>
   ));
@@ -86,6 +90,7 @@ export default function LyricsPanel({ visible }: { visible: boolean }) {
         data-empty={status !== 'active' || !lyrics?.lines.length}
         ref={scroll}
       >
+        <span aria-hidden data-reading-pill className={textStyles.readingPill} />
         {status === 'disabled' ? (
           <div className={styles.emptyLyrics}>
             <p>{t('lyricsPluginDisabled')}</p>

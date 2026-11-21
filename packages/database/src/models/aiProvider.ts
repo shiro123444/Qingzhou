@@ -100,6 +100,19 @@ export class AiProviderModel {
     });
   };
 
+  getRemoteModelProviderIds = async (providerId?: string): Promise<string[]> => {
+    const rows = await this.db
+      .select({ id: aiProviders.id, settings: aiProviders.settings })
+      .from(aiProviders)
+      .where(
+        and(
+          eq(aiProviders.userId, this.userId),
+          providerId ? eq(aiProviders.id, providerId) : undefined,
+        ),
+      );
+    return rows.filter((row) => row.settings?.modelListSource === 'remote').map((row) => row.id);
+  };
+
   update = async (id: string, value: Partial<AiProviderSelectItem>) => {
     return this.db
       .update(aiProviders)

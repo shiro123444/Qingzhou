@@ -3,6 +3,8 @@ import { RequestTrigger } from '@lobechat/types';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { aiAgentService } from '@/services/aiAgent';
+import { useUiAttentionStore } from '@/store/uiAttention';
+import { useUserStore } from '@/store/user';
 
 import type { GatewayConnection } from '../gateway';
 import { GatewayActionImpl } from '../gateway';
@@ -86,11 +88,84 @@ function createTestAction() {
 }
 
 describe('GatewayActionImpl', () => {
+  it('activates native chat without a gateway URL or lab toggle', () => {
+    const previous = window.global_serverConfigStore;
+    window.global_serverConfigStore = {
+      getState: () => ({ serverConfig: { agentRuntimeMode: 'native' } }),
+    } as any;
+    try {
+      expect(createTestAction().action.isGatewayModeEnabled()).toBe(true);
+    } finally {
+      window.global_serverConfigStore = previous;
+    }
+  });
+  it('uses the native transport and detaches without an RPC interrupt', () => {
+    const { action, mockClient } = createTestAction();
+    action.createNativeClient = vi.fn(() => mockClient);
+    action.connectToGateway({
+      transport: 'native',
+      gatewayUrl: '',
+      token: '',
+      operationId: 'native',
+      topicId: TEST_TOPIC_ID,
+    });
+    expect(action.createNativeClient).toHaveBeenCalledWith('native');
+    expect(action.createClient).not.toHaveBeenCalled();
+    action.disconnectFromGateway('native');
+    expect(mockClient.disconnect).toHaveBeenCalledOnce();
+    expect(mockClient.sendInterrupt).not.toHaveBeenCalled();
+  });
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
   describe('connectToGateway', () => {
+    it('retains the native admission handle and forwards a Stop received during startup', async () => {
+      const previous = window.global_serverConfigStore;
+      window.global_serverConfigStore = {
+        getState: () => ({ serverConfig: { agentRuntimeMode: 'native' } }),
+      } as any;
+      const { action, state } = createTestAction();
+      const controller = new AbortController();
+      state.getOperationAbortSignal = () => controller.signal;
+      vi.mocked(aiAgentService.execAgentTask).mockImplementationOnce(async () => {
+        controller.abort(new DOMException('Stopped', 'AbortError'));
+        return {
+          agentId: 'a',
+          assistantMessageId: 'assistant',
+          userMessageId: 'user',
+          operationId: 'accepted',
+          topicId: 'topic',
+          transport: 'native',
+          success: true,
+          autoStarted: true,
+          status: 'created',
+          message: 'ok',
+          createdAt: '',
+          timestamp: '',
+        };
+      });
+      vi.mocked(aiAgentService.interruptTask).mockResolvedValueOnce({
+        success: true,
+        operationId: 'accepted',
+        threadId: undefined,
+      });
+      try {
+        await expect(
+          action.executeGatewayAgent({
+            context: { agentId: 'a', topicId: 'topic', threadId: null, scope: 'main' },
+            message: 'work',
+            parentOperationId: 'startup',
+          }),
+        ).rejects.toMatchObject({ name: 'AbortError' });
+        expect(aiAgentService.execAgentTask).toHaveBeenLastCalledWith(expect.any(Object), {
+          signal: undefined,
+        });
+        expect(aiAgentService.interruptTask).toHaveBeenCalledWith({ operationId: 'accepted' });
+      } finally {
+        window.global_serverConfigStore = previous;
+      }
+    });
     it('should create client and add to store', () => {
       const { action, mockClient, state } = createTestAction();
 
@@ -475,6 +550,17 @@ describe('GatewayActionImpl', () => {
         userMessageId: 'usr-1',
       });
 
+      const signal = { area: 'music' as const, evidence: 'dwell' as const, observedAt: Date.now() };
+      useUiAttentionStore.setState({
+        ownerId: 'attention-owner',
+        agentId: 'agent-1',
+        enabled: true,
+        signal,
+      });
+      vi.mocked(useUserStore.getState).mockReturnValueOnce({
+        preference: { lab: {} },
+        user: { id: 'attention-owner' },
+      } as any);
       await action.executeGatewayAgent({
         context: { agentId: 'agent-1', topicId: 'topic-1', threadId: null, scope: 'main' },
         message: 'Hello',
@@ -484,9 +570,15 @@ describe('GatewayActionImpl', () => {
         expect.objectContaining({
           parentMessageId: undefined,
           prompt: 'Hello',
+          uiAttention: signal,
         }),
         expect.anything(),
       );
+      expect(aiAgentService.execAgentTask).toHaveBeenLastCalledWith(
+        expect.objectContaining({ uiAttention: signal }),
+        expect.anything(),
+      );
+      useUiAttentionStore.setState({ ownerId: undefined, agentId: undefined, signal: undefined });
     });
 
     it('should forward metadata trigger to execAgentTask', async () => {
@@ -603,12 +695,8 @@ describe('GatewayActionImpl', () => {
       const connectToGateway = vi.fn();
       const onOperationCancel = vi.fn();
 
-      // Pre-aborted controller simulates the user clicking Stop while
-      // execAgentTask is still in flight: when it resolves the signal is
-      // already `aborted: true`, so executeGatewayAgent must NOT proceed to
-      // start the child op or open a WS connection.
+      // Stop arrives during the request, before its response is handed off.
       const controller = new AbortController();
-      controller.abort('user cancelled');
 
       const mockClient = createMockClient();
       const state: Record<string, any> = { gatewayConnections: {} };
@@ -641,19 +729,22 @@ describe('GatewayActionImpl', () => {
         .mocked(aiAgentService.interruptTask)
         .mockResolvedValue({ operationId: 'server-op-cancel', success: true });
 
-      vi.mocked(aiAgentService.execAgentTask).mockResolvedValue({
-        agentId: 'agent-1',
-        assistantMessageId: 'ast-1',
-        autoStarted: true,
-        createdAt: new Date().toISOString(),
-        message: 'ok',
-        operationId: 'server-op-cancel',
-        status: 'created',
-        success: true,
-        timestamp: new Date().toISOString(),
-        token: 'test-token',
-        topicId: 'topic-1',
-        userMessageId: 'usr-1',
+      vi.mocked(aiAgentService.execAgentTask).mockImplementationOnce(async () => {
+        controller.abort('user cancelled');
+        return {
+          agentId: 'agent-1',
+          assistantMessageId: 'ast-1',
+          autoStarted: true,
+          createdAt: new Date().toISOString(),
+          message: 'ok',
+          operationId: 'server-op-cancel',
+          status: 'created',
+          success: true,
+          timestamp: new Date().toISOString(),
+          token: 'test-token',
+          topicId: 'topic-1',
+          userMessageId: 'usr-1',
+        };
       });
 
       await expect(

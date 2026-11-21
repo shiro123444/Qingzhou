@@ -1,4 +1,3 @@
-import { DEFAULT_MINI_SYSTEM_AGENT_ITEM } from '@lobechat/const';
 import { SpanStatusCode } from '@lobechat/observability-otel/api';
 import { tracer } from '@lobechat/observability-otel/modules/agent-signal';
 
@@ -14,6 +13,7 @@ import { executeBudgetedSignal } from '@/server/runtime/improvement/signal-budge
 import { createSignalHarnessProposals } from '@/server/runtime/improvement/signal-proposal';
 import { AGENT_SIGNAL_DEFAULTS } from '@/server/services/agentSignal/constants';
 import { isAgentSignalEnabledForUser } from '@/server/services/agentSignal/featureGate';
+import { resolveAgentSignalModelConfig } from '@/server/services/agentSignal/modelConfig';
 import { runMemoryActionAgent } from '@/server/services/agentSignal/policies/analyzeIntent/actions/userMemory';
 import { redisSourceEventStore } from '@/server/services/agentSignal/store/adapters/redis/sourceEventStore';
 import { SkillManagementDocumentService } from '@/server/services/skillManagement';
@@ -1119,11 +1119,12 @@ export const createServerSelfReviewPolicyOptions = ({
     },
     collectContext: (input) => collector.collect(input),
     runSelfReviewAgent: async ({ context, localDate, sourceId, userId: runnerUserId }) => {
+      const modelConfig = await resolveAgentSignalModelConfig(db, runnerUserId, context.agentId);
       const briefTextTranslator = await resolveBriefTextTranslator({ userId: runnerUserId });
       const modelRuntime = await initModelRuntimeFromDB(
         db,
         runnerUserId,
-        DEFAULT_MINI_SYSTEM_AGENT_ITEM.provider,
+        modelConfig.provider,
         process.env.QINGZHOU_HARNESS_LEARNING_ENABLED === '1'
           ? { singleDispatch: true }
           : undefined,
@@ -1147,7 +1148,8 @@ export const createServerSelfReviewPolicyOptions = ({
             agentId: context.agentId,
             context,
             maxSteps,
-            model: DEFAULT_MINI_SYSTEM_AGENT_ITEM.model,
+            model: modelConfig.model,
+            provider: modelConfig.provider,
             modelRuntime,
             sourceId,
             tools,

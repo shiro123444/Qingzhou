@@ -16,6 +16,11 @@ import type { ChatToolPayload, MessageToolCall, ModelUsage } from '@lobechat/typ
 import { RequestTrigger } from '@lobechat/types';
 
 import type { LearningBudgetBinding } from '@/server/runtime/improvement/budget';
+import {
+  SIGNAL_ATTEMPT_LIMIT,
+  SIGNAL_MAX_INPUT_BYTES,
+  SIGNAL_MAX_OUTPUT_TOKENS,
+} from '@/server/runtime/improvement/signal-limits';
 
 import type { NightlyReviewContext } from './review/collect';
 import type { SelfReviewIdea, SelfReviewProposalBaseSnapshot } from './review/proposal';
@@ -129,6 +134,7 @@ export interface ExecuteSelfIterationInput {
   model: string;
   /** Minimal model runtime dependency used to stream chat completions. */
   modelRuntime: Pick<ModelRuntime, 'chat'>;
+  provider?: string;
   /** Stable source id used for tracing and fallback idempotency keys. */
   sourceId: string;
   /** Safe read/write self-iteration tools available to this run. */
@@ -681,16 +687,14 @@ const resolveToolCalls = ({
   const resolvedIds = new Set(resolvedToolCalls.map((toolCall) => toolCall.id));
   const unresolvedToolCalls = rawToolCalls
     .filter((toolCall) => !resolvedIds.has(toolCall.id))
-    .map(
-      (toolCall): ChatToolPayload => ({
-        apiName: getApiNameFromRawToolName(toolCall.function.name),
-        arguments: toolCall.function.arguments,
-        id: toolCall.id,
-        identifier: selfIterationToolIdentifier,
-        thoughtSignature: toolCall.thoughtSignature,
-        type: 'builtin',
-      }),
-    );
+    .map((toolCall): ChatToolPayload => ({
+      apiName: getApiNameFromRawToolName(toolCall.function.name),
+      arguments: toolCall.function.arguments,
+      id: toolCall.id,
+      identifier: selfIterationToolIdentifier,
+      thoughtSignature: toolCall.thoughtSignature,
+      type: 'builtin',
+    }));
 
   return [...resolvedToolCalls, ...unresolvedToolCalls];
 };
@@ -1029,7 +1033,7 @@ const createInitialState = ({
     },
     modelRuntimeConfig: {
       model: input.model,
-      provider: DEFAULT_MINI_SYSTEM_AGENT_ITEM.provider,
+      provider: input.provider ?? DEFAULT_MINI_SYSTEM_AGENT_ITEM.provider,
     },
     operationId,
     operationToolSet: {
@@ -1128,7 +1132,7 @@ export const executeSelfIteration = async (
           compressionConfig: { enabled: false },
           modelRuntimeConfig: {
             model: input.model,
-            provider: DEFAULT_MINI_SYSTEM_AGENT_ITEM.provider,
+            provider: input.provider ?? DEFAULT_MINI_SYSTEM_AGENT_ITEM.provider,
           },
           operationId: `agent-signal-self-iteration:${input.sourceId}`,
           userId: input.userId,
@@ -1141,6 +1145,7 @@ export const executeSelfIteration = async (
               ).payload;
               let content = '';
               let modelUsage: ModelUsage | undefined;
+              let finishReason: string | undefined;
               let rawToolCalls: MessageToolCall[] = [];
 
               const send = async (signal?: AbortSignal) => {
@@ -1149,7 +1154,7 @@ export const executeSelfIteration = async (
                     messages: payload.messages,
                     model: input.model,
                     stream: true,
-                    ...(input.learningBudget ? { max_tokens: 512 } : {}),
+                    ...(input.learningBudget ? { max_tokens: SIGNAL_MAX_OUTPUT_TOKENS } : {}),
                     tools: state.forceFinish ? [] : runtimeTools,
                   },
                   {
@@ -1157,6 +1162,7 @@ export const executeSelfIteration = async (
                     callback: {
                       onCompletion: (data) => {
                         modelUsage = data.usage;
+                        finishReason = data.finishReason;
                       },
                       onText: (text) => {
                         content += text;
@@ -1176,16 +1182,18 @@ export const executeSelfIteration = async (
                   messages: payload.messages,
                   model: input.model,
                   tools: state.forceFinish ? [] : runtimeTools,
-                  max_tokens: 512,
+                  max_tokens: SIGNAL_MAX_OUTPUT_TOKENS,
                 };
-                if (new TextEncoder().encode(JSON.stringify(request)).length > 131072)
+                if (
+                  new TextEncoder().encode(JSON.stringify(request)).length > SIGNAL_MAX_INPUT_BYTES
+                )
                   throw new Error('LEARNING_BUDGET_INPUT_LIMIT');
                 learningRequests.push(request);
                 await input.learningBudget.perform(
                   {
                     id: `call:${paidAttempt++}`,
                     request,
-                    reserved: { calls: 1, tokens: 132608, costMicros: 50000 },
+                    reserved: SIGNAL_ATTEMPT_LIMIT,
                     measure: (value) => ({
                       ...(value.modelUsage?.totalInputTokens !== undefined &&
                       value.modelUsage?.totalOutputTokens !== undefined
@@ -1203,6 +1211,14 @@ export const executeSelfIteration = async (
                   send,
                 );
               } else await send();
+
+              if (
+                ['length', 'max_tokens', 'MAX_TOKENS'].includes(finishReason ?? '') ||
+                (input.learningBudget &&
+                  !finishReason &&
+                  (modelUsage?.totalOutputTokens ?? 0) >= SIGNAL_MAX_OUTPUT_TOKENS)
+              )
+                throw new Error('AGENT_SIGNAL_OUTPUT_TRUNCATED');
 
               if (content) contentParts.push(content);
               if (modelUsage) usage.push(modelUsage);
@@ -1326,7 +1342,7 @@ export const executeSelfIteration = async (
         let context: AgentRuntimeContext = {
           payload: {
             model: input.model,
-            provider: DEFAULT_MINI_SYSTEM_AGENT_ITEM.provider,
+            provider: input.provider ?? DEFAULT_MINI_SYSTEM_AGENT_ITEM.provider,
             tools: runtimeTools,
           },
           phase: 'user_input',
@@ -1405,7 +1421,7 @@ export const executeSelfIteration = async (
 
         runSpan.setAttribute('agent.signal.self_iteration_agent.step_count', state.stepCount);
         runSpan.setStatus({
-          code: state.status === 'error' ? SpanStatusCode.ERROR : SpanStatusCode.OK,
+          code: state.status === 'done' ? SpanStatusCode.OK : SpanStatusCode.ERROR,
         });
 
         return {
@@ -1414,7 +1430,7 @@ export const executeSelfIteration = async (
           content: contentParts.join(''),
           ideas,
           intents,
-          status: state.status === 'error' ? ReviewRunStatus.Failed : ReviewRunStatus.Completed,
+          status: state.status === 'done' ? ReviewRunStatus.Completed : ReviewRunStatus.Failed,
           stepCount: state.stepCount,
           toolCalls,
           usage,

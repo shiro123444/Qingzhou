@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import type { AtomicRuntime } from '../atomic-runtime';
 import { MusicError, type MusicProvider } from './contracts';
+import { assertMusicRequestOrigin } from './request-origin';
 
 const responseHeaders = { 'Cache-Control': 'private, no-store' };
 const envelope = z
@@ -79,11 +80,7 @@ export async function handleMusicCommand(
   runtime: AtomicRuntime,
 ) {
   try {
-    const origin = request.headers.get('origin');
-    if (origin && origin !== new URL(request.url).origin)
-      throw new MusicError('MUSIC_FORBIDDEN', 403);
-    if (request.headers.get('sec-fetch-site') === 'cross-site')
-      throw new MusicError('MUSIC_FORBIDDEN', 403);
+    assertMusicRequestOrigin(request);
     const { operation, input } = await readCommand(request);
     const result = await runtime.invoke(operation, input, {
       scope: { userId: provider.userId, sessionId: `music-account:${provider.userId}` },

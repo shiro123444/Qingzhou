@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { PresentationPlanningSession } from '../../../../packages/runtime-contracts/src';
@@ -92,15 +92,26 @@ describe('PresentationAgentFlow (A-1 / A-2 / A-3)', () => {
     );
     try {
       expect(await screen.findByText('继续制作前请选择')).toBeInTheDocument();
+      expect(screen.getByTestId('presentation-collaboration-root')).toHaveAttribute(
+        'data-layout',
+        'inline',
+      );
       expect(screen.getByTestId('presentation-agent-transcript')).toHaveTextContent(
         '沿用已读资料制作18页汇报',
       );
       expect(turn).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByTestId('presentation-collaboration-question-trigger'));
       fireEvent.change(
-        screen.getByRole('textbox', { name: /Describe|补充希望|presentationCollaboration.input/ }),
+        screen.getByRole('textbox', {
+          name: /Add details|补充说明|Answer the current question|presentationCollaboration.answerLabel/,
+        }),
         { target: { value: '增加两张统一风格插画' } },
       );
-      fireEvent.click(screen.getByRole('button', { name: '补充后继续' }));
+      fireEvent.click(
+        screen.getByRole('button', {
+          name: /Confirm and continue|确认并继续|presentationCollaboration.submit/,
+        }),
+      );
       await waitFor(() =>
         expect(answerDecision).toHaveBeenCalledWith(
           'restored-planning-thread',
@@ -258,7 +269,7 @@ describe('PresentationAgentFlow (A-1 / A-2 / A-3)', () => {
         '模板「招新」已保存。我正在查看真实页面、媒体和组件；需要你决定的地方会直接在这里询问。',
       ),
     ).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '联网搜索与技能（联网搜索已开启）' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: /联网搜索与技能/ })).not.toBeInTheDocument();
     expect(screen.getByTestId('presentation-agent-transcript')).toHaveTextContent('秋季招新计划');
     expect(screen.queryByText(/界面事件：模板已由当前用户选择/u)).not.toBeInTheDocument();
     expect(turn).toHaveBeenCalledWith(
@@ -424,32 +435,42 @@ describe('PresentationAgentFlow (A-1 / A-2 / A-3)', () => {
     expect(onOutlineAiRewrite).not.toHaveBeenCalled();
   }, 20_000);
 
-  it('renders typewriter title, fills template without auto-submitting, and walks through the state machine', async () => {
+  it('selects a real design without replacing or submitting the current draft', async () => {
     const onCreate = vi.fn();
-
+    const client = readyClient({ topic: '模板测试' });
     render(
       <PresentationAgentFlow
-        agentClient={readyClient({ topic: '模板测试' })}
+        agentClient={client}
         onCreate={onCreate}
         onOutlineAiRewrite={rewriteOutline}
       />,
     );
 
-    // Step 1: Typewriter title is present (A-1: No PPT icon or "PPT 创作专家")
-    expect(screen.getByTestId('presentation-typewriter-title')).toBeInTheDocument();
-    expect(screen.queryByText('PPT 创作专家')).not.toBeInTheDocument();
     expect(screen.getByTestId('presentation-chat-input-adapter')).toBeInTheDocument();
-    expect(screen.queryByTestId('presentation-agent-thinking')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('presentation-style-narrative-keynote')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('presentation-recent-works')).not.toBeInTheDocument();
 
-    // A-1 / A-3: Click template chip only fills the draft and DOES NOT auto-submit; no emoji prefix
-    const templateChip = screen.getByText('企业战略规划 · 2026年企业数字化转型战略规划');
-    expect(templateChip).toBeInTheDocument();
-    fireEvent.click(templateChip);
+    fireEvent.click(screen.getByRole('button', { name: 'presentationGallery.styles' }));
+    const style = await screen.findByTestId('presentation-style-narrative-keynote');
+    expect(style.querySelector('img')).toHaveAttribute(
+      'src',
+      '/images/presentation-styles/narrative-keynote-cover.svg',
+    );
+    expect(screen.getAllByTestId(/^presentation-style-/)).toHaveLength(3);
+    fireEvent.click(style);
 
-    // Assert that we are still on the welcome / topic step (audience options have not appeared yet)
-    expect(screen.queryByTestId('audience-options-group')).not.toBeInTheDocument();
-    expect(screen.getByTestId('presentation-typewriter-title')).toBeInTheDocument();
-  }, 60000);
+    fireEvent.click(
+      within(screen.getByTestId('presentation-chat-input-adapter')).getByRole('button', {
+        name: 'presentationGallery.narrative-keynote',
+      }),
+    );
+    expect(await screen.findByTestId('presentation-style-narrative-keynote')).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(onCreate).not.toHaveBeenCalled();
+    expect(client.turn).not.toHaveBeenCalled();
+  });
 
   it('uses the Agent brief and outline as the only generation input', async () => {
     const onCreate = vi.fn();

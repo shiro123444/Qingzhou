@@ -23,6 +23,12 @@ export interface UserChatProviderConfig {
   supportsVision: boolean;
 }
 
+/** Trusted server-side role selection; credentials still come from this user's provider. */
+export interface UserChatModelSelection {
+  readonly model: string;
+  readonly provider?: string;
+}
+
 export class UserChatProviderConfigurationError extends Error {
   constructor() {
     super('The selected chat provider is unavailable or unsupported. Check your chat settings.');
@@ -39,14 +45,16 @@ export class UserChatProviderConfigurationError extends Error {
 export const resolveUserChatProvider = async (
   db: LobeChatDatabase,
   userId: string,
+  selection?: UserChatModelSelection,
 ): Promise<UserChatProviderConfig> => {
   try {
     if (!userId.trim()) throw new UserChatProviderConfigurationError();
 
     const agent = await new AgentService(db, userId).getAgentConfig('inbox');
-    if (!agent?.provider || !agent.model) throw new UserChatProviderConfigurationError();
+    const provider = selection?.provider ?? agent?.provider;
+    const model = selection?.model ?? agent?.model;
+    if (!provider?.trim() || !model?.trim()) throw new UserChatProviderConfigurationError();
 
-    const { model, provider } = agent;
     const providerConfig = await new AiProviderModel(db, userId).getAiProviderById(
       provider,
       KeyVaultsGateKeeper.getUserKeyVaults,
@@ -72,12 +80,22 @@ export const resolveUserChatProvider = async (
 
     // Use the same merged builtin/server/user metadata as the model settings API.
     const { aiProvider } = await getServerGlobalConfig();
-    const models = await new AiInfraRepos(
+    const infrastructure = new AiInfraRepos(
       db,
       userId,
       aiProvider as Record<string, ProviderConfig>,
-    ).getAiProviderModelList(provider);
-    const selectedModel = models.find((item) => item.id === model);
+    );
+    const models = await infrastructure.getAiProviderModelList(provider);
+    // An explicit server-owned specialist selection can use an enabled account
+    // model outside the curated chat UI list. Never infer a model or its abilities
+    // from a request, reuse another user's record, or bypass disabled metadata.
+    const selectedModel =
+      models.find((item) => item.id === model) ??
+      (selection
+        ? (await infrastructure.aiModelModel.getModelListByProviderId(provider)).find(
+            (item) => item.id === model,
+          )
+        : undefined);
     if (selectedModel?.enabled !== true || selectedModel.type !== 'chat') {
       throw new UserChatProviderConfigurationError();
     }

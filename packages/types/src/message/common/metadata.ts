@@ -168,6 +168,8 @@ export const MessageSignalSchema = z.object({
 });
 
 export const MessageMetadataSchema = ModelUsageSchema.merge(ModelPerformanceSchema).extend({
+  presentationJobId: z.string().optional(),
+  presentationRequest: z.boolean().optional(),
   collapsed: z.boolean().optional(),
   inspectExpanded: z.boolean().optional(),
   isMultimodal: z.boolean().optional(),
@@ -215,6 +217,8 @@ export interface ModelPerformance {
 }
 
 export interface MessageMetadata {
+  presentationJobId?: string;
+  presentationRequest?: boolean;
   // ───────────────────────────────────────────────────────────────
   // Token usage + performance fields — DEPRECATED flat shape.
   // New code must write to `metadata.usage` / `metadata.performance` (nested)

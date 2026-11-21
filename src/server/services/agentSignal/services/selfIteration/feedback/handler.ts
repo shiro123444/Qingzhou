@@ -16,11 +16,7 @@ export type SelfFeedbackIntentSourceScopeType = 'operation' | 'topic';
 
 /** Actions that an agent may declare as self-feedback intent. */
 export type SelfFeedbackIntentDeclaredAction =
-  | 'write'
-  | 'create'
-  | 'refine'
-  | 'consolidate'
-  | 'proposal';
+  'write' | 'create' | 'refine' | 'consolidate' | 'proposal';
 
 /** Self-feedback target category declared by the running agent. */
 export type SelfFeedbackIntentDeclaredKind = 'memory' | 'skill' | 'gap';
@@ -121,6 +117,7 @@ export interface SelfFeedbackIntentRuntimeConfig {
   model: string;
   /** Model runtime used by the self-iteration runtime. */
   modelRuntime: Pick<ModelRuntime, 'chat'>;
+  provider?: string;
   /** Source-scoped safe tools exposed to the self-iteration runtime. */
   tools: ToolSet;
 }
@@ -462,6 +459,7 @@ const runSharedSelfFeedbackIntent = async ({
     maxSteps: runtime.maxSteps ?? deps.maxSteps ?? 10,
     mode: 'feedback',
     model: runtime.model,
+    ...(runtime.provider ? { provider: runtime.provider } : {}),
     modelRuntime: runtime.modelRuntime,
     sourceId: source.sourceId,
     tools: runtime.tools,

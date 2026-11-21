@@ -463,9 +463,12 @@ export const initModelRuntimeFromDB = async (
 /** Explicit capability declaration for bounded experiments. Other transports must be audited first. */
 export const singleDispatchOptions = (runtimeProvider: string) => {
   if (
-    !new Set<string>([ModelProvider.OpenAI, ModelProvider.DeepSeek, ModelProvider.Azure]).has(
-      runtimeProvider,
-    )
+    !new Set<string>([
+      ModelProvider.OpenAI,
+      ModelProvider.DeepSeek,
+      ModelProvider.Azure,
+      ModelProvider.Nexus,
+    ]).has(runtimeProvider)
   )
     throw new Error('HARNESS_PROVIDER_SINGLE_DISPATCH_UNSUPPORTED');
   return { maxRetries: 0 };

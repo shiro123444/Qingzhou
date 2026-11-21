@@ -20,7 +20,6 @@ import {
   ExternalLink,
   History,
   MoreHorizontal,
-  PanelLeft,
   Plus,
   Settings2,
   Sparkles,
@@ -33,6 +32,8 @@ import { useParams } from 'react-router-dom';
 import useSWR from 'swr';
 
 import Link from '@/components/Link';
+import { BotMentionButton } from '@/features/BotSurface/context';
+import { PanelToggle } from '@/features/GlassMotion/PanelToggle';
 import NavHeader from '@/features/NavHeader';
 import { NavPanelPortal } from '@/features/NavPanel';
 import { QingzhouComposerOrnaments, qingzhouStyles } from '@/features/QingzhouBrand';
@@ -74,13 +75,15 @@ export function SitesWorkspace() {
           left={
             <>
               {mobile && (
-                <ActionIcon
-                  aria-label={t('sites.articles')}
-                  icon={PanelLeft}
-                  title={t('sites.articles')}
-                  onClick={() => setDialog('navigation')}
+                <PanelToggle
+                  aria-haspopup="dialog"
+                  expanded={dialog === 'navigation'}
+                  label={t('sites.articles')}
+                  side="left"
+                  onToggle={() => setDialog('navigation')}
                 />
               )}
+              <BotMentionButton />
               <Text ellipsis weight={500}>
                 {w.site?.name ?? t('sites.title')}
               </Text>

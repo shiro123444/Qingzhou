@@ -6,6 +6,7 @@ import { RefreshCw } from 'lucide-react';
 import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { QingzhouEmptyBoat } from '@/features/QingzhouBrand';
 import { TaskTemplateCard } from '@/features/RecommendTaskTemplates/TaskTemplateCard';
 import { TaskTemplateCardSkeleton } from '@/features/RecommendTaskTemplates/TaskTemplateCardSkeleton';
 import { useDailyBriefRecommendationsUI } from '@/features/RecommendTaskTemplates/useDailyBriefRecommendationsUI';
@@ -41,6 +42,7 @@ const EmptyState = memo(() => {
       wrapperStyle={{ flex: 1, overflowY: 'auto' }}
     >
       <Flexbox align={'center'} gap={8}>
+        <QingzhouEmptyBoat />
         <Text as={'h1'} style={{ fontSize: 24, fontWeight: 600, margin: 0 }}>
           {t('taskList.emptyHero.greeting')}
         </Text>

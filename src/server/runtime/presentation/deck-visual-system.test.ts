@@ -6,6 +6,7 @@ import {
   createDeckVisualSystem,
   deckPageRole,
   deckVisualInstructions,
+  deckVisualSystemSchema,
   renderDeckVisualFrame,
 } from './deck-visual-system';
 
@@ -16,11 +17,66 @@ const input = {
   aspectRatio: '16:9',
   options: { style: '商务会议' },
 };
-const system = createDeckVisualSystem(input)!;
+const system = {
+  ...createDeckVisualSystem(input)!,
+  schemaVersion: 2 as const,
+  fontFamily: 'Microsoft YaHei, Arial',
+  headerHeight: 40,
+  body: { x: 48, y: 136, width: 864, height: 364 },
+  darkBody: { x: 48, y: 320, width: 864, height: 152 },
+};
 const body =
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><g data-deck-body="true"><rect x="48" y="150" width="360" height="200" fill="#abc123"/><text x="72" y="190" font-family="serif" font-size="24" fill="#800080">本页内容</text></g></svg>';
 
 describe('one visual system for the whole deck', () => {
+  it('uses the selected gallery contract for every page, even when the outline suggests another style', () => {
+    const presets = ['narrative-keynote', 'academic-research', 'technical-deepdive'] as const;
+    const systems = presets.map((styleWorkspaceId) =>
+      createDeckVisualSystem({
+        ...input,
+        options: { styleWorkspaceId, style: 'a different style proposed by the planner' },
+      })!,
+    );
+    expect(systems.map((value) => value.styleWorkspaceId)).toEqual(presets);
+    expect(new Set(systems.map((value) => value.colors.background)).size).toBe(3);
+    expect(new Set(systems.map((value) => value.id)).size).toBe(3);
+  });
+
+  it('lets fresh learned designs own their full canvas without repainting fonts, colors or titles', async () => {
+    const authored = createDeckVisualSystem(input)!;
+    expect(authored.schemaVersion).toBe(3);
+    expect(() =>
+      deckVisualSystemSchema.parse({ ...authored, fontFamily: 'Arial" onload="alert(1)' }),
+    ).toThrow();
+    const page = body.replace('y="190"', 'y="90"');
+    const svg = renderDeckVisualFrame(page, authored, {
+      title: '另一个标题',
+      role: 'content',
+      order: 2,
+      total: 3,
+    });
+    expect(svg).toContain('font-family="serif"');
+    expect(svg).toContain('#800080');
+    expect(svg).not.toContain('data-deck-frame');
+    expect(svg).not.toContain('另一个标题');
+    await expect(assertDeckBodyFits(svg, authored, 'content')).resolves.toBeUndefined();
+    await expect(
+      assertDeckBodyFits(svg.replace('960 540', '960 720'), authored, 'content'),
+    ).rejects.toThrow('canvas');
+  });
+  it('activates an authored design for learned capabilities and keeps a saved legacy contract intact', () => {
+    const learned = createDeckVisualSystem({
+      ...input,
+      options: {
+        learnedCapabilities: { capsules: [{ kind: 'style', name: 'Editorial', rules: [] }] },
+      },
+    });
+    expect(learned?.schemaVersion).toBe(3);
+    expect(deckVisualInstructions(learned!, 'cover')).toContain('完整页面');
+    expect(createDeckVisualSystem({ ...input, options: { deckVisualSystem: system } })).toEqual(
+      system,
+    );
+  });
   it('renders the approved title exactly once when the model repeats it in the body', () => {
     const svg = renderDeckVisualFrame(body.replace('本页内容', '感谢聆听'), system, {
       title: '感谢聆听',

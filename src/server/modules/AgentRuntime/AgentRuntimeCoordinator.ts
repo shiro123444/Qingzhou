@@ -1,6 +1,8 @@
 import type { AgentState, HarnessRunBinding } from '@lobechat/agent-runtime';
 import debug from 'debug';
 
+import type { LobeChatDatabase } from '@/database/type';
+
 import { type AgentOperationMetadata, type StepResult } from './AgentStateManager';
 import { createAgentStateManager, createStreamEventManager } from './factory';
 import { type IAgentStateManager, type IStreamEventManager, type StepLease } from './types';
@@ -33,6 +35,7 @@ const hasEnteredStreamEndState = (
 };
 
 export interface AgentRuntimeCoordinatorOptions {
+  database?: LobeChatDatabase;
   /**
    * Custom state manager implementation
    * Defaults to automatic selection based on Redis availability
@@ -61,7 +64,7 @@ export class AgentRuntimeCoordinator {
   private streamEventManager: IStreamEventManager;
 
   constructor(options?: AgentRuntimeCoordinatorOptions) {
-    this.stateManager = options?.stateManager ?? createAgentStateManager();
+    this.stateManager = options?.stateManager ?? createAgentStateManager(options?.database);
     this.streamEventManager = options?.streamEventManager ?? createStreamEventManager();
   }
 

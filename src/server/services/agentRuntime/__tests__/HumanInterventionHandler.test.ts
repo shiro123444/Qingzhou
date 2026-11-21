@@ -17,6 +17,7 @@ describe('HumanInterventionHandler.process', () => {
   let handler: HumanInterventionHandler;
 
   const makeState = (overrides: Record<string, any> = {}): any => ({
+    metadata: { userId: 'user-1' },
     lastModified: new Date().toISOString(),
     pendingToolsCalling: [
       { apiName: 'search', arguments: '{}', id: 'tool-call-1', identifier: 'web-search' },
@@ -28,7 +29,11 @@ describe('HumanInterventionHandler.process', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    mockDBPluginQuery = vi.fn().mockResolvedValue({ toolCallId: 'tool-call-1' });
+    mockDBPluginQuery = vi.fn().mockResolvedValue({
+      toolCallId: 'tool-call-1',
+      identifier: 'web-search',
+      apiName: 'search',
+    });
     mockMessageModel = {
       updateMessagePlugin: vi.fn().mockResolvedValue(undefined),
       updateToolMessage: vi.fn().mockResolvedValue({ success: true }),
@@ -37,6 +42,57 @@ describe('HumanInterventionHandler.process', () => {
   });
 
   describe('approve path', () => {
+    it('rejects substituted tools and changed arguments before updating any message', async () => {
+      await expect(
+        handler.process(makeState(), {
+          approvedToolCall: { id: 'tool-call-1', identifier: 'local-system' },
+          toolMessageId: 'tool-msg-1',
+        }),
+      ).rejects.toThrow('identity changed');
+      await expect(
+        handler.process(makeState(), {
+          approvedToolCall: { id: 'tool-call-1', arguments: '{"recipient":"other"}' },
+          toolMessageId: 'tool-msg-1',
+        }),
+      ).rejects.toThrow('arguments changed');
+      expect(mockMessageModel.updateMessagePlugin).not.toHaveBeenCalled();
+    });
+
+    it('rejects stale approval IDs and message references belonging to a different pending tool', async () => {
+      await expect(
+        handler.process(makeState(), {
+          approvedToolCall: { id: 'already-consumed' },
+          toolMessageId: 'tool-msg-1',
+        }),
+      ).rejects.toThrow('pending tool');
+      mockDBPluginQuery.mockResolvedValue({
+        toolCallId: 'tool-call-2',
+        identifier: 'local-system',
+        apiName: 'write',
+      });
+      await expect(
+        handler.process(makeState(), {
+          approvedToolCall: { id: 'tool-call-1' },
+          toolMessageId: 'tool-msg-2',
+        }),
+      ).rejects.toThrow('does not match');
+      expect(mockMessageModel.updateMessagePlugin).not.toHaveBeenCalled();
+    });
+
+    it('uses the stored call when equivalent JSON arguments are reviewed', async () => {
+      const pending = {
+        id: 'tool-call-1',
+        identifier: 'web-search',
+        apiName: 'search',
+        arguments: '{"a":1,"b":2}',
+      };
+      const result = await handler.process(makeState({ pendingToolsCalling: [pending] }), {
+        approvedToolCall: { ...pending, arguments: '{"b":2,"a":1}' },
+        toolMessageId: 'tool-msg-1',
+      });
+      expect(result.nextContext).toMatchObject({ payload: { approvedToolCall: pending } });
+    });
+
     it('persists intervention=approved on the tool message', async () => {
       const state = makeState();
 
@@ -60,7 +116,12 @@ describe('HumanInterventionHandler.process', () => {
 
       expect(result.nextContext).toEqual({
         payload: {
-          approvedToolCall: { id: 'tool-call-1' },
+          approvedToolCall: {
+            id: 'tool-call-1',
+            identifier: 'web-search',
+            apiName: 'search',
+            arguments: '{}',
+          },
           parentMessageId: 'tool-msg-1',
           skipCreateToolMessage: true,
         },
@@ -164,7 +225,11 @@ describe('HumanInterventionHandler.process', () => {
 
     it('removes the rejected tool from pendingToolsCalling by tool_call_id lookup', async () => {
       const state = makeState();
-      mockDBPluginQuery.mockResolvedValueOnce({ toolCallId: 'tool-call-2' });
+      mockDBPluginQuery.mockResolvedValueOnce({
+        toolCallId: 'tool-call-2',
+        identifier: 'local-system',
+        apiName: 'write',
+      });
 
       const result = await handler.process(state, {
         rejectionReason: 'nope',
@@ -200,7 +265,11 @@ describe('HumanInterventionHandler.process', () => {
       // Returning a `phase: 'user_input'` context here would resume the LLM
       // before the remaining pending tools are decided (LOBE-7151 review P1).
       const state = makeState();
-      mockDBPluginQuery.mockResolvedValueOnce({ toolCallId: 'tool-call-1' });
+      mockDBPluginQuery.mockResolvedValueOnce({
+        toolCallId: 'tool-call-1',
+        identifier: 'web-search',
+        apiName: 'search',
+      });
 
       const result = await handler.process(state, {
         rejectAndContinue: true,
@@ -218,7 +287,11 @@ describe('HumanInterventionHandler.process', () => {
           { apiName: 'search', arguments: '{}', id: 'tool-call-1', identifier: 'web-search' },
         ],
       });
-      mockDBPluginQuery.mockResolvedValueOnce({ toolCallId: 'tool-call-1' });
+      mockDBPluginQuery.mockResolvedValueOnce({
+        toolCallId: 'tool-call-1',
+        identifier: 'web-search',
+        apiName: 'search',
+      });
 
       const result = await handler.process(state, {
         rejectAndContinue: true,
@@ -302,6 +375,28 @@ describe('HumanInterventionHandler.process', () => {
         messages: [{ id: 'tool-msg-1', role: 'tool', pluginIntervention: { status: 'pending' } }],
       });
     }
+    it('binds API input and selection responses to the stored question before enqueueing', async () => {
+      for (const humanInput of [{ response: { text: 'A' } }, { selection: { choice: 'A' } }]) {
+        const state = prepare();
+        const validated = await handler.validate(state, {
+          toolMessageId: 'tool-msg-1',
+          humanInput,
+        });
+        expect(validated.humanInput).toEqual({
+          response: humanInput.response ?? humanInput.selection,
+          toolCallId: question.id,
+        });
+        const result = await handler.process(state, validated);
+        expect(result.newState.status).toBe('running');
+        expect(result.nextContext?.phase).toBe('tool_result');
+      }
+      await expect(
+        handler.validate(prepare(), {
+          toolMessageId: 'tool-msg-1',
+          humanInput: { toolCallId: 'other', response: { text: 'A' } },
+        }),
+      ).rejects.toThrow('pending question');
+    });
     it('persists a real answer and resumes from the tool result without re-executing ask', async () => {
       const state = prepare();
       const result = await handler.process(state, {

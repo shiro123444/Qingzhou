@@ -1,0 +1,52 @@
+{
+  "artifacts": "output/computer-ui-validation",
+  "checks": {
+    "typescript": "passed",
+    "eslint": "passed",
+    "stylelint": "passed",
+    "diffWhitespace": "passed"
+  },
+  "cleanup": {
+    "testServicesStopped": true,
+    "listeningPorts": {
+      "3010": false,
+      "9876": false,
+      "55432": false,
+      "19000": false,
+      "16379": false,
+      "8791": false
+    },
+    "testVm": "stopped"
+  },
+  "date": "2026-11-16T02:50:50.305112+00:00",
+  "documentation": "docs/development/computer-companion-ui.md",
+  "liveCoverage": [
+    "companion entry",
+    "container browser click and text input",
+    "saved page result",
+    "control return revokes input",
+    "glass magnifier",
+    "drag pull cord",
+    "human-control monitor morph",
+    "authenticated live preview",
+    "Chinese/English streaming and code block",
+    "reduced motion",
+    "390px viewport",
+    "dark appearance"
+  ],
+  "liveTests": 1,
+  "mainProject": {
+    "url": "http://localhost:3010/",
+    "browserRuntimeErrors": 0,
+    "sidebarWidthBefore": 320,
+    "sidebarWidthCollapsed": 0,
+    "sidebarWidthRestored": 319.828125
+  },
+  "notes": [
+    "No new model calls or native worker startup in this UI verification.",
+    "Browser preview is live; terminal actions use the existing saved receipt view."
+  ],
+  "regressionTests": 17,
+  "scope": "Computer companion and six motion references",
+  "verdict": "passed"
+}

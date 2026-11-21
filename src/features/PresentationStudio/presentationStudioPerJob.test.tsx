@@ -39,13 +39,8 @@ describe('PresentationStudio selected-job stream status (C-66)', () => {
         };
       })();
     });
-    const createPresentationJob = vi.fn(
-      async (): Promise<PresentationJob> =>
-        job(createPresentationJob.mock.calls.length === 2 ? 'job-b' : 'job-a', 'queued'),
-    );
-
     const client = {
-      createPresentationJob,
+      createPresentationJob: vi.fn(),
       getPresentationJob: vi.fn(async (jobId: string) => job(jobId)),
       cancelPresentationJob: vi.fn(),
       retryPresentationJob: vi.fn(),
@@ -56,25 +51,14 @@ describe('PresentationStudio selected-job stream status (C-66)', () => {
 
     render(
       <PresentationStudio
+        initialJobIds={['job-a', 'job-b']}
         client={client}
         pollIntervalMs={50}
         streamReconnectOptions={{ maxReconnectAttempts: 0 }}
       />,
     );
 
-    // Two parallel jobs: A degrades, B stays live.
-    fireEvent.change(screen.getByLabelText('Presentation title'), { target: { value: 'Deck A' } });
-    fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
-    await waitFor(() => {
-      expect(screen.getByTestId('presentation-job-job-a')).toBeInTheDocument();
-    });
-
-    fireEvent.change(screen.getByLabelText('Presentation title'), { target: { value: 'Deck B' } });
-    fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
-    await waitFor(() => {
-      expect(screen.getByTestId('presentation-job-job-b')).toBeInTheDocument();
-    });
-
+    fireEvent.click(await screen.findByTestId('presentation-job-job-b'));
     await waitFor(() => {
       expect(screen.getByTestId('job-stream-status')).toHaveTextContent('live');
     });

@@ -144,6 +144,8 @@ export interface AiProviderSettings {
    * @default true
    */
   modelEditable?: boolean;
+  /** Use the saved remote catalog as membership, while retaining builtin metadata for matching IDs. */
+  modelListSource?: 'remote';
 
   /**
    * OAuth Device Flow configuration
@@ -198,6 +200,7 @@ const AiProviderSettingsSchema = z.object({
   defaultShowBrowserRequest: z.boolean().optional(),
   disableBrowserRequest: z.boolean().optional(),
   modelEditable: z.boolean().optional(),
+  modelListSource: z.literal('remote').optional(),
   oauthDeviceFlow: OAuthDeviceFlowConfigSchema.optional(),
   proxyUrl: z
     .object({

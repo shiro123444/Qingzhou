@@ -78,9 +78,9 @@ const renderRestoredStudio = async (overrides: Record<string, unknown> = {}) => 
 };
 
 const openExportMenu = async (format: 'pptx' | 'svg') => {
-  fireEvent.click(screen.getByRole('button', { name: /Export presentation artifact/i }));
+  fireEvent.click(screen.getByTestId('presentation-editor-more'));
   const menuItem = await screen.findByRole('menuitem', {
-    name: format === 'pptx' ? /PowerPoint \(\.pptx\)/ : /矢量切片 \(\.svg\)/,
+    name: format === 'pptx' ? /PowerPoint \(\.pptx\)/ : /SVG \(\.svg\)/,
   });
   fireEvent.click(menuItem.closest('li') ?? menuItem);
 };
@@ -163,17 +163,17 @@ describe('PresentationStudio export failure recovery (C-80)', () => {
       retryPresentationJob,
     });
 
-    fireEvent.click(screen.getByRole('button', { name: /Retry presentation job/i }));
+    fireEvent.click(screen.getByTestId('presentation-editor-more'));
+    fireEvent.click(await screen.findByRole('menuitem', { name: /regenerate|重新生成演示文稿/i }));
     await waitFor(() => {
       expect(retryPresentationJob).toHaveBeenCalledWith('job-done');
       expect(screen.getByTestId('presentation-completed-tag')).toHaveTextContent(
         'Upstream HTTP 500',
       );
     });
-    expect(screen.getByRole('button', { name: /Quick export presentation/i })).toBeEnabled();
-    expect(screen.getByRole('button', { name: /Export presentation artifact/i })).toBeEnabled();
+    expect(screen.getByTestId('presentation-editor-export')).toBeEnabled();
 
-    fireEvent.click(screen.getByRole('button', { name: /Quick export presentation/i }));
+    fireEvent.click(screen.getByTestId('presentation-editor-export'));
     await waitFor(() => expect(exportArtifact).toHaveBeenCalledWith('deck-pptx', 'pptx'));
     expect(await screen.findByTestId('presentation-export-download')).toHaveAttribute(
       'href',
@@ -195,9 +195,8 @@ describe('PresentationStudio export failure recovery (C-80)', () => {
       }),
     });
 
-    expect(screen.getByRole('button', { name: /Quick export presentation/i })).toBeDisabled();
-    expect(screen.getByRole('button', { name: /Export presentation artifact/i })).toBeDisabled();
-    fireEvent.click(screen.getByRole('button', { name: /Quick export presentation/i }));
+    expect(screen.getByTestId('presentation-editor-export')).toBeDisabled();
+    fireEvent.click(screen.getByTestId('presentation-editor-export'));
     expect(exportArtifact).not.toHaveBeenCalled();
   }, 20000);
 
@@ -214,9 +213,8 @@ describe('PresentationStudio export failure recovery (C-80)', () => {
       });
 
       expect(screen.getByTestId('presentation-completed-tag')).toHaveTextContent('正在修改');
-      expect(screen.getByRole('button', { name: /Quick export presentation/i })).toBeDisabled();
-      expect(screen.getByRole('button', { name: /Export presentation artifact/i })).toBeDisabled();
-      fireEvent.click(screen.getByRole('button', { name: /Quick export presentation/i }));
+      expect(screen.getByTestId('presentation-editor-export')).toBeDisabled();
+      fireEvent.click(screen.getByTestId('presentation-editor-export'));
       expect(exportArtifact).not.toHaveBeenCalled();
     },
     20000,
@@ -372,23 +370,18 @@ describe('PresentationStudio export failure recovery (C-80)', () => {
     await openExportMenu('svg');
 
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /Export presentation artifact/i })).toBeDisabled();
+      expect(screen.getByTestId('presentation-editor-export')).toBeDisabled();
     });
-    expect(screen.getByRole('button', { name: /Export presentation artifact/i })).toHaveAttribute(
-      'aria-busy',
-      'true',
-    );
+    expect(screen.getByTestId('presentation-editor-export')).toHaveAttribute('aria-busy', 'true');
 
     resolveExport({ artifactId: 'slide-1', format: 'svg', uri: 'data:image/svg+xml,late' });
     await waitFor(() => {
-      expect(
-        screen.getByRole('button', { name: /Export presentation artifact/i }),
-      ).not.toBeDisabled();
+      expect(screen.getByTestId('presentation-editor-export')).not.toBeDisabled();
     });
     expect(screen.getByTestId('presentation-export-download')).toBeInTheDocument();
   });
 
-  it('preserves the selection, artifacts and composer draft through an export failure', async () => {
+  it('preserves the selection, artifacts and canvas through an export failure', async () => {
     const exportArtifact = vi
       .fn()
       .mockRejectedValueOnce(new Error('HTTP 500 EXPORT_FAILED: boom'))
@@ -399,11 +392,6 @@ describe('PresentationStudio export failure recovery (C-80)', () => {
       });
     await renderRestoredStudio({ exportArtifact });
 
-    // A draft exists in the composer before the failure.
-    fireEvent.change(screen.getByLabelText('Presentation title'), {
-      target: { value: 'Unfinished draft' },
-    });
-
     await openExportMenu('svg');
     const errorBox = await screen.findByTestId('presentation-export-error');
     expect(errorBox).toHaveTextContent('Export failed: EXPORT_FAILED');
@@ -412,7 +400,8 @@ describe('PresentationStudio export failure recovery (C-80)', () => {
     expect(screen.getByTestId('artifact-card-slide-1')).toHaveAttribute('data-selected', 'true');
     expect(screen.getByTestId('artifact-card-slide-2')).toBeInTheDocument();
     expect(screen.getByTestId('presentation-job-job-done')).toBeInTheDocument();
-    expect(screen.getByLabelText('Presentation title')).toHaveValue('Unfinished draft');
+    expect(screen.getByTestId('slide-preview-image')).toBeInTheDocument();
+    expect(screen.queryByTestId('presentation-conversation-input')).not.toBeInTheDocument();
 
     // The retry targets exactly the same artifact + format and succeeds.
     fireEvent.click(screen.getByTestId('presentation-export-retry'));
@@ -426,8 +415,8 @@ describe('PresentationStudio export failure recovery (C-80)', () => {
         'data:image/svg+xml,after-failure',
       );
     });
-    // The draft is still there after the successful retry.
-    expect(screen.getByLabelText('Presentation title')).toHaveValue('Unfinished draft');
+    // The same canvas remains mounted after the successful retry.
+    expect(screen.getByTestId('slide-preview-image')).toBeInTheDocument();
   });
 
   it('never fires a download when only the error path runs and clears on dismiss', async () => {

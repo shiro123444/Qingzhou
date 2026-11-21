@@ -9,6 +9,7 @@ import type {
   PresentationJob,
 } from '../../../packages/runtime-contracts/src/index';
 import { RuntimeClientImpl } from '../../services/runtime/client';
+import { confirmTestOutline, outlineTestClient } from './outlineTestClient';
 import PresentationStudio from './PresentationStudio';
 import { createPresentationStudioStore } from './store/presentationStore';
 
@@ -37,10 +38,6 @@ const jsonResponse = (status: number, body: unknown): Response =>
 /** A real RuntimeClientImpl whose HTTP seam is the injected fetcher. */
 const httpClient = (fetcher: ReturnType<typeof vi.fn>): RuntimeClientImpl =>
   new RuntimeClientImpl({ fetcher });
-
-const typeTitle = (value: string) => {
-  fireEvent.change(screen.getByLabelText('Presentation title'), { target: { value } });
-};
 
 describe('PresentationStudio production transport regression (C-78)', () => {
   // The suite's shared environment persists DOM, storage, timers and the URL between cases: the studio
@@ -76,10 +73,15 @@ describe('PresentationStudio production transport regression (C-78)', () => {
       }
       return jsonResponse(404, {});
     });
-    render(<PresentationStudio client={httpClient(fetcher)} />);
+    render(
+      <PresentationStudio
+        agentClient={outlineTestClient}
+        initialTopic={'HTTP deck'}
+        client={httpClient(fetcher)}
+      />,
+    );
 
-    typeTitle('HTTP deck');
-    fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
+    await confirmTestOutline();
 
     const hint = await screen.findByTestId('presentation-provider-unavailable');
     expect(hint).toHaveTextContent('Presentation generation is currently unavailable');
@@ -100,10 +102,15 @@ describe('PresentationStudio production transport regression (C-78)', () => {
     const fetcher = vi.fn(async () => {
       throw new TypeError('Failed to fetch');
     });
-    render(<PresentationStudio client={httpClient(fetcher)} />);
+    render(
+      <PresentationStudio
+        agentClient={outlineTestClient}
+        initialTopic={'Offline deck'}
+        client={httpClient(fetcher)}
+      />,
+    );
 
-    typeTitle('Offline deck');
-    fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
+    await confirmTestOutline();
 
     const errorBox = await screen.findByTestId('presentation-client-error');
     expect(errorBox).toHaveTextContent('Presentation runtime error: RUNTIME_ERROR');
@@ -138,10 +145,15 @@ describe('PresentationStudio production transport regression (C-78)', () => {
           String(call[0]).endsWith('/api/runtime/presentation/jobs') && call[1]?.method === 'POST',
       );
 
-    render(<PresentationStudio client={httpClient(fetcher)} />);
+    render(
+      <PresentationStudio
+        agentClient={outlineTestClient}
+        initialTopic={'HTTP recovery deck'}
+        client={httpClient(fetcher)}
+      />,
+    );
 
-    typeTitle('HTTP recovery deck');
-    fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
+    await confirmTestOutline();
     await screen.findByTestId('presentation-provider-unavailable', {}, { timeout: 5000 });
 
     configured = true;
@@ -174,10 +186,15 @@ describe('PresentationStudio production transport regression (C-78)', () => {
         (call) =>
           String(call[0]).endsWith('/api/runtime/presentation/jobs') && call[1]?.method === 'POST',
       );
-    render(<PresentationStudio client={httpClient(fetcher)} />);
+    render(
+      <PresentationStudio
+        agentClient={outlineTestClient}
+        initialTopic={'HTTP retry deck'}
+        client={httpClient(fetcher)}
+      />,
+    );
 
-    typeTitle('HTTP retry deck');
-    fireEvent.click(screen.getByRole('button', { name: /Create Job/i }));
+    await confirmTestOutline();
     await screen.findByTestId('presentation-provider-unavailable', {}, { timeout: 5000 });
 
     fireEvent.click(screen.getByTestId('presentation-provider-resubmit'));
@@ -187,7 +204,7 @@ describe('PresentationStudio production transport regression (C-78)', () => {
     });
 
     expect(screen.getByTestId('presentation-provider-unavailable')).toBeInTheDocument();
-    expect(screen.getByLabelText('Presentation title')).toHaveValue('HTTP retry deck');
+    expect(screen.getByTestId('outline-slide-1')).toHaveTextContent('HTTP retry deck');
     expect(screen.getByTestId('studio-empty-state')).toBeInTheDocument();
   });
 

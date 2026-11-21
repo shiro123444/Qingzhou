@@ -27,6 +27,8 @@ import { ToolsEngine } from '@lobechat/context-engine';
 import { type RuntimeEnvMode, type RuntimePlatform } from '@lobechat/types';
 import debug from 'debug';
 
+import { computerManifest, ComputerToolIdentifier } from '@/server/runtime/computer/manifest';
+import { isNativeAgentRuntimeEnabled } from '@/server/runtime/tasks/mode';
 import {
   buildAllowedBuiltinTools,
   DEVICE_TOOL_IDENTIFIERS,
@@ -168,6 +170,11 @@ export const createServerAgentToolsEngine = (
   const searchMode = agentConfig.chatConfig?.searchMode ?? 'auto';
   const isSearchEnabled = searchMode !== 'off';
   const isChatMode = agentConfig.chatConfig?.enableAgentMode === false;
+  const computerEnabled =
+    !isChatMode &&
+    isNativeAgentRuntimeEnabled() &&
+    process.env.QINGZHOU_COMPUTER_ENABLED === '1' &&
+    !isBotConversation;
 
   log(
     'Creating agent tools engine model=%s provider=%s searchMode=%s platform=%s runtimeMode=%s additionalManifests=%d hasClientExecutor=%s hasDeviceProxy=%s canUseDevice=%s isChatMode=%s',
@@ -195,6 +202,7 @@ export const createServerAgentToolsEngine = (
   };
 
   const agentModeRules = {
+    [ComputerToolIdentifier]: computerEnabled,
     // User-selected plugins
     ...Object.fromEntries((agentConfig.plugins ?? []).map((id) => [id, true])),
     // Always-on builtin tools
@@ -236,14 +244,19 @@ export const createServerAgentToolsEngine = (
 
   return createServerToolsEngine(context, {
     // Pass additional manifests (e.g., LobeHub Skills)
-    additionalManifests,
+    additionalManifests: [
+      ...(additionalManifests ?? []),
+      ...(computerEnabled ? [computerManifest()] : []),
+    ],
     // Physically drop device-tool manifests for turns whose access policy
     // denies them. Without this filter, `lobe-activator`'s explicit
     // activation could resolve the manifest and bypass the rule-layer
     // gates below (LOBE-8768).
     builtinTools: buildAllowedBuiltinTools({ canUseDevice, disableLocalSystem }),
     // Add default tools based on configuration
-    defaultToolIds: isChatMode ? chatModeAllowedToolIds : defaultToolIds,
+    defaultToolIds: isChatMode
+      ? chatModeAllowedToolIds
+      : [...defaultToolIds, ...(computerEnabled ? [ComputerToolIdentifier] : [])],
     // Post-merge wall: a plugin or Skill/Klavis manifest claiming a
     // device identifier survives `buildAllowedBuiltinTools` (which only
     // filters the builtin source). Excluding the identifiers here drops

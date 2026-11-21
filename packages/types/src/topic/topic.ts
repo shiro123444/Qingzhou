@@ -4,12 +4,7 @@ import type { BaseDataModel } from '../meta';
 export type ShareVisibility = 'private' | 'link';
 
 export type TimeGroupId =
-  | 'today'
-  | 'yesterday'
-  | 'week'
-  | 'month'
-  | `${number}-${string}`
-  | `${number}`;
+  'today' | 'yesterday' | 'week' | 'month' | `${number}-${string}` | `${number}`;
 
 export type TopicGroupMode = 'byTime' | 'byProject' | 'flat';
 export type TopicSortBy = 'createdAt' | 'updatedAt';
@@ -145,6 +140,7 @@ export interface ChatTopicMetadata {
   runningOperation?: {
     assistantMessageId: string;
     operationId: string;
+    transport?: 'native' | 'gateway';
     scope?: string;
     threadId?: string | null;
   } | null;
@@ -169,13 +165,7 @@ export interface ChatTopicSummary {
 }
 
 export type ChatTopicStatus =
-  | 'active'
-  | 'running'
-  | 'paused'
-  | 'waitingForHuman'
-  | 'failed'
-  | 'completed'
-  | 'archived';
+  'active' | 'running' | 'paused' | 'waitingForHuman' | 'failed' | 'completed' | 'archived';
 
 export interface ChatTopic extends Omit<BaseDataModel, 'meta'> {
   completedAt?: Date | null;

@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   getAgentConfig: vi.fn(),
   getAiProviderById: vi.fn(),
   getAiProviderModelList: vi.fn(),
+  getAccountModels: vi.fn(),
   getLLMConfig: vi.fn(() => ({ API_KEY_SELECT_MODE: 'turn' }) as Record<string, string>),
   getServerGlobalConfig: vi.fn(),
 }));
@@ -25,7 +26,10 @@ vi.mock('@/database/models/aiProvider', () => ({
 }));
 vi.mock('@/database/repositories/aiInfra', () => ({
   AiInfraRepos: vi.fn(function () {
-    return { getAiProviderModelList: mocks.getAiProviderModelList };
+    return {
+      getAiProviderModelList: mocks.getAiProviderModelList,
+      aiModelModel: { getModelListByProviderId: mocks.getAccountModels },
+    };
   }),
 }));
 vi.mock('@/server/services/agent', () => ({
@@ -64,6 +68,7 @@ describe('resolveUserChatProvider', () => {
     mocks.getAgentConfig.mockResolvedValue(selection);
     mocks.getAiProviderById.mockResolvedValue(providerConfig);
     mocks.getAiProviderModelList.mockResolvedValue([modelMetadata]);
+    mocks.getAccountModels.mockResolvedValue([]);
     mocks.getLLMConfig.mockReturnValue({
       ANTHROPIC_API_KEY: 'anthropic-secret',
       DEEPSEEK_API_KEY: 'deepseek-server-secret',
@@ -101,6 +106,57 @@ describe('resolveUserChatProvider', () => {
     );
     expect(AiInfraRepos).toHaveBeenCalledWith(db, userId, serverProviders);
     expect(mocks.getAiProviderModelList).toHaveBeenCalledWith('tini');
+  });
+
+  it('resolves an explicit role model without changing the inbox selection', async () => {
+    mocks.getAiProviderModelList.mockResolvedValue([
+      modelMetadata,
+      { ...modelMetadata, id: 'review-model' },
+    ]);
+    await expect(
+      resolveUserChatProvider(db, userId, { model: 'review-model' }),
+    ).resolves.toMatchObject({ model: 'review-model', provider: selection.provider });
+    await expect(resolveUserChatProvider(db, userId)).resolves.toMatchObject(selection);
+  });
+
+  it('resolves a role provider with its own credentials and enabled models', async () => {
+    mocks.getAiProviderById.mockImplementation(async (id: string) => ({
+      ...providerConfig,
+      id,
+      keyVaults: { apiKey: `${id}-secret`, baseURL: `https://${id}.example/v1` },
+    }));
+    await expect(
+      resolveUserChatProvider(db, userId, { provider: 'reviewer', model: modelMetadata.id }),
+    ).resolves.toMatchObject({
+      provider: 'reviewer',
+      apiKey: 'reviewer-secret',
+      baseURL: 'https://reviewer.example/v1',
+    });
+    expect(mocks.getAiProviderModelList).toHaveBeenCalledWith('reviewer');
+  });
+
+  it('permits a trusted specialist from its enabled account catalog without changing chat visibility', async () => {
+    mocks.getAccountModels.mockResolvedValue([{ ...modelMetadata, id: 'specialist' }]);
+    await expect(
+      resolveUserChatProvider(db, userId, { model: 'specialist' }),
+    ).resolves.toMatchObject({ model: 'specialist' });
+    expect(mocks.getAccountModels).toHaveBeenCalledWith(selection.provider);
+    await expect(resolveUserChatProvider(db, userId)).resolves.toMatchObject(selection);
+    mocks.getAccountModels.mockResolvedValue([
+      { ...modelMetadata, id: 'specialist', enabled: false },
+    ]);
+    await expect(
+      resolveUserChatProvider(db, userId, { model: 'specialist' }),
+    ).rejects.toBeInstanceOf(UserChatProviderConfigurationError);
+  });
+
+  it('rejects disabled or unlisted role models rather than borrowing the main model', async () => {
+    for (const models of [[], [{ ...modelMetadata, enabled: false }]]) {
+      mocks.getAiProviderModelList.mockResolvedValue(models);
+      await expect(
+        resolveUserChatProvider(db, userId, { model: modelMetadata.id }),
+      ).rejects.toBeInstanceOf(UserChatProviderConfigurationError);
+    }
   });
 
   it('defaults a custom provider SDK to openai, using runtime SDK environment precedence', async () => {

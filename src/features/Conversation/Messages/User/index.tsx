@@ -5,6 +5,7 @@ import { memo, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { ChatItem } from '@/features/Conversation/ChatItem';
+import PresentationDeliveryCard from '@/features/PresentationDelivery/DeliveryCard';
 import { useUserAvatar } from '@/hooks/useUserAvatar';
 import { useSessionStore } from '@/store/session';
 import { sessionSelectors } from '@/store/session/selectors';
@@ -30,6 +31,7 @@ interface UserMessageProps {
 const UserMessage = memo<UserMessageProps>(({ id, disableEditing, index }) => {
   const item = useConversationStore(dataSelectors.getDisplayMessageById(id), isEqual)!;
   const { content, createdAt, error, role, extra, targetId } = item;
+  const ctx = useConversationStore((s) => s.context);
 
   const { t } = useTranslation('chat');
   const avatar = useUserAvatar();
@@ -74,23 +76,35 @@ const UserMessage = memo<UserMessageProps>(({ id, disableEditing, index }) => {
   );
 
   return (
-    <ChatItem
-      actions={<Actions data={item} disableEditing={disableEditing} id={id} />}
-      avatar={{ avatar, title }}
-      editing={editing}
-      id={id}
-      message={content}
-      messageExtra={<UserMessageExtra content={content} extra={extra} id={id} />}
-      placement={'right'}
-      showAvatar={false}
-      showTitle={false}
-      time={createdAt}
-      titleAddon={dmIndicator}
-      onDoubleClick={onDoubleClick}
-      onMouseEnter={onMouseEnter}
-    >
-      <UserMessageContent {...item} />
-    </ChatItem>
+    <>
+      <ChatItem
+        actions={<Actions data={item} disableEditing={disableEditing} id={id} />}
+        avatar={{ avatar, title }}
+        editing={editing}
+        id={id}
+        message={content}
+        messageExtra={<UserMessageExtra content={content} extra={extra} id={id} />}
+        placement={'right'}
+        showAvatar={false}
+        showTitle={false}
+        time={createdAt}
+        titleAddon={dmIndicator}
+        onDoubleClick={onDoubleClick}
+        onMouseEnter={onMouseEnter}
+      >
+        <UserMessageContent {...item} />
+      </ChatItem>
+      {item.metadata?.presentationRequest &&
+        ctx.agentId &&
+        ctx.topicId &&
+        !ctx.topicShareId &&
+        !ctx.threadId && (
+          <PresentationDeliveryCard
+            jobId={item.metadata.presentationJobId}
+            origin={{ agentId: ctx.agentId, topicId: ctx.topicId, messageId: id }}
+          />
+        )}
+    </>
   );
 }, isEqual);
 

@@ -1,29 +1,11 @@
 'use client';
 
-import { Icon } from '@lobehub/ui';
 import { cx } from 'antd-style';
-import {
-  AudioLines,
-  ChevronDown,
-  ChevronUp,
-  ExternalLink,
-  ListMusic,
-  MoreHorizontal,
-  Music2,
-  Pause,
-  Play,
-  Repeat,
-  Repeat1,
-  RotateCcw,
-  Shuffle,
-  SkipBack,
-  SkipForward,
-  Volume2,
-} from 'lucide-react';
 import { type CSSProperties, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useLocation } from 'react-router-dom';
 
+import { MotionGlyph } from '@/features/GlassMotion/MotionGlyph';
 import { liquidGlass } from '@/styles/liquidGlass';
 
 import { styles } from './capsule.style';
@@ -32,17 +14,9 @@ import { type RepeatMode } from './engine';
 import { formatTime } from './lyrics';
 import { musicTheme } from './musicTheme';
 import MusicTrackList from './MusicTrackList';
+import { RecordDisc } from './RecordDisc';
 import { useCapsuleMotion } from './useCapsuleMotion';
 import { useCapsulePosition } from './useCapsulePosition';
-
-function TrackArtwork({ coverUrl }: { coverUrl?: string }) {
-  const [failed, setFailed] = useState(false);
-  return coverUrl && !failed ? (
-    <img alt="" draggable={false} src={coverUrl} onError={() => setFailed(true)} />
-  ) : (
-    <Icon aria-hidden icon={Music2} size={{ size: 24, strokeWidth: 1.75 }} />
-  );
-}
 
 export default function MiniPlayer() {
   const { t } = useTranslation('music');
@@ -53,6 +27,7 @@ export default function MiniPlayer() {
   const [collapsedPreference, setCollapsedPreference] = useState<boolean | null>(null);
   const [details, setDetails] = useState(false);
   const dock = useRef<HTMLElement>(null);
+  const studioOpen = pathname === '/music';
   const collapsed = collapsedPreference ?? pathname === '/music';
   const panelOpen = details && !collapsed;
   const morphing = useCapsuleMotion(collapsed, panelOpen, dock);
@@ -100,6 +75,7 @@ export default function MiniPlayer() {
     <section
       {...position.surfaceProps}
       data-qz-glass-motion
+      aria-hidden={studioOpen}
       aria-label={t('player')}
       className={cx(styles.dock, musicTheme, liquidGlass)}
       data-collapsed={collapsed}
@@ -108,6 +84,8 @@ export default function MiniPlayer() {
       data-positioned={position.ready}
       data-qz-glass-morphing={morphing}
       data-testid="music-capsule"
+      hidden={studioOpen}
+      inert={studioOpen}
       ref={dock}
       style={position.style}
     >
@@ -122,7 +100,7 @@ export default function MiniPlayer() {
       >
         <div className={styles.panelHeading}>
           <span>
-            <Icon aria-hidden icon={ListMusic} size={{ size: 18, strokeWidth: 1.75 }} />
+            <MotionGlyph name="tasks" size={18} />
             {t('queue')} <small>{s.playlist?.total ?? s.queue.length}</small>
           </span>
           <span className={styles.transport}>
@@ -132,10 +110,10 @@ export default function MiniPlayer() {
               title={t('capsuleResetPosition')}
               onClick={position.reset}
             >
-              <Icon aria-hidden icon={RotateCcw} size={{ size: 18, strokeWidth: 1.75 }} />
+              <MotionGlyph name="refresh" size={18} />
             </button>
             <Link aria-label={t('openStudio')} to="/music" onClick={() => setDetails(false)}>
-              <Icon aria-hidden icon={ExternalLink} size={{ size: 18, strokeWidth: 1.75 }} />
+              <MotionGlyph name="expand" size={18} />
             </Link>
           </span>
         </div>
@@ -161,13 +139,12 @@ export default function MiniPlayer() {
                 >
                   <span className={styles.queueNumber}>
                     {s.activeId === item.id ? (
-                      <Icon aria-hidden icon={AudioLines} size={{ size: 18, strokeWidth: 1.75 }} />
+                      <MotionGlyph name="music" running={s.status === 'playing'} size={18} />
                     ) : (
                       String((s.playlist?.startIndex ?? 0) + index + 1).padStart(2, '0')
                     )}
                   </span>
                   <span>{item.name}</span>
-                  {s.activeId === item.id && <span className={styles.activeDot} />}
                 </button>
               </li>
             )}
@@ -183,7 +160,7 @@ export default function MiniPlayer() {
             title={t('shuffle')}
             onClick={() => engine.setShuffle(!s.shuffle)}
           >
-            <Icon aria-hidden icon={Shuffle} size={{ size: 18, strokeWidth: 1.75 }} />
+            <MotionGlyph name="shuffle" size={18} />
           </button>
           <button
             aria-label={t('capsuleRepeat')}
@@ -197,13 +174,13 @@ export default function MiniPlayer() {
             }
           >
             {s.repeat === 'single' ? (
-              <Icon aria-hidden icon={Repeat1} size={{ size: 18, strokeWidth: 1.75 }} />
+              <MotionGlyph name="repeat" size={18} />
             ) : (
-              <Icon aria-hidden icon={Repeat} size={{ size: 18, strokeWidth: 1.75 }} />
+              <MotionGlyph name="repeat" size={18} />
             )}
           </button>
           <label className={styles.volume}>
-            <Icon aria-hidden icon={Volume2} size={{ size: 18, strokeWidth: 1.75 }} />
+            <MotionGlyph name="volume" size={18} />
             <input
               aria-label={t('capsuleVolume')}
               data-capsule-range="volume"
@@ -246,7 +223,7 @@ export default function MiniPlayer() {
             aria-expanded={false}
             aria-label={t('capsuleExpand')}
             className={styles.artworkLink}
-            title={`${track?.name ?? t('title')} · ${t('capsuleDragHint')}`}
+            title={`${t('capsuleExpand')} · ${track?.name ?? t('title')}`}
             onClick={(event) => {
               if (!event.defaultPrevented) {
                 dock.current
@@ -257,15 +234,27 @@ export default function MiniPlayer() {
             }}
           >
             <span aria-hidden className={styles.record} data-playing={s.status === 'playing'}>
-              <TrackArtwork coverUrl={track?.coverUrl} key={track?.coverUrl ?? 'empty'} />
+              <RecordDisc
+                coverUrl={track?.coverUrl}
+                playing={s.status === 'playing' && collapsed}
+              />
             </span>
-            {s.status === 'playing' && <span className={styles.orbIndicator} />}
+            <span aria-hidden className={styles.expandBadge}>
+              <MotionGlyph name="expand" size={10} />
+            </span>
           </button>
         </div>
-        <div aria-hidden={collapsed} className={styles.expanded} inert={collapsed}>
+        <div
+          aria-hidden={collapsed}
+          className={cx(styles.expanded, styles.deckLayout)}
+          inert={collapsed}
+        >
           <Link aria-label={t('openStudio')} className={styles.artworkLink} to="/music">
             <span aria-hidden className={styles.record} data-playing={s.status === 'playing'}>
-              <TrackArtwork coverUrl={track?.coverUrl} key={track?.coverUrl ?? 'empty'} />
+              <RecordDisc
+                coverUrl={track?.coverUrl}
+                playing={s.status === 'playing' && !collapsed}
+              />
             </span>
           </Link>
           <Link className={styles.track} to="/music">
@@ -282,7 +271,7 @@ export default function MiniPlayer() {
                 className={`${styles.iconButton} ${styles.secondaryTransport}`}
                 onClick={() => engine.previous()}
               >
-                <Icon aria-hidden icon={SkipBack} size={{ size: 18, strokeWidth: 1.75 }} />
+                <MotionGlyph name="previous" size={18} />
               </button>
               <button
                 aria-label={t(playing ? 'capsulePause' : 'capsulePlay')}
@@ -290,9 +279,9 @@ export default function MiniPlayer() {
                 onClick={() => (playing ? engine.pause() : engine.play())}
               >
                 {playing ? (
-                  <Icon aria-hidden icon={Pause} size={{ size: 20, strokeWidth: 1.75 }} />
+                  <MotionGlyph name="pause" size={20} />
                 ) : (
-                  <Icon aria-hidden icon={Play} size={{ size: 20, strokeWidth: 1.75 }} />
+                  <MotionGlyph name="play" size={20} />
                 )}
               </button>
               <button
@@ -300,7 +289,7 @@ export default function MiniPlayer() {
                 className={`${styles.iconButton} ${styles.secondaryTransport}`}
                 onClick={() => engine.next()}
               >
-                <Icon aria-hidden icon={SkipForward} size={{ size: 18, strokeWidth: 1.75 }} />
+                <MotionGlyph name="next" size={18} />
               </button>
             </div>
           )}
@@ -312,20 +301,17 @@ export default function MiniPlayer() {
               className={styles.iconButton}
               onClick={() => setDetails((value) => !value)}
             >
-              {details ? (
-                <Icon aria-hidden icon={ChevronDown} size={{ size: 18, strokeWidth: 1.75 }} />
-              ) : (
-                <Icon aria-hidden icon={MoreHorizontal} size={{ size: 18, strokeWidth: 1.75 }} />
-              )}
+              <MotionGlyph active={details} name="menu" size={18} />
             </button>
             <button
               data-capsule-collapse
+              aria-expanded={true}
               aria-label={t('capsuleCollapse')}
               className={styles.collapseButton}
               title={t('capsuleCollapse')}
               onClick={collapse}
             >
-              <Icon aria-hidden icon={ChevronUp} size={{ size: 14, strokeWidth: 1.75 }} />
+              <MotionGlyph name="collapse" size={16} />
             </button>
           </div>
           {!!s.queue.length && (
