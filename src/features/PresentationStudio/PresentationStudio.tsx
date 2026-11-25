@@ -21,7 +21,6 @@ import {
   type PresentationStyleId,
 } from '../../../packages/runtime-contracts/src/presentation-style-presets';
 import PresentationAgentFlow from './AgentFlow';
-import { StudioGlass } from './StudioGlass';
 import type { OutlineSlide } from './AgentFlow/OutlineWorkspace';
 import {
   createPresentationAgentClient,
@@ -50,6 +49,7 @@ import {
   type PresentationClient,
   type PresentationTransportMode,
 } from './store/presentationStore';
+import { StudioGlass } from './StudioGlass';
 import { StudioNotice } from './StudioNotice';
 import { styles } from './style';
 
@@ -935,6 +935,7 @@ export const PresentationStudio = memo<PresentationStudioProps>(
                   exporting={exporting}
                   jobTitles={jobTitles}
                   jobs={jobs}
+                  key={selectedJob.jobId}
                   resolveArtifactUri={resolveArtifactUri}
                   retryPendingKeys={retryPendingKeys}
                   selectedJob={selectedJob}

@@ -23,12 +23,13 @@ import PanoramaGrid from './PanoramaGrid';
 import SlideFocusStage from './SlideFocusStage';
 import { styles } from './style';
 import type { CompletedViewMode, CompletedWorkspaceProps } from './types';
+import { useCanvasSaveQueue } from './useCanvasSaveQueue';
 
 export const CompletedWorkspace = memo<CompletedWorkspaceProps>(
   ({
     activity,
     activityHistory,
-    canExport,
+    canExport: exportAllowed,
     collaboration,
     dismissSlotError,
     effectiveSelectedArtifactId,
@@ -59,6 +60,8 @@ export const CompletedWorkspace = memo<CompletedWorkspaceProps>(
     slideArtifacts,
   }) => {
     const { t } = useTranslation('common');
+    const queue = useCanvasSaveQueue(selectedJob.jobId, onJobChanged);
+    const canExport = exportAllowed && !queue.pending;
     const studentHandout = selectedJobArtifacts.find(
       (artifact) =>
         artifact.status === 'ready' && artifact.metadata?.artifactRole === 'student-handout',
@@ -226,9 +229,9 @@ export const CompletedWorkspace = memo<CompletedWorkspaceProps>(
     const workspace = (
       <div
         className={`${liquidGlass} ${styles.workspaceRoot}`}
-        style={panelMotionStyle}
         data-focused={focused}
         data-testid="presentation-completed-workspace"
+        style={panelMotionStyle}
       >
         {collaboration && <div className={styles.collaborationSlot}>{collaboration}</div>}
         <CapsuleHeader
@@ -325,22 +328,24 @@ export const CompletedWorkspace = memo<CompletedWorkspaceProps>(
             {/* Central Stage: Slide Focus Mode vs Panorama Lightbox Grid */}
             {viewMode === 'focus' ? (
               <SlideFocusStage
-                onFocusPage={() => setFocused(true)}
-                job={selectedJob}
                 annotating={annotating}
                 annotationDock={annotationDock}
                 canEditObjects={selectedJob.state === 'completed'}
                 canvas={canvas}
                 currentIndex={currentIndex}
                 dataError={dataError}
+                job={selectedJob}
                 jobId={selectedJob.jobId}
                 paintInterrupted={paintInterrupted}
                 painting={focusPainting && !savingCanvas}
+                queue={queue}
+                refreshJob={onJobChanged}
                 selectedSlide={selectedSlide}
                 setAnnotating={setAnnotating}
                 slides={slideArtifacts}
                 totalSlides={totalSlides}
                 versionId={selectedJob.versionId}
+                onFocusPage={() => setFocused(true)}
                 onNext={handleNext}
                 onPrev={handlePrev}
                 onSelectSlide={onSelectArtifact}

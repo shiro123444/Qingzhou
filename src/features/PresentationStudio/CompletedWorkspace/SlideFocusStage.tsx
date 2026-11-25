@@ -18,45 +18,50 @@ import {
   useCallback,
   useEffect,
   useMemo,
-  useState,
   useRef,
+  useState,
 } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { GlassToolbar } from '@/features/GlassMotion/Toolbar';
+import { type CanvasControls, CanvasSurface } from '@/features/SpatialCanvas';
 import {
   alignmentEdges,
   alignSelection,
-  selectionBounds,
   distributeSelection,
+  selectionBounds,
 } from '@/features/SpatialCanvas/selection';
-import { GlassToolbar } from '@/features/GlassMotion/Toolbar';
-import { type CanvasControls, CanvasSurface } from '@/features/SpatialCanvas';
 import { glassSurface } from '@/styles/liquidGlass';
 
-import {
-  canvasAtoms,
-  canvasNode,
-  editableTextNodes,
-} from '../../../../packages/utils/src/presentationAnnotation';
-import { translateInPage, scaleInPage } from '../../../utils/presentationCanvasTransform';
 import { moveCanvasObject } from '../../../../packages/runtime-contracts/src/canvas';
 import type {
   ArtifactSnapshot,
   CanvasCommand,
-  PresentationMessageInput,
   PresentationJob,
+  PresentationMessageInput,
 } from '../../../../packages/runtime-contracts/src/index';
+import {
+  annotationElements,
+  canvasAtoms,
+  canvasNode,
+  editableTextNodes,
+} from '../../../../packages/utils/src/presentationAnnotation';
+import { scaleInPage, translateInPage } from '../../../utils/presentationCanvasTransform';
+import { measureAnnotationElements } from '../annotation/geometry';
+import { type EditableSlide } from '../annotation/readEditableSlide';
 import { SlideAnnotation } from '../annotation/SlideAnnotation';
-import { type SlideCanvasObject, presentationCanvasObjects } from './canvasObjects';
+import type { readCanvasDocument, SlideCanvasObject } from './canvasObjects';
+import { presentationCanvasObjects } from './canvasObjects';
 import { CanvasZoomControl } from './CanvasZoomControl';
 import { ChartDataEditor } from './ChartDataEditor';
-import { DirectCanvasEditor, useDirectCanvasEdit, useEditingImage } from './DirectCanvasEditor';
 import { DeckPlayback } from './DeckPlayback';
+import { DirectCanvasEditor, useDirectCanvasEdit, useEditingImage } from './DirectCanvasEditor';
 import SlideGenerationOverlay from './SlideGenerationOverlay';
 import { styles } from './style';
 import { TableDataEditor } from './TableDataEditor';
-import { useCanvasShortcuts } from './useCanvasShortcuts';
 import { useCanvasDocument, useDragPreview, usePositionPreview } from './useCanvasDocument';
+import type { useCanvasSaveQueue } from './useCanvasSaveQueue';
+import { useCanvasShortcuts } from './useCanvasShortcuts';
 
 export interface SlideFocusStageProps {
   annotating: boolean;
@@ -65,8 +70,8 @@ export interface SlideFocusStageProps {
   canvas: RefObject<CanvasControls | null>;
   currentIndex: number;
   dataError?: string;
-  jobId?: string;
   job?: PresentationJob;
+  jobId?: string;
   onFocusPage?: () => void;
   onNext: () => void;
   onPrev: () => void;
@@ -74,6 +79,8 @@ export interface SlideFocusStageProps {
   onSendMessage?: (jobId: string, input: PresentationMessageInput) => Promise<boolean>;
   painting?: boolean;
   paintInterrupted?: boolean;
+  queue: ReturnType<typeof useCanvasSaveQueue>;
+  refreshJob?: () => Promise<void>;
   selectedSlide: ArtifactSnapshot | null;
   setAnnotating: (active: boolean) => void;
   slides: ArtifactSnapshot[];
@@ -103,6 +110,8 @@ const getSlideStatusZh = (status?: string): string => {
 
 export const SlideFocusStage = memo<SlideFocusStageProps>(
   ({
+    queue,
+    refreshJob,
     annotationDock,
     annotating,
     setAnnotating,
@@ -133,17 +142,15 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
       y: number;
       requestId: string;
     }>();
-    const [optimistic, setOptimistic] = useState<{ page: string; version?: string; uri: string }>();
-    const mainImage = useRef<HTMLImageElement>(null);
-    const [drop, setDrop] = useState<{
-      jobId: string;
-      pageId: string;
-      baseArtifact: string;
+    const [local, setLocal] = useState<{
+      page: number;
       requestId: string;
-      baseVersion: string;
+      base: string;
+      data: EditableSlide;
+      source: NonNullable<ReturnType<typeof readCanvasDocument>>;
       uri: string;
       objects: SlideCanvasObject[];
-      selected: string[];
+      tables: ReturnType<typeof presentationCanvasObjects>['tables'];
     }>();
     const [positionSaving, setPositionSaving] = useState(false);
     const [positionFailed, setPositionFailed] = useState(false);
@@ -154,19 +161,16 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
     const [playback, setPlayback] = useState<{ slides: ArtifactSnapshot[]; startIndex: number }>();
     const exitPlayback = useCallback(() => setPlayback(undefined), []);
     useEffect(() => {
-      setDrop(undefined);
-    }, [currentIndex, jobId]);
-    useEffect(() => {
       setAnnotating(false);
       setSelection(undefined);
       setDataEditor(undefined);
       setDraft(undefined);
       setPositionFailed(false);
-    }, [currentIndex, jobId, versionId, setAnnotating]);
+    }, [currentIndex, jobId, setAnnotating]);
     const {
       objects: semanticObjects,
       charts,
-      tables,
+      tables: publishedTables,
     } = useMemo(
       () =>
         presentationCanvasObjects(
@@ -191,6 +195,8 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
     );
     const pageId = pages[currentIndex]?.id ?? String(currentIndex + 1);
     const pageNumber = Number(pageId);
+    const working = local?.page === pageNumber ? local : undefined;
+    const tables = working?.tables ?? publishedTables;
     const openDataEditor = (id?: string) => {
       if (id && versionId) setDataEditor({ id, versionId, page: pageNumber });
     };
@@ -209,21 +215,30 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
       pageNumber,
       versionId,
       Boolean(
-        ready && canEditObjects && onSendMessage && !painting && !annotating && mode === 'select',
+        ready &&
+        (canEditObjects || working) &&
+        (!queue.pending || working) &&
+        onSendMessage &&
+        (!painting || working) &&
+        !annotating &&
+        mode === 'select',
       ),
       tables,
       openDataEditor,
       charts.map((chart) => chart.id),
+      working?.data,
     );
-    const source = useCanvasDocument(
+    const publishedSource = useCanvasDocument(
       selectedSlide?.uri,
       ready && Boolean(onSendMessage),
       jobId,
       pageNumber,
       versionId,
     );
+    const source = working?.source ?? publishedSource;
     const editingImage = useEditingImage(source?.document, direct.field, direct.editing);
     const objects = useMemo(() => {
+      if (working) return working.objects;
       if (!source || !direct.data) return semanticObjects;
       const { elements, boxes } = direct.data;
       const extra = boxes
@@ -257,7 +272,7 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
       return [...extra, ...semanticObjects].sort(
         (a, b) => (order.get(a.id) ?? -1) - (order.get(b.id) ?? -1),
       );
-    }, [source, direct.data, semanticObjects]);
+    }, [source, direct.data, semanticObjects, working]);
     const families = useMemo(() => {
       const byId = new Map<string, string>();
       if (source) {
@@ -290,7 +305,14 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
       selectedIds.every((id) => families.get(id) === families.get(selectedIds[0]));
     const selectedRevision = useRef(versionId);
     useEffect(() => {
-      if (!versionId || selectedRevision.current === versionId || !direct.data || !source) return;
+      if (
+        working ||
+        !versionId ||
+        selectedRevision.current === versionId ||
+        !direct.data ||
+        !source
+      )
+        return;
       selectedRevision.current = versionId;
       const message = job?.messages?.findLast(
         (m) => m.status === 'applied' && m.versionId === versionId,
@@ -314,8 +336,7 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
             : undefined;
       }
       if (id && objects.some((object) => object.id === id)) setSelection(id);
-    }, [direct.data, source, objects, versionId, job?.messages, pageNumber]);
-    const pendingDrop = drop?.pageId === pageId && drop.jobId === jobId ? drop : undefined;
+    }, [direct.data, source, objects, versionId, job?.messages, pageNumber, working]);
     const selectedObject = objects.find(({ id }) => id === selection);
     const selectedItems = objects.filter((o) => selectedIds.includes(o.id));
     const units = new Map<string, typeof selectedItems>();
@@ -342,65 +363,41 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
       selectedIds,
       expand,
     );
-    const { end: endDrag } = dragPreview;
-    const receipt =
-      pendingDrop && job?.messages?.findLast((m) => m.requestId === pendingDrop.requestId);
-    const published = job?.revisions?.find((revision) => revision.versionId === versionId);
+    const acknowledged = job?.messages?.findLast(
+      (m) => m.requestId === working?.requestId && m.status === 'applied',
+    );
     useEffect(() => {
-      if (!pendingDrop) return;
-      if (receipt?.status === 'failed' || job?.state === 'failed' || job?.state === 'cancelled') {
-        endDrag();
-        setDrop(undefined);
-        setPositionFailed(true);
-        return;
-      }
-      const image = mainImage.current;
       if (
-        !image ||
-        !source ||
-        (!direct.data && mode === 'select' && !annotating) ||
-        receipt?.status !== 'applied' ||
-        pendingDrop.baseVersion === versionId ||
-        (published
-          ? !published.artifactIds.includes(selectedSlide?.artifactId ?? '')
-          : receipt.versionId !== versionId) ||
-        selectedSlide?.artifactId === pendingDrop.baseArtifact ||
-        !selectedSlide?.uri ||
-        image.src !== new URL(selectedSlide.uri, window.location.href).href
+        working &&
+        !queue.pending &&
+        !direct.editing &&
+        acknowledged &&
+        publishedSource &&
+        direct.published?.versionId === versionId &&
+        canEditObjects &&
+        selectedSlide?.metadata?.versionId === versionId
       )
-        return;
-      let cancelled = false;
-      // The acknowledgement and the replacement slide arrive independently.
-      // Keep the dropped pixels on screen until the actual published image can paint.
-      const complete = () => {
-        if (cancelled || !image.complete || !image.naturalWidth) return;
-        endDrag();
-        setDrop((current) => (current === pendingDrop ? undefined : current));
-      };
-      image.addEventListener('load', complete);
-      if (image.decode) void image.decode().then(complete, () => {});
-      else complete();
-      return () => {
-        cancelled = true;
-        image.removeEventListener('load', complete);
-      };
+        setLocal(undefined);
     }, [
-      pendingDrop,
-      receipt?.status,
-      receipt?.versionId,
-      job?.state,
+      working,
+      queue.pending,
+      direct.editing,
+      acknowledged,
+      publishedSource,
+      direct.published,
       versionId,
-      selectedSlide?.artifactId,
-      selectedSlide?.uri,
-      source,
-      direct.data,
-      endDrag,
-      published,
-      mode,
-      annotating,
+      canEditObjects,
+      selectedSlide,
     ]);
     const canMove = Boolean(
-      source && canEditObjects && onSendMessage && jobId && versionId && ready && !pendingDrop,
+      source &&
+      (canEditObjects || working) &&
+      onSendMessage &&
+      jobId &&
+      versionId &&
+      ready &&
+      (!queue.pending || working) &&
+      !(queue.pending && ['conflict', 'failed'].includes(queue.status)),
     );
     const showObjectBar =
       ready &&
@@ -408,10 +405,8 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
       mode === 'select' &&
       (semanticObjects.length > 0 || Boolean(selection));
     const canvasObjects = useMemo(
-      () =>
-        pendingDrop?.objects ??
-        (sourceObject && draft ? [{ ...sourceObject, x: draft.x, y: draft.y }] : objects),
-      [draft, objects, sourceObject, pendingDrop],
+      () => (sourceObject && draft ? [{ ...sourceObject, x: draft.x, y: draft.y }] : objects),
+      [draft, objects, sourceObject],
     );
     const select = useCallback(
       (id?: string) => {
@@ -463,7 +458,8 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
       job,
       version: versionId,
       page: pageNumber,
-      canSubmit: canEditObjects && ready && !!onSendMessage && !positionSaving,
+      canSubmit:
+        canEditObjects && ready && !!onSendMessage && !positionSaving && !queue.pending && !working,
       selected: multiple ? selectedIds : currentId ? [currentId] : [],
       pasteOffset: {
         dx: bounds && source ? Math.min(12, source.x + source.width - bounds.x - bounds.width) : 12,
@@ -543,6 +539,59 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
       }
     };
 
+    function saveLocal(
+      message: PresentationMessageInput,
+      update: (root: Element) => void,
+      geometry: SlideCanvasObject[],
+      nextTables: typeof tables,
+    ) {
+      if (!source || !direct.data || !versionId) return false;
+      try {
+        const author = new DOMParser().parseFromString(direct.data.slide.svg, 'image/svg+xml');
+        const view = source.document.cloneNode(true) as Document;
+        const targets = author.cloneNode(true) as Document;
+        update(author.documentElement);
+        update(view.documentElement);
+        const svg = new XMLSerializer().serializeToString(author);
+        const preview = new XMLSerializer().serializeToString(view);
+        const elements = annotationElements(svg);
+        const boxes = measureAnnotationElements(svg);
+        const base =
+          working?.base ??
+          message.annotation?.expectedVersionId ??
+          message.tableDataPatch?.expectedVersionId ??
+          direct.data.versionId;
+        if (!queue.enqueue(message, base, targets, working?.requestId))
+          throw new Error('Canvas save unavailable');
+        setLocal({
+          page: pageNumber,
+          requestId: message.requestId,
+          base,
+          tables: nextTables,
+          data: { ...direct.data, slide: { ...direct.data.slide, svg }, elements, boxes },
+          objects: geometry.map((o) => {
+            const box = o.id.startsWith('svg:') ? boxes[Number(o.id.slice(4))] : undefined;
+            return box
+              ? {
+                  ...o,
+                  x: source.x + box.x * source.width,
+                  y: source.y + box.y * source.height,
+                  width: box.width * source.width,
+                  height: box.height * source.height,
+                }
+              : o;
+          }),
+          source: { ...source, document: view },
+          uri: 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(preview),
+        });
+        setPositionFailed(false);
+        return true;
+      } catch {
+        setPositionFailed(true);
+        return false;
+      }
+    }
+
     const commitCanvas = async (command: CanvasCommand, label: string) => {
       if (
         !canMove ||
@@ -555,26 +604,17 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
         return;
       const requestId = crypto.randomUUID();
       if (
-        source &&
-        selectedSlide &&
-        (command.kind === 'moveMany' ||
-          command.kind === 'resizeGroup' ||
-          command.kind === 'translate')
+        command.kind === 'translate' ||
+        command.kind === 'moveMany' ||
+        command.kind === 'resizeGroup'
       ) {
-        const root = source.document.documentElement.cloneNode(true) as Element;
+        if (!source || !direct.data) return;
         const moves =
           command.kind === 'moveMany'
             ? command.moves
             : command.kind === 'translate'
               ? [command]
               : command.objects.map((object) => ({ object, dx: 0, dy: 0 }));
-        for (const move of moves) {
-          const n = canvasNode(root, move.object);
-          if (!n) continue;
-          if (command.kind === 'resizeGroup')
-            scaleInPage(n, command.anchorX, command.anchorY, command.factor);
-          else translateInPage(n, move.dx, move.dy);
-        }
         const byId = new Map(moves.map((m) => [m.object, m]));
         const geometry = objects.map((o) => {
           const m = byId.get(o.id);
@@ -589,20 +629,28 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
             };
           return { ...o, x: o.x + m.dx, y: o.y + m.dy };
         });
-        dragPreview.hold();
-        setDrop({
-          jobId,
-          pageId,
-          baseVersion: versionId,
-          baseArtifact: selectedSlide.artifactId,
-          requestId,
-          objects: geometry,
-          selected: moves.map((m) => m.object),
-          uri:
-            'data:image/svg+xml;charset=utf-8,' +
-            encodeURIComponent(new XMLSerializer().serializeToString(root)),
-        });
+        saveLocal(
+          {
+            canvasCommand: command,
+            requestId,
+            content: label,
+            target: { type: 'slide', slideNumber: pageNumber },
+          },
+          (root) => {
+            for (const m of moves) {
+              const node = canvasNode(root, m.object);
+              if (!node) throw new Error('Canvas object missing');
+              if (command.kind === 'resizeGroup')
+                scaleInPage(node, command.anchorX, command.anchorY, command.factor);
+              else translateInPage(node, m.dx, m.dy);
+            }
+          },
+          geometry,
+          tables,
+        );
+        return;
       }
+      if (working || queue.pending) return;
       setPositionSaving(true);
       setPositionFailed(false);
       try {
@@ -615,11 +663,11 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
         setPositionFailed(!saved);
         if (!saved) {
           dragPreview.end();
-          setDrop(undefined);
+          setLocal(undefined);
         }
       } catch {
         dragPreview.end();
-        setDrop(undefined);
+        setLocal(undefined);
         setPositionFailed(true);
       } finally {
         setPositionSaving(false);
@@ -673,16 +721,16 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
 
     return (
       <section
-        ref={root}
+        aria-label={t('presentationCanvas.viewport')}
+        className={styles.stageArea}
         data-editable-version={direct.data && canMove ? versionId : undefined}
+        data-testid="slide-preview"
+        ref={root}
         aria-busy={
           painting ||
           positionSaving ||
           (!direct.data && canMove && mode === 'select' && !annotating)
         }
-        aria-label={t('presentationCanvas.viewport')}
-        className={styles.stageArea}
-        data-testid="slide-preview"
         onKeyDown={(event) => {
           const target = event.target;
           if (
@@ -718,6 +766,41 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
           }
         }}
       >
+        {queue.pending && (
+          <div
+            className={`${glassSurface} ${styles.syncState}`}
+            data-testid="canvas-sync-state"
+            role="status"
+          >
+            {t(
+              queue.status === 'offline'
+                ? 'presentationCanvas.pendingSync'
+                : queue.status === 'conflict'
+                  ? 'presentationCanvas.editConflict'
+                  : queue.status === 'failed'
+                    ? 'presentationCanvas.saveFailed'
+                    : 'presentationCanvas.saving',
+            )}
+            {queue.status === 'failed' && (
+              <Button size="small" onClick={queue.retry}>
+                {t('retry')}
+              </Button>
+            )}
+            {(queue.status === 'conflict' || queue.status === 'failed') && (
+              <Button
+                size="small"
+                onClick={() => {
+                  queue.discard();
+                  setLocal(undefined);
+                  direct.clear();
+                  void refreshJob?.();
+                }}
+              >
+                {t('presentationCanvas.discardLocal')}
+              </Button>
+            )}
+          </div>
+        )}
         <div className={styles.focusCanvas}>
           <div className={styles.canvasTools}>
             <GlassToolbar
@@ -793,26 +876,49 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
           <CanvasSurface
             boardId={jobId ?? ''}
             currentPageId={pageId}
+            expandSelection={expand}
             fitPadding={0}
             height={source?.height ?? (aspectRatio === '4:3' ? 720 : 540)}
             label={t('presentationCanvas.viewport')}
             mode={annotating || direct.editing ? 'passive' : mode}
-            objects={painting || !ready ? [] : canvasObjects}
+            objects={(painting && !working) || !ready ? [] : canvasObjects}
             originX={source?.x}
             originY={source?.y}
             pages={pages}
             ref={canvas}
             reservedBottom={showObjectBar ? 66 : 48}
             reservedTop={60}
+            resizeLabel={t('presentationCanvas.resizeGroup')}
+            selectedId={currentId}
+            selectedIds={selectedIds}
             showSelectionFrame={multiple || !direct.field}
-            selectedId={pendingDrop?.selected.at(-1) ?? currentId}
-            selectedIds={pendingDrop?.selected ?? selectedIds}
-            expandSelection={expand}
+            width={source?.width ?? 960}
+            onClearDocumentSelection={direct.clear}
+            onDragPreview={dragPreview.update}
+            onGroupShortcut={groupAction}
+            onMove={canMove && !positionSaving ? finishMove : undefined}
+            onSelect={select}
+            onZoomChange={setZoom}
+            onDocumentTap={
+              draft ? undefined : (point, edit) => (edit ? direct.hit(point, true) : false)
+            }
+            onEditSelection={() => {
+              if (multiple) return false;
+              if (direct.open()) return true;
+              if (selection && canEditObjects && charts.some((c) => c.id === selection)) {
+                openDataEditor(selection);
+                return true;
+              }
+              return false;
+            }}
             onFocusPage={() => {
               setMode('select');
               onFocusPage?.();
             }}
-            onGroupShortcut={groupAction}
+            onPageChange={(id) => {
+              const index = pages.findIndex((page) => page.id === id);
+              if (index !== -1) onSelectSlide(slides[index].artifactId);
+            }}
             onResize={
               multiple && canMove && !positionSaving && versionId
                 ? (factor, anchorX, anchorY) => {
@@ -830,7 +936,6 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
                   }
                 : undefined
             }
-            resizeLabel={t('presentationCanvas.resizeGroup')}
             onSelectMany={
               canMove && !draft
                 ? (ids) => {
@@ -839,28 +944,6 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
                   }
                 : undefined
             }
-            width={source?.width ?? 960}
-            onClearDocumentSelection={direct.clear}
-            onDocumentTap={
-              draft ? undefined : (point, edit) => (edit ? direct.hit(point, true) : false)
-            }
-            onEditSelection={() => {
-              if (multiple) return false;
-              if (direct.open()) return true;
-              if (selection && canEditObjects && charts.some((c) => c.id === selection)) {
-                openDataEditor(selection);
-                return true;
-              }
-              return false;
-            }}
-            onDragPreview={dragPreview.update}
-            onMove={canMove && !positionSaving ? finishMove : undefined}
-            onSelect={select}
-            onZoomChange={setZoom}
-            onPageChange={(id) => {
-              const index = pages.findIndex((page) => page.id === id);
-              if (index !== -1) onSelectSlide(slides[index].artifactId);
-            }}
           >
             <div
               aria-label={`第 ${currentIndex + 1} 页 ${aspectRatio} 大预览`}
@@ -880,17 +963,9 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
                 <img
                   alt={selectedSlide?.name ?? `第 ${currentIndex + 1} 页`}
                   className={styles.focusImage}
-                  ref={mainImage}
                   data-testid="slide-preview-image"
                   draggable={false}
-                  src={
-                    editingImage ??
-                    (optimistic?.page === pageId && optimistic.version === versionId
-                      ? optimistic.uri
-                      : undefined) ??
-                    draftUri ??
-                    selectedSlide?.uri
-                  }
+                  src={editingImage ?? draftUri ?? working?.uri ?? selectedSlide?.uri}
                 />
               ) : (
                 <div className={styles.focusEmpty} data-testid="slide-preview-empty">
@@ -903,72 +978,63 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
                 </div>
               )}
 
-              {pendingDrop && (
-                <img
-                  alt=""
-                  aria-hidden
-                  data-testid="canvas-drop-preview"
-                  className={styles.focusImage}
-                  src={pendingDrop.uri}
-                  style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}
-                />
-              )}
               <img aria-hidden alt="" className={styles.dragImage} ref={dragPreview.background} />
               <img aria-hidden alt="" className={styles.dragImage} ref={dragPreview.floating} />
               <SlideGenerationOverlay
-                active={painting}
+                active={painting && !working}
                 hasPreview={ready}
                 interrupted={paintInterrupted}
               />
 
               {direct.field && direct.data && jobId && onSendMessage && (
                 <DirectCanvasEditor
-                  key={JSON.stringify([
-                    versionId,
-                    pageNumber,
-                    direct.field.box.index,
-                    direct.editing,
-                  ])}
-                  field={direct.field}
+                  close={direct.close}
                   data={direct.data}
                   editing={direct.editing}
+                  field={direct.field}
+                  key={JSON.stringify([jobId, pageNumber, direct.field.box.index, direct.editing])}
                   page={pageNumber}
                   draftKey={JSON.stringify([
                     jobId,
-                    versionId,
+                    direct.field.versionId,
                     pageNumber,
                     direct.field.cell?.table.id,
                     direct.field.cell?.row,
                     direct.field.cell?.col,
                     direct.field.box.index,
                   ])}
-                  onCommitPreview={(values) => {
-                    if (!source || !direct.field) return;
-                    const root = source.document.documentElement.cloneNode(true) as Element;
-                    const field = direct.field,
-                      atoms = canvasAtoms(root);
-                    const indices = field.cell?.lines ?? [field.box.index];
-                    indices.forEach((index, i) => {
-                      const n = atoms[index];
-                      if (!n) return;
-                      editableTextNodes(n).forEach((v, j) => {
-                        v.data = field.cell
-                          ? i === 0 && j === 0
-                            ? values[0]
-                            : ''
-                          : (values[j] ?? v.data);
-                      });
-                    });
-                    setOptimistic({
-                      page: pageId,
-                      version: versionId,
-                      uri:
-                        'data:image/svg+xml;charset=utf-8,' +
-                        encodeURIComponent(new XMLSerializer().serializeToString(root)),
-                    });
+                  send={async (message, values) => {
+                    if (!direct.field) return false;
+                    const patch = message.tableDataPatch;
+                    const nextTables = patch
+                      ? tables.map((t) =>
+                          t.id === patch.blockId
+                            ? { ...t, columns: patch.columns, rows: patch.rows }
+                            : t,
+                        )
+                      : tables;
+                    const field = direct.field;
+                    return saveLocal(
+                      message,
+                      (root) => {
+                        const atoms = canvasAtoms(root);
+                        const indices = field.cell?.lines ?? [field.box.index];
+                        indices.forEach((index, i) => {
+                          const n = atoms[index];
+                          if (!n) return;
+                          editableTextNodes(n).forEach((v, j) => {
+                            v.data = field.cell
+                              ? i === 0 && j === 0
+                                ? values[0]
+                                : ''
+                              : (values[j] ?? v.data);
+                          });
+                        });
+                      },
+                      objects,
+                      nextTables,
+                    );
                   }}
-                  close={direct.close}
-                  send={(message) => onSendMessage(jobId, message)}
                 />
               )}
               {annotating && ready && jobId && versionId && onSendMessage && (
@@ -995,9 +1061,9 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
               role="group"
             >
               <select
-                hidden={multiple}
                 aria-label={t('presentationCanvas.objects')}
                 disabled={Boolean(draft)}
+                hidden={multiple}
                 value={selection ?? ''}
                 onChange={(event) => select(event.target.value || undefined)}
               >
@@ -1017,8 +1083,8 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
               )}
               {canMove && multiple && (
                 <Button
-                  size="small"
                   disabled={positionSaving}
+                  size="small"
                   onClick={() => {
                     root.current
                       ?.querySelector<HTMLElement>('[data-testid="spatial-canvas"]')
@@ -1032,8 +1098,8 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
               {canMove && multiple && !grouped && (
                 <select
                   aria-label={t('presentationCanvas.align')}
-                  value=""
                   disabled={positionSaving}
+                  value=""
                   onChange={(event) => {
                     const direction = event.target.value;
                     if (direction === 'horizontal' || direction === 'vertical') {
@@ -1062,7 +1128,7 @@ export const SlideFocusStage = memo<SlideFocusStageProps>(
                     }
                   }}
                 >
-                  <option value="" disabled>
+                  <option disabled value="">
                     {t('presentationCanvas.align')}
                   </option>
                   {!grouped && units.size >= 3 && (

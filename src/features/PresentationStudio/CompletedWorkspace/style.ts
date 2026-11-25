@@ -35,14 +35,15 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       transform var(--qz-panel-resize),
       box-shadow 200ms ease,
       border-color 200ms ease;
-    @media (prefers-reduced-motion: reduce) {
-      transition: none;
-    }
 
     &:hover {
       transform: translateY(-2px);
       border-color: ${cssVar.colorBorder};
       box-shadow: 0 8px 24px rgb(0 0 0 / 12%);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      transition: none;
     }
   `,
   bentoCardSelected: css`
@@ -164,11 +165,13 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     flex-wrap: wrap;
     gap: 4px;
     align-items: center;
+
     @media (width <= 768px) {
+      scrollbar-width: thin;
+      overflow-x: auto;
       flex-wrap: nowrap;
       gap: 2px;
-      overflow-x: auto;
-      scrollbar-width: thin;
+
       button {
         flex-shrink: 0;
       }
@@ -176,8 +179,8 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
   `,
   exportButton: css`
     &&:not(:disabled) {
-      color: ${cssVar.colorText};
       border: 1px solid var(--qz-glass-border, ${cssVar.colorBorderSecondary});
+      color: ${cssVar.colorText};
       background: var(--qz-glass-selection, color-mix(in srgb, #74948c 14%, transparent));
       box-shadow: inset 0 1px 0 var(--qz-glass-highlight);
     }
@@ -297,6 +300,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
       width var(--qz-panel-resize),
       margin-inline-start var(--qz-panel-resize),
       opacity 150ms ease;
+
     @media (prefers-reduced-motion: reduce) {
       transition: none;
     }
@@ -357,6 +361,7 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
         border-radius: 12px;
       }
     }
+
     &[aria-pressed='true'] {
       color: ${cssVar.colorText};
       background: var(--qz-glass-selection);
@@ -390,20 +395,23 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     transition:
       width var(--qz-panel-resize),
       height var(--qz-panel-resize);
+
     &[data-open='false'] {
       height: 40px;
-    }
-    @media (prefers-reduced-motion: reduce) {
-      transition: none;
     }
 
     &[data-open='true'] {
       width: 176px;
     }
 
+    @media (prefers-reduced-motion: reduce) {
+      transition: none;
+    }
+
     @media (width <= 768px) {
       inset-inline-start: 8px;
       width: 38px;
+
       &[data-open='true'] {
         width: 124px;
       }
@@ -423,7 +431,8 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     align-items: center;
     justify-content: flex-end;
 
-    padding: 3px 6px;
+    padding-block: 3px;
+    padding-inline: 6px;
   `,
   canvasTools: css`
     position: absolute;
@@ -431,17 +440,20 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     inset-block-start: 76px;
     inset-inline-start: 50%;
     transform: translateX(-50%);
+
     width: max-content;
     max-width: calc(100% - 20px);
+
     @container (width < 430px) {
-      inset-inline-start: auto;
-      inset-inline-end: 10px;
+      inset-inline: auto 10px;
       transform: none;
       max-width: calc(100% - 56px);
+
       [role='toolbar'] {
         gap: 1px;
         padding: 4px;
       }
+
       button {
         width: 32px;
         height: 34px;
@@ -451,46 +463,56 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
   objectBar: css`
     position: absolute;
     z-index: 3;
-    inset-inline-start: 50%;
     inset-block-end: 12px;
+    inset-inline-start: 50%;
     transform: translateX(-50%);
+
     display: flex;
     flex-wrap: wrap;
+    gap: 6px;
     align-items: center;
     justify-content: center;
-    gap: 6px;
+
     width: max-content;
     max-width: calc(100% - 28px);
-    padding: 6px 10px;
+    padding-block: 6px;
+    padding-inline: 10px;
     border: 1px solid ${cssVar.colorBorderSecondary};
     border-radius: 12px;
+
     background: transparent;
     box-shadow: var(--qz-glass-shadow);
 
     select {
       max-width: min(160px, 32vw);
-      border: 0;
       padding: 2px;
-      color: ${cssVar.colorText};
-      background: transparent;
+      border: 0;
+
       font: inherit;
       font-size: 12px;
+      color: ${cssVar.colorText};
+
+      background: transparent;
     }
+
     label {
       display: inline-flex;
-      align-items: center;
       gap: 3px;
+      align-items: center;
+
       font-size: 11px;
       color: ${cssVar.colorTextSecondary};
     }
+
     label .ant-input-number {
       width: 60px;
     }
+
     [role='alert'] {
       flex-basis: 100%;
-      text-align: center;
       font-size: 12px;
       color: ${cssVar.colorError};
+      text-align: center;
     }
   `,
   focusCanvas: css`
@@ -546,26 +568,30 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     box-shadow: none;
   `,
   dragImage: css`
+    pointer-events: none;
+
     position: absolute;
     inset: 0;
+
     width: 100%;
     height: 100%;
-    object-fit: contain;
-    pointer-events: none;
+
     visibility: hidden;
+    object-fit: contain;
+
     [data-moving='true'] > & {
       visibility: visible;
     }
   `,
   focusImage: css`
-    [data-moving='true'] > & {
-      visibility: hidden;
-    }
-
     display: block;
     width: 100%;
     height: 100%;
     object-fit: contain;
+
+    [data-moving='true'] > & {
+      visibility: hidden;
+    }
   `,
   mainLayout: css`
     position: relative;
@@ -696,6 +722,29 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     color: ${cssVar.colorText};
     text-align: center;
   `,
+  syncState: css`
+    pointer-events: none;
+
+    position: absolute;
+    z-index: 5;
+    inset-block-start: 8px;
+    inset-inline-end: 8px;
+
+    display: flex;
+    gap: 8px;
+    align-items: center;
+
+    max-width: calc(100% - 16px);
+    padding-block: 4px;
+    padding-inline: 10px;
+    border-radius: 12px;
+
+    font-size: 12px;
+
+    button {
+      pointer-events: auto;
+    }
+  `,
   stageArea: css`
     position: relative;
 
@@ -714,39 +763,31 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
   `,
   editorColumn: css`
     display: flex;
-    flex-direction: column;
     flex: 1;
+    flex-direction: column;
     gap: 0;
-    min-height: 0;
+
     min-width: 0;
+    min-height: 0;
   `,
   workspaceMount: css`
     display: flex;
     flex: 1;
-    min-width: 0;
-    min-height: 0;
+
     width: 100%;
+    min-width: 0;
     height: 100%;
+    min-height: 0;
   `,
   collaborationSlot: css`
     pointer-events: none;
+
     position: absolute;
     z-index: 20;
     inset-block-start: 68px;
     inset-inline: 0;
   `,
   workspaceRoot: css`
-    &[data-focused='true'] {
-      position: fixed;
-      inset: 0;
-      z-index: 800;
-      width: 100vw;
-      height: 100dvh;
-      box-sizing: border-box;
-      padding: 0;
-      background: ${cssVar.colorBgLayout};
-    }
-
     position: relative;
 
     overflow: hidden;
@@ -758,6 +799,19 @@ export const styles = createStaticStyles(({ css, cssVar }) => ({
     width: 100%;
     height: 100%;
     min-height: 0;
+
+    &[data-focused='true'] {
+      position: fixed;
+      z-index: 800;
+      inset: 0;
+
+      box-sizing: border-box;
+      width: 100vw;
+      height: 100dvh;
+      padding: 0;
+
+      background: ${cssVar.colorBgLayout};
+    }
 
     @keyframes presentation-fade-in {
       from {

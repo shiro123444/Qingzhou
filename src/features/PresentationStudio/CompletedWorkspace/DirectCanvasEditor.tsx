@@ -1,7 +1,8 @@
-import { glassSelection } from '@/features/GlassMotion/selectionStyle';
 import { createStaticStyles } from 'antd-style';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+
+import { glassSelection } from '@/features/GlassMotion/selectionStyle';
 
 import type { PresentationMessageInput } from '../../../../packages/runtime-contracts/src';
 import {
@@ -23,7 +24,13 @@ type Cell = {
   bottom: number;
   placeholder: ElementBox;
 };
-type Field = { box: ElementBox; values: string[]; cell?: Cell; activeRun: number };
+type Field = {
+  versionId: string;
+  box: ElementBox;
+  values: string[];
+  cell?: Cell;
+  activeRun: number;
+};
 
 function cellAt(
   data: EditableSlide,
@@ -93,6 +100,7 @@ export function useDirectCanvasEdit(
   tables: EditableTable[],
   openData: (id: string) => void,
   chartIds: string[],
+  local?: EditableSlide,
 ) {
   const [loaded, setLoaded] = useState<{ jobId: string; page: number; data: EditableSlide }>();
   const [field, setField] = useState<Field>();
@@ -100,7 +108,8 @@ export function useDirectCanvasEdit(
   useEffect(() => {
     setField(undefined);
     setEditing(false);
-    setLoaded(undefined);
+  }, [jobId, page, enabled]);
+  useEffect(() => {
     if (!enabled || !jobId || !versionId) return;
     const controller = new AbortController();
     void readEditableSlide(jobId, page, versionId, controller.signal)
@@ -112,13 +121,14 @@ export function useDirectCanvasEdit(
       });
     return () => controller.abort();
   }, [jobId, page, versionId, enabled]);
-  const data =
+  const published =
     enabled &&
     loaded?.jobId === jobId &&
     loaded?.page === page &&
     loaded?.data.versionId === versionId
       ? loaded?.data
       : undefined;
+  const data = enabled ? (local ?? published) : undefined;
   const hit = (point: { x: number; y: number }, activate: boolean) => {
     if (!data) return false;
     const [index] = selectAnnotationElements(data.boxes, { ...point, width: 0, height: 0 });
@@ -177,12 +187,13 @@ export function useDirectCanvasEdit(
               point.y <= r.y + r.height,
           ) ?? 0,
         );
-    setField({ box: displayBox, values, cell, activeRun });
+    setField({ versionId: data.versionId, box: displayBox, values, cell, activeRun });
     setEditing(activate);
     return true;
   };
   return {
     data,
+    published,
     field: data ? field : undefined,
     editing,
     hit,
@@ -203,42 +214,52 @@ export function useDirectCanvasEdit(
 
 const nativeStyles = createStaticStyles(({ css, cssVar }) => ({
   layer: css`
-    position: absolute;
-    inset: 0;
-    z-index: 5;
     pointer-events: none;
+
+    position: absolute;
+    z-index: 5;
+    inset: 0;
+
     container-type: inline-size;
   `,
   input: css`
     pointer-events: auto;
+    touch-action: manipulation;
+    resize: none;
+    user-select: text;
+
     position: absolute;
+
+    overflow: hidden;
+
     box-sizing: border-box;
+    min-width: 1ch;
     margin: 0;
     padding: 0;
     border: 0;
     border-radius: 0;
+
+    appearance: none;
+    background: transparent;
     outline: 1px solid var(--qz-glass-tint, #648c85);
     outline-offset: 2px;
-    background: transparent;
-    appearance: none;
-    resize: none;
-    overflow: hidden;
-    caret-color: currentColor;
-    user-select: text;
-    touch-action: manipulation;
-    min-width: 1ch;
+    caret-color: currentcolor;
+
     field-sizing: content;
+
     &:not(:focus) {
       outline: none;
     }
   `,
   error: css`
     position: absolute;
-    bottom: 0;
+    inset-block-end: 0;
     inset-inline: 0;
-    color: ${cssVar.colorErrorText};
-    background: ${cssVar.colorBgContainer};
+
     font-size: 12px;
+    color: ${cssVar.colorErrorText};
+
+    background: ${cssVar.colorBgContainer};
   `,
 }));
 
@@ -264,7 +285,6 @@ export function useEditingImage(
 export function DirectCanvasEditor({
   field,
   draftKey,
-  onCommitPreview,
   data,
   editing,
   page,
@@ -273,12 +293,11 @@ export function DirectCanvasEditor({
 }: {
   field: Field;
   draftKey?: string;
-  onCommitPreview?: (values: string[]) => void;
   data: EditableSlide;
   editing: boolean;
   page: number;
   close: () => void;
-  send: (message: PresentationMessageInput) => Promise<boolean>;
+  send: (message: PresentationMessageInput, values: string[]) => Promise<boolean>;
 }) {
   const { t } = useTranslation('common');
   const storageKey = draftKey ? 'qingzhou:slide-text:' + draftKey : undefined;
@@ -357,7 +376,7 @@ export function DirectCanvasEditor({
             ...common,
             tableDataPatch: {
               blockId: cell.table.id,
-              expectedVersionId: data.versionId,
+              expectedVersionId: field.versionId,
               columns: cell.table.columns.map((v, c) =>
                 cell.row === 0 && c === cell.col ? values[0] : v,
               ),
@@ -369,7 +388,7 @@ export function DirectCanvasEditor({
         : {
             ...common,
             annotation: {
-              expectedVersionId: data.versionId,
+              expectedVersionId: field.versionId,
               slideId: data.slide.slideId,
               baseSvgHash: data.hash,
               elementIndices: [b.index],
@@ -382,8 +401,7 @@ export function DirectCanvasEditor({
               textRuns: values,
             },
           };
-      onCommitPreview?.(values);
-      if (await send(message)) {
+      if (await send(message, values)) {
         storeDraft();
         close();
       } else setFailed(true);
@@ -410,15 +428,15 @@ export function DirectCanvasEditor({
     );
   return (
     <div
-      ref={anchor}
       className={nativeStyles.layer}
       data-testid="direct-canvas-editor"
+      ref={anchor}
+      onDoubleClick={(e) => e.stopPropagation()}
+      onPointerDown={(e) => e.stopPropagation()}
       onBlur={(e) => {
         if (!(e.relatedTarget instanceof Node && e.currentTarget.contains(e.relatedTarget)))
           void save();
       }}
-      onPointerDown={(e) => e.stopPropagation()}
-      onDoubleClick={(e) => e.stopPropagation()}
       onKeyDown={(e) => {
         e.stopPropagation();
         if (e.nativeEvent.isComposing || e.keyCode === 229) return;
@@ -476,13 +494,13 @@ export function DirectCanvasEditor({
           },
         };
         return cell ? (
-          <textarea rows={1} key={i} {...props} />
+          <textarea key={i} rows={1} {...props} />
         ) : (
           <input key={i} type="text" {...props} />
         );
       })}
       {failed && (
-        <span role="alert" className={nativeStyles.error}>
+        <span className={nativeStyles.error} role="alert">
           {t('presentationCanvas.saveFailed')}
         </span>
       )}
